@@ -12,7 +12,9 @@
 - Frame、Rectangle、Ellipse 与 Text 是一次性创建工具：工具栏、图层面板或快捷键选中后在画布完成一次创建，Worker 确认节点写入并选中该节点后，明确通知主线程切回 Move；避免下一次点击继续创建图层。
 - 无 SharedArrayBuffer 的常规输入路径使用版本化、最大 256 条的可转移 `ArrayBuffer` 批次。主线程每帧聚合 Pointer Move/Wheel，相邻 Move 只保留最新位置；Down/Up 会与最后待发 Move 同批即时 flush。Worker 严格校验版本、长度、事件类型与有限数值后才派发。SAB 不是编辑正确性的前提，暂未启用为另一条输入协议。
 - Main Thread 使用浏览器 `PerformanceObserver` 的 Long Task 条目作为瞬态健康证据。采样窗口在 Engine Worker 就绪后打开，衡量持续编辑而非页面启动成本；该计数仅在 UI 呈现，不写入 Worker、Journal 或 Document Snapshot。缺少该浏览器 API 时明确标示监测不可用，编辑功能不受影响。
-- 平移、缩放、选择与框选通过不含节点或 Core Snapshot 的轻量 `view-state` 消息刷新 React 投影；视口操作停止 500ms 后才请求一次可持久化 checkpoint。高频临时交互不得逐帧序列化完整 WASM 文档或排入 OPFS/IndexedDB 写队列。
+- 平移、缩放、选择与框选通过不含节点或 Core Snapshot 的轻量 `view-state` 消息刷新 React 投影；其中 viewport 更新只触发独立的 View UI State，不能运行 optimistic document projection。视口操作停止 500ms 后，Worker 发送只含 viewport、Core revision 和 canonical document hash 的 `viewport-checkpoint`，主线程将它保存为独立 `viewport-record-v1`。恢复时该记录必须同时匹配 Core hash 与 revision；写入失败不影响文档编辑、Journal 或 Core Snapshot 持久化。高频临时交互不得逐帧序列化完整 WASM 文档或排入 OPFS/IndexedDB 写队列。
+- 图层面板是 React memo 化的固定行高虚拟列表，直接按反向索引读取 document nodes，绝不复制或反转完整数组。其节点数组仅在文档投影改变时变更，持续缩放不能造成图层行协调。
+- WebGPU Scene 使用固定单位 Quad 与世界坐标 Instance Buffer；canonical scene revision 或 renderer generation 改变时才重建并上传实例数据。viewport、画布尺寸与 DPR 改变只写入 32-byte Camera Uniform。Canvas 2D 的文字、渐变、选择与 Frame 标签仍以经视口裁剪的覆盖层绘制。
 - IndexedDB 保存结构化 Journal 与 active/previous Manifest；不可变、带内容哈希的版本化 Rust Core Snapshot 先写入并校验 OPFS 后才会切换 Manifest，OPFS 不可用时使用内联 IndexedDB Snapshot 作为降级路径。v9 后新写入不再保存可编辑 presentation sidecar；它仅为旧快照迁移读取，不能作为第二份可写文档模型。支持 Web Locks 时，每份本地文档只有 Owner 写入；非 Owner 标签页只读、通过 BroadcastChannel 接收 Owner 已持久化的快照，并可用带优先级的编辑意图请求交接。没有 Web Locks 时仅降级为本地编辑，不能保证多标签页一致性。
 
 ## 后果
