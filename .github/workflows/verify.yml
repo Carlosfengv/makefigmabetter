@@ -1,0 +1,37 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  web-and-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
+      - name: Verify frontend boundaries
+        run: pnpm check:boundaries
+      - name: Verify Phase 0 compatibility matrix
+        run: pnpm check:compatibility
+      - name: Build WASM bridge
+        run: pnpm wasm:build
+      - name: Verify independent mock backend
+        run: pnpm mock:backend:check
+      - name: Lint and test web
+        run: pnpm lint && pnpm test && pnpm build
+      - name: Test Rust Core and WASM bridge
+        run: cargo test

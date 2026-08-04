@@ -1,0 +1,31 @@
+{
+  "format": "makefigma-shadcn-info-baseline-v1",
+  "capturedWith": {
+    "shadcnCliVersion": "4.16.1",
+    "nextVersion": "16.2.12",
+    "baseUiVersion": "1.6.0"
+  },
+  "project": {
+    "framework": "Next.js",
+    "srcDirectory": true,
+    "rsc": true,
+    "typescript": true,
+    "tailwindVersion": "v4",
+    "tailwindCss": "src/app/globals.css",
+    "importAlias": "@"
+  },
+  "config": {
+    "style": "base-nova",
+    "base": "base",
+    "rsc": true,
+    "typescript": true,
+    "iconLibrary": "lucide",
+    "aliases": {
+      "components": "@/components",
+      "utils": "@/lib/utils",
+      "ui": "@/components/ui",
+      "lib": "@/lib",
+      "hooks": "@/hooks"
+    }
+  }
+}

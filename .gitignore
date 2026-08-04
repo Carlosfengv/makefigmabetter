@@ -1,0 +1,11 @@
+node_modules/
+.next/
+target/
+.playwright-cli/
+output/
+*.tsbuildinfo
+.DS_Store
+.env*
+!.env.example
+*.log
+phase0-gradient-stop-management.png

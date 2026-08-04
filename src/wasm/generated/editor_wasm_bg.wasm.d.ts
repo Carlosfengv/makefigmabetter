@@ -1,0 +1,30 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_documentengine_free: (a: number, b: number) => void;
+export const documentengine_apply_transaction_json: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
+export const documentengine_can_redo: (a: number) => number;
+export const documentengine_can_undo: (a: number) => number;
+export const documentengine_canonical_hash: (a: number) => [number, number];
+export const documentengine_create_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
+export const documentengine_delete_nodes: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
+export const documentengine_load_snapshot_json: (a: number, b: number, c: number) => [bigint, number, number];
+export const documentengine_memory_stats_json: (a: number) => [number, number];
+export const documentengine_move_nodes: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
+export const documentengine_new: () => number;
+export const documentengine_redo: (a: number) => [bigint, number, number];
+export const documentengine_rename_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number) => [bigint, number, number];
+export const documentengine_revision: (a: number) => bigint;
+export const documentengine_seed_batch_json: (a: number, b: number, c: number) => [bigint, number, number];
+export const documentengine_seed_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
+export const documentengine_set_document_color_profile: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
+export const documentengine_snapshot_json: (a: number) => [number, number];
+export const documentengine_undo: (a: number) => [bigint, number, number];
+export const documentengine_update_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number) => [bigint, number, number];
+export const engine_semantics_version: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

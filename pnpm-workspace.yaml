@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - crates/*
+
+# These optional native optimizations are deliberately not built in the local
+# prototype; Next.js can use its JavaScript fallbacks.
+allowBuilds:
+  sharp: false
+  unrs-resolver: false

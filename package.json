@@ -1,0 +1,35 @@
+{
+  "name": "makefigma",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "wasm:build": "bash scripts/build-wasm.sh",
+    "evidence:report": "node scripts/write-phase0-acceptance-report.mjs",
+    "check:boundaries": "node scripts/check-frontend-boundaries.mjs",
+    "check:compatibility": "node scripts/check-compatibility-matrix.mjs",
+    "mock:backend": "node services/mock-backend/server.mjs",
+    "mock:backend:check": "node services/mock-backend/check.mjs",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.2.0",
+    "next": "16.2.12",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "tailwindcss": "^4.1.18"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.2",
+    "eslint-config-next": "16.2.12",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  }
+}
