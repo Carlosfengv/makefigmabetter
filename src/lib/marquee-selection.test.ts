@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CanvasNode } from "./editor-protocol";
-import { marqueeRect, resolveMarqueeSelection, selectNodesInMarquee } from "./marquee-selection";
+import { exceedsMarqueeDragThreshold, marqueeRect, resolveMarqueeSelection, selectNodesInMarquee } from "./marquee-selection";
 
 const node = (id: string, patch: Partial<CanvasNode> = {}): CanvasNode => ({
   id, name: id, kind: "rectangle", x: 0, y: 0, width: 40, height: 40, rotation: 0,
@@ -19,6 +19,19 @@ describe("marquee selection", () => {
 
   it("uses the visual bounds of rotated layers", () => {
     expect(selectNodesInMarquee([node("rotated", { x: 50, y: 50, width: 40, height: 20, rotation: 45 })], { x: 45, y: 45 }, { x: 52, y: 52 })).toEqual(["rotated"]);
+  });
+
+  it("does not turn a click in the empty corner of a rotated layer's bounds into a marquee hit", () => {
+    const rotated = node("rotated", { width: 100, height: 40, rotation: 45 });
+    const emptyCorner = { x: 5, y: -20 };
+
+    expect(selectNodesInMarquee([rotated], emptyCorner, emptyCorner)).toEqual([]);
+  });
+
+  it("starts marquee selection only after three CSS pixels of pointer movement", () => {
+    expect(exceedsMarqueeDragThreshold({ x: 10, y: 10 }, { x: 12, y: 12 })).toBe(false);
+    expect(exceedsMarqueeDragThreshold({ x: 10, y: 10 }, { x: 13, y: 10 })).toBe(true);
+    expect(exceedsMarqueeDragThreshold({ x: 10, y: 10 }, { x: 12, y: 13 })).toBe(true);
   });
 
   it("adds marquee results to the existing selection only when Shift is held", () => {

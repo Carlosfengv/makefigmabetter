@@ -18,7 +18,7 @@ import { resetDocumentProjection } from "@/lib/document-reset";
 import { resolveInsideRoundedRect } from "@/lib/rounded-rect";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
-import { resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
+import { exceedsMarqueeDragThreshold, resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
 import { selectionDimensions, selectionTitle } from "@/lib/selection-label";
 import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
 
@@ -28,7 +28,7 @@ type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
   | { mode: "move"; startX: number; startY: number; before: CanvasNode[]; initial: Map<string, Pick<CanvasNode, "x" | "y">> }
   | { mode: "pan"; startX: number; startY: number }
-  | { mode: "select"; startX: number; startY: number; currentX: number; currentY: number; initialSelection: string[]; additive: boolean };
+  | { mode: "select"; startX: number; startY: number; currentX: number; currentY: number; startScreenX: number; startScreenY: number; marqueeStarted: boolean; initialSelection: string[]; additive: boolean };
 type WasmProjectionNode = CoreProjectionNode;
 type WasmProjectionSnapshot = { schemaVersion: number; revision: number; canUndo: boolean; canRedo: boolean; nodes: WasmProjectionNode[] };
 type WasmDocumentEngine = {
@@ -816,7 +816,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     const target = hit(world.x, world.y);
     if (!target) {
-      drag = { mode: "select", startX: world.x, startY: world.y, currentX: world.x, currentY: world.y, initialSelection: event.shiftKey ? [...selectedIds] : [], additive: event.shiftKey };
+      drag = { mode: "select", startX: world.x, startY: world.y, currentX: world.x, currentY: world.y, startScreenX: event.x, startScreenY: event.y, marqueeStarted: false, initialSelection: event.shiftKey ? [...selectedIds] : [], additive: event.shiftKey };
       if (!event.shiftKey) selectedIds = [];
       render();
       emitViewState();
@@ -851,6 +851,13 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   if (event.event === "move") {
     if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; render(); emitViewState(true); }
     if (activeDrag.mode === "select") {
+      if (!activeDrag.marqueeStarted) {
+        activeDrag.marqueeStarted = exceedsMarqueeDragThreshold(
+          { x: activeDrag.startScreenX, y: activeDrag.startScreenY },
+          { x: event.x, y: event.y },
+        );
+      }
+      if (!activeDrag.marqueeStarted) return;
       updateMarqueeSelection(activeDrag, world.x, world.y);
       render();
       emitViewState();
@@ -875,7 +882,11 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   }
   if (event.event === "up") {
     if (activeDrag.mode === "select") {
-      updateMarqueeSelection(activeDrag, world.x, world.y);
+      const marqueeStarted = activeDrag.marqueeStarted || exceedsMarqueeDragThreshold(
+        { x: activeDrag.startScreenX, y: activeDrag.startScreenY },
+        { x: event.x, y: event.y },
+      );
+      if (marqueeStarted) updateMarqueeSelection(activeDrag, world.x, world.y);
       drag = undefined;
       render();
       emitViewState();

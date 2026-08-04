@@ -3,6 +3,15 @@ import type { CanvasNode } from "./editor-protocol";
 export interface MarqueePoint { x: number; y: number }
 export interface MarqueeRect { x: number; y: number; width: number; height: number }
 
+export const MARQUEE_DRAG_THRESHOLD_PX = 3;
+
+/** Keeps an ordinary click (and small pointer jitter) out of marquee selection. */
+export function exceedsMarqueeDragThreshold(start: MarqueePoint, end: MarqueePoint, threshold = MARQUEE_DRAG_THRESHOLD_PX): boolean {
+  const deltaX = end.x - start.x;
+  const deltaY = end.y - start.y;
+  return deltaX * deltaX + deltaY * deltaY >= threshold * threshold;
+}
+
 export function marqueeRect(start: MarqueePoint, end: MarqueePoint): MarqueeRect {
   return { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y) };
 }
@@ -23,6 +32,7 @@ function overlaps(first: MarqueeRect, second: MarqueeRect): boolean {
 /** Returns visible layers touched by a world-space marquee, in document order. */
 export function selectNodesInMarquee(nodes: readonly CanvasNode[], start: MarqueePoint, end: MarqueePoint): string[] {
   const selection = marqueeRect(start, end);
+  if (selection.width === 0 && selection.height === 0) return [];
   return nodes.filter((node) => node.visible !== false && overlaps(selection, rotatedNodeBounds(node))).map((node) => node.id);
 }
 
