@@ -12,6 +12,7 @@ import { emptyMainThreadLongTaskSummary, recordMainThreadLongTask, type MainThre
 import { encodeInputBatch } from "@/lib/input-transfer";
 import { createEditorTransactionQueue } from "@/lib/editor-transaction-queue";
 import { applyOptimisticUpdates, type OptimisticUpdate } from "@/lib/optimistic-projection";
+import { LayerPanel } from "./layer-panel";
 import phase0BasicCardFixture from "../../../fixtures/documents/phase0-basic-card.fixture.json";
 
 const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> = [
@@ -440,7 +441,7 @@ export function EditorShell() {
       ? `main ${mainThreadLongTasks.count} long tasks · worst ${mainThreadLongTasks.maxDurationMs.toFixed(0)}ms`
       : "main 0 long tasks";
   const resourceEvidence = snapshot.resources ? `${snapshot.resources.documentNodes}/${snapshot.resources.maxDocumentNodes} nodes · ${(snapshot.resources.documentBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxDocumentBytes / 1024 / 1024).toFixed(0)} MB document · ${(snapshot.resources.wasmHeapBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxWasmHeapBytes / 1024 / 1024).toFixed(0)} MB WASM · ${(snapshot.resources.renderSurfaceBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxRenderSurfaceBytes / 1024 / 1024).toFixed(0)} MB surface · ${(snapshot.resources.gpuSceneBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxGpuSceneBytes / 1024 / 1024).toFixed(0)} MB GPU scene${snapshot.resources.gpuSceneWithinBudget ? "" : " (Canvas fallback)"}` : "collecting resource evidence";
-  const setActiveTool = (next: ToolKind) => {
+  const setActiveTool = useCallback((next: ToolKind) => {
     if (safeMode) return;
     if (!writerRef.current && next !== "select" && next !== "hand") {
       setStatus("Engine worker online · read-only tab");
@@ -448,7 +449,7 @@ export function EditorShell() {
     }
     setTool(next);
     post({ type: "tool", tool: next });
-  };
+  }, [post, safeMode]);
   const pointer = (event: React.PointerEvent<HTMLCanvasElement>, type: "down" | "move" | "up" | "leave") => {
     if (safeMode) return;
     const readOnly = !writerRef.current;
@@ -473,7 +474,11 @@ export function EditorShell() {
     if (patch.rotation !== undefined && !Number.isFinite(patch.rotation)) return;
     if (selected) command({ type: "update", id: selected.id, patch });
   };
-  const selectCreationTool = (kind: NodeKind) => setActiveTool(kind);
+  const selectCreationTool = useCallback((kind: NodeKind) => setActiveTool(kind), [setActiveTool]);
+  const selectLayer = useCallback((id: string) => command({ type: "select", ids: [id] }), [command]);
+  const createFrame = useCallback(() => selectCreationTool("frame"), [selectCreationTool]);
+  const createRectangle = useCallback(() => selectCreationTool("rectangle"), [selectCreationTool]);
+  const createText = useCallback(() => selectCreationTool("text"), [selectCreationTool]);
   const setAccessMode = (next: "edit" | "view") => {
     if (next === accessPreference) return;
     if (next === "view") {
@@ -515,19 +520,7 @@ export function EditorShell() {
         <IconButton label="Zoom in" disabled={safeMode} onClick={() => { const input: EditorInputEvent = { type: "wheel", x: window.innerWidth / 2, y: window.innerHeight / 2, deltaX: 0, deltaY: -100, ctrlKey: true }; const batcher = inputBatcherRef.current; if (batcher) batcher.enqueue(input); else postInput([input]); }}>+</IconButton>
       </aside>
 
-      <section className="layers-panel panel" aria-label="Layers">
-        <div className="panel-heading"><span>Layers</span><button disabled={!canEdit} onClick={() => selectCreationTool("frame")} aria-label="Create frame">+</button></div>
-        <div className="page-label"><span className="page-square" />Page 1</div>
-        <div className="layer-list">
-          {[...snapshot.nodes].reverse().map((node) => <button key={node.id} className={`layer-row ${snapshot.selectedIds.includes(node.id) ? "selected" : ""}`} onClick={() => command({ type: "select", ids: [node.id] })}>
-            <span className={`node-icon ${node.kind}`}>{node.kind === "ellipse" ? "○" : node.kind === "text" ? "T" : node.kind === "frame" ? "#" : "□"}</span><span>{node.name}</span><span className="layer-visibility">{node.visible === false ? "○" : "◉"}</span>
-          </button>)}
-        </div>
-        <div className="quick-add">
-          <p>New layer</p>
-          <div><button disabled={!canEdit} onClick={() => selectCreationTool("rectangle")}>Rectangle</button><button disabled={!canEdit} onClick={() => selectCreationTool("text")}>Text</button></div>
-        </div>
-      </section>
+      <LayerPanel nodes={snapshot.nodes} selectedIds={snapshot.selectedIds} canEdit={canEdit} onSelect={selectLayer} onCreateFrame={createFrame} onCreateRectangle={createRectangle} onCreateText={createText} />
 
       <section className="canvas-wrap" aria-label="Design canvas">
         <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
