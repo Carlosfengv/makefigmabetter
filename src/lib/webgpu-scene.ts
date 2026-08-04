@@ -295,15 +295,25 @@ fn rounded_box_distance(point: vec2<f32>, half_extent: vec2<f32>, radius: f32) -
   return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  var distance: f32;
   if (input.params.x > 0.5) {
-    distance = length((input.local - vec2<f32>(0.5)) * 2.0) - 1.0;
+    let aspect = max(input.params.w, 0.0001);
+    let extent = select(vec2<f32>(1.0, 1.0 / aspect), vec2<f32>(aspect, 1.0), aspect >= 1.0);
+    let outer_half_extent = extent * 0.5;
+    let point = (input.local - vec2<f32>(0.5)) * extent;
+    let outer_distance = length(point / outer_half_extent) - 1.0;
+    if (outer_distance > 0.0) { discard; }
+    if (input.params.z > 0.0) {
+      let inner_half_extent = max(outer_half_extent - vec2<f32>(input.params.z), vec2<f32>(0.0001));
+      let inner_distance = length(point / inner_half_extent) - 1.0;
+      if (inner_distance > 0.0) { return input.stroke; }
+    }
+    return input.fill;
   } else {
     let aspect = max(input.params.w, 0.0001);
     let scale = select(vec2<f32>(1.0, 1.0 / aspect), vec2<f32>(aspect, 1.0), aspect >= 1.0);
-    distance = rounded_box_distance((input.local - vec2<f32>(0.5)) * scale, vec2<f32>(0.5) * scale, min(input.params.y, 0.5));
+    let distance = rounded_box_distance((input.local - vec2<f32>(0.5)) * scale, vec2<f32>(0.5) * scale, min(input.params.y, 0.5));
+    if (distance > 0.0) { discard; }
+    if (input.params.z > 0.0 && distance > -input.params.z) { return input.stroke; }
+    return input.fill;
   }
-  if (distance > 0.0) { discard; }
-  if (input.params.z > 0.0 && distance > -input.params.z) { return input.stroke; }
-  return input.fill;
 }`;

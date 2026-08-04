@@ -16,6 +16,13 @@ describe("inside rounded-rectangle geometry", () => {
     });
   });
 
+  it("keeps a narrow ellipse's inside stroke from consuming its long axis", () => {
+    expect(resolveInsideRoundedRect(7, 78, 0, 1)).toEqual({
+      outerRadius: 0, insideStrokeWidth: 1,
+      innerX: 1, innerY: 1, innerWidth: 5, innerHeight: 76, innerRadius: 0,
+    });
+  });
+
   it("rejects non-finite geometry at the rendering boundary", () => {
     expect(resolveInsideRoundedRect(Number.NaN, 20, Number.POSITIVE_INFINITY, 2)).toEqual({
       outerRadius: 0, insideStrokeWidth: 0,

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/icon-button";
 import { appendLocalJournalEntry, loadLocalDocument, prepareLocalStorage, saveLocalDocument } from "@/lib/local-document";
 import { createId, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentColor, type DocumentLinearGradient, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
-import { maintainWriterLease, type WriterLeaseMode } from "@/lib/writer-lease";
 import { planWorkerRecovery } from "@/lib/worker-recovery";
 import { colorToOpaqueSrgbCss, colorToSrgbCss, createDefaultLinearGradient } from "@/lib/color-rendering";
 import { createInputTransferBatcher, type InputTransferBatcher } from "@/lib/input-transfer-batcher";
@@ -24,7 +23,7 @@ const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> 
 ];
 
 const blankSnapshot: EditorSnapshot = { revision: 0, nodes: [], selectedIds: [], viewport: { x: 0, y: 0, zoom: 1 }, canUndo: false, canRedo: false, renderer: "Canvas 2D", documentCore: "Starting Rust/WASM bridge" };
-const writerLockName = "makefigma:starter-document";
+const documentChannelName = "makefigma:starter-document";
 type TabMessage = { type: "snapshot"; snapshot: CoreLocalSnapshot };
 
 function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }> ["snapshot"] | undefined {
@@ -74,7 +73,7 @@ export function EditorShell() {
   const recoveryStabilityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const viewportCheckpointTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const persistenceQueue = useRef(Promise.resolve());
-  const writerRef = useRef(false);
+  const writerRef = useRef(true);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const inputBatcherRef = useRef<InputTransferBatcher | null>(null);
   const transactionQueueRef = useRef<ReturnType<typeof createEditorTransactionQueue> | null>(null);
@@ -85,7 +84,6 @@ export function EditorShell() {
   const [status, setStatus] = useState("Starting engine");
   const [storageNotice, setStorageNotice] = useState<string>();
   const [error, setError] = useState<string>();
-  const [writerMode, setWriterMode] = useState<WriterLeaseMode>("acquiring");
   const [accessPreference, setAccessPreference] = useState<"edit" | "view">("edit");
   const [canvasGeneration, setCanvasGeneration] = useState(0);
   const [safeMode, setSafeMode] = useState(false);
@@ -193,7 +191,7 @@ export function EditorShell() {
   }, [postInput]);
 
   useEffect(() => {
-    const channel = new BroadcastChannel(writerLockName);
+    const channel = new BroadcastChannel(documentChannelName);
     channelRef.current = channel;
     channel.onmessage = ({ data }: MessageEvent<TabMessage>) => {
       if (data.type === "snapshot" && !writerRef.current) {
@@ -201,49 +199,10 @@ export function EditorShell() {
         setStatus("Engine worker online · read-only copy updated");
       }
     };
-    if (accessPreference === "view") {
-      writerRef.current = false;
-      transactionQueueRef.current?.reset();
-      optimisticUpdatesRef.current.clear();
-      return () => {
-        channel.close();
-        channelRef.current = null;
-      };
-    }
-    if (!navigator.locks) {
-      queueMicrotask(() => {
-        setWriterMode("read-only");
-        setStatus("Engine worker online · Web Locks unavailable (read-only)");
-      });
-    } else {
-      const lease = maintainWriterLease({
-        name: writerLockName,
-        request: async (name, callback) => {
-          await navigator.locks!.request(name, { ifAvailable: true }, async (lock) => callback(lock));
-        },
-        onMode: (mode) => {
-          writerRef.current = mode === "owner";
-          setWriterMode(mode);
-          if (mode === "owner") setStatus("Engine worker online · writer lease acquired");
-          if (mode === "read-only") setStatus("Engine worker online · following local writer");
-        },
-      });
-      return () => {
-        writerRef.current = false;
-        transactionQueueRef.current?.reset();
-        // Keep the Web Lock until every snapshot accepted while this tab was
-        // owner has finished. This fences an old owner's queued Manifest writes
-        // from a newly promoted tab.
-        void persistenceQueue.current.catch(() => undefined).finally(() => {
-          lease.stop();
-          channel.close();
-          if (channelRef.current === channel) channelRef.current = null;
-        });
-      };
-    }
+    writerRef.current = accessPreference === "edit";
     return () => {
       channel.close();
-      channelRef.current = null;
+      if (channelRef.current === channel) channelRef.current = null;
     };
   }, [accessPreference, post]);
 
@@ -391,14 +350,12 @@ export function EditorShell() {
   }, [post, safeMode]);
 
   const selected = useMemo(() => snapshot.nodes.find((node) => snapshot.selectedIds.includes(node.id)), [snapshot]);
-  const canEdit = accessPreference === "edit" && writerMode === "owner" && !safeMode;
+  const canEdit = accessPreference === "edit" && !safeMode;
   const accessLabel = safeMode
     ? "安全模式"
     : accessPreference === "view"
       ? "只读"
-      : writerMode === "owner"
-        ? "可编辑"
-        : "申请编辑中";
+      : "可编辑";
   const renderEvidence = snapshot.performance?.samples ? `render P95 ${snapshot.performance.p95Ms.toFixed(1)}ms · ${snapshot.diagnostics?.total ?? 0} diagnostics` : "collecting render evidence";
   const mainThreadEvidence = mainThreadMonitor === "waiting"
     ? "main task monitor starting"
@@ -448,11 +405,10 @@ export function EditorShell() {
       writerRef.current = false;
       transactionQueueRef.current?.reset();
       optimisticUpdatesRef.current.clear();
-      setWriterMode("read-only");
       setStatus("Engine worker online · view-only mode");
     } else {
-      setWriterMode("acquiring");
-      setStatus("Engine worker online · requesting edit access");
+      writerRef.current = true;
+      setStatus("Engine worker online · local editing enabled");
     }
     setAccessPreference(next);
   };
@@ -468,7 +424,7 @@ export function EditorShell() {
             <button type="button" aria-pressed={accessPreference === "edit"} onClick={() => setAccessMode("edit")} disabled={safeMode}>编辑</button>
             <span className={`access-state ${canEdit ? "is-editable" : ""}`} aria-live="polite">{accessLabel}</span>
           </div>
-          <span className="engine-status">{snapshot.renderer} · {snapshot.gpu?.webgpu === "ready" ? snapshot.resources?.gpuSceneWithinBudget === false ? "GPU scene resource fallback" : snapshot.gpu.recoveryAttempts ? `WebGPU scene recovered (${snapshot.gpu.recoveryAttempts})` : "WebGPU scene active" : snapshot.gpu?.webgpu === "recovering" ? "recovering WebGPU scene" : snapshot.gpu?.webgpu === "unavailable" ? snapshot.gpu.recoveryAttempts ? `WebGPU recovery exhausted · ${snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback"}` : (snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback") : "checking GPU"} · {snapshot.documentCore} · {writerMode === "owner" ? "local writer" : writerMode === "read-only" ? "read-only tab" : "acquiring writer lock"} · {status}{storageNotice ? ` · ${storageNotice}` : ""}</span>
+          <span className="engine-status">{snapshot.renderer} · {snapshot.gpu?.webgpu === "ready" ? snapshot.resources?.gpuSceneWithinBudget === false ? "GPU scene resource fallback" : snapshot.gpu.recoveryAttempts ? `WebGPU scene recovered (${snapshot.gpu.recoveryAttempts})` : "WebGPU scene active" : snapshot.gpu?.webgpu === "recovering" ? "recovering WebGPU scene" : snapshot.gpu?.webgpu === "unavailable" ? snapshot.gpu.recoveryAttempts ? `WebGPU recovery exhausted · ${snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback"}` : (snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback") : "checking GPU"} · {snapshot.documentCore} · {accessPreference === "edit" ? "local editing" : "view-only"} · {status}{storageNotice ? ` · ${storageNotice}` : ""}</span>
           <button className="quiet-button" disabled={!canEdit} onClick={() => command({ type: "reset" })}>Reset demo</button>
           <button className="publish-button">Share <span>↗</span></button>
         </div>

@@ -466,8 +466,20 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.translate(-w / 2, -h / 2);
   const paint = fillStyle(ctx, node, w, h);
   if (node.kind === "ellipse") {
-    ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2); ctx.fillStyle = paint; ctx.fill();
-    if (node.strokeWidth) { ctx.strokeStyle = strokeStyle(ctx, node, w, h); ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom); ctx.stroke(); }
+    const geometry = resolveInsideRoundedRect(w, h, 0, node.strokeWidth * viewport.zoom);
+    ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
+      ctx.fillStyle = strokeStyle(ctx, node, w, h);
+      ctx.fill();
+      if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
+        ctx.beginPath(); ctx.ellipse(w / 2, h / 2, geometry.innerWidth / 2, geometry.innerHeight / 2, 0, 0, Math.PI * 2);
+        ctx.fillStyle = paint;
+        ctx.fill();
+      }
+    } else {
+      ctx.fillStyle = paint;
+      ctx.fill();
+    }
   } else if (node.kind === "text") {
     const textMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
     ctx.fillStyle = paint;
