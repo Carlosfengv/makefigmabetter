@@ -95,7 +95,7 @@ function starterNodes(): CanvasNode[] {
   return [
     { id: "00000000-0000-4000-8000-000000000001", name: "Product card", kind: "frame", x: -250, y: -170, width: 500, height: 340, rotation: 0, fill: "#fbfbf8", stroke: "#d4d5cb", strokeWidth: 1, radius: 18, opacity: 1, visible: true },
     { id: "00000000-0000-4000-8000-000000000002", name: "Sun disc", kind: "ellipse", x: -194, y: -112, width: 130, height: 130, rotation: 0, fill: "#f6ad62", stroke: "#b4612d", strokeWidth: 1, radius: 0, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000003", name: "Signal", kind: "rectangle", x: 48, y: -92, width: 150, height: 46, rotation: 0, fill: "#e1dcff", stroke: "#6657b7", strokeWidth: 1, radius: 23, opacity: 1, visible: true },
+    { id: "00000000-0000-4000-8000-000000000003", name: "Signal", kind: "rectangle", x: 48, y: -92, width: 150, height: 46, rotation: 0, fill: "#e6edff", stroke: "#0048FF", strokeWidth: 1, radius: 23, opacity: 1, visible: true },
     { id: "00000000-0000-4000-8000-000000000004", name: "Headline", kind: "text", x: -194, y: 65, width: 370, height: 64, rotation: 0, fill: "#20221c", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1, text: "Design, with intent.", visible: true },
   ];
 }

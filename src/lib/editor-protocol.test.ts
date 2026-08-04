@@ -12,12 +12,12 @@ describe("editor protocol node presets", () => {
       y: -8,
       width: 180,
       height: 120,
-      fill: "#e3dcff",
+      fill: "#e6edff",
       opacity: 1,
       visible: true,
     });
     expect(node.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-    expect(node.fillColor).toEqual({ space: "srgb", components: [227 / 255, 220 / 255, 1], alpha: 1 });
+    expect(node.fillColor).toEqual({ space: "srgb", components: [230 / 255, 237 / 255, 1], alpha: 1 });
   });
 
   it("keeps text content in the command payload instead of UI-only state", () => {

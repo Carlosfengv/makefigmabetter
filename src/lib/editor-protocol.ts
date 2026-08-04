@@ -205,7 +205,7 @@ export function documentColorFromCssHex(value: string): DocumentColor | undefine
 export function createNode(kind: NodeKind, x: number, y: number): CanvasNode {
   const presets: Record<NodeKind, Pick<CanvasNode, "name" | "width" | "height" | "fill" | "stroke" | "radius" | "text">> = {
     frame: { name: "Frame", width: 320, height: 220, fill: "#fbfbf8", stroke: "#d4d5cb", radius: 10 },
-    rectangle: { name: "Rectangle", width: 180, height: 120, fill: "#e3dcff", stroke: "#6954be", radius: 12 },
+    rectangle: { name: "Rectangle", width: 180, height: 120, fill: "#e6edff", stroke: "#0048FF", radius: 12 },
     ellipse: { name: "Ellipse", width: 140, height: 140, fill: "#ffd8b7", stroke: "#bd6332", radius: 0 },
     text: { name: "Text", width: 220, height: 44, fill: "#23251f", stroke: "transparent", radius: 0, text: "Type something" },
   };
