@@ -159,7 +159,7 @@ export interface EditorTransaction {
 /** High-frequency browser input carried in a transferable binary batch. */
 export type EditorInputEvent =
   /** Read-only followers may point-select and pan, but must never begin a document mutation. */
-  | { type: "pointer"; event: "down" | "move" | "up"; x: number; y: number; shiftKey: boolean; button: number; readOnly?: true }
+  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; button: number; readOnly?: true }
   | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean };
 
 export type MainToWorker =

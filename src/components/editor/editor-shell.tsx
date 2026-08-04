@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/icon-button";
 import { appendLocalJournalEntry, loadLocalDocument, prepareLocalStorage, saveLocalDocument } from "@/lib/local-document";
 import { createId, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentColor, type DocumentLinearGradient, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
+import { maintainWriterLease, type WriterLease, type WriterLeaseMode } from "@/lib/writer-lease";
 import { planWorkerRecovery } from "@/lib/worker-recovery";
 import { colorToOpaqueSrgbCss, colorToSrgbCss, createDefaultLinearGradient } from "@/lib/color-rendering";
 import { createInputTransferBatcher, type InputTransferBatcher } from "@/lib/input-transfer-batcher";
@@ -23,8 +24,13 @@ const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> 
 ];
 
 const blankSnapshot: EditorSnapshot = { revision: 0, nodes: [], selectedIds: [], viewport: { x: 0, y: 0, zoom: 1 }, canUndo: false, canRedo: false, renderer: "Canvas 2D", documentCore: "Starting Rust/WASM bridge" };
-const documentChannelName = "makefigma:starter-document";
-type TabMessage = { type: "snapshot"; snapshot: CoreLocalSnapshot };
+const writerLockName = "makefigma:starter-document";
+type EditIntent = { at: number; id: string };
+type TabMessage = { type: "snapshot"; snapshot: CoreLocalSnapshot } | { type: "request-edit"; intent: EditIntent };
+
+function newerEditIntent(candidate: EditIntent, current: EditIntent) {
+  return candidate.at > current.at || (candidate.at === current.at && candidate.id > current.id);
+}
 
 function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }> ["snapshot"] | undefined {
   if (typeof window === "undefined" || new URLSearchParams(window.location.search).get("fixture") !== "phase0-basic-card") return undefined;
@@ -33,6 +39,12 @@ function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }>
     nodes: structuredClone(phase0BasicCardFixture.nodes) as CanvasNode[],
     viewport: structuredClone(phase0BasicCardFixture.viewport),
   };
+}
+
+function isDeterministicEvidenceCapture() {
+  if (typeof window === "undefined") return false;
+  const search = new URLSearchParams(window.location.search);
+  return search.get("fixture") === "phase0-basic-card" && search.get("renderer") === "canvas2d";
 }
 
 function requestedRendererPreference(): RendererPreference {
@@ -73,7 +85,9 @@ export function EditorShell() {
   const recoveryStabilityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const viewportCheckpointTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const persistenceQueue = useRef(Promise.resolve());
-  const writerRef = useRef(true);
+  const writerRef = useRef(false);
+  const writerLeaseRef = useRef<WriterLease | null>(null);
+  const editIntentRef = useRef<EditIntent | undefined>(undefined);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const inputBatcherRef = useRef<InputTransferBatcher | null>(null);
   const transactionQueueRef = useRef<ReturnType<typeof createEditorTransactionQueue> | null>(null);
@@ -84,6 +98,7 @@ export function EditorShell() {
   const [status, setStatus] = useState("Starting engine");
   const [storageNotice, setStorageNotice] = useState<string>();
   const [error, setError] = useState<string>();
+  const [writerMode, setWriterMode] = useState<WriterLeaseMode>("acquiring");
   const [accessPreference, setAccessPreference] = useState<"edit" | "view">("edit");
   const [canvasGeneration, setCanvasGeneration] = useState(0);
   const [safeMode, setSafeMode] = useState(false);
@@ -91,6 +106,7 @@ export function EditorShell() {
   const [mainThreadMonitor, setMainThreadMonitor] = useState<"waiting" | "monitoring" | "unavailable">("waiting");
   const [mainThreadMonitoringEnabled, setMainThreadMonitoringEnabled] = useState(false);
   const fixtureSnapshot = useMemo(() => requestedFixtureSnapshot(), []);
+  const deterministicEvidenceCapture = useMemo(() => isDeterministicEvidenceCapture(), []);
   const rendererPreference = useMemo(() => requestedRendererPreference(), []);
   const simulateGpuLosses = useMemo(() => requestedGpuLossSimulationCount(), []);
   const simulateWorkerCrashes = useMemo(() => requestedEngineCrashSimulationCount(), []);
@@ -191,16 +207,72 @@ export function EditorShell() {
   }, [postInput]);
 
   useEffect(() => {
-    const channel = new BroadcastChannel(documentChannelName);
+    const channel = new BroadcastChannel(writerLockName);
+    const optimisticUpdates = optimisticUpdatesRef.current;
+    editIntentRef.current ??= { at: Date.now(), id: createId() };
     channelRef.current = channel;
     channel.onmessage = ({ data }: MessageEvent<TabMessage>) => {
       if (data.type === "snapshot" && !writerRef.current) {
         post({ type: "command", command: { type: "hydrate", snapshot: data.snapshot } });
         setStatus("Engine worker online · read-only copy updated");
       }
+      if (data.type === "request-edit" && writerRef.current && newerEditIntent(data.intent, editIntentRef.current!)) {
+        writerRef.current = false;
+        transactionQueueRef.current?.reset();
+        optimisticUpdates.clear();
+        writerLeaseRef.current?.stop();
+        writerLeaseRef.current = null;
+        setWriterMode("read-only");
+        setAccessPreference("view");
+        setStatus("Engine worker online · editing handed to another tab");
+      }
     };
-    writerRef.current = accessPreference === "edit";
+    if (accessPreference === "view") {
+      writerRef.current = false;
+      transactionQueueRef.current?.reset();
+      optimisticUpdates.clear();
+      return () => {
+        channel.close();
+        if (channelRef.current === channel) channelRef.current = null;
+      };
+    }
+    if (!navigator.locks) {
+      queueMicrotask(() => {
+        writerRef.current = true;
+        setWriterMode("owner");
+        setStatus("Engine worker online · local editing (Web Locks unavailable)");
+      });
+      return () => {
+        writerRef.current = false;
+        channel.close();
+        if (channelRef.current === channel) channelRef.current = null;
+      };
+    }
+    const lease = maintainWriterLease({
+      name: writerLockName,
+      request: async (name, callback) => {
+        await navigator.locks!.request(name, { ifAvailable: true }, async (lock) => callback(lock));
+      },
+      onMode: (mode) => {
+        writerRef.current = mode === "owner";
+        setWriterMode(mode);
+        if (mode === "owner") setStatus("Engine worker online · writer lease acquired");
+        if (mode === "read-only") {
+          setStatus("Engine worker online · requesting edit handoff");
+          channel.postMessage({ type: "request-edit", intent: editIntentRef.current! } satisfies TabMessage);
+        }
+      },
+    });
+    writerLeaseRef.current = lease;
     return () => {
+      writerRef.current = false;
+      transactionQueueRef.current?.reset();
+      optimisticUpdates.clear();
+      // Release synchronously. Waiting for a prior page's persistence promise
+      // during refresh can retain the Web Lock indefinitely and strand the new
+      // page in read-only mode. Confirmed writes remain atomic individually.
+      lease.stop();
+      if (writerLeaseRef.current === lease) writerLeaseRef.current = null;
       channel.close();
       if (channelRef.current === channel) channelRef.current = null;
     };
@@ -350,13 +422,16 @@ export function EditorShell() {
   }, [post, safeMode]);
 
   const selected = useMemo(() => snapshot.nodes.find((node) => snapshot.selectedIds.includes(node.id)), [snapshot]);
-  const canEdit = accessPreference === "edit" && !safeMode;
+  const canEdit = accessPreference === "edit" && writerMode === "owner" && !safeMode;
   const accessLabel = safeMode
     ? "安全模式"
     : accessPreference === "view"
       ? "只读"
-      : "可编辑";
-  const renderEvidence = snapshot.performance?.samples ? `render P95 ${snapshot.performance.p95Ms.toFixed(1)}ms · ${snapshot.diagnostics?.total ?? 0} diagnostics` : "collecting render evidence";
+      : writerMode === "owner"
+        ? "可编辑"
+        : "申请编辑中";
+  const renderEvidence = deterministicEvidenceCapture ? "collecting render evidence" : snapshot.performance?.samples ? `render P95 ${snapshot.performance.p95Ms.toFixed(1)}ms · ${snapshot.diagnostics?.total ?? 0} diagnostics` : "collecting render evidence";
+  const renderPerformanceEvidence = snapshot.performance ? JSON.stringify(snapshot.performance) : undefined;
   const mainThreadEvidence = mainThreadMonitor === "waiting"
     ? "main task monitor starting"
     : mainThreadMonitor === "unavailable"
@@ -374,7 +449,7 @@ export function EditorShell() {
     setTool(next);
     post({ type: "tool", tool: next });
   };
-  const pointer = (event: React.PointerEvent<HTMLCanvasElement>, type: "down" | "move" | "up") => {
+  const pointer = (event: React.PointerEvent<HTMLCanvasElement>, type: "down" | "move" | "up" | "leave") => {
     if (safeMode) return;
     const readOnly = !writerRef.current;
     if (readOnly && tool !== "select" && tool !== "hand") {
@@ -405,10 +480,14 @@ export function EditorShell() {
       writerRef.current = false;
       transactionQueueRef.current?.reset();
       optimisticUpdatesRef.current.clear();
+      writerLeaseRef.current?.stop();
+      writerLeaseRef.current = null;
+      setWriterMode("read-only");
       setStatus("Engine worker online · view-only mode");
     } else {
-      writerRef.current = true;
-      setStatus("Engine worker online · local editing enabled");
+      editIntentRef.current = { at: Date.now(), id: createId() };
+      setWriterMode("acquiring");
+      setStatus("Engine worker online · requesting edit handoff");
     }
     setAccessPreference(next);
   };
@@ -424,7 +503,7 @@ export function EditorShell() {
             <button type="button" aria-pressed={accessPreference === "edit"} onClick={() => setAccessMode("edit")} disabled={safeMode}>编辑</button>
             <span className={`access-state ${canEdit ? "is-editable" : ""}`} aria-live="polite">{accessLabel}</span>
           </div>
-          <span className="engine-status">{snapshot.renderer} · {snapshot.gpu?.webgpu === "ready" ? snapshot.resources?.gpuSceneWithinBudget === false ? "GPU scene resource fallback" : snapshot.gpu.recoveryAttempts ? `WebGPU scene recovered (${snapshot.gpu.recoveryAttempts})` : "WebGPU scene active" : snapshot.gpu?.webgpu === "recovering" ? "recovering WebGPU scene" : snapshot.gpu?.webgpu === "unavailable" ? snapshot.gpu.recoveryAttempts ? `WebGPU recovery exhausted · ${snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback"}` : (snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback") : "checking GPU"} · {snapshot.documentCore} · {accessPreference === "edit" ? "local editing" : "view-only"} · {status}{storageNotice ? ` · ${storageNotice}` : ""}</span>
+          <span className="engine-status">{snapshot.renderer} · {snapshot.gpu?.webgpu === "ready" ? snapshot.resources?.gpuSceneWithinBudget === false ? "GPU scene resource fallback" : snapshot.gpu.recoveryAttempts ? `WebGPU scene recovered (${snapshot.gpu.recoveryAttempts})` : "WebGPU scene active" : snapshot.gpu?.webgpu === "recovering" ? "recovering WebGPU scene" : snapshot.gpu?.webgpu === "unavailable" ? snapshot.gpu.recoveryAttempts ? `WebGPU recovery exhausted · ${snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback"}` : (snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback") : "checking GPU"} · {snapshot.documentCore} · {writerMode === "owner" ? "local writer" : writerMode === "read-only" ? "read-only tab" : "acquiring writer lock"} · {status}{storageNotice ? ` · ${storageNotice}` : ""}</span>
           <button className="quiet-button" disabled={!canEdit} onClick={() => command({ type: "reset" })}>Reset demo</button>
           <button className="publish-button">Share <span>↗</span></button>
         </div>
@@ -451,8 +530,8 @@ export function EditorShell() {
       </section>
 
       <section className="canvas-wrap" aria-label="Design canvas">
-        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
-        <div className="canvas-caption"><span>WORLD</span><b>{Math.round(snapshot.viewport.zoom * 100)}%</b><span>⌘ + scroll to zoom</span><span aria-label="Render evidence">{renderEvidence}</span><span aria-label="Main thread responsiveness">{mainThreadEvidence}</span><span aria-label="Resource evidence">{resourceEvidence}</span></div>
+        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
+        <div className="canvas-caption"><span>WORLD</span><b>{Math.round(snapshot.viewport.zoom * 100)}%</b><span>⌘ + scroll to zoom</span><span aria-label="Render evidence" data-render-performance={renderPerformanceEvidence}>{renderEvidence}</span><span aria-label="Main thread responsiveness">{mainThreadEvidence}</span><span aria-label="Resource evidence">{resourceEvidence}</span></div>
         {error && <div className="engine-error" role="alert">{error}</div>}
       </section>
 

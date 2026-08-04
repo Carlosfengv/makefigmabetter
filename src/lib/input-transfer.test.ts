@@ -7,6 +7,7 @@ describe("transferable input batches", () => {
     const events: EditorInputEvent[] = [
       { type: "pointer", event: "down", x: 10.5, y: -3.25, shiftKey: true, button: 0 },
       { type: "pointer", event: "move", x: 11.5, y: 4, shiftKey: false, button: -1 },
+      { type: "pointer", event: "leave", x: 12, y: 5, shiftKey: false, button: -1 },
       { type: "wheel", x: 12, y: 6, deltaX: -7.5, deltaY: 20.25, ctrlKey: true },
     ];
     expect(decodeInputBatch(encodeInputBatch(events))).toEqual(events);

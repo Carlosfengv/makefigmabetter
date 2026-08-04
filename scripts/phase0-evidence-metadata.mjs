@@ -49,6 +49,8 @@ export function collectPhase0EvidenceMetadata({ root, evidenceDirectory, evidenc
     "screenshot.log",
     "console.txt",
     "browser-runtime.log",
+    "performance-warmup.log",
+    "performance-summary.json",
     "golden-verification.json",
   ]
     .map((name) => artifact(root, join(evidenceDirectory, name)))

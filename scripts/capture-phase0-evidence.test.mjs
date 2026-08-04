@@ -34,7 +34,7 @@ describe("Phase 0 evidence capture", () => {
     const result = spawnSync("bash", ["scripts/capture-phase0-evidence.sh", "http://localhost:3000", evidenceDirectory], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, PWCLI: worker },
+      env: { ...process.env, PWCLI: worker, PHASE0_PERFORMANCE_RUNS: "0", PHASE0_PERFORMANCE_WARMUP_SECONDS: "0" },
     });
 
     expect(result.status).toBe(1);

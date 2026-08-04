@@ -69,6 +69,7 @@ let redoOrder: HistoryKind[] = [];
 const preservedProjectionNodes = new Map<string, PresentationNode>();
 let revision = 0;
 let drag: Drag | undefined;
+let hoveredId: string | undefined;
 let documentCore: EditorSnapshot["documentCore"] = "Starting Rust/WASM bridge";
 let wasmDocument: WasmDocumentEngine | undefined;
 let bridgeLoadSequence = 0;
@@ -527,6 +528,31 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.strokeStyle = "#5442a9"; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(.5, .5, Math.max(0, w - 1), Math.max(0, h - 1)); ctx.setLineDash([]);
   ctx.restore();
 }
+function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (hoveredId !== node.id || selectedIds.includes(node.id) || node.visible === false) return;
+  const point = toScreen(node.x, node.y);
+  const w = node.width * viewport.zoom;
+  const h = node.height * viewport.zoom;
+  if (w <= 0 || h <= 0) return;
+  ctx.save();
+  ctx.translate(point.x + w / 2, point.y + h / 2);
+  ctx.rotate(node.rotation * Math.PI / 180);
+  ctx.translate(-w / 2, -h / 2);
+  ctx.strokeStyle = "#5442a9";
+  ctx.lineWidth = 1;
+  if (node.kind === "ellipse") {
+    ctx.beginPath();
+    ctx.ellipse(w / 2, h / 2, Math.max(0, w / 2 - .5), Math.max(0, h / 2 - .5), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (node.kind === "text") {
+    ctx.strokeRect(.5, .5, Math.max(0, w - 1), Math.max(0, h - 1));
+  } else {
+    const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
+    roundedRectPath(ctx, .5, .5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - .5));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function renderFrameName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (node.kind !== "frame" || node.visible === false || selectedIds.includes(node.id)) return;
   const label = frameNameLabelGeometry(ctx, node);
@@ -635,6 +661,7 @@ function render() {
   }
   nodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
   nodes.forEach((node) => renderFrameName(context!, node));
+  nodes.forEach((node) => renderHover(context!, node));
   nodes.forEach((node) => renderSelection(context!, node));
   renderSelectionLabel(context);
   renderMarquee(context);
@@ -769,6 +796,13 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
 }
 function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   const world = toWorld(event.x, event.y);
+  if (event.event === "leave") {
+    if (!drag && hoveredId !== undefined) {
+      hoveredId = undefined;
+      render();
+    }
+    return;
+  }
   if (event.event === "down") {
     if (tool === "hand" || event.button === 1) { drag = { mode: "pan", startX: event.x, startY: event.y }; return; }
     if (tool !== "select") {
@@ -792,7 +826,16 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     if (target && !event.readOnly) drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Map(nodes.filter((node) => selectedIds.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y }])) };
     render(); emitViewState(); return;
   }
-  if (!drag) return;
+  if (!drag) {
+    if (event.event === "move") {
+      const nextHoveredId = hit(world.x, world.y)?.id;
+      if (nextHoveredId !== hoveredId) {
+        hoveredId = nextHoveredId;
+        render();
+      }
+    }
+    return;
+  }
   const activeDrag = drag;
   if (event.readOnly && activeDrag.mode !== "pan" && activeDrag.mode !== "select") {
     // A lease can expire mid-drag. Restore the pre-drag projection instead of

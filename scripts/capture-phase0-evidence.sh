@@ -11,6 +11,14 @@ evidence_dir="${2:-output/phase0-evidence/$(date -u +%Y%m%dT%H%M%SZ)}"
 pwcli="${PWCLI:-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh}"
 golden_verifier="$(dirname "$0")/verify-phase0-golden.mjs"
 metadata_writer="$(dirname "$0")/write-phase0-evidence-metadata.mjs"
+performance_writer="$(dirname "$0")/write-phase0-performance-summary.mjs"
+warmup_seconds="${PHASE0_PERFORMANCE_WARMUP_SECONDS:-30}"
+performance_runs="${PHASE0_PERFORMANCE_RUNS:-3}"
+
+if ! [[ "$warmup_seconds" =~ ^[0-9]+$ ]] || ! [[ "$performance_runs" =~ ^[0-9]+$ ]]; then
+  echo "PHASE0_PERFORMANCE_WARMUP_SECONDS and PHASE0_PERFORMANCE_RUNS must be non-negative integers." >&2
+  exit 64
+fi
 
 mkdir -p "$evidence_dir"
 
@@ -34,6 +42,23 @@ done
 if [[ "$fixture_ready" -ne 1 ]]; then
   echo "Timed out waiting for the fixed Fixture and Rust/WASM bridge." | tee "$evidence_dir/readiness.log" >&2
   exit 1
+fi
+
+# Wheel pairs force the Worker to render while returning the camera to its exact
+# starting position, so the Golden capture after the benchmark remains stable.
+if (( warmup_seconds > 0 )); then
+  echo "Warming up Phase 0 performance baseline for ${warmup_seconds}s." | tee "$evidence_dir/performance-warmup.log"
+  sleep "$warmup_seconds"
+else
+  echo "Performance warmup skipped by PHASE0_PERFORMANCE_WARMUP_SECONDS=0." | tee "$evidence_dir/performance-warmup.log"
+fi
+performance_probe='(async () => { const canvas = document.querySelector("canvas"); if (!canvas) throw new Error("Canvas not found"); const dispatch = (deltaX) => canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, clientX: 720, clientY: 480, deltaX, deltaY: 0 })); for (let index = 0; index < 120; index += 1) { dispatch(1); dispatch(-1); } await new Promise((resolve) => setTimeout(resolve, 250)); return document.querySelector("[aria-label=\"Render evidence\"]")?.getAttribute("data-render-performance") ?? ""; })()'
+for run in $(seq 1 "$performance_runs"); do
+  run_name=$(printf 'performance-run-%02d.txt' "$run")
+  "$pwcli" --session makefigma-phase0-evidence eval "$performance_probe" | tee "$evidence_dir/$run_name"
+done
+if (( performance_runs > 0 )); then
+  node "$performance_writer" "$evidence_dir" "$warmup_seconds"
 fi
 "$pwcli" --session makefigma-phase0-evidence screenshot --filename "$evidence_dir/phase0-basic-card.png" | tee "$evidence_dir/screenshot.log"
 "$pwcli" --session makefigma-phase0-evidence console | tee "$evidence_dir/console.txt"

@@ -8,7 +8,7 @@
       "backend": "Canvas 2D",
       "viewport": { "width": 1440, "height": 960, "dpr": 1, "zoom": 1 },
       "baseline": "fixtures/golden-images/phase0-basic-card.png",
-      "baselineSha256": "dc1543d7c207bef1f931b6fc3cd6cf43a1dcbce7ad96429950808dcb14acafd6",
+      "baselineSha256": "970d492ad14201f2f33f240c5f0f66c0f92d4536d406a481e33f41453d59dfd5",
       "pixelTolerance": 0,
       "status": "reviewed"
     }

@@ -22,7 +22,8 @@ describe("canvas grid", () => {
     expect(shouldRenderCanvasGrid(4.01)).toBe(true);
   });
 
-  it("supports the Figma-compatible 25,600% maximum zoom", () => {
+  it("supports the Figma-compatible 2%–25,600% zoom range", () => {
+    expect(MIN_CANVAS_ZOOM).toBe(0.02);
     expect(MAX_CANVAS_ZOOM).toBe(256);
     expect(clampCanvasZoom(1_000)).toBe(256);
     expect(clampCanvasZoom(0.01)).toBe(MIN_CANVAS_ZOOM);

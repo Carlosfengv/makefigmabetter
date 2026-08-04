@@ -1,7 +1,8 @@
 export const CANVAS_GRID_UNIT = 1;
 export const MIN_VISIBLE_GRID_GAP = 4;
 export const GRID_VISIBILITY_ZOOM = 4;
-export const MIN_CANVAS_ZOOM = 0.2;
+/** Matches Figma's 2% lower zoom limit. */
+export const MIN_CANVAS_ZOOM = 0.02;
 /** Matches Figma's 25,600% upper zoom limit. */
 export const MAX_CANVAS_ZOOM = 256;
 

@@ -132,6 +132,8 @@ bash scripts/capture-phase0-evidence.sh \
   output/phase0-evidence/local-run
 ```
 
+采集器默认先预热 30 秒，再执行 3 轮受控渲染采样（每轮 240 个样本），并将中位 P50/P95/最大值写入 `performance-summary.json` 和验收报告。固定 Fixture 的截图会保持性能文字稳定，性能原始值仍会作为证据保存，因此瞬态指标不会造成 Golden 误报。
+
 ## 故障注入
 
 以下参数只在开发环境和固定 Fixture 下生效：

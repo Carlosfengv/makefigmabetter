@@ -4,8 +4,8 @@ const HEADER_BYTES = 4;
 const EVENT_BYTES = 32;
 const POINTER_KIND = 1;
 const WHEEL_KIND = 2;
-const POINTER_EVENT_CODE = { down: 1, move: 2, up: 3 } as const;
-const POINTER_EVENT_BY_CODE = { 1: "down", 2: "move", 3: "up" } as const;
+const POINTER_EVENT_CODE = { down: 1, move: 2, up: 3, leave: 4 } as const;
+const POINTER_EVENT_BY_CODE = { 1: "down", 2: "move", 3: "up", 4: "leave" } as const;
 
 /** Bounds both message allocation and the Worker decode loop for one input turn. */
 export const MAX_INPUT_EVENTS_PER_BATCH = 256;
