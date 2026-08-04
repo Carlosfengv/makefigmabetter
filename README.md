@@ -4,7 +4,7 @@
 
 一个浏览器优先的设计编辑器工程原型，用来验证类 Figma 产品最核心的技术边界：Worker 驱动的无限画布、Rust/WASM 文档内核、WebGPU 渲染、本地持久化，以及可演进的事务与恢复协议。
 
-> 当前处于 **Phase 0**。项目已经具备可交互、可恢复、可验证的单机编辑闭环，但不是完整的 Figma 替代品，也不应直接作为生产协同编辑器使用。
+> **Phase 0 已于 2026-08-04 完成，项目当前进入 Phase 1。** 项目已经具备可交互、可恢复、可自动验证的单机编辑闭环；下一阶段将补齐 Document/Page、服务端 Operation、资源、文本与渲染内核。它不是完整的 Figma 替代品，也不应直接作为生产协同编辑器使用。
 
 ## 为什么做这个项目
 
@@ -34,7 +34,7 @@ Rust / WASM Canonical Document Core
 
 - Frame、Rectangle、Ellipse、Text 的创建、选择、拖动、复制和删除；
 - 无限网格、平移、光标锚定缩放、旋转与基础命中测试；
-- 图层树、属性面板、基础 Linear Gradient 和 Undo/Redo；
+- 基础图层列表、属性面板、基础 Linear Gradient 和 Undo/Redo；
 - 基础纯文本换行、字素簇保护和 LTR/RTL 段落方向；
 - UI Transaction 单飞排队、revision 冲突处理和未确认输入的乐观投影。
 
@@ -191,12 +191,15 @@ docs/adr/                架构决策记录
 
 当前尚未实现：
 
-- 多人实时协同、服务端 accepted revision、评论与正式权限系统；
+- Document/Page 的完整层级投影、Section、Group、Line 和嵌套图层编辑；
+- 服务端 accepted revision、持久 pending Operation、断线重试与对账；
 - HarfBuzz/ICU4X/FreeType 字体栈、富文本、Caret、Selection 和 IME；
 - Rust `wgpu` Render Graph、完整 GPU 资源重建、效果与图片渲染；
+- 图片/字体的 Asset 引用、解码、缓存、上传和对象存储闭环；
 - Auto Layout、Constraints、Components 和 Variables；
 - Figma 导入/写回与生产级导出；
-- 任意 Path Boolean、Clip/Mask 和空间索引。
+- 任意 Path Boolean、Clip/Mask、深层选择和生产级 R-tree/BVH 空间索引；
+- 多人实时协同、Presence、评论与正式权限系统。
 
 `.fig` 是私有格式，直接读写明确不在项目范围内。
 
@@ -205,14 +208,17 @@ docs/adr/                架构决策记录
 - [完整架构设计](figma-like-canvas-rust-wasm-webgpu-architecture.md)
 - [兼容矩阵](docs/compatibility-matrix.md)
 - [架构决策记录](docs/adr/)
+- [Phase 0 完成记录](verification/phase0/completion.md)
 - [CI 验证流程](.github/workflows/verify.yml)
 
 ## 路线图
 
-- **Phase 0**：单机编辑闭环、Worker/WASM/WebGPU 边界、本地恢复与验证基线；
-- **Phase 1**：完善渲染图、文本系统、资源管线与服务端 Operation 接入；
-- **Phase 2**：Auto Layout、Constraints 和更完整的编辑语义；
-- **Phase 3**：Components、Variables、导入与导出；
-- **Phase 4**：多人协同、评论、权限与跨设备恢复。
+- **Phase 0（已完成，2026-08-04）**：冻结单机编辑闭环、Worker/WASM/WebGPU 边界、本地恢复与验证基线；
+- **Phase 1**：补齐 Document/Page 层级语义，建立 Protobuf 契约和单客户端服务端 Operation 闭环，完成图片/字体资源管线、正式文本引擎与 Rust/wgpu Render Graph；
+- **Phase 2**：实现 Section、Group、Line、嵌套图层树、八方向与多选 Transform、跨父级排序、Shadow、Mixed Inspector、完整键盘可访问性，以及 Vector、Effect、Auto Layout、Constraints 和导出；
+- **Phase 3**：Components、Variables、Figma 导入与写回；
+- **Phase 4**：在 Phase 1 的服务端 Operation 基础上实现多人协同、Presence、评论、权限与跨设备恢复。
+
+Phase 1 的服务端接入只要求单客户端从本地提交、持久 pending、获得 accepted revision、断线重试并完成对账；多人并发合并、远端 Presence 和协同 Undo 仍属于 Phase 4。Phase 2 的编辑语义不得反向改变 Phase 1 已冻结的稳定 ID、父子顺序、Operation、Asset 和文本版本契约。
 
 这个仓库更关注正确的编辑器内核边界，而不是快速堆叠 UI 功能。每个新增能力都应同时定义数据语义、事务行为、恢复路径、资源预算和可验证证据。

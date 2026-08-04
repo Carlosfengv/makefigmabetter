@@ -386,8 +386,9 @@ Document Reducer 每次提交后校验以下不变量：
 
 | 阶段 | 节点类型 |
 |---|---|
-| Phase 1 | Document、Page、Section、Frame、Group、Rectangle、Ellipse、Line、Text |
-| Phase 2 | Polygon、Star、Vector、BooleanOperation、Slice |
+| Phase 0 | Frame、Rectangle、Ellipse、Text 的基础单机投影 |
+| Phase 1 | Document、Page，以及 Frame、Rectangle、Ellipse、Text 的稳定层级语义 |
+| Phase 2 | Section、Group、Line、Polygon、Star、Vector、BooleanOperation、Slice |
 | Phase 3 | Component、ComponentSet、Instance |
 
 尚未实现的已知 Figma Node 使用 UnknownNode/Extension Payload 保留原始类型和 namespaced 数据，只允许移动、复制、删除和占位显示；不能伪装成完整支持。
@@ -1469,10 +1470,10 @@ protocol crate 是 Protobuf Schema 的 Rust 生成代码入口，packages/protoc
 | 0.2 | 完成核心 ADR：文档存储、ID、Operation、Undo、色彩、文本、渲染后端、序列化、Worker 和 SharedArrayBuffer | 关键架构只有一个当前决策和明确替代方案 | 召开架构评审，人工模拟一个节点从创建、协同、撤销、保存到恢复的完整链路 | 所有 ADR 有状态、负责人和后果；不存在未决 P1 |
 | 0.3 | 建立 Next.js App Router、shadcn Base UI、pnpm/Cargo Workspace、CI 和可复现依赖锁定 | 新环境可稳定完成前端、WASM 与后端独立构建 | 在未配置项目的机器上按 README 初始化、分别构建和启动 Web/Backend | 无需口头补充；Next Production Build 与 Rust 测试通过；前后端可分别运行 |
 | 0.4 | 实现 TypeScript/WASM Bridge 原型，支持批量 Command、Viewport 和 Inspector Snapshot | JS/WASM 边界保持高层和批量化 | 使用浏览器性能面板检查拖动和批量属性更新；统计跨边界调用次数 | 一次帧更新不按节点逐个调用 WASM；1,000 个属性更新可以单批提交 |
-| 0.5 | 实现 wgpu WebGPU 最小渲染后端、WebGL2 探测路径和 GPU Device Lost 恢复原型 | Renderer 能创建、销毁并重建全部 GPU 资源 | 正常绘制后模拟 Device Lost 或主动销毁 Device，观察自动恢复；再禁用 WebGPU 验证降级提示 | 文档状态不丢失；3 秒内恢复或明确进入降级模式；无无限重试 |
+| 0.5 | 实现 Worker 内 TypeScript/WGSL WebGPU 最小 Scene Renderer、WebGL2 探测路径和 GPU Device Lost 恢复 Spike | 验证 GPU 创建、提交、合成、销毁和有界恢复边界，为 Phase 1 Rust/wgpu Render Graph 提供基线 | 正常绘制后模拟 Device Lost 或主动销毁 Device，观察自动恢复；再禁用 WebGPU 验证降级提示 | 文档状态不丢失；3 秒内恢复或明确进入 Canvas 2D 降级；无无限重试；不宣称已完成 Rust/wgpu Render Graph |
 | 0.6 | 实现 Main Thread + 单一 Engine Worker（同时拥有 Renderer）+ OffscreenCanvas 基线；SharedArrayBuffer 仅作为可选能力 | UI 主线程不承担场景计算和逐帧绘制 | 连续缩放、拖动 5 分钟；分别在 crossOriginIsolated 为 true/false 时运行 | 两种环境均可编辑；无 SAB 时功能完整；主线程无持续长任务 |
 | 0.7 | 几何引擎 Spike：矩阵、Bézier、Stroke、Boolean、Bounds 和 Hit Test | 选定可长期维护的几何库或自研边界 | 人工编辑直线、尖角、重叠、退化路径、自交路径和超大坐标样例 | 无崩溃；结果稳定可重复；已知差异进入兼容矩阵 |
-| 0.8 | 文本引擎 Spike：HarfBuzz、ICU4X、FreeType、Fallback、Caret 和 Glyph Atlas | 确定段落布局与栅格化的唯一责任模块 | 使用中英文、阿拉伯文、Emoji、Ligature、Variable Font 和缺失字体文件逐项操作 | 换行、光标、选择范围一致；刷新后布局不漂移；缺失字体有明确提示 |
+| 0.8 | 冻结文本责任边界与 Phase 1 技术选型：Canonical 纯文本、HarfBuzz、ICU4X、FreeType、Fallback、Caret 和 Glyph Atlas；实现受限 Canvas 过渡布局 | 文本内容可确定性保存、撤销和迁移，最终塑形/断行/栅格化只有一套计划内实现 | 验证中英文、RTL、Emoji、组合字符和显式换行的基础 round-trip，并评审完整语种 Fixture 与缺失字体方案 | Canonical 文本不依赖 UI sidecar；字素簇不被错误拆分；过渡实现限制进入兼容矩阵；不宣称已完成正式文本引擎 |
 | 0.9 | 色彩流水线 Spike：DocumentColorProfile、sRGB、Display P3、渐变和图片 ICC | 文档颜色值显式包含色彩空间，CPU/GPU/导出解释一致 | 在支持 P3 的设备和普通 sRGB 设备打开固定色板、渐变和图片文件并截图比对 | Solid Color 通道误差不超过 1/255；不支持 P3 时有确定的转换策略 |
 | 0.10 | 定义 Operation Envelope、稳定 ID、子节点并发顺序、幂等和确定性回放 | 协同基础语义在网络功能前冻结 | 将同一批 Operation 重排、重复、断点恢复后分别回放 | 所有合法序列得到相同文档 Hash；重复操作不产生二次修改 |
 | 0.11 | 建立 Golden Image、性能采样、日志收集和人工验收报告模板 | 后续步骤可以复用统一证据链 | 验收人独立运行一次基准集，并从报告定位一个故意引入的渲染差异 | 报告包含环境、Build、Fixture、指标和证据；差异可以复现 |
@@ -1489,63 +1490,73 @@ Phase 0 Gate：
 
 预期：获得一个没有业务面板但拥有稳定 Document/Command 边界、可恢复 GPU 渲染、确定性基础数据协议和完整验证工具的技术底座。
 
+完成状态：Phase 0 已于 2026-08-04 由项目决策确认完成，完成记录位于 `verification/phase0/completion.md`，项目正式进入 Phase 1。历史步骤报告保持原样，不为阶段切换补写个人签名。Phase 0 不要求交付 Section、Group、Line、嵌套图层树、八方向缩放、跨父级排序、Shadow、Mixed Inspector 或完整键盘可访问性；这些产品编辑语义统一进入 Phase 2。
+
 ---
 
-### Phase 1：单机基础编辑器
+### Phase 1：联机就绪的图形内核
 
-目标：完成可保存、可恢复、可撤销的基础图形编辑闭环。
+目标：在现有单机编辑闭环之上，冻结可长期演进的 Document/Page、Operation、Asset 和文本契约，完成单客户端服务端 Operation 接入、正式图片/字体资源管线、文本引擎与 Rust/wgpu Render Graph。
+
+Phase 1 入口条件：Phase 0 已完成并形成阶段完成记录；当前无阻塞阶段切换的 P0/P1。现有原子 Transaction、Undo/Redo、无限画布、基础节点、空间网格、本地 Snapshot/Journal、单写者 Tab、资源预算和最小 WebGPU Scene Renderer 作为 Phase 0 基线，不在本阶段重复建设。
 
 | Step | 实施内容与交付物 | 预期结果 | 人工验证方法 | 通过标准 |
 |---|---|---|---|---|
-| 1.1 | 实现 Document、Page、Frame 和基础 SceneNode Schema、稳定 ID、引用校验与 Migration | 文档可以创建、保存、加载和迁移 | 创建多页面嵌套文件，保存、刷新、升级 Schema 后重新打开 | 节点数量、ID、父子顺序和属性完全一致；坏引用被拒绝或修复并报告 |
-| 1.2 | 实现 Command、Transaction、校验、原子提交和回滚 | 任一子命令失败不会留下半完成文档 | 构造包含一个非法子命令的多命令 Transaction | 整个 Transaction 回滚；revision、历史栈和渲染状态不变化 |
-| 1.3 | 实现单用户 Undo/Redo、操作合并和历史边界 | Undo 以用户意图为单位 | 连续输入文字、拖动、属性输入、复制粘贴后逐步 Undo/Redo | 每次撤销对应一次明确意图；Redo 后文档 Hash 与撤销前一致 |
-| 1.4 | 实现无限画布、Zoom、Pan、世界坐标和 camera-relative rendering | 大坐标下仍可平滑导航 | 在原点和 1,000,000 坐标附近创建图形，围绕光标缩放并快速平移 | 光标锚点不跳动；图形不抖动；无明显精度漂移 |
-| 1.5 | 实现 Section、Frame、Group、Rectangle、Ellipse、Line 和基础 Text | Phase 1 节点可创建、嵌套并正确显示 | 用工具创建每种节点，改变尺寸、旋转、透明度和父级 | Schema、画布、Inspector 和 Snapshot 值一致；刷新后视觉一致 |
-| 1.6 | 实现空间索引、粗略与精确 Hit Test、单选、多选、深层选择 | 选择结果符合图层顺序、Clip 和锁定规则 | 测试重叠、透明 Fill、Stroke、锁定、隐藏和 Clip 场景 | 选择目标与规则一致；10 万存量节点时不全量遍历 |
-| 1.7 | 实现移动、八方向缩放、旋转、比例锁定和多选 Transform | 变换在不同坐标空间下保持稳定 | 操作旋转父节点中的子节点、多选不同旋转节点并反复缩放 | 无突然翻转或漂移；Undo 后精确恢复；Inspector 数值可解释 |
-| 1.8 | 实现图层树、重命名、拖拽排序、跨父级移动和显示/锁定 | 图层树和画布场景始终一致 | 在深层树中连续排序、跨 Frame 移动、折叠、隐藏和锁定 | 父子关系无环；顺序保存后不变化；非法移动被阻止 |
-| 1.9 | 实现 Fill、Stroke、Corner Radius、Opacity、基础 Shadow 和 Inspector 混合值 | 多选属性编辑与画布结果一致 | 对单选和多选节点修改单色、渐变、描边位置、圆角和阴影 | Inspector 正确显示相同值或 Mixed；刷新和 Undo 后一致 |
-| 1.10 | 实现 IndexedDB/OPFS 本地 Snapshot、增量保存和崩溃恢复 | 浏览器异常关闭后可恢复最近已确认操作 | 编辑过程中强制关闭标签页或终止 Worker，然后重新打开 | 已确认操作不丢；未完成 Transaction 不出现；用户看到恢复状态 |
-| 1.11 | 建立基础编辑器综合 Fixture 和人工回归清单 | 基础功能形成稳定可重复的编辑闭环 | 验收人从空文件独立完成一张指定 UI 卡片并导出 Snapshot | 成品结构、视觉、历史和恢复全部通过；无控制台未处理异常 |
-| 1.12 | 实现单写者 Tab、存储配额检测、Persistent Storage 和 Atomic Manifest 恢复 | 多标签页和空间不足不会损坏本地文档 | 同时打开两个标签页编辑，再模拟 QuotaExceeded 和 Snapshot 写入中断 | 只有一个 Owner 写入；另一标签页只读或加入 Owner；旧 Snapshot 始终可恢复 |
-| 1.13 | 实现键盘操作、虚拟可访问树、焦点与状态播报基础 | 不使用鼠标也能完成基础选择和属性编辑 | 仅用键盘和至少一种桌面屏幕阅读器完成创建、选中、移动、重命名和删除 | 焦点不丢失；操作可完成；状态播报不重复、不读取过期 revision |
-| 1.14 | 使用 shadcn Base UI 完成 Toolbar、Layers、Inspector、Menu、Dialog、Tooltip 和 Toast 组合组件 | 编辑器 UI 遵守 Hooks + Components 与单组件体系 | 人工完成基础编辑流程，同时运行依赖扫描、restricted imports、Hook cleanup 和视觉回归 | UI Primitive 全部来自 components/ui；无第二组件库；Feature Component 无直接 API/WASM 副作用 |
+| 1.1 | 完成 Document、Page、SceneNode 层级 Schema、稳定 parent_id/position_id、引用校验与 Migration | 当前扁平浏览器投影升级为可长期兼容的多页面文档语义 | 创建多页面、嵌套 Frame 文件，保存、刷新、升级 Schema 后重新打开；注入坏父级和重复 PositionId | 节点、ID、父子顺序和属性完全一致；坏引用被拒绝或修复并报告；旧 Snapshot 可单向迁移 |
+| 1.2 | 建立 `schemas/proto`、Rust `protocol` crate 和生成的 TypeScript 类型，定义 Operation、Snapshot、Ack、错误与版本协商 | 浏览器与服务端只通过单一版本化契约交换文档数据 | 用新旧客户端 Fixture 读取最近三个格式版本，并让未知字段经过中转服务 | Rust/TypeScript 不存在手写重复 wire type；未知字段不丢；不兼容版本返回结构化错误 |
+| 1.3 | 实现 Rust Document Service：对象级 AuthZ、Schema/hash/引用/配额校验、Operation 幂等和数据库事务内 accepted_revision | 服务端成为已确认 Operation 与 revision 的耐久事实来源 | 重复、篡改、越权和过期 base revision 提交；提交期间终止服务再恢复 | 只有 durable commit 返回 Accepted；document_id + operation_id 和 accepted_revision 唯一；重启后 Hash 与 revision 一致 |
+| 1.4 | 将本地 Journal 扩展为持久 pending Operation 队列，实现发送、Ack 清理、断线重试、Rejected/Transformed 对账和用户可诊断记录 | 本地优先编辑可安全接入服务端，但不引入多人并发语义 | 离线编辑、刷新、重复发送、服务重启后重连，并模拟 Accepted、Conflict 和 Permanent Reject | 已确认和 pending 操作均不丢；至少一次投递不重复修改；客户端最终与服务端 Document Hash 一致 |
+| 1.5 | 在 Canonical Document 中加入 AssetId/contentHash 引用，完成图片/字体的探测、隔离解码、取消、客户端缓存和占位降级 | 文档不嵌入原始资源，失败资源不破坏编辑闭环 | 导入正常与损坏图片/字体、旋转 EXIF、P3/ICC、伪造 MIME、超大像素和取消中的任务 | Asset 引用可 round-trip；方向与色彩解释一致；超限或损坏资源被拒绝/占位；CPU/OPFS 缓存在预算内回收 |
+| 1.6 | 实现受控上传会话、内容 Hash 去重、对象存储、短期下载 URL、对象级授权和服务端资源审计 | 图片和字体可以跨刷新与设备稳定获取 | 重复上传、断点续传、伪造 contentHash、越权下载和对象存储短暂失败 | 只有校验完成的对象返回 AssetId；重复内容去重；越权和损坏对象不可引用；失败可重试且不产生悬空 Document 引用 |
+| 1.7 | 扩展 Canonical Text：FontId、Style Runs、段落属性、Auto Size、Fallback Chain 和 engineSemanticsVersion | 文本内容、样式和字体解析规则都可确定性保存与迁移 | 保存混合样式、中英阿拉伯文、Emoji、Variable Font 和缺失字体文档并跨版本重开 | 原始 Unicode 不被改写；Style Run/FontId round-trip；缺失字体状态明确；Schema 变化有迁移 |
+| 1.8 | 在 `graphics-core` 实现 HarfBuzz + ICU4X + FreeType、Bidi/断行、Caret Map、Selection、IME 与 Glyph Cache/Atlas | 文本不再依赖 DOM 或系统 `measureText` 作为事实来源 | 使用中文输入法、英文、阿拉伯文、Emoji、Ligature、Variable Font 完成输入、选择、删除和换行 | 无丢字、错位或光标跳跃；刷新与服务端重放布局不漂移；F-TEXT-10K 达到预算 |
+| 1.9 | 建立 Rust `graphics-core`/`renderer-wgpu` 边界和 Dirty Set → Scene → Culling → Render Graph → Pass → Composite 流水线 | 主场景、基础图片、文本和 Overlay 由同一 Render Graph 驱动 | 在 Canvas 2D 与 WebGPU 上打开图形、渐变、图片、文本综合 Fixture 并进行像素对照 | Document 不持有 GPU Handle；主场景/图片/文本/Overlay Pass 顺序稳定；缓存失效不产生旧帧 |
+| 1.10 | 实现 Buffer/Texture/Pipeline、Glyph/Image Atlas、离屏池、资源预算和 Device Lost 全量重建，保留明确降级路径 | GPU 资源可以回收、重建和诊断，失败不影响 Canonical Document | 注入 Device Lost、OOM、Validation Error，分别验证恢复、降级和 Snapshot 下载 | 恢复后视觉与 Hash 不变；无无限重试或资源泄漏；无法恢复时进入可解释降级状态 |
+| 1.11 | 建立 Phase 1 综合 Fixture、协议兼容、服务恢复、资源安全、文本与渲染回归证据 | 四条主线形成可重复验收的纵向闭环 | 独立验收人运行多页面、Operation、F-TEXT-10K、F-ASSET-HOSTILE、F-SHAPE-100K 和 GPU 恢复脚本 | 报告包含 Build、协议/引擎版本、Hash、性能、Golden、缺陷和签字；无控制台未处理异常 |
 
 Phase 1 Gate：
 
-- 综合 Fixture 可以连续编辑 30 分钟；
-- 保存、刷新、崩溃恢复、Undo/Redo 均不损坏文档；
-- 多标签页、空间不足和键盘/屏幕阅读器基础流程通过；
-- Next.js Production Build、shadcn 组件约束、Hooks Cleanup 和前后端 Contract Test 通过；
-- B1 设备常规拖动和缩放 P95 输入到画面延迟小于 50 ms；
+- 多页面 Snapshot 迁移和 round-trip 通过，Document/Page/父子顺序无损；
+- 本地提交、pending 持久化、accepted revision、断线重试和服务恢复闭环通过，客户端与服务端 Document Hash 一致；
+- 图片/字体上传、下载、缓存、越权、损坏和资源耗尽流程通过；
+- 中英、RTL、Emoji、Variable Font、Caret、Selection 和 IME 文本基线通过，客户端与服务端布局语义一致；
+- Rust/wgpu Render Graph、Device Lost 全量重建、Canvas/WebGL 降级和核心 Golden 通过；
+- 综合 Fixture 可以连续编辑 30 分钟，保存、刷新、Worker/GPU/服务崩溃恢复和 Undo/Redo 均不损坏文档；
+- Web 与 Backend 可独立构建、部署和回滚，Protobuf 生成与兼容测试通过；
+- B1 设备常规拖动、缩放和文本输入 P95 输入到画面延迟小于 50 ms；
 - 无 P0/P1。
 
-预期：获得一个可以可靠完成基础 UI 图形设计的单机编辑器 Alpha。
+预期：获得一个保持本地优先体验、能够可靠连接服务端，并拥有正式资源、文本和渲染内核的单客户端编辑器 Alpha。多人 Presence、并发合并、评论和协同 Undo 明确不在 Phase 1 范围内。
 
 ---
 
-### Phase 2：专业图形、文本与布局
+### Phase 2：完整编辑语义、专业图形与布局
 
-目标：覆盖专业设计工具的主要图形表达和布局能力。
+目标：在 Phase 1 已冻结的层级、Operation、Asset、文本和渲染契约上，补齐完整编辑器交互，并覆盖专业设计工具的主要图形表达和布局能力。
 
 | Step | 实施内容与交付物 | 预期结果 | 人工验证方法 | 通过标准 |
 |---|---|---|---|---|
-| 2.1 | 实现 VectorPath、锚点、控制柄、开闭路径和 Fill Rule | 路径数据可以稳定编辑和序列化 | 编辑曲线、尖角、平滑点、自交路径和多子路径 | 拖动控制柄实时反馈；保存后控制点不变化；命中结果正确 |
-| 2.2 | 实现 Pen Tool、加点、删点、断开、连接和路径继续绘制 | 可以完成连续钢笔绘图流程 | 按固定操作脚本临摹一组图标 | 操作无死路；Undo 粒度合理；最终 Path 与预期 Fixture 一致 |
-| 2.3 | 实现 Union、Intersect、Subtract、Exclude、Outline Stroke 和 Stroke Join/Cap/Dash | 布尔与描边语义稳定 | 使用退化、相切、包含、自交和开放路径测试集逐项执行 | 不崩溃；结果可重复；几何回归测试全部通过 |
-| 2.4 | 实现 Mask、Clip Content、嵌套 Clip 和命中规则 | 视觉裁剪与选择范围一致 | 构建两层 Mask、Clip Frame 和透明 Mask 场景 | 画布、导出和 Hit Test 结果一致；解除 Mask 后原节点完整 |
-| 2.5 | 实现 Blend Mode、Drop/Inner Shadow、Layer/Background Blur 和离屏纹理池 | 常用效果可正确组合 | 对固定色块和图片叠加多效果，切换顺序、可见性和透明度 | Golden Image 在允许误差内；连续编辑无纹理泄漏 |
-| 2.6 | 完成生产级文本：Style Runs、段落、Auto Size、Bidi、Caret、Selection 和输入法 | 文本可以用于真实 UI 设计 | 使用中文输入法、英文、阿拉伯文、Emoji、复制粘贴和混合样式编辑 | 无丢字、错位或光标跳跃；刷新、客户端导出与离线渲染核心结果一致 |
-| 2.7 | 实现 Horizontal/Vertical Constraints 和父 Frame Resize | 普通子节点能按约束响应父尺寸变化 | 对每种约束建立 Fixture，连续缩放父 Frame | 位置和尺寸符合预期公式；反复缩放无累积漂移 |
-| 2.8 | 实现 Auto Layout：方向、Padding、Gap、Alignment、Hug、Fill、Wrap、Min/Max 和 Absolute | 嵌套布局可以增量计算 | 人工搭建按钮、表单、卡片、列表和三层嵌套布局，修改文本和容器尺寸 | 布局无循环；修改局部节点只重算受影响子树；结果符合 Fixture |
-| 2.9 | 完成图片/字体安全解码、PNG/SVG/PDF 导出和兼容性报告 | 编辑结果可以稳定交付且恶意资源不影响宿主 | 导入旋转 EXIF、P3 图片、自定义字体、脚本 SVG、伪造 MIME 和超大解码资源，再导出三种格式 | 正常资源尺寸、透明度和颜色正确；危险/超限资源被隔离；降级项有明确报告 |
-| 2.10 | 建立复杂场景性能 Fixture：文本、Auto Layout、Mask、Blur 和图片混合 | 性能指标覆盖真实设计文件，而非只有矩形 | 在 B1/B2 上连续缩放、选择、拖动、修改文本和 Resize | 常规操作 P95 小于 50 ms；无持续内存增长；无整页重布局 |
-| 2.11 | 专业编辑综合验收 | 设计师能独立完成指定复杂界面 | 由未参与开发的设计师复刻一张包含图标、文本、Mask、效果和 Auto Layout 的页面 | 任务可完成；无阻断问题；导出视觉通过人工对照 |
+| 2.1 | 实现 Section、Group、Line 及其嵌套、创建、保存、选择和基础 Inspector | Phase 2 节点进入完整编辑闭环 | 创建每种节点并跨多层 Frame/Group 嵌套，保存刷新后逐项核对 | Schema、画布、图层、Inspector 与 Snapshot 一致；未知节点不伪装成支持 |
+| 2.2 | 实现嵌套图层树、折叠、重命名、拖拽排序、跨父级移动和显示/锁定 | 图层树和画布共享同一层级事实 | 在深层树中连续排序、跨 Frame/Group 移动和执行非法成环操作 | 父子关系无环；PositionId 顺序持久；非法移动被原子拒绝 |
+| 2.3 | 实现八方向缩放、画布旋转控制柄、比例锁定和多选 Transform | 不同父级和旋转坐标空间下的变换稳定 | 变换旋转父节点中的子节点，并对不同旋转的多选反复缩放和撤销 | 无翻转或漂移；Undo 精确恢复；Inspector 数值可解释 |
+| 2.4 | 完成 Fill/Stroke/Corner/Opacity、基础 Shadow 与多选 Mixed Inspector | 单选和多选属性编辑语义完整 | 对异值多选节点修改颜色、渐变、描边、圆角、透明度和阴影 | Mixed 显示与覆盖规则正确；刷新、服务端对账和 Undo 后一致 |
+| 2.5 | 完成键盘操作、虚拟可访问树、焦点/状态播报，以及 Menu/Dialog/Tooltip/Toast 组合组件 | 不使用鼠标也能完成基础编辑流程 | 使用键盘和至少一种桌面屏幕阅读器完成创建、选择、移动、重命名、排序、属性编辑和删除 | 焦点不丢失；状态不读取过期 revision；UI Primitive 与 Hooks/Components 边界检查通过 |
+| 2.6 | 实现 VectorPath、锚点、控制柄、开闭路径和 Fill Rule | 路径数据可以稳定编辑和序列化 | 编辑曲线、尖角、平滑点、自交路径和多子路径 | 拖动控制柄实时反馈；保存后控制点不变化；命中结果正确 |
+| 2.7 | 实现 Pen Tool、加点、删点、断开、连接和路径继续绘制 | 可以完成连续钢笔绘图流程 | 按固定操作脚本临摹一组图标 | 操作无死路；Undo 粒度合理；最终 Path 与预期 Fixture 一致 |
+| 2.8 | 实现 Union、Intersect、Subtract、Exclude、Outline Stroke 和 Stroke Join/Cap/Dash | 布尔与描边语义稳定 | 使用退化、相切、包含、自交和开放路径测试集逐项执行 | 不崩溃；结果可重复；几何回归测试全部通过 |
+| 2.9 | 实现 Mask、Clip Content、嵌套 Clip 和命中规则 | 视觉裁剪与选择范围一致 | 构建两层 Mask、Clip Frame 和透明 Mask 场景 | 画布、导出和 Hit Test 结果一致；解除 Mask 后原节点完整 |
+| 2.10 | 实现 Blend Mode、Drop/Inner Shadow、Layer/Background Blur 和离屏纹理池 | 常用效果可正确组合 | 对固定色块和图片叠加多效果，切换顺序、可见性和透明度 | Golden Image 在允许误差内；连续编辑无纹理泄漏 |
+| 2.11 | 完成高级文本编辑体验：段落控制、Auto Size、选区级 Style Run 编辑、复制粘贴和混合值 Inspector | Phase 1 文本内核可用于真实 UI 设计 | 编辑多段落、多语言、混合样式文本并切换 Auto Width/Height/Fixed Size | 选区样式和尺寸变化正确；无光标跳跃；导出与离线渲染核心结果一致 |
+| 2.12 | 实现 Horizontal/Vertical Constraints 和父 Frame Resize | 普通子节点能按约束响应父尺寸变化 | 对每种约束建立 Fixture，连续缩放父 Frame | 位置和尺寸符合预期公式；反复缩放无累积漂移 |
+| 2.13 | 实现 Auto Layout：方向、Padding、Gap、Alignment、Hug、Fill、Wrap、Min/Max 和 Absolute | 嵌套布局可以增量计算 | 人工搭建按钮、表单、卡片、列表和三层嵌套布局，修改文本和容器尺寸 | 布局无循环；修改局部节点只重算受影响子树；结果符合 Fixture |
+| 2.14 | 完成 PNG/SVG/PDF 导出和兼容性报告 | 编辑结果可以稳定交付，降级项可见 | 导出包含 P3 图片、自定义字体、Path、Mask 和 Effect 的三种格式 | 尺寸、透明度和颜色正确；不支持项全部进入报告；危险资源不进入输出 |
+| 2.15 | 建立复杂场景性能 Fixture：文本、Auto Layout、Mask、Blur 和图片混合 | 性能指标覆盖真实设计文件，而非只有矩形 | 在 B1/B2 上连续缩放、选择、拖动、修改文本和 Resize | 常规操作 P95 小于 50 ms；无持续内存增长；无整页重布局 |
+| 2.16 | 专业编辑综合验收 | 设计师能独立完成指定复杂界面 | 由未参与开发的设计师复刻一张包含嵌套图层、图标、文本、Mask、效果和 Auto Layout 的页面 | 任务可完成；键盘基础流程通过；无阻断问题；导出视觉通过人工对照 |
 
 Phase 2 Gate：
 
-- 图形、文本、Mask、Effect、Constraints、Auto Layout 和导出全部形成闭环；
+- Section/Group/Line、嵌套图层、完整 Transform、Mixed Inspector 和键盘可访问流程通过；
+- 图形、文本编辑体验、Mask、Effect、Constraints、Auto Layout 和导出全部形成闭环；
 - 复杂 Fixture 连续编辑 60 分钟无崩溃、无明显内存增长；
 - 关键 Golden Image、几何和文本回归集全部通过；
 - 无 P0/P1。
@@ -1584,16 +1595,16 @@ Phase 3 Gate：
 
 ### Phase 4：多人实时协同
 
-目标：在 Phase 0 已冻结的 Operation 模型之上，实现可靠、可恢复、可审计的多人编辑。
+目标：在 Phase 0 已冻结的 Operation 语义和 Phase 1 已上线的单客户端 Document Service 之上，实现可靠、可恢复、可审计的多人编辑。
 
 | Step | 实施内容与交付物 | 预期结果 | 人工验证方法 | 通过标准 |
 |---|---|---|---|---|
 | 4.1 | 实现 WebSocket Room、成员列表、Cursor、Selection 和 Viewport Presence | 多人可感知彼此但 Presence 不污染文档 | 两台设备进入同一文件，移动光标、选择和 Follow | 远端可见延迟同地域 P95 小于 200 ms；刷新后无 Presence 残留 |
-| 4.2 | 实现服务端 Operation 接收、对象鉴权、幂等、Fencing、确认、广播和 revision | 客户端和服务端有一致的提交协议 | 重复发送、延迟发送、断线重发、伪造 actor/tenant 和旧 primaryEpoch 写入 | 不重复应用；越权和旧 Primary 被拒绝；客户端区分 Pending、Accepted、Transformed 和 Rejected |
+| 4.2 | 在 Phase 1 Document Service 上增加 Realtime Room、Primary Fencing、Canonical Operation 广播与多客户端对账 | 已有单客户端提交协议扩展为同一文档的可靠实时分发 | 重复发送、延迟发送、断线重发、伪造 actor/tenant、旧 primaryEpoch 写入和 Primary 切换 | 不重复应用；越权和旧 Primary 被拒绝；所有客户端区分 Pending、Accepted、Transformed 和 Rejected 并对齐同一 accepted revision |
 | 4.3 | 实现属性、创建、删除、移动和子节点排序的并发合并 | 结构操作最终收敛 | 两名验收人同时修改同一属性、同时插入、移动和删除节点 | 所有客户端最终文档 Hash 一致；无环、无重复子节点 |
 | 4.4 | 实现协同文本、光标相对位置和混合 Style Run 合并 | 多人可同时编辑同一文本节点 | 两人同时在开头、中间、结尾输入并修改样式 | 不丢字符；光标保持合理相对位置；最终文本与样式收敛 |
 | 4.5 | 实现基于 origin 和补偿操作的语义 Undo/Redo | 用户只撤销自己的意图，不覆盖远端新值 | A 修改 Fill，B 再修改同一 Fill；A 撤销。对移动、删除、文本重复验证 | 结果符合预先定义的语义表；所有客户端仍收敛 |
-| 4.6 | 实现离线队列、重连、冲突处理和本地恢复 | 离线编辑不会丢失且可安全重放 | 设备 A 断网编辑，B 在线编辑，A 重连；期间刷新和强制关闭 A | 已确认和本地操作均不丢；重连后收敛；冲突有明确结果 |
+| 4.6 | 将 Phase 1 单客户端 pending/retry 扩展为多人离线队列、并发重连、冲突处理和本地恢复 | 离线编辑不会丢失且可与在线远端操作安全合并 | 设备 A 断网编辑，B 在线编辑，A 重连；期间刷新和强制关闭 A | 已确认和本地操作均不丢；重连后所有客户端收敛；冲突有明确结果 |
 | 4.7 | 实现 Snapshot、Operation Log、压缩、校验、版本历史和恢复 | 任意有效 revision 可恢复 | 从 Snapshot 加乱序、重复和损坏日志恢复；打开历史版本并复制内容 | 损坏日志被隔离；恢复 Hash 正确；历史版本只读且不影响当前文件 |
 | 4.8 | 实现查看/编辑权限、分享链接、评论、Resolve 和审计基础 | 未授权用户不能产生有效文档修改 | 以 Owner、Editor、Viewer 和过期链接分别执行读取、评论和编辑 | 服务端拒绝越权 Operation；UI 状态与服务端结果一致 |
 | 4.9 | 执行 50 人协同、网络抖动、Primary 故障转移和长时间稳定性测试 | 协同服务在目标规模和单点故障下稳定 | 自动客户端产生操作，人工客户端持续编辑 2 小时，并注入延迟、丢包、进程退出和路由切换 | 同一时刻只有一个 Document Primary；无数据分叉；P95 延迟达标；恢复后自动收敛 |

@@ -14,7 +14,7 @@
 
 ## 迁移边界
 
-当前 Schema 还没有任意 Path、Stroke Join/Cap/Dash、Clip、Mask、R-tree/BVH 或文本 Glyph 轮廓。因此任意路径布尔运算、真实描边 outline 与空间索引尚未声明完成；矩形布尔仅作为可重复的 Phase 0 数值基线。
+当前 Schema 还没有任意 Path、Stroke Join/Cap/Dash、Clip、Mask、R-tree/BVH 或文本 Glyph 轮廓。Worker 已采用可重建 fixed grid 为空间候选查询和视口裁剪加速，但它不是生产级 R-tree/BVH，也不提供 Path、Mask 或 Glyph 精确命中。因此任意路径布尔运算、真实描边 outline、深层选择与生产级空间索引尚未声明完成；矩形布尔仅作为可重复的 Phase 0 数值基线。
 
 ## 后果
 
