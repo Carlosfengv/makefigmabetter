@@ -5,6 +5,7 @@ const FLOATS_PER_VERTEX = 16;
 const BYTES_PER_FLOAT = Float32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE_VERTEX = 0x20;
 const GPU_BUFFER_USAGE_COPY_DST = 0x08;
+const GPU_BUFFER_USAGE_UNIFORM = 0x40;
 const RGBA8_BYTES_PER_PIXEL = 4;
 const SWAP_CHAIN_SURFACE_COUNT = 3;
 
@@ -19,16 +20,18 @@ type GpuDevice = {
   createShaderModule(descriptor: { code: string }): unknown;
   createRenderPipeline(descriptor: unknown): GpuRenderPipeline;
   createBuffer(descriptor: { size: number; usage: number }): GpuBuffer;
+  createBindGroup(descriptor: { layout: unknown; entries: Array<{ binding: number; resource: { buffer: GpuBuffer } }> }): GpuBindGroup;
   createCommandEncoder(): GpuCommandEncoder;
   destroy?(): void;
 };
 type GpuAdapter = { requestDevice(): Promise<GpuDevice> };
 type GpuNavigator = { gpu?: { requestAdapter(): Promise<GpuAdapter | null>; getPreferredCanvasFormat?(): string } };
 type GpuBuffer = { destroy?(): void };
-type GpuRenderPipeline = unknown;
+type GpuBindGroup = unknown;
+type GpuRenderPipeline = { getBindGroupLayout(index: number): unknown };
 type GpuCanvasContext = { configure(configuration: { device: GpuDevice; format: string; alphaMode: "premultiplied" }): void; getCurrentTexture(): { createView(): unknown } };
 type GpuCommandEncoder = { beginRenderPass(descriptor: unknown): GpuRenderPass; finish(): unknown };
-type GpuRenderPass = { setPipeline(pipeline: GpuRenderPipeline): void; setVertexBuffer(slot: number, buffer: GpuBuffer): void; draw(vertexCount: number): void; end(): void };
+type GpuRenderPass = { setPipeline(pipeline: GpuRenderPipeline): void; setBindGroup(index: number, group: GpuBindGroup): void; setVertexBuffer(slot: number, buffer: GpuBuffer): void; draw(vertexCount: number, instanceCount?: number): void; end(): void };
 
 export interface WebGpuSceneRenderInput {
   nodes: readonly CanvasNode[];
@@ -36,12 +39,44 @@ export interface WebGpuSceneRenderInput {
   width: number;
   height: number;
   dpr: number;
+  /** Changes only when canonical scene data or renderer generation changes. */
+  sceneKey?: string | number;
 }
 
 export interface WebGpuSceneRenderResult {
   bitmap: ImageBitmap;
   renderedNodeIds: ReadonlySet<string>;
   resourceBytes: number;
+  gpuUploadBytes: number;
+  imageBitmapMs: number;
+}
+
+/** World-space instance payload used by the next renderer pass. Camera state is
+ * deliberately absent so a viewport change cannot invalidate this scene data. */
+export const GPU_INSTANCE_FLOATS = 16;
+export const GPU_CAMERA_UNIFORM_BYTES = 32;
+export const GPU_SCENE_INSTANCE_BYTES_PER_NODE = GPU_INSTANCE_FLOATS * BYTES_PER_FLOAT;
+export interface GpuSceneCacheKey { documentRevision: number; rendererGeneration: number; colorProfile: string; }
+export interface GpuCameraUniform { viewportX: number; viewportY: number; zoom: number; canvasWidth: number; canvasHeight: number; dpr: number; }
+
+export function buildWebGpuInstances(nodes: readonly CanvasNode[]): { instances: Float32Array; renderedNodeIds: ReadonlySet<string> } {
+  const renderable = nodes.filter(isGpuRenderable).filter((node) => Boolean(cssColor(node.fill, node.opacity)));
+  const instances = new Float32Array(renderable.length * GPU_INSTANCE_FLOATS);
+  const renderedNodeIds = new Set<string>();
+  renderable.forEach((node, index) => {
+    const offset = index * GPU_INSTANCE_FLOATS;
+    const fill = cssColor(node.fill, node.opacity)!;
+    const stroke = cssColor(node.stroke, node.opacity) ?? [0, 0, 0, 0];
+    const geometry = resolveInsideRoundedRect(Math.abs(node.width), Math.abs(node.height), node.radius, node.strokeWidth);
+    instances.set([node.x, node.y, node.width, node.height, node.rotation, node.kind === "ellipse" ? 1 : 0, geometry.outerRadius, stroke[3] > 0 ? geometry.insideStrokeWidth : 0, ...fill, ...stroke], offset);
+    renderedNodeIds.add(node.id);
+  });
+  return { instances, renderedNodeIds };
+}
+
+export function cameraUniform(camera: GpuCameraUniform) {
+  // Eight floats meet WebGPU's uniform alignment requirement without dynamic offsets.
+  return new Float32Array([camera.viewportX, camera.viewportY, camera.zoom, camera.canvasWidth, camera.canvasHeight, camera.dpr, 0, 0]);
 }
 
 export type GpuSceneResourceAdmission =
@@ -56,7 +91,7 @@ export class GpuSceneResourceLimitError extends Error {
 }
 
 /**
- * A real, bounded WebGPU scene spike. It renders solid Frame/Rectangle/Ellipse
+ * A real, bounded WebGPU scene. It renders solid Frame/Rectangle/Ellipse
  * fills and strokes on an auxiliary OffscreenCanvas; Canvas 2D retains the grid,
  * text and unsupported paint overlay until the Rust/wgpu render graph replaces it.
  */
@@ -67,8 +102,15 @@ export class WebGpuSceneRenderer {
   private readonly format: string;
   private readonly canvas: OffscreenCanvas;
   private readonly pipeline: GpuRenderPipeline;
-  private vertexBuffer: GpuBuffer | undefined;
-  private vertexCapacity = 0;
+  private readonly unitQuadBuffer: GpuBuffer;
+  private readonly cameraBuffer: GpuBuffer;
+  private readonly cameraBindGroup: GpuBindGroup;
+  private instanceBuffer: GpuBuffer | undefined;
+  private instanceCapacity = 0;
+  private cachedSceneKey: string | number | undefined;
+  private hasCachedScene = false;
+  private cachedInstanceCount = 0;
+  private cachedRenderedNodeIds: ReadonlySet<string> = new Set();
   private pixelWidth = 0;
   private pixelHeight = 0;
 
@@ -79,6 +121,10 @@ export class WebGpuSceneRenderer {
     this.format = format;
     this.deviceLost = device.lost;
     this.pipeline = createPipeline(device, format);
+    this.unitQuadBuffer = device.createBuffer({ size: UNIT_QUAD.byteLength, usage: GPU_BUFFER_USAGE_VERTEX | GPU_BUFFER_USAGE_COPY_DST });
+    this.cameraBuffer = device.createBuffer({ size: GPU_CAMERA_UNIFORM_BYTES, usage: GPU_BUFFER_USAGE_UNIFORM | GPU_BUFFER_USAGE_COPY_DST });
+    this.cameraBindGroup = device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.cameraBuffer } }] });
+    this.device.queue.writeBuffer(this.unitQuadBuffer, 0, UNIT_QUAD);
   }
 
   static async create(navigatorLike: GpuNavigator = navigator as unknown as GpuNavigator): Promise<WebGpuSceneRenderer> {
@@ -102,7 +148,9 @@ export class WebGpuSceneRenderer {
     const pixelWidth = Math.max(1, Math.ceil(input.width * input.dpr));
     const pixelHeight = Math.max(1, Math.ceil(input.height * input.dpr));
     this.resize(pixelWidth, pixelHeight);
-    const { vertices, renderedNodeIds } = buildWebGpuVertices(input);
+    const sceneChanged = !this.hasCachedScene || this.cachedSceneKey !== input.sceneKey;
+    const sceneUploadBytes = sceneChanged ? this.uploadScene(input.nodes, input.sceneKey) : 0;
+    this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraUniform({ viewportX: input.viewport.x, viewportY: input.viewport.y, zoom: input.viewport.zoom, canvasWidth: input.width, canvasHeight: input.height, dpr: input.dpr }));
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -115,20 +163,24 @@ export class WebGpuSceneRenderer {
         storeOp: "store",
       }],
     });
-    if (vertices.length) {
-      this.ensureVertexBuffer(vertices.byteLength);
-      this.device.queue.writeBuffer(this.vertexBuffer!, 0, vertices);
+    if (this.cachedInstanceCount) {
       pass.setPipeline(this.pipeline);
-      pass.setVertexBuffer(0, this.vertexBuffer!);
-      pass.draw(vertices.length / FLOATS_PER_VERTEX);
-    } else this.releaseVertexBuffer();
+      pass.setBindGroup(0, this.cameraBindGroup);
+      pass.setVertexBuffer(0, this.unitQuadBuffer);
+      pass.setVertexBuffer(1, this.instanceBuffer!);
+      pass.draw(6, this.cachedInstanceCount);
+    }
     pass.end();
     this.device.queue.submit([encoder.finish()]);
-    return { bitmap: this.canvas.transferToImageBitmap(), renderedNodeIds, resourceBytes: admission.resourceBytes };
+    const transferStartedAt = performance.now();
+    const bitmap = this.canvas.transferToImageBitmap();
+    return { bitmap, renderedNodeIds: this.cachedRenderedNodeIds, resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt };
   }
 
   destroy() {
-    this.releaseVertexBuffer();
+    this.releaseInstanceBuffer();
+    this.unitQuadBuffer.destroy?.();
+    this.cameraBuffer.destroy?.();
     this.device.destroy?.();
   }
 
@@ -141,19 +193,31 @@ export class WebGpuSceneRenderer {
     this.context.configure({ device: this.device, format: this.format, alphaMode: "premultiplied" });
   }
 
-  private ensureVertexBuffer(requiredBytes: number) {
-    const requiredCapacity = Math.max(requiredBytes, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES);
-    if (this.vertexBuffer && this.vertexCapacity === requiredCapacity) return;
-    this.releaseVertexBuffer();
-    // Exact sizing makes the admission estimate match the resource we request.
-    this.vertexCapacity = requiredCapacity;
-    this.vertexBuffer = this.device.createBuffer({ size: this.vertexCapacity, usage: GPU_BUFFER_USAGE_VERTEX | GPU_BUFFER_USAGE_COPY_DST });
+  private uploadScene(nodes: readonly CanvasNode[], key: string | number | undefined) {
+    const { instances, renderedNodeIds } = buildWebGpuInstances(nodes);
+    this.cachedSceneKey = key;
+    this.hasCachedScene = true;
+    this.cachedInstanceCount = instances.length / GPU_INSTANCE_FLOATS;
+    this.cachedRenderedNodeIds = renderedNodeIds;
+    if (!instances.length) { this.releaseInstanceBuffer(); return 0; }
+    this.ensureInstanceBuffer(instances.byteLength);
+    this.device.queue.writeBuffer(this.instanceBuffer!, 0, instances);
+    return instances.byteLength;
   }
 
-  private releaseVertexBuffer() {
-    this.vertexBuffer?.destroy?.();
-    this.vertexBuffer = undefined;
-    this.vertexCapacity = 0;
+  private ensureInstanceBuffer(requiredBytes: number) {
+    const requiredCapacity = Math.max(requiredBytes, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES);
+    if (this.instanceBuffer && this.instanceCapacity === requiredCapacity) return;
+    this.releaseInstanceBuffer();
+    // Exact sizing makes the admission estimate match the resource we request.
+    this.instanceCapacity = requiredCapacity;
+    this.instanceBuffer = this.device.createBuffer({ size: this.instanceCapacity, usage: GPU_BUFFER_USAGE_VERTEX | GPU_BUFFER_USAGE_COPY_DST });
+  }
+
+  private releaseInstanceBuffer() {
+    this.instanceBuffer?.destroy?.();
+    this.instanceBuffer = undefined;
+    this.instanceCapacity = 0;
   }
 }
 
@@ -170,7 +234,7 @@ export function admitWebGpuSceneResources(
   const renderableNodeCount = input.nodes.filter(isGpuRenderable).filter((node) => Boolean(cssColor(node.fill, node.opacity))).length;
   const framebufferBytes = pixelWidth * pixelHeight * RGBA8_BYTES_PER_PIXEL * SWAP_CHAIN_SURFACE_COUNT;
   const vertexBytes = renderableNodeCount
-    ? Math.max(renderableNodeCount * GPU_SCENE_VERTEX_BYTES_PER_NODE, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES)
+    ? Math.max(renderableNodeCount * GPU_SCENE_INSTANCE_BYTES_PER_NODE, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES)
     : 0;
   const resourceBytes = framebufferBytes + vertexBytes;
   if (!Number.isSafeInteger(framebufferBytes) || !Number.isSafeInteger(vertexBytes) || !Number.isSafeInteger(resourceBytes) || resourceBytes > maxBytes) {
@@ -260,10 +324,15 @@ function createPipeline(device: GpuDevice, format: string): GpuRenderPipeline {
       module: shaderModule,
       entryPoint: "vs_main",
       buffers: [{
-        arrayStride: FLOATS_PER_VERTEX * BYTES_PER_FLOAT,
+        arrayStride: 2 * BYTES_PER_FLOAT,
         attributes: [
           { shaderLocation: 0, offset: 0, format: "float32x2" },
-          { shaderLocation: 1, offset: 2 * BYTES_PER_FLOAT, format: "float32x2" },
+        ],
+      }, {
+        arrayStride: GPU_INSTANCE_FLOATS * BYTES_PER_FLOAT,
+        stepMode: "instance",
+        attributes: [
+          { shaderLocation: 1, offset: 0, format: "float32x4" },
           { shaderLocation: 2, offset: 4 * BYTES_PER_FLOAT, format: "float32x4" },
           { shaderLocation: 3, offset: 8 * BYTES_PER_FLOAT, format: "float32x4" },
           { shaderLocation: 4, offset: 12 * BYTES_PER_FLOAT, format: "float32x4" },
@@ -277,17 +346,28 @@ function createPipeline(device: GpuDevice, format: string): GpuRenderPipeline {
 
 const WGSL = /* wgsl */ `
 struct VertexInput {
-  @location(0) position: vec2<f32>, @location(1) local: vec2<f32>,
-  @location(2) fill: vec4<f32>, @location(3) stroke: vec4<f32>, @location(4) params: vec4<f32>,
+  @location(0) local: vec2<f32>, @location(1) position_size: vec4<f32>,
+  @location(2) rotation_params: vec4<f32>, @location(3) fill: vec4<f32>, @location(4) stroke: vec4<f32>,
 };
+struct Camera { first: vec4<f32>, second: vec4<f32>, };
+@group(0) @binding(0) var<uniform> camera: Camera;
 struct VertexOutput {
   @builtin(position) position: vec4<f32>, @location(0) local: vec2<f32>,
   @location(1) fill: vec4<f32>, @location(2) stroke: vec4<f32>, @location(3) params: vec4<f32>,
 };
 @vertex fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
-  output.position = vec4<f32>(input.position, 0.0, 1.0);
-  output.local = input.local; output.fill = input.fill; output.stroke = input.stroke; output.params = input.params;
+  let size = input.position_size.zw;
+  let center = size * 0.5;
+  let radians = input.rotation_params.x * 0.01745329252;
+  let cosine = cos(radians); let sine = sin(radians);
+  let local_point = input.local * size - center;
+  let world = input.position_size.xy + center + vec2<f32>(local_point.x * cosine - local_point.y * sine, local_point.x * sine + local_point.y * cosine);
+  let screen = (world + camera.first.xy) * camera.first.z + vec2<f32>(camera.first.w * 0.5, camera.second.x * 0.5);
+  output.position = vec4<f32>(screen.x / camera.first.w * 2.0 - 1.0, 1.0 - screen.y / camera.second.x * 2.0, 0.0, 1.0);
+  let smallest = max(1.0, min(abs(size.x), abs(size.y)));
+  output.local = input.local; output.fill = input.fill; output.stroke = input.stroke;
+  output.params = vec4<f32>(input.rotation_params.y, input.rotation_params.z / smallest, input.rotation_params.w / smallest, abs(size.x) / max(1.0, abs(size.y)));
   return output;
 }
 fn rounded_box_distance(point: vec2<f32>, half_extent: vec2<f32>, radius: f32) -> f32 {
@@ -317,3 +397,5 @@ fn rounded_box_distance(point: vec2<f32>, half_extent: vec2<f32>, radius: f32) -
     return input.fill;
   }
 }`;
+
+const UNIT_QUAD = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);

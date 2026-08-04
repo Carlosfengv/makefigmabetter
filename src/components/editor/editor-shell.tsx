@@ -2,17 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/icon-button";
-import { appendLocalJournalEntry, loadLocalDocument, prepareLocalStorage, saveLocalDocument } from "@/lib/local-document";
+import { appendLocalJournalEntry, loadLocalDocument, prepareLocalStorage, saveLocalDocument, saveViewportRecord } from "@/lib/local-document";
 import { createId, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentColor, type DocumentLinearGradient, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
 import { maintainWriterLease, type WriterLease, type WriterLeaseMode } from "@/lib/writer-lease";
 import { planWorkerRecovery } from "@/lib/worker-recovery";
 import { colorToOpaqueSrgbCss, colorToSrgbCss, createDefaultLinearGradient } from "@/lib/color-rendering";
-import { createInputTransferBatcher, type InputTransferBatcher } from "@/lib/input-transfer-batcher";
-import { emptyMainThreadLongTaskSummary, recordMainThreadLongTask, type MainThreadLongTaskSummary } from "@/lib/main-thread-health";
+import { createInputBatchBacklogSampler, createInputTransferBatcher, type InputBatchBacklogSummary, type InputTransferBatcher } from "@/lib/input-transfer-batcher";
+import { createFrameIntervalSampler, emptyMainThreadLongTaskSummary, recordMainThreadLongTask, type FrameIntervalSummary, type MainThreadLongTaskSummary } from "@/lib/main-thread-health";
+import { createViewportCheckpointSampler, type ViewportCheckpointSummary } from "@/lib/viewport-checkpoint-performance";
 import { encodeInputBatch } from "@/lib/input-transfer";
 import { createEditorTransactionQueue } from "@/lib/editor-transaction-queue";
 import { applyOptimisticUpdates, type OptimisticUpdate } from "@/lib/optimistic-projection";
 import { LayerPanel } from "./layer-panel";
+import { createZoomPerformanceFixture } from "@/lib/zoom-performance-fixture";
 import phase0BasicCardFixture from "../../../fixtures/documents/phase0-basic-card.fixture.json";
 
 const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> = [
@@ -25,6 +27,9 @@ const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> 
 ];
 
 const blankSnapshot: EditorSnapshot = { revision: 0, nodes: [], selectedIds: [], viewport: { x: 0, y: 0, zoom: 1 }, canUndo: false, canRedo: false, renderer: "Canvas 2D", documentCore: "Starting Rust/WASM bridge" };
+type DocumentUiState = Pick<EditorSnapshot, "revision" | "documentHash" | "memory" | "resources" | "diagnostics" | "nodes" | "canUndo" | "canRedo" | "renderer" | "gpu" | "documentCore" | "localSnapshot" | "localJournalEntry">;
+type SelectionUiState = { selectedIds: string[] };
+type ViewUiState = { viewport: EditorSnapshot["viewport"]; performance?: EditorSnapshot["performance"] };
 const writerLockName = "makefigma:starter-document";
 type EditIntent = { at: number; id: string };
 type TabMessage = { type: "snapshot"; snapshot: CoreLocalSnapshot } | { type: "request-edit"; intent: EditIntent };
@@ -33,8 +38,18 @@ function newerEditIntent(candidate: EditIntent, current: EditIntent) {
   return candidate.at > current.at || (candidate.at === current.at && candidate.id > current.id);
 }
 
+function sameIds(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }> ["snapshot"] | undefined {
-  if (typeof window === "undefined" || new URLSearchParams(window.location.search).get("fixture") !== "phase0-basic-card") return undefined;
+  if (typeof window === "undefined") return undefined;
+  const fixture = new URLSearchParams(window.location.search).get("fixture");
+  if (fixture === "zoom-50k") {
+    const performanceFixture = createZoomPerformanceFixture();
+    return { format: "legacy-projection-v0", nodes: performanceFixture.nodes, viewport: performanceFixture.viewport };
+  }
+  if (fixture !== "phase0-basic-card") return undefined;
   return {
     format: "legacy-projection-v0",
     nodes: structuredClone(phase0BasicCardFixture.nodes) as CanvasNode[],
@@ -94,7 +109,13 @@ export function EditorShell() {
   const transactionQueueRef = useRef<ReturnType<typeof createEditorTransactionQueue> | null>(null);
   const optimisticUpdatesRef = useRef(new Map<string, OptimisticUpdate>());
   const simulatedWorkerCrashesRef = useRef(0);
-  const [snapshot, setSnapshot] = useState<EditorSnapshot>(blankSnapshot);
+  const fixtureBenchmarkStartedRef = useRef(false);
+  const frameIntervalSamplerRef = useRef(createFrameIntervalSampler());
+  const inputBacklogSamplerRef = useRef(createInputBatchBacklogSampler());
+  const viewportCheckpointSamplerRef = useRef(createViewportCheckpointSampler());
+  const [documentState, setDocumentState] = useState<DocumentUiState>(blankSnapshot);
+  const [selectionState, setSelectionState] = useState<SelectionUiState>({ selectedIds: blankSnapshot.selectedIds });
+  const [viewState, setViewState] = useState<ViewUiState>({ viewport: blankSnapshot.viewport });
   const [tool, setTool] = useState<ToolKind>("select");
   const [status, setStatus] = useState("Starting engine");
   const [storageNotice, setStorageNotice] = useState<string>();
@@ -104,6 +125,9 @@ export function EditorShell() {
   const [canvasGeneration, setCanvasGeneration] = useState(0);
   const [safeMode, setSafeMode] = useState(false);
   const [mainThreadLongTasks, setMainThreadLongTasks] = useState<MainThreadLongTaskSummary>(emptyMainThreadLongTaskSummary);
+  const [frameIntervals, setFrameIntervals] = useState<FrameIntervalSummary>({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+  const [inputBacklog, setInputBacklog] = useState<InputBatchBacklogSummary>({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+  const [viewportCheckpoints, setViewportCheckpoints] = useState<ViewportCheckpointSummary>({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
   const [mainThreadMonitor, setMainThreadMonitor] = useState<"waiting" | "monitoring" | "unavailable">("waiting");
   const [mainThreadMonitoringEnabled, setMainThreadMonitoringEnabled] = useState(false);
   const fixtureSnapshot = useMemo(() => requestedFixtureSnapshot(), []);
@@ -111,6 +135,7 @@ export function EditorShell() {
   const rendererPreference = useMemo(() => requestedRendererPreference(), []);
   const simulateGpuLosses = useMemo(() => requestedGpuLossSimulationCount(), []);
   const simulateWorkerCrashes = useMemo(() => requestedEngineCrashSimulationCount(), []);
+  const snapshot = useMemo(() => ({ ...documentState, ...selectionState, ...viewState }) as EditorSnapshot, [documentState, selectionState, viewState]);
 
   const post = useCallback((message: MainToWorker, transfer?: Transferable[]) => workerRef.current?.postMessage(message, transfer ?? []), []);
   const postInput = useCallback((events: readonly EditorInputEvent[]) => {
@@ -125,7 +150,7 @@ export function EditorShell() {
       optimisticUpdatesRef.current.set(transactionId, next);
       const projected = applyOptimisticUpdates(confirmedSnapshotRef.current, optimisticUpdatesRef.current.values());
       snapshotRef.current = projected;
-      setSnapshot(projected);
+      setDocumentState(projected);
     }
   }, [safeMode]);
 
@@ -199,7 +224,28 @@ export function EditorShell() {
   }, [mainThreadMonitoringEnabled]);
 
   useEffect(() => {
-    const batcher = createInputTransferBatcher((events) => postInput(events));
+    if (!mainThreadMonitoringEnabled) return;
+    const sampler = frameIntervalSamplerRef.current;
+    sampler.reset();
+    let frame = 0;
+    let lastPublished = 0;
+    const observe = (timestamp: number) => {
+      sampler.record(timestamp);
+      if (timestamp - lastPublished >= 250) {
+        lastPublished = timestamp;
+        setFrameIntervals(sampler.summary());
+      }
+      frame = requestAnimationFrame(observe);
+    };
+    frame = requestAnimationFrame(observe);
+    return () => cancelAnimationFrame(frame);
+  }, [mainThreadMonitoringEnabled]);
+
+  useEffect(() => {
+    const batcher = createInputTransferBatcher((events) => postInput(events), undefined, (durationMs) => {
+      inputBacklogSamplerRef.current.record(durationMs);
+      setInputBacklog(inputBacklogSamplerRef.current.summary());
+    });
     inputBatcherRef.current = batcher;
     return () => {
       batcher.dispose();
@@ -314,6 +360,17 @@ export function EditorShell() {
         restoredRef.current = true;
       }
       if (data.type === "snapshot") {
+        // Fixture hydration is intentionally expensive and excluded from the
+        // interaction window. Begin main-thread evidence after the 50K projection
+        // has been confirmed, matching the benchmark contract.
+        if (fixtureSnapshot && data.snapshot.nodes.length >= 50_000) {
+          fixtureBenchmarkStartedRef.current = false;
+          setMainThreadLongTasks(emptyMainThreadLongTaskSummary());
+          frameIntervalSamplerRef.current.reset();
+          setFrameIntervals({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+          inputBacklogSamplerRef.current.reset();
+          setInputBacklog({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+        }
         revisionRef.current = data.snapshot.revision;
         confirmedSnapshotRef.current = data.snapshot;
         const projectedSnapshot = applyOptimisticUpdates(data.snapshot, optimisticUpdatesRef.current.values());
@@ -326,7 +383,9 @@ export function EditorShell() {
             recoveryStabilityTimerRef.current = setTimeout(() => { recoveryFailuresRef.current = 0; }, 5_000);
           }
         }
-        setSnapshot(projectedSnapshot);
+        setDocumentState(projectedSnapshot);
+        setSelectionState({ selectedIds: projectedSnapshot.selectedIds });
+        setViewState({ viewport: projectedSnapshot.viewport, performance: projectedSnapshot.performance });
         if (data.snapshot.localSnapshot && simulatedWorkerCrashesRef.current < simulateWorkerCrashes && !crashSimulationTimer) {
           simulatedWorkerCrashesRef.current += 1;
           crashSimulationTimer = setTimeout(() => {
@@ -346,11 +405,19 @@ export function EditorShell() {
         }
       }
       if (data.type === "view-state") {
-        const confirmedSnapshot = { ...confirmedSnapshotRef.current, viewport: data.viewport, selectedIds: data.selectedIds, performance: data.performance };
-        confirmedSnapshotRef.current = confirmedSnapshot;
-        const nextSnapshot = applyOptimisticUpdates(confirmedSnapshot, optimisticUpdatesRef.current.values());
-        snapshotRef.current = nextSnapshot;
-        setSnapshot(nextSnapshot);
+        if (fixtureSnapshot && !fixtureBenchmarkStartedRef.current) {
+          fixtureBenchmarkStartedRef.current = true;
+          setMainThreadLongTasks(emptyMainThreadLongTaskSummary());
+          frameIntervalSamplerRef.current.reset();
+          setFrameIntervals({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+          inputBacklogSamplerRef.current.reset();
+          setInputBacklog({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+        }
+        // Viewport input is deliberately not a document update: it must not create
+        // a 50K-node optimistic projection or cause the LayerPanel to reconcile.
+        setSelectionState((current) => sameIds(current.selectedIds, data.selectedIds) ? current : { selectedIds: data.selectedIds });
+        setViewState({ viewport: data.viewport, performance: data.performance });
+        snapshotRef.current = { ...snapshotRef.current, viewport: data.viewport, selectedIds: data.selectedIds, performance: data.performance };
         if (data.viewportChanged && restoredRef.current && writerRef.current && !fixtureSnapshot) {
           if (viewportCheckpointTimerRef.current) clearTimeout(viewportCheckpointTimerRef.current);
           viewportCheckpointTimerRef.current = setTimeout(() => {
@@ -359,6 +426,17 @@ export function EditorShell() {
           }, 500);
         }
       }
+      if (data.type === "viewport-checkpoint" && restoredRef.current && writerRef.current && !fixtureSnapshot) {
+        persistenceQueue.current = persistenceQueue.current
+          .catch(() => undefined)
+          .then(async () => {
+            const startedAt = performance.now();
+            await saveViewportRecord({ format: "viewport-record-v1", viewport: data.viewport, documentHash: data.documentHash, coreRevision: data.coreRevision });
+            viewportCheckpointSamplerRef.current.record(performance.now() - startedAt);
+            setViewportCheckpoints(viewportCheckpointSamplerRef.current.summary());
+          })
+          .catch(() => setStatus("Engine worker online · viewport save paused"));
+      }
       if (data.type === "ack") {
         if (data.acceptedRevision !== undefined) revisionRef.current = data.acceptedRevision;
         const acknowledgement = transactionQueueRef.current?.acknowledge(data);
@@ -366,7 +444,9 @@ export function EditorShell() {
           optimisticUpdatesRef.current.delete(data.transactionId);
           const projected = applyOptimisticUpdates(confirmedSnapshotRef.current, optimisticUpdatesRef.current.values());
           snapshotRef.current = projected;
-          setSnapshot(projected);
+          setDocumentState(projected);
+          setSelectionState({ selectedIds: projected.selectedIds });
+          setViewState({ viewport: projected.viewport, performance: projected.performance });
         }
         if (data.errorCode) setStatus(`Engine worker online · ${data.errorCode.toLowerCase().replaceAll("_", " ")}`);
       }
@@ -422,7 +502,13 @@ export function EditorShell() {
     return () => window.removeEventListener("keydown", listener);
   }, [post, safeMode]);
 
-  const selected = useMemo(() => snapshot.nodes.find((node) => snapshot.selectedIds.includes(node.id)), [snapshot]);
+  // Viewport updates replace `snapshot`, but keep the document and selection
+  // references stable. Depending on the whole snapshot made every zoom frame
+  // linearly scan all 50K nodes just to rediscover that nothing is selected.
+  const selected = useMemo(() => {
+    const selectedId = snapshot.selectedIds[0];
+    return selectedId ? snapshot.nodes.find((node) => node.id === selectedId) : undefined;
+  }, [snapshot.nodes, snapshot.selectedIds]);
   const canEdit = accessPreference === "edit" && writerMode === "owner" && !safeMode;
   const accessLabel = safeMode
     ? "安全模式"
@@ -440,6 +526,9 @@ export function EditorShell() {
     : mainThreadLongTasks.count
       ? `main ${mainThreadLongTasks.count} long tasks · worst ${mainThreadLongTasks.maxDurationMs.toFixed(0)}ms`
       : "main 0 long tasks";
+  const frameEvidence = frameIntervals.samples ? `frame P95 ${frameIntervals.p95Ms.toFixed(1)}ms` : "collecting frame intervals";
+  const inputBacklogEvidence = inputBacklog.samples ? `input backlog P95 ${inputBacklog.p95Ms.toFixed(1)}ms` : "collecting input backlog";
+  const viewportCheckpointEvidence = viewportCheckpoints.samples ? `viewport checkpoint P95 ${viewportCheckpoints.p95Ms.toFixed(1)}ms` : "collecting viewport checkpoints";
   const resourceEvidence = snapshot.resources ? `${snapshot.resources.documentNodes}/${snapshot.resources.maxDocumentNodes} nodes · ${(snapshot.resources.documentBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxDocumentBytes / 1024 / 1024).toFixed(0)} MB document · ${(snapshot.resources.wasmHeapBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxWasmHeapBytes / 1024 / 1024).toFixed(0)} MB WASM · ${(snapshot.resources.renderSurfaceBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxRenderSurfaceBytes / 1024 / 1024).toFixed(0)} MB surface · ${(snapshot.resources.gpuSceneBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxGpuSceneBytes / 1024 / 1024).toFixed(0)} MB GPU scene${snapshot.resources.gpuSceneWithinBudget ? "" : " (Canvas fallback)"}` : "collecting resource evidence";
   const setActiveTool = useCallback((next: ToolKind) => {
     if (safeMode) return;
@@ -524,7 +613,7 @@ export function EditorShell() {
 
       <section className="canvas-wrap" aria-label="Design canvas">
         <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
-        <div className="canvas-caption"><span>WORLD</span><b>{Math.round(snapshot.viewport.zoom * 100)}%</b><span>⌘ + scroll to zoom</span><span aria-label="Render evidence" data-render-performance={renderPerformanceEvidence}>{renderEvidence}</span><span aria-label="Main thread responsiveness">{mainThreadEvidence}</span><span aria-label="Resource evidence">{resourceEvidence}</span></div>
+        <div className="canvas-caption"><span>WORLD</span><b>{Math.round(snapshot.viewport.zoom * 100)}%</b><span>⌘ + scroll to zoom</span><span aria-label="Render evidence" data-render-performance={renderPerformanceEvidence}>{renderEvidence}</span><span aria-label="Main thread responsiveness" data-main-thread-long-tasks={JSON.stringify(mainThreadLongTasks)}>{mainThreadEvidence}</span><span aria-label="Frame interval evidence" data-frame-intervals={JSON.stringify(frameIntervals)}>{frameEvidence}</span><span aria-label="Input backlog evidence" data-input-backlog={JSON.stringify(inputBacklog)}>{inputBacklogEvidence}</span>{!deterministicEvidenceCapture && <span aria-label="Viewport checkpoint evidence" data-viewport-checkpoints={JSON.stringify(viewportCheckpoints)}>{viewportCheckpointEvidence}</span>}<span aria-label="Resource evidence">{resourceEvidence}</span></div>
         {error && <div className="engine-error" role="alert">{error}</div>}
       </section>
 

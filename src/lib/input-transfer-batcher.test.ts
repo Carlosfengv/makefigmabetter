@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorInputEvent } from "./editor-protocol";
-import { createInputTransferBatcher } from "./input-transfer-batcher";
+import { createInputBatchBacklogSampler, createInputTransferBatcher } from "./input-transfer-batcher";
 
 const move = (x: number): EditorInputEvent => ({ type: "pointer", event: "move", x, y: 1, shiftKey: false, button: 0 });
 const wheel: EditorInputEvent = { type: "wheel", x: 4, y: 5, deltaX: 0, deltaY: 3, ctrlKey: false };
@@ -29,5 +29,11 @@ describe("transferable input batcher", () => {
     batcher.dispose();
     expect(sent).toEqual([[move(6), up]]);
     expect(cancelled).toEqual([9]);
+  });
+
+  it("summarizes input batch backlog without retaining raw samples", () => {
+    const sampler = createInputBatchBacklogSampler(3);
+    [2, 8, 4, 16].forEach((duration) => sampler.record(duration));
+    expect(sampler.summary()).toEqual({ samples: 3, p50Ms: 8, p95Ms: 16, maxMs: 16 });
   });
 });

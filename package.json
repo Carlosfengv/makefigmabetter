@@ -8,6 +8,7 @@
     "build": "next build",
     "wasm:build": "bash scripts/build-wasm.sh",
     "evidence:report": "node scripts/write-phase0-acceptance-report.mjs",
+    "evidence:zoom": "bash scripts/capture-zoom-performance-evidence.sh",
     "check:boundaries": "node scripts/check-frontend-boundaries.mjs",
     "check:compatibility": "node scripts/check-compatibility-matrix.mjs",
     "mock:backend": "node services/mock-backend/server.mjs",

@@ -1,10 +1,11 @@
-import type { CoreLocalSnapshot, LegacyProjectionSnapshot, LocalDocumentSnapshot, LocalJournalEntry } from "@/lib/editor-protocol";
+import type { CoreLocalSnapshot, LegacyProjectionSnapshot, LocalDocumentSnapshot, LocalJournalEntry, ViewportRecord } from "@/lib/editor-protocol";
 
 const DATABASE = "makefigma-local";
 const DOCUMENTS = "documents";
 const JOURNAL = "journal";
 const SNAPSHOTS = "snapshots";
 const KEY = "starter-document";
+const VIEWPORT_KEY = `${KEY}:viewport`;
 const OPFS_DIRECTORY = "makefigma-snapshots-v1";
 
 /** Snapshot payloads moved to OPFS without changing old IndexedDB records. */
@@ -54,7 +55,7 @@ function getAllJournal(database: IDBDatabase): Promise<LocalJournalEntry[]> {
 }
 
 function normalizedSnapshot(snapshot: CoreLocalSnapshot): CoreLocalSnapshot {
-  return { format: "rust-core-v1", coreRevision: snapshot.coreRevision, coreSnapshot: snapshot.coreSnapshot, viewport: snapshot.viewport, presentation: snapshot.presentation };
+  return { format: "rust-core-v1", coreRevision: snapshot.coreRevision, coreSnapshot: snapshot.coreSnapshot, ...(snapshot.documentHash ? { documentHash: snapshot.documentHash } : {}), viewport: snapshot.viewport, presentation: snapshot.presentation };
 }
 
 async function contentHash(snapshot: CoreLocalSnapshot) {
@@ -159,25 +160,45 @@ function migrateCoreRevision(snapshot: CoreLocalSnapshot): CoreLocalSnapshot | u
 
 export async function loadLocalDocument(): Promise<LocalDocumentSnapshot | undefined> {
   const database = await openDatabase();
-  const [stored, journal] = await Promise.all([getValue<Manifest | CoreLocalSnapshot | Pick<LegacyProjectionSnapshot, "nodes" | "viewport">>(database, DOCUMENTS, KEY), getAllJournal(database)]);
+  const [stored, journal, viewportRecord] = await Promise.all([getValue<Manifest | CoreLocalSnapshot | Pick<LegacyProjectionSnapshot, "nodes" | "viewport">>(database, DOCUMENTS, KEY), getAllJournal(database), getValue<ViewportRecord>(database, DOCUMENTS, VIEWPORT_KEY)]);
   if (!stored) return undefined;
 
   if ("format" in stored && stored.format === "local-manifest-v1") {
     const manifest = stored as Manifest;
     const [active, previous] = await Promise.all([getValue<SnapshotRecord>(database, SNAPSHOTS, manifest.activeSnapshotKey), manifest.previousSnapshotKey ? getValue<SnapshotRecord>(database, SNAPSHOTS, manifest.previousSnapshotKey) : Promise.resolve(undefined)]);
     const current = await validSnapshot(active);
-    if (current) return { ...current, journal };
+    if (current) return attachViewportRecord(current, journal, viewportRecord);
     const fallback = await validSnapshot(previous);
-    if (fallback) return { ...fallback, journal, recoveredFromPrevious: true };
+    if (fallback) return { ...attachViewportRecord(fallback, journal, viewportRecord), recoveredFromPrevious: true };
     return undefined;
   }
 
   if ("coreSnapshot" in stored && typeof stored.coreSnapshot === "string") {
     const snapshot = migrateCoreRevision(stored as CoreLocalSnapshot);
-    return snapshot ? { ...snapshot, journal } : undefined;
+    return snapshot ? attachViewportRecord(snapshot, journal, viewportRecord) : undefined;
   }
   if ("nodes" in stored && Array.isArray(stored.nodes)) return { format: "legacy-projection-v0", nodes: stored.nodes, viewport: stored.viewport } satisfies LegacyProjectionSnapshot;
   return undefined;
+}
+
+function attachViewportRecord(snapshot: CoreLocalSnapshot, journal: LocalJournalEntry[], record: ViewportRecord | undefined): CoreLocalSnapshot {
+  return { ...applyViewportRecord(snapshot, record), journal };
+}
+
+/** Applies only a record confirmed to belong to this exact Core revision. */
+export function applyViewportRecord(snapshot: CoreLocalSnapshot, record: ViewportRecord | undefined): CoreLocalSnapshot {
+  const matches = record?.format === "viewport-record-v1" && record.documentHash === snapshot.documentHash && record.coreRevision === snapshot.coreRevision;
+  return matches ? { ...snapshot, viewport: record.viewport } : snapshot;
+}
+
+/** A viewport is UI state, so it has a tiny independent persistence path. */
+export async function saveViewportRecord(record: ViewportRecord) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database.transaction(DOCUMENTS, "readwrite").objectStore(DOCUMENTS).put(record, VIEWPORT_KEY);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
 }
 
 export async function appendLocalJournalEntry(entry: LocalJournalEntry) {

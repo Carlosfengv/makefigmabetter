@@ -19,8 +19,12 @@ import { resolveInsideRoundedRect } from "@/lib/rounded-rect";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
 import { exceedsMarqueeDragThreshold, resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
-import { selectionDimensions, selectionTitle } from "@/lib/selection-label";
+import { selectionDimensions } from "@/lib/selection-label";
 import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
+import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
+import { createSpatialGridIndex } from "@/lib/spatial-grid";
+import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
+import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -56,8 +60,14 @@ let context: OffscreenCanvasRenderingContext2D | null = null;
 let width = 0;
 let height = 0;
 let dpr = 1;
+let deviceDpr = 1;
+let renderQuality: RenderQualityState = { tier: "settled", zoomBucket: "normal" };
+let renderQualityTimer: ReturnType<typeof setTimeout> | undefined;
 let tool: ToolKind = "select";
 let nodes: CanvasNode[] = starterNodes();
+let nodeById = new Map(nodes.map((node) => [node.id, node]));
+let nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
+let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
 let selectedIds: string[] = [nodes[0].id];
 let viewport = { x: 0, y: 0, zoom: 1 };
 type LocalHistoryEntry = { nodes: CanvasNode[]; advancesRevision: boolean };
@@ -88,6 +98,9 @@ let renderSurfaceBytes = 0;
 let wasmMemory: WebAssembly.Memory | undefined;
 let wasmRuntimePromise: Promise<typeof import("@/wasm/generated/editor_wasm")> | undefined;
 let wasmHeapOverBudget = false;
+// Drag positions are intentionally not committed to the document revision until
+// pointer-up, but the GPU scene must still redraw them on every pointer move.
+let transientSceneVersion = 0;
 const diagnostics = createDiagnosticRecorder();
 const renderPerformance = createRenderPerformanceSampler();
 
@@ -101,6 +114,11 @@ function starterNodes(): CanvasNode[] {
 }
 
 function cloneDocument() { return structuredClone(nodes); }
+function rebuildNodeIndex() {
+  nodeById = new Map(nodes.map((node) => [node.id, node]));
+  nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
+  spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
+}
 function emit(message: WorkerToMain) { self.postMessage(message); }
 function emitError(error: unknown, code?: EditorErrorCode, transactionId?: string) {
   const classified = code ? editorError(code) : classifyEditorError(error);
@@ -108,7 +126,8 @@ function emitError(error: unknown, code?: EditorErrorCode, transactionId?: strin
   emit({ type: "error", ...classified, documentRevision: revision, diagnosticId: diagnostic.sequence, transactionId });
 }
 function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true) {
-  const localSnapshot = persistable && wasmDocument ? { format: "rust-core-v1", coreRevision: Number(wasmDocument.revision), coreSnapshot: wasmDocument.snapshot_json(), viewport: { ...viewport }, presentation: nodes.map(presentationNode) } satisfies CoreLocalSnapshot : undefined;
+  const documentHash = wasmDocument?.canonical_hash();
+  const localSnapshot = persistable && wasmDocument ? { format: "rust-core-v1", coreRevision: Number(wasmDocument.revision), coreSnapshot: wasmDocument.snapshot_json(), ...(documentHash ? { documentHash } : {}), viewport: { ...viewport }, presentation: nodes.map(presentationNode) } satisfies CoreLocalSnapshot : undefined;
   const memory = wasmDocument ? JSON.parse(wasmDocument.memory_stats_json()) as EditorSnapshot["memory"] : undefined;
   const wasmHeap = assessWasmHeap(wasmMemory?.buffer.byteLength ?? 0);
   if (!wasmHeap.withinBudget && wasmHeap.reason === "RESOURCE_LIMIT" && !wasmHeapOverBudget) {
@@ -116,12 +135,17 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
     diagnostics.record({ category: "lifecycle", code: "WASM_HEAP_SOFT_LIMIT" });
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
-  emit({ type: "snapshot", snapshot: { revision, documentHash: wasmDocument?.canonical_hash(), memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts }, documentCore, localSnapshot, localJournalEntry } });
+  emit({ type: "snapshot", snapshot: { revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts }, documentCore, localSnapshot, localJournalEntry } });
+}
+function emitViewportCheckpoint() {
+  if (!wasmDocument) return;
+  emit({ type: "viewport-checkpoint", viewport: { ...viewport }, documentHash: wasmDocument.canonical_hash(), coreRevision: Number(wasmDocument.revision) });
 }
 function emitViewState(viewportChanged = false) {
   emit({ type: "view-state", viewport: { ...viewport }, selectedIds: [...selectedIds], performance: renderPerformance.summary(), viewportChanged });
 }
-function setRenderSurface(nextWidth: number, nextHeight: number, nextDpr: number) {
+function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: number) {
+  const nextDpr = renderDpr(nextDeviceDpr, renderQuality);
   const admission = admitRenderSurface(nextWidth, nextHeight, nextDpr);
   if (!admission.accepted) {
     diagnostics.record({ category: "renderer", code: "RENDER_SURFACE_REJECTED" });
@@ -131,6 +155,7 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDpr: number
   }
   width = nextWidth;
   height = nextHeight;
+  deviceDpr = nextDeviceDpr;
   dpr = nextDpr;
   renderSurfaceBytes = admission.bytes;
   if (canvas && (canvas.width !== admission.pixelWidth || canvas.height !== admission.pixelHeight)) {
@@ -138,6 +163,22 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDpr: number
     canvas.height = Math.max(1, admission.pixelHeight);
   }
   return true;
+}
+function scheduleSettledRenderQuality() {
+  if (renderQualityTimer) clearTimeout(renderQualityTimer);
+  renderQualityTimer = setTimeout(() => {
+    renderQualityTimer = undefined;
+    renderQuality = resolveRenderQuality(renderQuality, viewport.zoom, false);
+    if (setRenderSurface(width, height, deviceDpr)) {
+      render();
+      emitViewState(true);
+    }
+  }, 160);
+}
+function activateInteractiveRenderQuality() {
+  renderQuality = resolveRenderQuality(renderQuality, viewport.zoom, true);
+  setRenderSurface(width, height, deviceDpr);
+  scheduleSettledRenderQuality();
 }
 function probeWebgl2() {
   try { return typeof OffscreenCanvas !== "undefined" && Boolean(new OffscreenCanvas(1, 1).getContext("webgl2")); } catch { return false; }
@@ -168,7 +209,11 @@ async function probeGpuDevice(recovery = false) {
     gpuSceneLimitReported = false;
     gpuStatus = "ready";
     diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_READY" });
+    // The first draw uploads the derived instance scene. It is renderer startup,
+    // not a zoom-frame cost, so begin a fresh steady-state sampling window after it.
+    renderPerformance.reset();
     render();
+    renderPerformance.start();
     emitSnapshot(undefined, false);
     if (simulatedGpuLosses < simulatedGpuLossesRequested) {
       simulatedGpuLosses += 1;
@@ -241,6 +286,7 @@ function syncProjectionFromWasm(rememberExisting = true) {
     return projected;
   });
   selectedIds = selectedIds.filter((id) => nodes.some((node) => node.id === id));
+  rebuildNodeIndex();
   revision = snapshot.revision;
 }
 function replayJournalEntry(engine: WasmDocumentEngine, entry: LocalJournalEntry) {
@@ -371,6 +417,7 @@ function resetDocumentToStarterNodes() {
   documentCore = "Starting Rust/WASM bridge";
   const reset = resetDocumentProjection(starterNodes());
   nodes = reset.nodes;
+  rebuildNodeIndex();
   selectedIds = reset.selectedIds;
   viewport = reset.viewport;
   history.length = 0;
@@ -395,27 +442,40 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
   mutator();
   recordHistory(appliedByWasm ? "core" : "local");
   if (appliedByWasm) syncProjectionFromWasm();
-  else if (advancesRevision) revision += 1;
+  else {
+    rebuildNodeIndex();
+    if (advancesRevision) revision += 1;
+  }
   render();
   emitSnapshot(operation && baseRevision !== undefined ? journalEntry(operation, baseRevision) : undefined);
 }
 function toWorld(x: number, y: number) { return { x: (x - width / 2) / viewport.zoom - viewport.x, y: (y - height / 2) / viewport.zoom - viewport.y }; }
 function toScreen(x: number, y: number) { return { x: (x + viewport.x) * viewport.zoom + width / 2, y: (y + viewport.y) * viewport.zoom + height / 2 }; }
-function frameNameLabelGeometry(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
-  const bounds = rotatedNodeBounds(node);
-  const point = toScreen(bounds.x, bounds.y);
+function frameNameMetrics(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.save();
-  ctx.font = '600 11px "Avenir Next", "Helvetica Neue", sans-serif';
-  const textWidth = ctx.measureText(node.name).width;
+  ctx.font = canvasFont(canvasDesignTokens.typography.layerName);
+  const width = ctx.measureText(node.name).width;
   ctx.restore();
-  return { x: Math.max(0, Math.min(point.x, width - textWidth)), baselineY: Math.max(11, Math.min(point.y - 4, height)), width: textWidth, height: 13 };
+  return { width, height: canvasDesignTokens.overlay.frameName.height };
+}
+function isFrameNameHit(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, screenX: number, screenY: number) {
+  const metrics = frameNameMetrics(ctx, node);
+  const point = toScreen(node.x, node.y);
+  const width = node.width * viewport.zoom;
+  const height = node.height * viewport.zoom;
+  const deltaX = screenX - (point.x + width / 2);
+  const deltaY = screenY - (point.y + height / 2);
+  const radians = node.rotation * Math.PI / 180;
+  const localX = Math.cos(radians) * deltaX + Math.sin(radians) * deltaY + width / 2;
+  const localY = -Math.sin(radians) * deltaX + Math.cos(radians) * deltaY + height / 2;
+  const baselineY = -canvasDesignTokens.overlay.frameName.offsetY;
+  return localX >= 0 && localX <= metrics.width && localY >= baselineY - metrics.height && localY <= baselineY;
 }
 function hitFrameName(screenX: number, screenY: number) {
   if (!context) return undefined;
   return [...nodes].reverse().find((node) => {
     if (node.kind !== "frame" || node.visible === false || node.locked) return false;
-    const label = frameNameLabelGeometry(context!, node);
-    return screenX >= label.x && screenX <= label.x + label.width && screenY >= label.baselineY - label.height && screenY <= label.baselineY;
+    return isFrameNameHit(context!, node, screenX, screenY);
   });
 }
 function hit(worldX: number, worldY: number) {
@@ -427,8 +487,8 @@ function hit(worldX: number, worldY: number) {
 function renderGrid(ctx: OffscreenCanvasRenderingContext2D) {
   if (!shouldRenderCanvasGrid(viewport.zoom)) return;
   const gap = resolveVisibleCanvasGridStep(viewport.zoom) * viewport.zoom;
-  ctx.strokeStyle = "rgba(45, 48, 37, .075)";
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = canvasDesignTokens.color.grid;
+  ctx.lineWidth = canvasDesignTokens.stroke.grid.width;
   const origin = toScreen(0, 0);
   const startX = ((origin.x % gap) + gap) % gap;
   const startY = ((origin.y % gap) + gap) % gap;
@@ -484,7 +544,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   } else if (node.kind === "text") {
     const textMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
     ctx.fillStyle = paint;
-    ctx.font = `650 ${textMetrics.fontSize}px "Avenir Next", "Helvetica Neue", sans-serif`;
+    ctx.font = canvasFont({ ...canvasDesignTokens.typography.canvasText, size: textMetrics.fontSize });
     ctx.textBaseline = "top";
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, textMetrics.width, textMetrics.height); ctx.clip();
@@ -525,7 +585,7 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.translate(point.x + w / 2, point.y + h / 2);
   ctx.rotate(node.rotation * Math.PI / 180);
   ctx.translate(-w / 2, -h / 2);
-  ctx.strokeStyle = "#5442a9"; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(.5, .5, Math.max(0, w - 1), Math.max(0, h - 1)); ctx.setLineDash([]);
+  ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(canvasDesignTokens.stroke.selection.pixelInset, canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1)); ctx.setLineDash([]);
   ctx.restore();
 }
 function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
@@ -538,34 +598,50 @@ function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.translate(point.x + w / 2, point.y + h / 2);
   ctx.rotate(node.rotation * Math.PI / 180);
   ctx.translate(-w / 2, -h / 2);
-  ctx.strokeStyle = "#5442a9";
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.hover.width;
   if (node.kind === "ellipse") {
     ctx.beginPath();
-    ctx.ellipse(w / 2, h / 2, Math.max(0, w / 2 - .5), Math.max(0, h / 2 - .5), 0, 0, Math.PI * 2);
+    ctx.ellipse(w / 2, h / 2, Math.max(0, w / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, h / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
     ctx.stroke();
   } else if (node.kind === "text") {
-    ctx.strokeRect(.5, .5, Math.max(0, w - 1), Math.max(0, h - 1));
+    ctx.strokeRect(canvasDesignTokens.stroke.hover.pixelInset, canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1));
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
-    roundedRectPath(ctx, .5, .5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - .5));
+    roundedRectPath(ctx, canvasDesignTokens.stroke.hover.pixelInset, canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - canvasDesignTokens.stroke.hover.pixelInset));
     ctx.stroke();
   }
   ctx.restore();
 }
-function renderFrameName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
-  if (node.kind !== "frame" || node.visible === false || selectedIds.includes(node.id)) return;
-  const label = frameNameLabelGeometry(ctx, node);
+function renderLayerName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, selected = false) {
+  const point = toScreen(node.x, node.y);
+  const width = node.width * viewport.zoom;
+  const height = node.height * viewport.zoom;
   ctx.save();
-  ctx.font = '600 11px "Avenir Next", "Helvetica Neue", sans-serif';
-  ctx.fillStyle = "#23251f";
+  ctx.translate(point.x + width / 2, point.y + height / 2);
+  ctx.rotate(node.rotation * Math.PI / 180);
+  ctx.translate(-width / 2, -height / 2);
+  ctx.font = canvasFont(canvasDesignTokens.typography.layerName);
+  ctx.fillStyle = selected ? canvasDesignTokens.color.selection : canvasDesignTokens.color.layerName;
   ctx.textBaseline = "bottom";
-  ctx.fillText(node.name, label.x, label.baselineY);
+  ctx.fillText(node.name, 0, -canvasDesignTokens.overlay.frameName.offsetY);
   ctx.restore();
 }
+function renderFrameName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (node.kind !== "frame" || node.visible === false || selectedIds.includes(node.id)) return;
+  renderLayerName(ctx, node);
+}
+function renderSelectionDimensions(ctx: OffscreenCanvasRenderingContext2D, dimensions: string, labelX: number, labelY: number, labelWidth: number, labelHeight: number, horizontalInset: number, cornerRadius: number) {
+  ctx.beginPath();
+  ctx.roundRect(labelX, labelY, labelWidth, labelHeight, cornerRadius);
+  ctx.fillStyle = canvasDesignTokens.color.selection;
+  ctx.fill();
+  ctx.fillStyle = canvasDesignTokens.color.selectionLabelText;
+  ctx.textBaseline = "middle";
+  ctx.fillText(dimensions, labelX + horizontalInset, labelY + labelHeight / 2);
+}
 function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
-  const selectedNodes = nodes.filter((node) => node.visible !== false && selectedIds.includes(node.id));
-  const title = selectionTitle(selectedNodes);
+  const selectedNodes = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && node.visible !== false));
   if (selectedNodes.length === 0) return;
   const screenBounds = selectedNodes.map((node) => {
     const bounds = rotatedNodeBounds(node);
@@ -579,28 +655,29 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
   const dimensions = selectedNodes.length === 1
     ? selectionDimensions(selectedNodes[0].width, selectedNodes[0].height)
     : selectionDimensions((rightEdge - leftEdge) / viewport.zoom, (bottomEdge - topEdge) / viewport.zoom);
-  const labelHeight = 20;
-  const horizontalInset = 7;
+  const { height: labelHeight, horizontalInset, cornerRadius, offsetY } = canvasDesignTokens.overlay.selectionLabel;
   ctx.save();
-  ctx.font = '600 11px "Avenir Next", "Helvetica Neue", sans-serif';
-  if (title) {
-    const titleWidth = ctx.measureText(title).width;
-    const titleX = Math.max(0, Math.min(leftEdge, width - titleWidth));
-    const titleY = Math.max(11, Math.min(topEdge - 4, height));
-    ctx.fillStyle = "#5442a9";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(title, titleX, titleY);
+  const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
+  if (selectedNode?.kind === "frame") {
+    renderLayerName(ctx, selectedNode, true);
   }
+  ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
   const labelWidth = Math.ceil(ctx.measureText(dimensions).width) + horizontalInset * 2;
-  const labelX = Math.max(0, Math.min((leftEdge + rightEdge - labelWidth) / 2, width - labelWidth));
-  const labelY = Math.max(0, Math.min(bottomEdge + 2, height - labelHeight));
-  ctx.beginPath();
-  ctx.roundRect(labelX, labelY, labelWidth, labelHeight, 3);
-  ctx.fillStyle = "#5442a9";
-  ctx.fill();
-  ctx.fillStyle = "#ffffff";
-  ctx.textBaseline = "middle";
-  ctx.fillText(dimensions, labelX + horizontalInset, labelY + labelHeight / 2);
+  if (selectedNode) {
+    const point = toScreen(selectedNode.x, selectedNode.y);
+    const nodeWidth = selectedNode.width * viewport.zoom;
+    const nodeHeight = selectedNode.height * viewport.zoom;
+    ctx.save();
+    ctx.translate(point.x + nodeWidth / 2, point.y + nodeHeight / 2);
+    ctx.rotate(selectedNode.rotation * Math.PI / 180);
+    ctx.translate(-nodeWidth / 2, -nodeHeight / 2);
+    renderSelectionDimensions(ctx, dimensions, (nodeWidth - labelWidth) / 2, nodeHeight + offsetY, labelWidth, labelHeight, horizontalInset, cornerRadius);
+    ctx.restore();
+  } else {
+    const labelX = Math.max(0, Math.min((leftEdge + rightEdge - labelWidth) / 2, width - labelWidth));
+    const labelY = Math.max(0, Math.min(bottomEdge + offsetY, height - labelHeight));
+    renderSelectionDimensions(ctx, dimensions, labelX, labelY, labelWidth, labelHeight, horizontalInset, cornerRadius);
+  }
   ctx.restore();
 }
 function updateMarqueeSelection(activeDrag: Extract<Drag, { mode: "select" }>, endX: number, endY: number) {
@@ -618,28 +695,43 @@ function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
   const marqueeWidth = Math.abs(end.x - start.x);
   const marqueeHeight = Math.abs(end.y - start.y);
   ctx.save();
-  ctx.fillStyle = "rgba(84, 66, 169, .10)";
-  ctx.strokeStyle = "#5442a9";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 3]);
+  ctx.fillStyle = canvasDesignTokens.color.selectionFill;
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.marquee.width;
+  ctx.setLineDash([...canvasDesignTokens.stroke.marquee.dash]);
   ctx.fillRect(x, y, marqueeWidth, marqueeHeight);
   ctx.strokeRect(x + .5, y + .5, marqueeWidth, marqueeHeight);
   ctx.restore();
 }
-function render() {
+function render(rendersPerInputFrame?: number) {
   if (!context || !canvas) return;
   const startedAt = performance.now();
+  const cullingStartedAt = startedAt;
+  const viewportBounds = viewportWorldBounds(viewport, width, height);
+  const candidateNodes = spatialGrid.query(viewportBounds);
+  const visibleNodes = candidateNodes.filter((node) => node.visible !== false && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  const cullingMs = performance.now() - cullingStartedAt;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#eeeee8";
+  context.fillStyle = canvasDesignTokens.color.backdrop;
   context.fillRect(0, 0, width, height);
   let gpuRenderedNodeIds: ReadonlySet<string> | undefined;
+  let gpuUploadBytes = 0;
+  let imageBitmapMs = 0;
+  let compositeMs = 0;
+  const gpuStartedAt = performance.now();
   if (gpuRenderer) {
     try {
-      const result = gpuRenderer.render({ nodes, viewport, width, height, dpr });
+      // GPU stores the whole world-space document once; the camera uniform performs
+      // viewport changes. Canvas-only overlays continue to use the culled list.
+      const result = gpuRenderer.render({ nodes, viewport, width, height, dpr, sceneKey: `${revision}:${transientSceneVersion}` });
+      const compositeStartedAt = performance.now();
       context.drawImage(result.bitmap, 0, 0, width, height);
+      compositeMs = performance.now() - compositeStartedAt;
       result.bitmap.close();
       gpuRenderedNodeIds = result.renderedNodeIds;
+      gpuUploadBytes = result.gpuUploadBytes;
+      imageBitmapMs = result.imageBitmapMs;
       gpuSceneBytes = result.resourceBytes;
       gpuSceneWithinBudget = true;
       gpuSceneLimitReported = false;
@@ -659,14 +751,18 @@ function render() {
       }
     }
   }
-  nodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
-  nodes.forEach((node) => renderFrameName(context!, node));
-  nodes.forEach((node) => renderHover(context!, node));
-  nodes.forEach((node) => renderSelection(context!, node));
-  renderSelectionLabel(context);
+  const gpuPrepareMs = performance.now() - gpuStartedAt;
+  const overlayStartedAt = performance.now();
+  visibleNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
+  visibleNodes.forEach((node) => renderFrameName(context!, node));
+  const hovered = hoveredId ? nodeById.get(hoveredId) : undefined;
+  if (hovered && visibleNodes.includes(hovered)) renderHover(context!, hovered);
+  const visibleSelected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && visibleNodes.includes(node)));
+  visibleSelected.forEach((node) => renderSelection(context!, node));
+  if (visibleSelected.length) renderSelectionLabel(context);
   renderMarquee(context);
   renderGrid(context);
-  renderPerformance.record(performance.now() - startedAt);
+  renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
 }
 function dispatch(command: EditorCommand) {
   const baseRevision = wasmDocument ? Number(wasmDocument.revision) : undefined;
@@ -741,6 +837,7 @@ function dispatch(command: EditorCommand) {
         void loadDocumentBridge(command.snapshot);
       } else {
         nodes = normalizeIds(command.snapshot.nodes);
+        rebuildNodeIndex();
         viewport = command.snapshot.viewport;
         render();
         emitSnapshot();
@@ -842,6 +939,8 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     // leaving an uncommitted visual move in a follower tab.
     if (activeDrag.mode === "move" && activeDrag.before) {
       nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
       render();
       emitSnapshot(undefined, false);
     }
@@ -849,7 +948,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     return;
   }
   if (event.event === "move") {
-    if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; render(); emitViewState(true); }
+    if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; activateInteractiveRenderQuality(); render(); emitViewState(true); }
     if (activeDrag.mode === "select") {
       if (!activeDrag.marqueeStarted) {
         activeDrag.marqueeStarted = exceedsMarqueeDragThreshold(
@@ -877,6 +976,8 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         const start = activeDrag.initial?.get(node.id);
         return start ? { ...node, ...snapCanvasPoint({ x: start.x + dx, y: start.y + dy }) } : node;
       });
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
       render();
     }
   }
@@ -905,6 +1006,8 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
           emitSnapshot(journalEntry({ type: "move", updates }, baseRevision));
         } catch (error) {
           nodes = activeDrag.before;
+          transientSceneVersion += 1;
+          rebuildNodeIndex();
           emitError(error);
           render();
           emitSnapshot();
@@ -914,17 +1017,31 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     drag = undefined;
   }
 }
-function wheel(event: Extract<MainToWorker, { type: "wheel" }>) {
+function applyWheel(event: Extract<MainToWorker, { type: "wheel" }>) {
   if (event.ctrlKey) { const before = toWorld(event.x, event.y); viewport.zoom = clampCanvasZoom(viewport.zoom * (event.deltaY > 0 ? .9 : 1.1)); const after = toWorld(event.x, event.y); viewport.x += after.x - before.x; viewport.y += after.y - before.y; }
   else { viewport.x -= event.deltaX / viewport.zoom; viewport.y -= event.deltaY / viewport.zoom; }
+}
+function wheel(event: Extract<MainToWorker, { type: "wheel" }>) {
+  applyWheel(event);
+  activateInteractiveRenderQuality();
   render(); emitViewState(true);
+}
+function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "pointer" | "wheel" }>[]) {
+  if (events.length && events.every((event) => event.type === "wheel")) {
+    events.forEach(applyWheel);
+    activateInteractiveRenderQuality();
+    render(1);
+    emitViewState(true);
+    return;
+  }
+  events.forEach((event) => { if (event.type === "pointer") pointer(event); else wheel(event); });
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
     if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
     else if (data.type === "tool") { tool = data.tool; }
-    else if (data.type === "checkpoint") emitSnapshot();
+    else if (data.type === "checkpoint") emitViewportCheckpoint();
     else if (data.type === "simulate-crash") {
       setTimeout(() => { throw new Error("Development-only Engine Worker crash simulation"); }, 0);
     }
@@ -935,7 +1052,7 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
       if (!events) {
         diagnostics.record({ category: "lifecycle", code: "INPUT_TRANSFER_REJECTED" });
         emitError(undefined, "INVALID_COMMAND");
-      } else events.forEach((event) => { if (event.type === "pointer") pointer(event); else wheel(event); });
+      } else dispatchInputBatch(events);
     }
     else if (data.type === "pointer") pointer(data);
     else if (data.type === "wheel") wheel(data);

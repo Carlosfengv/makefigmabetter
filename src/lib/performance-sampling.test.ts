@@ -8,20 +8,28 @@ describe("render performance sampler", () => {
     sampler.start();
     [1, 2, 3, 4, Number.NaN, -1, 5].forEach((sample) => sampler.record(sample));
 
-    expect(sampler.summary()).toEqual({ samples: 4, p50Ms: 3, p95Ms: 5, maxMs: 5 });
+    expect(sampler.summary()).toMatchObject({ samples: 4, p50Ms: 3, p95Ms: 5, maxMs: 5, cullingP95Ms: 0, rendersPerInputFrameMax: 0 });
   });
 
   it("excludes startup and rebuild frames until a new steady-state window starts", () => {
     const sampler = createRenderPerformanceSampler();
     sampler.record(200);
-    expect(sampler.summary()).toEqual({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+    expect(sampler.summary()).toMatchObject({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0, cullingP95Ms: 0 });
     sampler.start();
     sampler.record(3);
     sampler.reset();
     sampler.record(100);
-    expect(sampler.summary()).toEqual({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
+    expect(sampler.summary()).toMatchObject({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0, cullingP95Ms: 0 });
     sampler.start();
     sampler.record(4);
-    expect(sampler.summary()).toEqual({ samples: 1, p50Ms: 4, p95Ms: 4, maxMs: 4 });
+    expect(sampler.summary()).toMatchObject({ samples: 1, p50Ms: 4, p95Ms: 4, maxMs: 4, cullingP95Ms: 0 });
+  });
+
+  it("retains the maximum render count observed in an input frame", () => {
+    const sampler = createRenderPerformanceSampler();
+    sampler.start();
+    sampler.record({ totalMs: 2, rendersPerInputFrame: 1 });
+    sampler.record({ totalMs: 3, rendersPerInputFrame: 1 });
+    expect(sampler.summary().rendersPerInputFrameMax).toBe(1);
   });
 });

@@ -67,6 +67,29 @@ export interface RenderPerformanceSummary {
   p50Ms: number;
   p95Ms: number;
   maxMs: number;
+  cullingP95Ms: number;
+  gpuPrepareP95Ms: number;
+  overlayP95Ms: number;
+  imageBitmapP95Ms: number;
+  compositeP95Ms: number;
+  candidateNodesP95: number;
+  visibleNodesP95: number;
+  gpuUploadBytesP95: number;
+  rendersPerInputFrameMax: number;
+}
+
+export interface ViewportCheckpointMessage {
+  type: "viewport-checkpoint";
+  viewport: Viewport;
+  documentHash: string;
+  coreRevision: number;
+}
+
+export interface ViewportRecord {
+  format: "viewport-record-v1";
+  viewport: Viewport;
+  documentHash: string;
+  coreRevision: number;
 }
 
 /** New snapshots carry no rendering data outside the Core. Optional legacy fields
@@ -98,6 +121,8 @@ export interface CoreLocalSnapshot {
   format: "rust-core-v1";
   coreRevision: number;
   coreSnapshot: string;
+  /** Canonical Core hash used only to associate the independent viewport record. */
+  documentHash?: string;
   viewport: Viewport;
   presentation: PresentationNode[];
   /** Read from the separate IndexedDB journal store; never written into the snapshot. */
@@ -180,6 +205,8 @@ export type WorkerToMain =
   | { type: "snapshot"; snapshot: EditorSnapshot }
   /** Lightweight high-frequency projection update; never contains durable document data. */
   | { type: "view-state"; viewport: Viewport; selectedIds: string[]; performance: RenderPerformanceSummary; viewportChanged: boolean }
+  /** A durable viewport payload deliberately separated from the full Core snapshot. */
+  | ViewportCheckpointMessage
   | { type: "ready" }
   /** Worker-confirmed tool state, used for one-shot canvas creation. */
   | { type: "tool"; tool: ToolKind }

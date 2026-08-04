@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { admitWebGpuSceneResources, buildWebGpuVertices, GPU_SCENE_VERTEX_BYTES_PER_NODE, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer } from "./webgpu-scene";
+import { admitWebGpuSceneResources, buildWebGpuVertices, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer } from "./webgpu-scene";
 
 describe("WebGPU scene vertex projection", () => {
   it("triangulates supported solid nodes in screen space and leaves text/gradients for the overlay", () => {
@@ -18,8 +18,8 @@ describe("WebGPU scene vertex projection", () => {
     const rectangle = createNode("rectangle", 0, 0);
     expect(admitWebGpuSceneResources({ nodes: [rectangle], width: 100, height: 50, dpr: 2 })).toMatchObject({ accepted: true, vertexBytes: MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, renderableNodeCount: 1 });
     expect(admitWebGpuSceneResources({ nodes: [rectangle], width: 100, height: 50, dpr: 2 }, 1)).toEqual({ accepted: false, reason: "RESOURCE_LIMIT", resourceBytes: 244_096, maxBytes: 1 });
-    const manyRectangles = Array.from({ length: Math.ceil(MIN_GPU_SCENE_VERTEX_BUFFER_BYTES / GPU_SCENE_VERTEX_BYTES_PER_NODE) + 1 }, () => rectangle);
-    expect(admitWebGpuSceneResources({ nodes: manyRectangles, width: 1, height: 1, dpr: 1 })).toMatchObject({ accepted: true, vertexBytes: manyRectangles.length * GPU_SCENE_VERTEX_BYTES_PER_NODE });
+    const manyRectangles = Array.from({ length: Math.ceil(MIN_GPU_SCENE_VERTEX_BUFFER_BYTES / GPU_SCENE_INSTANCE_BYTES_PER_NODE) + 1 }, () => rectangle);
+    expect(admitWebGpuSceneResources({ nodes: manyRectangles, width: 1, height: 1, dpr: 1 })).toMatchObject({ accepted: true, vertexBytes: manyRectangles.length * GPU_SCENE_INSTANCE_BYTES_PER_NODE });
     expect(admitWebGpuSceneResources({ nodes: [], width: 0, height: 50, dpr: 1 })).toMatchObject({ accepted: false, reason: "INVALID_SIZE" });
   });
 
@@ -32,12 +32,13 @@ describe("WebGPU scene vertex projection", () => {
       lost: new Promise<unknown>(() => undefined),
       queue: { writeBuffer: () => undefined, submit: () => undefined },
       createShaderModule: () => ({}),
-      createRenderPipeline: () => ({}),
+      createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
       createBuffer: ({ size }: { size: number }) => {
         created.push(size);
         return { destroy: () => destroyed.push(size) };
       },
-      createCommandEncoder: () => ({ beginRenderPass: (descriptor: { colorAttachments: Array<{ clearValue: unknown }> }) => { clearValues.push(descriptor.colorAttachments[0]?.clearValue); return { setPipeline: () => undefined, setVertexBuffer: () => undefined, draw: () => undefined, end: () => undefined }; }, finish: () => ({}) }),
+      createCommandEncoder: () => ({ beginRenderPass: (descriptor: { colorAttachments: Array<{ clearValue: unknown }> }) => { clearValues.push(descriptor.colorAttachments[0]?.clearValue); return { setPipeline: () => undefined, setBindGroup: () => undefined, setVertexBuffer: () => undefined, draw: () => undefined, end: () => undefined }; }, finish: () => ({}) }),
       destroy: () => undefined,
     };
     const original = globalThis.OffscreenCanvas;
@@ -53,15 +54,18 @@ describe("WebGPU scene vertex projection", () => {
       const navigatorLike: Parameters<typeof WebGpuSceneRenderer.create>[0] = { gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } };
       const renderer = await WebGpuSceneRenderer.create(navigatorLike);
       const rectangle = createNode("rectangle", 0, 0);
-      renderer.render({ nodes: [rectangle], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1 });
+      renderer.render({ nodes: [rectangle], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 1 });
+      expect(renderer.render({ nodes: [rectangle], viewport: { x: 3, y: 2, zoom: 1.2 }, width: 10, height: 10, dpr: 1, sceneKey: 1 }).gpuUploadBytes).toBe(32);
+      const moved = { ...rectangle, x: 24, y: 16 };
+      expect(renderer.render({ nodes: [moved], viewport: { x: 3, y: 2, zoom: 1.2 }, width: 10, height: 10, dpr: 1, sceneKey: "1:drag-1" }).gpuUploadBytes).toBe(GPU_SCENE_INSTANCE_BYTES_PER_NODE + GPU_CAMERA_UNIFORM_BYTES);
       const many = Array.from({ length: 12 }, () => rectangle);
-      renderer.render({ nodes: many, viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1 });
-      renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1 });
+      renderer.render({ nodes: many, viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 2 });
+      renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 3 });
       renderer.destroy();
 
-      expect(created).toEqual([MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, 12 * GPU_SCENE_VERTEX_BYTES_PER_NODE]);
-      expect(destroyed).toEqual(created);
-      expect(clearValues).toEqual([{ r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }]);
+      expect(created).toEqual([48, 32, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES]);
+      expect(destroyed).toEqual([MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, 48, 32]);
+      expect(clearValues).toEqual([{ r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }]);
     } finally {
       if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
       else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
