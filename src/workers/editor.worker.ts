@@ -20,6 +20,7 @@ import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, 
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
 import { resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
 import { selectionDimensions, selectionTitle } from "@/lib/selection-label";
+import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -775,7 +776,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       emitViewState();
       return;
     }
-    selectedIds = target ? (event.shiftKey ? [...new Set([...selectedIds, target.id])] : [target.id]) : [];
+    selectedIds = resolveCanvasObjectSelection(selectedIds, target.id, event.shiftKey);
     if (target && !event.readOnly) drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Map(nodes.filter((node) => selectedIds.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y }])) };
     render(); emitViewState(); return;
   }
