@@ -39,4 +39,10 @@ describe("DocumentApiTransport", () => {
     await expect(transport.loadSnapshot(operation.documentId)).resolves.toEqual(Uint8Array.from([8, 1, 2]));
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining(`/v1/documents/${operation.documentId}/snapshot`), expect.objectContaining({ headers: expect.objectContaining({ "x-makefigma-dev-tenant-id": principal.tenantId }) }));
   });
+
+  it("reads validated service revision and hash metadata while keeping Snapshot bytes opaque", async () => {
+    const headers = new Headers({ "x-makefigma-document-revision": "7", "x-makefigma-document-hash": "ab".repeat(32) });
+    const transport = new DocumentApiTransport({ baseUrl: "http://127.0.0.1:8788", ...principal, fetch: async () => new Response(Uint8Array.from([8, 1, 2]), { status: 200, headers }) });
+    await expect(transport.loadSnapshotWithMetadata(operation.documentId)).resolves.toEqual({ snapshot: Uint8Array.from([8, 1, 2]), revision: 7, documentHash: "ab".repeat(32) });
+  });
 });

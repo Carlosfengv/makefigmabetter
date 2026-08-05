@@ -13,7 +13,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, options, post},
+    routing::{get, options, post, put},
 };
 use editor_core::{Document, DocumentId};
 use makefigma_document_service::{
@@ -53,6 +53,12 @@ pub fn router(state: ApiState) -> Router {
             post(submit_operation)
                 .options(preflight)
                 .layer(DefaultBodyLimit::max(MAX_OPERATION_BYTES)),
+        )
+        .route(
+            "/v1/documents/{document_id}/reset",
+            put(reset_document)
+                .options(preflight)
+                .layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BYTES)),
         )
         .route(
             "/v1/documents/{document_id}/snapshot",
@@ -160,6 +166,31 @@ async fn submit_operation(
     }
 }
 
+/** Destructive local-demo reset. The replacement snapshot is validated by the
+ * same codec used for document creation, then atomically replaces the durable
+ * root and its now-incompatible operation history. */
+async fn reset_document(
+    State(state): State<ApiState>,
+    Path(document_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let (principal, document_id) = match (dev_principal(&headers), parse_id(&document_id)) {
+        (Ok(principal), Ok(document_id)) => (principal, document_id),
+        (Err(error), _) | (_, Err(error)) => return protocol_error(error),
+    };
+    let document = match makefigma_document_codec::document_from_wire_snapshot(body.as_ref()) {
+        Ok(document) if document.id().0.to_be_bytes() == document_id => document,
+        Ok(_) | Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
+    };
+    match initial_document_state(&document, principal.tenant_id, ENGINE_SEMANTICS_VERSION)
+        .and_then(|replacement| state.service.replace_document(principal, replacement))
+    {
+        Ok(()) => plain_response(StatusCode::NO_CONTENT, Vec::new(), PROTOBUF_CONTENT_TYPE),
+        Err(error) => protocol_error(error),
+    }
+}
+
 async fn load_snapshot(
     State(state): State<ApiState>,
     Path(document_id): Path<String>,
@@ -173,7 +204,7 @@ async fn load_snapshot(
         state.service.load_document(document_id),
         state.service.can_read_document(principal, document_id),
     ) {
-        (Ok(document), Ok(true)) => protobuf_response(StatusCode::OK, document.snapshot),
+        (Ok(document), Ok(true)) => snapshot_response(document),
         (Ok(_), Ok(false)) => protocol_error(ServiceError::PermissionDenied),
         (Err(error), _) | (_, Err(error)) => protocol_error(error),
     }
@@ -230,6 +261,23 @@ fn status_for(error: &ServiceError) -> StatusCode {
 fn protobuf_response(status: StatusCode, body: Vec<u8>) -> Response {
     cors_response(status, body, PROTOBUF_CONTENT_TYPE)
 }
+/** The wire snapshot remains opaque to the browser. These two response headers
+ * are authenticated service metadata so an evidence runner can compare the
+ * browser Core's already-computed revision/hash without decoding a second
+ * Snapshot implementation in TypeScript. */
+fn snapshot_response(document: makefigma_document_service::DocumentState) -> Response {
+    let mut response = protobuf_response(StatusCode::OK, document.snapshot);
+    response.headers_mut().insert(
+        "x-makefigma-document-revision",
+        HeaderValue::from_str(&document.accepted_revision.to_string())
+            .expect("u64 is a header value"),
+    );
+    response.headers_mut().insert(
+        "x-makefigma-document-hash",
+        HeaderValue::from_str(&hex(&document.document_hash)).expect("hex hash is a header value"),
+    );
+    response
+}
 fn plain_response(status: StatusCode, body: Vec<u8>, content_type: &str) -> Response {
     cors_response(status, body, content_type)
 }
@@ -256,6 +304,10 @@ fn cors_response(status: StatusCode, body: Vec<u8>, content_type: &str) -> Respo
         header::ACCESS_CONTROL_ALLOW_METHODS,
         HeaderValue::from_static("GET, POST, OPTIONS"),
     );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("x-makefigma-document-revision, x-makefigma-document-hash"),
+    );
     // Chromium may classify a loopback service on another port as a private
     // network target. This local-development-only adapter explicitly answers
     // that preflight; production gateways use their own origin policy.
@@ -268,6 +320,10 @@ fn cors_response(status: StatusCode, body: Vec<u8>, content_type: &str) -> Respo
         HeaderValue::from_static("cross-origin"),
     );
     response
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub async fn serve(address: std::net::SocketAddr, state: ApiState) -> std::io::Result<()> {
@@ -298,6 +354,13 @@ mod tests {
             DocumentService::in_memory(CoreOperationReducer::new(ENGINE_SEMANTICS_VERSION))
                 .unwrap(),
         ))
+    }
+    fn app_with_state() -> (Router, ApiState) {
+        let state = ApiState::new(
+            DocumentService::in_memory(CoreOperationReducer::new(ENGINE_SEMANTICS_VERSION))
+                .unwrap(),
+        );
+        (router(state.clone()), state)
     }
     fn durable_app(path: &std::path::Path) -> Router {
         router(ApiState::new(
@@ -383,6 +446,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_ingress_preserves_unknown_operation_fields_byte_for_byte() {
+        let (app, state) = app_with_state();
+        let create = headers(Request::post(format!("/v1/documents/{}", id_hex(1))))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(create).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let mut future_envelope = envelope(payload());
+        // field 99, varint wire type, value 1. Prost can inspect known fields,
+        // but the durable relay must retain this future field verbatim.
+        future_envelope.extend([0x98, 0x06, 0x01]);
+        let request = headers(
+            Request::post(format!("/v1/documents/{}/operations", id_hex(1)))
+                .header(header::CONTENT_TYPE, PROTOBUF_CONTENT_TYPE),
+        )
+        .body(Body::from(future_envelope.clone()))
+        .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .service
+                .stored_operation_envelope(id(1), id(9))
+                .unwrap(),
+            Some(future_envelope)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_schema_and_engine_semantics_with_protocol_errors() {
+        let app = app();
+        let create = headers(Request::post(format!("/v1/documents/{}", id_hex(1))))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(create).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let mut incompatible_schema =
+            OperationEnvelope::decode(envelope(payload()).as_slice()).unwrap();
+        incompatible_schema.schema_version = 2;
+        let request = headers(
+            Request::post(format!("/v1/documents/{}/operations", id_hex(1)))
+                .header(header::CONTENT_TYPE, PROTOBUF_CONTENT_TYPE),
+        )
+        .body(Body::from(incompatible_schema.encode_to_vec()))
+        .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = makefigma_protocol::v1::ProtocolError::decode(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            error.code,
+            makefigma_protocol::v1::ErrorCode::SchemaVersionUnsupported as i32
+        );
+
+        let mut incompatible_engine =
+            OperationEnvelope::decode(envelope(payload()).as_slice()).unwrap();
+        incompatible_engine.engine_semantics_version = Some(ENGINE_SEMANTICS_VERSION + 1);
+        let request = headers(
+            Request::post(format!("/v1/documents/{}/operations", id_hex(1)))
+                .header(header::CONTENT_TYPE, PROTOBUF_CONTENT_TYPE),
+        )
+        .body(Body::from(incompatible_engine.encode_to_vec()))
+        .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = makefigma_protocol::v1::ProtocolError::decode(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            error.minimum_engine_semantics_version,
+            Some(ENGINE_SEMANTICS_VERSION)
+        );
+        assert_eq!(
+            error.code,
+            makefigma_protocol::v1::ErrorCode::SchemaVersionUnsupported as i32
+        );
+    }
+
+    #[tokio::test]
     async fn durable_http_reopen_serves_the_accepted_snapshot_and_idempotent_replay() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("document-api.sqlite");
@@ -417,6 +571,21 @@ mod tests {
         .unwrap();
         let response = restarted.clone().oneshot(snapshot).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-makefigma-document-revision")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-makefigma-document-hash")
+                .and_then(|value| value.to_str().ok())
+                .map(str::len),
+            Some(64)
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

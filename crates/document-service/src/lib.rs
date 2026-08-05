@@ -86,6 +86,8 @@ impl SubmitReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceError {
     ProtocolVersionUnsupported,
+    SchemaVersionUnsupported,
+    EngineSemanticsUnsupported { minimum: u32 },
     InvalidEnvelope,
     HashMismatch,
     PermissionDenied,
@@ -103,6 +105,14 @@ impl ServiceError {
             Self::ProtocolVersionUnsupported => (
                 v1::ErrorCode::ProtocolVersionUnsupported,
                 "Unsupported protocol version.",
+            ),
+            Self::SchemaVersionUnsupported => (
+                v1::ErrorCode::SchemaVersionUnsupported,
+                "Unsupported schema version.",
+            ),
+            Self::EngineSemanticsUnsupported { .. } => (
+                v1::ErrorCode::SchemaVersionUnsupported,
+                "Unsupported engine semantics version.",
             ),
             Self::InvalidEnvelope => (
                 v1::ErrorCode::InvalidEnvelope,
@@ -145,7 +155,10 @@ impl ServiceError {
                 min_protocol_version: PROTOCOL_VERSION,
                 max_protocol_version: PROTOCOL_VERSION,
             }),
-            minimum_engine_semantics_version: None,
+            minimum_engine_semantics_version: match self {
+                Self::EngineSemanticsUnsupported { minimum } => Some(*minimum),
+                _ => None,
+            },
             details: Default::default(),
         }
     }
@@ -231,6 +244,67 @@ impl<R: CanonicalReducer> DocumentService<R> {
     pub fn load_document(&self, document_id: Id) -> Result<DocumentState, ServiceError> {
         let connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
         load_document(&connection, document_id)?.ok_or(ServiceError::MissingDocument)
+    }
+
+    /** Replaces a document's canonical root after the caller has validated a
+     * complete snapshot. This is reserved for destructive demo resets: its
+     * prior operation history cannot be replayed against the replacement root. */
+    pub fn replace_document(
+        &self,
+        principal: TrustedPrincipal,
+        state: DocumentState,
+    ) -> Result<(), ServiceError> {
+        if state.snapshot.len() > MAX_SNAPSHOT_BYTES {
+            return Err(ServiceError::ResourceLimit);
+        }
+        let mut connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ServiceError::Storage)?;
+        let current = load_document(&transaction, state.document_id)?
+            .ok_or(ServiceError::MissingDocument)?;
+        if current.tenant_id != principal.tenant_id || state.tenant_id != principal.tenant_id {
+            return Err(ServiceError::PermissionDenied);
+        }
+        let editor = transaction
+            .query_row(
+                "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
+                params![state.document_id.as_slice(), principal.actor_id.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| ServiceError::Storage)?;
+        if editor.is_none() {
+            return Err(ServiceError::PermissionDenied);
+        }
+        transaction.execute(
+            "UPDATE documents SET accepted_revision = ?2, document_hash = ?3, snapshot = ?4 WHERE document_id = ?1",
+            params![state.document_id.as_slice(), state.accepted_revision, state.document_hash.as_slice(), state.snapshot],
+        ).map_err(|_| ServiceError::Storage)?;
+        transaction.execute(
+            "DELETE FROM operations WHERE document_id = ?1",
+            params![state.document_id.as_slice()],
+        ).map_err(|_| ServiceError::Storage)?;
+        transaction.commit().map_err(|_| ServiceError::Storage)
+    }
+
+    /// Returns the exact bytes accepted at the transport boundary. This is for
+    /// service-internal relay/audit paths: callers must not decode and re-encode
+    /// these bytes, because doing so can discard future protobuf fields.
+    pub fn stored_operation_envelope(
+        &self,
+        document_id: Id,
+        operation_id: Id,
+    ) -> Result<Option<Vec<u8>>, ServiceError> {
+        let connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
+        connection
+            .query_row(
+                "SELECT envelope FROM operations WHERE document_id = ?1 AND operation_id = ?2",
+                params![document_id.as_slice(), operation_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ServiceError::Storage)
     }
 
     /// Read access is intentionally checked at the service boundary as well as
@@ -378,7 +452,7 @@ fn hash_from_bytes(value: &[u8]) -> Result<Hash, ServiceError> {
 
 fn validate_envelope(operation: &v1::OperationEnvelope) -> Result<(), ServiceError> {
     if operation.schema_version != 1 {
-        return Err(ServiceError::ProtocolVersionUnsupported);
+        return Err(ServiceError::SchemaVersionUnsupported);
     }
     for id in [
         &operation.document_id,
@@ -496,6 +570,30 @@ mod tests {
     }
 
     #[test]
+    fn destructive_replacement_clears_incompatible_operation_history() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = DocumentService::in_memory(TestReducer { calls }).unwrap();
+        service.create_document(state(), &[id(7)]).unwrap();
+        let principal = TrustedPrincipal { tenant_id: id(2), actor_id: id(7) };
+        service.submit(principal, &envelope(9, 0, 99, b"before-reset")).unwrap();
+
+        let snapshot = b"reset-root".to_vec();
+        let replacement = DocumentState {
+            document_id: id(1),
+            tenant_id: id(2),
+            accepted_revision: 0,
+            document_hash: Sha256::digest(&snapshot).into(),
+            snapshot: snapshot.clone(),
+        };
+        service.replace_document(principal, replacement).unwrap();
+        assert_eq!(service.load_document(id(1)).unwrap().snapshot, snapshot);
+
+        let replay = service.submit(principal, &envelope(9, 0, 99, b"after-reset")).unwrap();
+        assert!(!replay.idempotent_replay);
+        assert_eq!(replay.accepted_revision, 1);
+    }
+
+    #[test]
     fn rejects_tampering_conflicts_and_untrusted_actor_without_mutation() {
         let calls = Arc::new(AtomicUsize::new(0));
         let service = DocumentService::in_memory(TestReducer {
@@ -520,6 +618,10 @@ mod tests {
         let raw = envelope(9, 0, 99, b"create");
         service.submit(principal, &raw).unwrap();
         assert_eq!(
+            service.submit(principal, &envelope(9, 1, 99, b"different")),
+            Err(ServiceError::OperationIdConflict)
+        );
+        assert_eq!(
             service.submit(principal, &envelope(10, 0, 99, b"stale")),
             Err(ServiceError::BaseRevisionConflict {
                 expected: 1,
@@ -537,5 +639,35 @@ mod tests {
             Err(ServiceError::PermissionDenied)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn resource_limits_reject_before_reducer_or_durable_document_mutation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = DocumentService::in_memory(TestReducer {
+            calls: calls.clone(),
+        })
+        .unwrap();
+        let mut oversized_state = state();
+        oversized_state.snapshot = vec![0; MAX_SNAPSHOT_BYTES + 1];
+        oversized_state.document_hash = Sha256::digest(&oversized_state.snapshot).into();
+        assert_eq!(
+            service.create_document(oversized_state, &[id(7)]),
+            Err(ServiceError::ResourceLimit)
+        );
+        assert_eq!(service.load_document(id(1)), Err(ServiceError::MissingDocument));
+
+        service.create_document(state(), &[id(7)]).unwrap();
+        let principal = TrustedPrincipal {
+            tenant_id: id(2),
+            actor_id: id(7),
+        };
+        let before = service.load_document(id(1)).unwrap();
+        assert_eq!(
+            service.submit(principal, &vec![0; MAX_OPERATION_BYTES + 1]),
+            Err(ServiceError::ResourceLimit)
+        );
+        assert_eq!(service.load_document(id(1)).unwrap(), before);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

@@ -36,6 +36,11 @@ impl CanonicalReducer for CoreOperationReducer {
         current: &DocumentState,
         input: ReductionInput<'_>,
     ) -> Result<ReducedDocument, ServiceError> {
+        if input.operation.engine_semantics_version != Some(self.engine_semantics_version) {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: self.engine_semantics_version,
+            });
+        }
         let mut document = makefigma_document_codec::document_from_snapshot(
             &current.snapshot,
             current.document_id,

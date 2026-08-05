@@ -25,6 +25,15 @@ export type PendingSyncReport = {
 
 const terminalResolution = (resolution: PendingOperationResolution): resolution is Extract<PendingOperationResolution, { kind: "transformed" | "conflict" | "rejected" }> => resolution.kind !== "accepted";
 
+function causalOperationOrder(left: PendingRemoteOperation, right: PendingRemoteOperation) {
+  const normalizeDocumentId = (value: string) => value.replaceAll("-", "").toLowerCase();
+  if (normalizeDocumentId(left.documentId) === normalizeDocumentId(right.documentId)
+    && left.baseRevision !== right.baseRevision) {
+    return left.baseRevision - right.baseRevision;
+  }
+  return left.createdAtMs - right.createdAtMs;
+}
+
 /**
  * Sends local operations one at a time. Ordering is deliberate: the server's
  * accepted revision is the single-client sequence authority, so a later pending
@@ -41,7 +50,11 @@ export class PendingOperationSynchronizer {
 
   async flush(): Promise<PendingSyncReport> {
     const report: PendingSyncReport = { acceptedOperationIds: [], retryingOperationIds: [], reconciliationRequiredOperationIds: [], events: [] };
-    const operations = await this.store.load();
+    // Storage may legitimately preserve several commits with the same
+    // millisecond timestamp. Reassert the document's revision-chain order at
+    // the delivery boundary so a random UUID tie-breaker can never submit a
+    // later base revision first.
+    const operations = [...await this.store.load()].sort(causalOperationOrder);
     for (const operation of operations) {
       if (operation.reconciliation) {
         report.reconciliationRequiredOperationIds.push(operation.operationId);

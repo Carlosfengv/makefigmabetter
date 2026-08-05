@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyViewportRecord, pendingOperationIsCoveredBySnapshot } from "./local-document";
+import { applyViewportRecord, comparePendingRemoteOperations, pendingOperationIsCoveredBySnapshot } from "./local-document";
 import type { CoreLocalSnapshot, PendingRemoteOperation, ViewportRecord } from "./editor-protocol";
 
 const snapshot: CoreLocalSnapshot = { format: "rust-core-v1", coreRevision: 4, documentHash: "same-core", coreSnapshot: "{}", viewport: { x: 0, y: 0, zoom: 1 }, presentation: [] };
@@ -35,5 +35,25 @@ describe("remote root adoption", () => {
     expect(pendingOperationIsCoveredBySnapshot(operation, operation.documentId.replaceAll("-", ""), 4)).toBe(true);
     expect(pendingOperationIsCoveredBySnapshot(operation, operation.documentId, 3)).toBe(false);
     expect(pendingOperationIsCoveredBySnapshot(operation, "00000000-0000-0000-0000-000000000002", 4)).toBe(false);
+  });
+});
+
+describe("pending remote operation order", () => {
+  it("keeps same-millisecond operations in document revision order", () => {
+    const base: PendingRemoteOperation = {
+      format: "pending-operation-v1",
+      transactionId: "transaction",
+      documentId: "00000000-0000-0000-0000-000000000001",
+      envelope: new Uint8Array(),
+      payloadHash: "hash",
+      localDocumentHash: "document-hash",
+      createdAtMs: 100,
+      attempts: 0,
+      operationId: "z-later",
+      baseRevision: 5,
+    };
+    const ordered = [base, { ...base, operationId: "a-earlier", baseRevision: 4 }]
+      .sort(comparePendingRemoteOperations);
+    expect(ordered.map((operation) => operation.baseRevision)).toEqual([4, 5]);
   });
 });

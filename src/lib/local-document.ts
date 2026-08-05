@@ -230,13 +230,49 @@ export async function loadPendingRemoteOperations() {
     const request = database.transaction(PENDING_OPERATIONS, "readonly").objectStore(PENDING_OPERATIONS).getAll();
     request.onsuccess = () => resolve((request.result as PendingRemoteOperation[])
       .filter((operation) => operation.format === "pending-operation-v1")
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || left.operationId.localeCompare(right.operationId)));
+      .sort(comparePendingRemoteOperations));
     request.onerror = () => reject(request.error);
   });
 }
 
+/** Operations for one document are a revision chain. `createdAtMs` is useful
+ * only across independent documents: multiple local commits can share a
+ * millisecond, and UUID ordering must never let a later base revision bypass
+ * its prerequisite. */
+export function comparePendingRemoteOperations(left: PendingRemoteOperation, right: PendingRemoteOperation) {
+  const normalizedDocumentId = (value: string) => value.replaceAll("-", "").toLowerCase();
+  if (normalizedDocumentId(left.documentId) === normalizedDocumentId(right.documentId)
+    && left.baseRevision !== right.baseRevision) {
+    return left.baseRevision - right.baseRevision;
+  }
+  return left.createdAtMs - right.createdAtMs;
+}
+
 export async function replacePendingRemoteOperation(operation: PendingRemoteOperation) {
   return appendPendingRemoteOperation(operation);
+}
+
+/** Atomically swaps the terminal/original pending sequence for its rebased
+ * replacements. Writing the replacements and removing the old IDs in one
+ * IndexedDB transaction makes a refresh observe either the old causal chain or
+ * the new one, never an empty or duplicated middle state. */
+export async function replacePendingRemoteOperations(
+  removeOperationIds: readonly string[],
+  replacements: readonly PendingRemoteOperation[],
+) {
+  const uniqueRemovals = [...new Set(removeOperationIds)];
+  const replacementIds = new Set(replacements.map((operation) => operation.operationId));
+  if (replacementIds.size !== replacements.length) throw new Error("DUPLICATE_RECONCILIATION_OPERATION");
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(PENDING_OPERATIONS, "readwrite");
+    const store = transaction.objectStore(PENDING_OPERATIONS);
+    replacements.forEach((operation) => store.put(operation));
+    uniqueRemovals.filter((operationId) => !replacementIds.has(operationId)).forEach((operationId) => store.delete(operationId));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Pending-operation reconciliation write failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Pending-operation reconciliation write aborted"));
+  });
 }
 
 export async function removePendingRemoteOperation(operationId: string) {

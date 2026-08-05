@@ -44,6 +44,16 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
                 Ok(Command::CreateInPage { page_id, node })
             }
         }
+        Kind::RestoreNode(value) => {
+            let (page_id, node, asset_id, text_properties) =
+                restored_node_from_proto(value.node.ok_or(ServiceError::InvalidEnvelope)?)?;
+            Ok(Command::RestoreNode {
+                page_id,
+                node,
+                asset_id,
+                text_properties,
+            })
+        }
         Kind::UpdateGeometry(value) => Ok(Command::UpdateGeometry {
             id: node_id(&value.node_id)?,
             x: value.x,
@@ -107,12 +117,23 @@ fn page_from_proto(page: v1::PageRef) -> Result<Page, ServiceError> {
 }
 
 fn node_from_proto(node: v1::SceneNode) -> Result<(PageId, Node, Option<AssetId>), ServiceError> {
-    if node.text_properties.is_some() {
+    let (page_id, node, asset_id, text_properties) = restored_node_from_proto(node)?;
+    if text_properties.is_some() {
         // Rich-text node creation is represented as CreateNode followed by the
         // explicit SetTextProperties operation, so it is an independently
         // hashable and replayable reducer action.
         return Err(ServiceError::InvalidEnvelope);
     }
+    Ok((page_id, node, asset_id))
+}
+
+/// `RestoreNode` carries every property needed to reconstruct a tombstone in a
+/// persisted service snapshot. `CreateNode` continues to keep rich text in its
+/// separately hashable SetTextProperties operation.
+fn restored_node_from_proto(
+    node: v1::SceneNode,
+) -> Result<(PageId, Node, Option<AssetId>, Option<TextProperties>), ServiceError> {
+    let text_properties = node.text_properties.map(text_properties_from_proto).transpose()?;
     let page_id = PageId(id(&node.page_id)?);
     let kind = match v1::NodeKind::try_from(node.kind).map_err(|_| ServiceError::InvalidEnvelope)? {
         v1::NodeKind::Frame => NodeKind::Frame,
@@ -146,6 +167,7 @@ fn node_from_proto(node: v1::SceneNode) -> Result<(PageId, Node, Option<AssetId>
             locked: node.locked,
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
+        text_properties,
     ))
 }
 

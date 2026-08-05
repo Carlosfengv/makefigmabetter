@@ -11,6 +11,13 @@ export type DocumentApiTransportConfig = {
   fetch?: typeof globalThis.fetch;
 };
 
+export type RemoteSnapshot = {
+  snapshot: Uint8Array;
+  /** Present on current Document API responses; absent only for an older proxy. */
+  revision?: number;
+  documentHash?: string;
+};
+
 /** The browser-facing transport deliberately forwards the pending envelope bytes
  * unchanged. It only decodes the service's response, preserving the unknown-field
  * forwarding rule for all outbound operations. */
@@ -63,9 +70,30 @@ export class DocumentApiTransport implements PendingOperationTransport {
     throw new Error(response.status === 409 ? "REMOTE_DOCUMENT_CONFLICT" : "REMOTE_DOCUMENT_CREATE_FAILED");
   }
 
+  /** Replaces the remote canonical root for the explicit destructive Reset demo
+   * action. The server validates and authorizes the opaque snapshot. */
+  async resetDocument(documentId: string, snapshot: Uint8Array) {
+    const response = await this.fetch(`${this.config.baseUrl.replace(/\/$/, "")}/v1/documents/${encodeURIComponent(documentId)}/reset`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/x-protobuf",
+        "x-makefigma-dev-tenant-id": this.config.tenantId,
+        "x-makefigma-dev-actor-id": this.config.actorId,
+      },
+      body: new Uint8Array(snapshot).buffer,
+    });
+    if (!response.ok) throw new Error(response.status === 404 ? "REMOTE_DOCUMENT_MISSING" : "REMOTE_DOCUMENT_RESET_FAILED");
+  }
+
   /** Retrieves the canonical server snapshot verbatim. Validation happens in
    * Rust/WASM before it can replace the locally projected document. */
   async loadSnapshot(documentId: string): Promise<Uint8Array> {
+    return (await this.loadSnapshotWithMetadata(documentId)).snapshot;
+  }
+
+  /** Returns opaque snapshot bytes plus service-owned evidence metadata. The
+   * caller must still hand the bytes to Rust/WASM for validation. */
+  async loadSnapshotWithMetadata(documentId: string): Promise<RemoteSnapshot> {
     const response = await this.fetch(`${this.config.baseUrl.replace(/\/$/, "")}/v1/documents/${encodeURIComponent(documentId)}/snapshot`, {
       headers: {
         "x-makefigma-dev-tenant-id": this.config.tenantId,
@@ -73,7 +101,13 @@ export class DocumentApiTransport implements PendingOperationTransport {
       },
     });
     if (!response.ok) throw new Error(response.status === 404 ? "REMOTE_DOCUMENT_MISSING" : "REMOTE_SNAPSHOT_UNAVAILABLE");
-    return new Uint8Array(await response.arrayBuffer());
+    const revision = numericRevision(response.headers.get("x-makefigma-document-revision"));
+    const documentHash = canonicalHash(response.headers.get("x-makefigma-document-hash"));
+    return {
+      snapshot: new Uint8Array(await response.arrayBuffer()),
+      ...(revision !== undefined ? { revision } : {}),
+      ...(documentHash ? { documentHash } : {}),
+    };
   }
 }
 
@@ -95,10 +129,14 @@ function errorAck(operationId: string, error: ReturnType<typeof ProtocolError.de
   };
 }
 
-function numericRevision(revision: string | undefined) {
-  if (revision === undefined) return undefined;
+function numericRevision(revision: string | null | undefined) {
+  if (revision === undefined || revision === null) return undefined;
   const number = Number(revision);
   return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
+}
+
+function canonicalHash(value: string | null) {
+  return value && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : undefined;
 }
 
 function hex(value: Uint8Array) { return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
