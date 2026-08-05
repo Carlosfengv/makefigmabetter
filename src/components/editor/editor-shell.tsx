@@ -47,7 +47,6 @@ const blankSnapshot: EditorSnapshot = { documentId: "00000000-0000-0000-0000-000
 type DocumentUiState = Pick<EditorSnapshot, "documentId" | "revision" | "documentHash" | "memory" | "resources" | "diagnostics" | "nodes" | "assets" | "pages" | "activePageId" | "canUndo" | "canRedo" | "renderer" | "gpu" | "documentCore" | "localSnapshot" | "localJournalEntry">;
 type SelectionUiState = { selectedIds: string[] };
 type ViewUiState = { viewport: EditorSnapshot["viewport"]; performance?: EditorSnapshot["performance"] };
-const writerLockName = "makefigma:starter-document";
 const localDevTenantId = "00000000-0000-0000-0000-000000000002";
 const localDevActorId = "00000000-0000-0000-0000-000000000007";
 const documentApiUrl = process.env.NEXT_PUBLIC_DOCUMENT_API_URL ?? "/document-api";
@@ -503,7 +502,8 @@ function changesDocument(command: EditorCommand) {
   return command.type !== "select" && command.type !== "select-page";
 }
 
-export function EditorShell() {
+export function EditorShell({ documentId, documentName = "Orbit card exploration", workspaceHref, remoteSync = true, writerLock = true, onRenameDocument, onDocumentSaved }: { documentId?: string; documentName?: string; workspaceHref?: string; remoteSync?: boolean; writerLock?: boolean; onRenameDocument?: (name: string) => void; onDocumentSaved?: (revision: number) => void }) {
+  const writerLockName = `makefigma:${documentId ?? "starter-document"}`;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // An OffscreenCanvas transfer is irreversible. Development Strict Mode and
   // Fast Refresh can re-run this component effect against the old element, so
@@ -566,6 +566,8 @@ export function EditorShell() {
   const [mainThreadMonitor, setMainThreadMonitor] = useState<"waiting" | "monitoring" | "unavailable">("waiting");
   const [mainThreadMonitoringEnabled, setMainThreadMonitoringEnabled] = useState(false);
   const [canvasTextEdit, setCanvasTextEdit] = useState<CanvasTextEdit>();
+  const [renameMode, setRenameMode] = useState(false);
+  const [nameDraft, setNameDraft] = useState(documentName);
   const canvasTextCommitRef = useRef(false);
   const canvasTextIsComposingRef = useRef(false);
   const canvasTextEditorRef = useRef<HTMLDivElement>(null);
@@ -590,6 +592,12 @@ export function EditorShell() {
   const simulateWorkerCrashes = useMemo(() => requestedEngineCrashSimulationCount(), []);
   const simulateWorkerCrashDelayMs = useMemo(() => requestedEngineCrashSimulationDelayMs(), []);
   const snapshot = useMemo(() => ({ ...documentState, ...selectionState, ...viewState }) as EditorSnapshot, [documentState, selectionState, viewState]);
+  useEffect(() => { if (!renameMode) setNameDraft(documentName); }, [documentName, renameMode]);
+  const commitDocumentName = useCallback(() => {
+    const next = nameDraft.trim();
+    if (next && next.length <= 100) onRenameDocument?.(next);
+    setRenameMode(false);
+  }, [nameDraft, onRenameDocument]);
 
   useLayoutEffect(() => {
     if (canvasTextEditNodeId === undefined || canvasTextCaret === undefined || canvasTextSelectionAnchor === undefined) return;
@@ -769,10 +777,11 @@ export function EditorShell() {
   }, []);
 
   useEffect(() => {
+    if (!remoteSync) return;
     const retry = () => { void synchronizePendingOperations(); };
     window.addEventListener("online", retry);
     return () => window.removeEventListener("online", retry);
-  }, [synchronizePendingOperations]);
+  }, [remoteSync, synchronizePendingOperations]);
 
   useEffect(() => {
     const queue = createEditorTransactionQueue({
@@ -844,6 +853,12 @@ export function EditorShell() {
   }, [postInput]);
 
   useEffect(() => {
+    if (!writerLock) {
+      writerRef.current = accessPreference === "edit";
+      setWriterMode(accessPreference === "edit" ? "owner" : "read-only");
+      setStatus(accessPreference === "edit" ? "Engine worker online · server conflict protection active" : "Engine worker online · view-only mode");
+      return () => { writerRef.current = false; };
+    }
     const channel = new BroadcastChannel(writerLockName);
     const optimisticUpdates = optimisticUpdatesRef.current;
     editIntentRef.current ??= { at: Date.now(), id: createId() };
@@ -913,7 +928,7 @@ export function EditorShell() {
       channel.close();
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [accessPreference, post]);
+  }, [accessPreference, post, writerLock]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -955,7 +970,7 @@ export function EditorShell() {
         }).catch(() => setStorageNotice("local storage status unavailable"));
         try {
           const recoverySnapshot = recoverySnapshotRef.current;
-          const local = recoverySnapshot ?? fixtureSnapshot ?? await loadLocalDocument();
+          const local = recoverySnapshot ?? fixtureSnapshot ?? await loadLocalDocument(documentId);
           if (local) {
             if (recoverySnapshot) setStatus("Engine worker online · recovered confirmed snapshot");
             else if (fixtureSnapshot) setStatus(`Engine worker online · ${fixtureStatus}`);
@@ -967,12 +982,12 @@ export function EditorShell() {
         // Hydration starts an async WASM bridge load. Post on the next task so
         // the worker has registered that load before it records the bootstrap
         // request; the worker then emits only the final canonical state.
-        if (!fixtureSnapshot) setTimeout(() => {
+        if (!fixtureSnapshot && remoteSync) setTimeout(() => {
           if (!disposed) post({ type: "remote-bootstrap" });
         }, 0);
       }
       if (data.type === "remote-bootstrap") {
-        if (resetPendingRef.current) return;
+        if (!remoteSync || resetPendingRef.current) return;
         if (!restoredRef.current || fixtureSnapshot || remoteBootstrapRequestedRef.current) return;
         remoteBootstrapRequestedRef.current = true;
         const transport = new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId });
@@ -1068,9 +1083,9 @@ export function EditorShell() {
         // documents retain the durable, ordered remote reconciliation path.
         const adopted = remoteAdoptedRevisionRef.current;
         const alreadyRepresented = adopted && pendingOperationIsCoveredBySnapshot(data.operation, adopted.documentId, adopted.revision);
-        if (!disposed && !fixtureSnapshot && !alreadyRepresented) void synchronizePendingOperations(data.operation);
+        if (!disposed && remoteSync && !fixtureSnapshot && !alreadyRepresented) void synchronizePendingOperations(data.operation);
       }
-      if (data.type === "remote-reconciled" && !disposed && !fixtureSnapshot) {
+      if (data.type === "remote-reconciled" && !disposed && remoteSync && !fixtureSnapshot) {
         if (data.coreRejectedOperationIds.length) setStatus("Engine worker online · local operations conflict with the remote document");
         else if (data.discardedOperationIds.length) setStatus(`Engine worker online · ${data.rejectionDiagnostics[0] ?? "invalid local operations were discarded during reconciliation"}`);
         void synchronizePendingOperations(undefined, data);
@@ -1167,6 +1182,7 @@ export function EditorShell() {
           }
         }
         setDocumentState(projectedSnapshot);
+        if (documentId && data.snapshot.revision > 0) onDocumentSaved?.(data.snapshot.revision);
         setSelectionState({ selectedIds: projectedSnapshot.selectedIds });
         setViewState({ viewport: projectedSnapshot.viewport, performance: projectedSnapshot.performance });
         if (data.snapshot.localSnapshot && simulatedWorkerCrashesRef.current < simulateWorkerCrashes && !crashSimulationTimer) {
@@ -1180,8 +1196,8 @@ export function EditorShell() {
           persistenceQueue.current = persistenceQueue.current
             .catch(() => undefined)
             .then(async () => {
-              if (localJournalEntry) await appendLocalJournalEntry(localJournalEntry);
-              await saveLocalDocument(localSnapshot);
+              if (localJournalEntry) await appendLocalJournalEntry(localJournalEntry, documentId);
+              await saveLocalDocument(localSnapshot, documentId);
               channelRef.current?.postMessage({ type: "snapshot", snapshot: localSnapshot } satisfies TabMessage);
             })
             .catch((reason: unknown) => setStatus(reason instanceof Error && reason.message === "LOCAL_STORAGE_QUOTA_EXCEEDED" ? "Engine worker online · local storage is full" : "Engine worker online · save paused"));
@@ -1214,7 +1230,7 @@ export function EditorShell() {
           .catch(() => undefined)
           .then(async () => {
             const startedAt = performance.now();
-            await saveViewportRecord({ format: "viewport-record-v1", viewport: data.viewport, documentHash: data.documentHash, coreRevision: data.coreRevision });
+            await saveViewportRecord({ format: "viewport-record-v1", viewport: data.viewport, documentHash: data.documentHash, coreRevision: data.coreRevision }, documentId);
             viewportCheckpointSamplerRef.current.record(performance.now() - startedAt);
             setViewportCheckpoints(viewportCheckpointSamplerRef.current.summary());
           })
@@ -1248,9 +1264,9 @@ export function EditorShell() {
     };
     const offscreen = canvas.transferControlToOffscreen();
     transferredCanvasRef.current = canvas;
-    post({ type: "init", canvas: offscreen, width: canvas.clientWidth, height: canvas.clientHeight, dpr: window.devicePixelRatio || 1, rendererPreference, simulateGpuLosses, simulateGpuLossAfterImage, simulateGpuFault }, [offscreen]);
+    post({ type: "init", canvas: offscreen, width: canvas.clientWidth, height: canvas.clientHeight, dpr: window.devicePixelRatio || 1, documentId, rendererPreference, simulateGpuLosses, simulateGpuLossAfterImage, simulateGpuFault }, [offscreen]);
     return () => { disposed = true; if (crashSimulationTimer) clearTimeout(crashSimulationTimer); if (remoteBootstrapRetryTimer) clearTimeout(remoteBootstrapRetryTimer); observer.disconnect(); worker.terminate(); if (workerRef.current === worker) workerRef.current = null; };
-  }, [canvasGeneration, ensureMainFontFace, fixtureAssetNodes, fixtureAssetSeeds, fixtureSnapshot, fixtureStatus, post, recoverWorker, rehydrateFromRemote, rendererPreference, simulateGpuFault, simulateGpuLossAfterImage, simulateGpuLosses, simulateWorkerCrashDelayMs, simulateWorkerCrashes, synchronizePendingOperations]);
+  }, [canvasGeneration, documentId, ensureMainFontFace, fixtureAssetNodes, fixtureAssetSeeds, fixtureSnapshot, fixtureStatus, onDocumentSaved, post, recoverWorker, rehydrateFromRemote, remoteSync, rendererPreference, simulateGpuFault, simulateGpuLossAfterImage, simulateGpuLosses, simulateWorkerCrashDelayMs, simulateWorkerCrashes, synchronizePendingOperations]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1611,8 +1627,8 @@ export function EditorShell() {
   return (
     <main className="editor-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark">M</span><span>MAKE / FIGMA</span><small>alpha 01</small></div>
-        <div className="document-name"><span className="sync-dot" />Orbit card exploration <span>• saved locally</span></div>
+        {workspaceHref ? <button className="editor-back-button" type="button" onClick={() => window.location.assign(workspaceHref)} aria-label="返回工作区"><span aria-hidden="true">←</span><span>返回工作区</span></button> : <div className="brand"><span className="brand-mark">M</span><span>MAKE / FIGMA</span><small>alpha 01</small></div>}
+        <div className="document-name"><span className="sync-dot" />{renameMode ? <input aria-label="文档名称" autoFocus maxLength={100} value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} onBlur={commitDocumentName} onKeyDown={(event) => { if (event.key === "Enter") commitDocumentName(); if (event.key === "Escape") { setNameDraft(documentName); setRenameMode(false); } }} /> : <button type="button" onClick={() => onRenameDocument && setRenameMode(true)} title={onRenameDocument ? "重命名文档" : undefined}>{documentName}</button>} <span>• saved locally</span></div>
         <div className="top-actions">
           <div className="access-toggle" role="group" aria-label="Document access mode">
             <button type="button" aria-pressed={accessPreference === "view"} onClick={() => setAccessMode("view")}>只读</button>

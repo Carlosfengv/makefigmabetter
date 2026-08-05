@@ -1042,6 +1042,11 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
         if (!hydrated) throw new Error("INVALID_LEGACY_PROJECTION");
         engine.seed_batch_json(JSON.stringify(hydrated.batch));
       }
+      // A workspace document gets its own Canonical identity before its first
+      // local or remote snapshot is emitted. The seeded starter canvas remains
+      // identical, but its operation history can never collide with another file.
+      const seeded = JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot;
+      if (seeded.documentId !== documentId) engine.load_snapshot_json(JSON.stringify({ ...seeded, documentId }));
     }
     if (loadSequence !== bridgeLoadSequence) return;
     wasmDocument = engine;
@@ -2088,7 +2093,7 @@ function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "poin
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
-    if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
+    if (data.type === "init") { documentId = data.documentId ?? documentId; canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
     else if (data.type === "tool") { tool = data.tool; }
     else if (data.type === "checkpoint") emitViewportCheckpoint();

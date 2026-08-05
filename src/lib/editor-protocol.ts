@@ -321,7 +321,7 @@ export type EditorInputEvent =
   | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean };
 
 export type MainToWorker =
-  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
+  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; documentId?: string; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
   | { type: "resize"; width: number; height: number; dpr: number }
   | { type: "tool"; tool: ToolKind }
   /** Requests a durable Core snapshot after a burst of ephemeral viewport input. */

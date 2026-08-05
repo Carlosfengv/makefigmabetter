@@ -6,8 +6,15 @@ const JOURNAL = "journal";
 const PENDING_OPERATIONS = "pending-operations";
 const SNAPSHOTS = "snapshots";
 const KEY = "starter-document";
-const VIEWPORT_KEY = `${KEY}:viewport`;
 const OPFS_DIRECTORY = "makefigma-snapshots-v1";
+
+/** Existing alpha records retain their historical key. New workspace documents
+ * receive a separate durable namespace so opening one cannot hydrate another. */
+function documentKey(documentId?: string) {
+  return documentId ? `document:${documentId}` : KEY;
+}
+function viewportKey(documentId?: string) { return `${documentKey(documentId)}:viewport`; }
+function journalPrefix(documentId?: string) { return `${documentKey(documentId)}:journal:`; }
 
 /** Snapshot payloads moved to OPFS without changing old IndexedDB records. */
 type SnapshotRecord = {
@@ -48,10 +55,11 @@ function getValue<T>(database: IDBDatabase, store: string, key: IDBValidKey): Pr
   });
 }
 
-function getAllJournal(database: IDBDatabase): Promise<LocalJournalEntry[]> {
+function getAllJournal(database: IDBDatabase, documentId?: string): Promise<LocalJournalEntry[]> {
+  const prefix = journalPrefix(documentId);
   return new Promise((resolve, reject) => {
     const request = database.transaction(JOURNAL, "readonly").objectStore(JOURNAL).getAll();
-    request.onsuccess = () => resolve((request.result as LocalJournalEntry[]).filter((entry) => entry.format === "rust-core-operation-v1").sort((a, b) => a.acceptedRevision - b.acceptedRevision));
+    request.onsuccess = () => resolve((request.result as LocalJournalEntry[]).filter((entry) => entry.format === "rust-core-operation-v1" && (documentId ? entry.id.startsWith(prefix) : !entry.id.includes(":journal:"))).map((entry) => documentId ? { ...entry, id: entry.id.slice(prefix.length) } : entry).sort((a, b) => a.acceptedRevision - b.acceptedRevision));
     request.onerror = () => reject(request.error);
   });
 }
@@ -160,27 +168,86 @@ function migrateCoreRevision(snapshot: CoreLocalSnapshot): CoreLocalSnapshot | u
   try { return { ...snapshot, coreRevision: Number((JSON.parse(snapshot.coreSnapshot) as { revision: number }).revision) }; } catch { return undefined; }
 }
 
-export async function loadLocalDocument(): Promise<LocalDocumentSnapshot | undefined> {
+/** A snapshot namespace is not trusted on its own: older builds used one
+ * shared key, so a stale record can physically sit under a newer document key.
+ * Never hydrate that record into a different document. */
+function belongsToDocument(snapshot: CoreLocalSnapshot, documentId?: string) {
+  if (!documentId) return true;
+  try {
+    const storedId = (JSON.parse(snapshot.coreSnapshot) as { documentId?: unknown }).documentId;
+    return typeof storedId === "string" && storedId.replaceAll("-", "").toLowerCase() === documentId.replaceAll("-", "").toLowerCase();
+  } catch { return false; }
+}
+
+export async function loadLocalDocument(documentId?: string): Promise<LocalDocumentSnapshot | undefined> {
   const database = await openDatabase();
-  const [stored, journal, viewportRecord] = await Promise.all([getValue<Manifest | CoreLocalSnapshot | Pick<LegacyProjectionSnapshot, "nodes" | "viewport">>(database, DOCUMENTS, KEY), getAllJournal(database), getValue<ViewportRecord>(database, DOCUMENTS, VIEWPORT_KEY)]);
+  const key = documentKey(documentId);
+  const [stored, journal, viewportRecord] = await Promise.all([getValue<Manifest | CoreLocalSnapshot | Pick<LegacyProjectionSnapshot, "nodes" | "viewport">>(database, DOCUMENTS, key), getAllJournal(database, documentId), getValue<ViewportRecord>(database, DOCUMENTS, viewportKey(documentId))]);
   if (!stored) return undefined;
 
   if ("format" in stored && stored.format === "local-manifest-v1") {
     const manifest = stored as Manifest;
     const [active, previous] = await Promise.all([getValue<SnapshotRecord>(database, SNAPSHOTS, manifest.activeSnapshotKey), manifest.previousSnapshotKey ? getValue<SnapshotRecord>(database, SNAPSHOTS, manifest.previousSnapshotKey) : Promise.resolve(undefined)]);
     const current = await validSnapshot(active);
-    if (current) return attachViewportRecord(current, journal, viewportRecord);
+    if (current && belongsToDocument(current, documentId)) return attachViewportRecord(current, journal, viewportRecord);
     const fallback = await validSnapshot(previous);
-    if (fallback) return { ...attachViewportRecord(fallback, journal, viewportRecord), recoveredFromPrevious: true };
+    if (fallback && belongsToDocument(fallback, documentId)) return { ...attachViewportRecord(fallback, journal, viewportRecord), recoveredFromPrevious: true };
     return undefined;
   }
 
   if ("coreSnapshot" in stored && typeof stored.coreSnapshot === "string") {
     const snapshot = migrateCoreRevision(stored as CoreLocalSnapshot);
-    return snapshot ? attachViewportRecord(snapshot, journal, viewportRecord) : undefined;
+    return snapshot && belongsToDocument(snapshot, documentId) ? attachViewportRecord(snapshot, journal, viewportRecord) : undefined;
   }
   if ("nodes" in stored && Array.isArray(stored.nodes)) return { format: "legacy-projection-v0", nodes: stored.nodes, viewport: stored.viewport } satisfies LegacyProjectionSnapshot;
   return undefined;
+}
+
+/** Copies the latest durable Core state into a new document namespace. A copy
+ * intentionally starts at revision 0: its pixels and nodes match the source,
+ * while later saves form an independent version chain. */
+export async function copyLocalDocument(sourceDocumentId: string, targetDocumentId: string) {
+  const source = await loadLocalDocument(sourceDocumentId);
+  if (!source || source.format !== "rust-core-v1") return false;
+  try {
+    const core = JSON.parse(source.coreSnapshot) as Record<string, unknown>;
+    const copied: CoreLocalSnapshot = {
+      ...source,
+      coreRevision: 0,
+      coreSnapshot: JSON.stringify({ ...core, documentId: targetDocumentId, revision: 0, canonicalHash: "" }),
+      documentHash: undefined,
+      journal: undefined,
+    };
+    await saveLocalDocument(copied, targetDocumentId);
+    return true;
+  } catch { return false; }
+}
+
+/** Removes browser recovery state after the durable document has been purged.
+ * A failed local cleanup is intentionally non-fatal: the server deletion is the
+ * authority, and an orphaned local snapshot can never be reopened by URL. */
+export async function removeLocalDocument(documentId: string) {
+  const database = await openDatabase();
+  const key = documentKey(documentId);
+  const manifest = await getValue<Manifest>(database, DOCUMENTS, key);
+  const snapshotKeys = manifest?.format === "local-manifest-v1"
+    ? [manifest.activeSnapshotKey, manifest.previousSnapshotKey].filter((value): value is string => Boolean(value))
+    : [];
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction([DOCUMENTS, JOURNAL, PENDING_OPERATIONS, SNAPSHOTS], "readwrite");
+    const documents = transaction.objectStore(DOCUMENTS);
+    documents.delete(key);
+    documents.delete(viewportKey(documentId));
+    snapshotKeys.forEach((snapshotKey) => transaction.objectStore(SNAPSHOTS).delete(snapshotKey));
+    const journal = transaction.objectStore(JOURNAL).openCursor();
+    journal.onsuccess = () => { const entry = journal.result; if (!entry) return; if (String(entry.key).startsWith(journalPrefix(documentId))) entry.delete(); entry.continue(); };
+    const pending = transaction.objectStore(PENDING_OPERATIONS).openCursor();
+    pending.onsuccess = () => { const entry = pending.result; if (!entry) return; const value = entry.value as PendingRemoteOperation; if (value.documentId.replaceAll("-", "").toLowerCase() === documentId.replaceAll("-", "").toLowerCase()) entry.delete(); entry.continue(); };
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error("Local document cleanup aborted"));
+  });
+  await Promise.all(snapshotKeys.map((snapshotKey) => removeOpfsSnapshot(snapshotKey)));
 }
 
 function attachViewportRecord(snapshot: CoreLocalSnapshot, journal: LocalJournalEntry[], record: ViewportRecord | undefined): CoreLocalSnapshot {
@@ -194,19 +261,19 @@ export function applyViewportRecord(snapshot: CoreLocalSnapshot, record: Viewpor
 }
 
 /** A viewport is UI state, so it has a tiny independent persistence path. */
-export async function saveViewportRecord(record: ViewportRecord) {
+export async function saveViewportRecord(record: ViewportRecord, documentId?: string) {
   const database = await openDatabase();
   return new Promise<void>((resolve, reject) => {
-    const request = database.transaction(DOCUMENTS, "readwrite").objectStore(DOCUMENTS).put(record, VIEWPORT_KEY);
+    const request = database.transaction(DOCUMENTS, "readwrite").objectStore(DOCUMENTS).put(record, viewportKey(documentId));
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
 }
 
-export async function appendLocalJournalEntry(entry: LocalJournalEntry) {
+export async function appendLocalJournalEntry(entry: LocalJournalEntry, documentId?: string) {
   const database = await openDatabase();
   return new Promise<void>((resolve, reject) => {
-    const request = database.transaction(JOURNAL, "readwrite").objectStore(JOURNAL).put(entry);
+    const request = database.transaction(JOURNAL, "readwrite").objectStore(JOURNAL).put(documentId ? { ...entry, id: `${journalPrefix(documentId)}${entry.id}` } : entry);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
@@ -320,8 +387,10 @@ export async function removePendingRemoteOperationsCoveredBySnapshot(documentId:
 
 /** Writes an immutable record first, then atomically switches the Manifest pointer.
  * The previous pointer is retained so a corrupt active record never bricks recovery. */
-export async function saveLocalDocument(snapshot: CoreLocalSnapshot) {
+export async function saveLocalDocument(snapshot: CoreLocalSnapshot, documentId?: string) {
+  if (!belongsToDocument(snapshot, documentId)) throw new Error("LOCAL_DOCUMENT_ID_MISMATCH");
   const database = await openDatabase();
+  const key = documentKey(documentId);
   const persisted = normalizedSnapshot(snapshot);
   const id = crypto.randomUUID();
   const hash = await contentHash(persisted);
@@ -344,19 +413,20 @@ export async function saveLocalDocument(snapshot: CoreLocalSnapshot) {
     const snapshotStore = transaction.objectStore(SNAPSHOTS);
     const journalStore = transaction.objectStore(JOURNAL);
     let staleSnapshotKey: string | undefined;
-    const currentRequest = documentStore.get(KEY);
+    const currentRequest = documentStore.get(key);
     currentRequest.onsuccess = () => {
       const current = currentRequest.result as Manifest | undefined;
       const previousSnapshotKey = current?.format === "local-manifest-v1" ? current.activeSnapshotKey : undefined;
       staleSnapshotKey = current?.format === "local-manifest-v1" ? current.previousSnapshotKey : undefined;
       snapshotStore.put(record);
-      documentStore.put({ format: "local-manifest-v1", activeSnapshotKey: record.id, ...(previousSnapshotKey ? { previousSnapshotKey } : {}) } satisfies Manifest, KEY);
+      documentStore.put({ format: "local-manifest-v1", activeSnapshotKey: record.id, ...(previousSnapshotKey ? { previousSnapshotKey } : {}) } satisfies Manifest, key);
       if (staleSnapshotKey && staleSnapshotKey !== previousSnapshotKey) snapshotStore.delete(staleSnapshotKey);
       const cursor = journalStore.openCursor();
       cursor.onsuccess = () => {
         const entry = cursor.result;
         if (!entry) return;
-        if ((entry.value as LocalJournalEntry).acceptedRevision <= persisted.coreRevision) entry.delete();
+        const value = entry.value as LocalJournalEntry;
+        if ((!documentId || value.id.startsWith(journalPrefix(documentId))) && value.acceptedRevision <= persisted.coreRevision) entry.delete();
         entry.continue();
       };
     };
