@@ -30,7 +30,7 @@ esac
 
 performance_probe='(async () => { const canvas = document.querySelector("canvas"); if (!canvas) throw new Error("Canvas not found"); const frame = () => new Promise((resolve) => requestAnimationFrame(resolve)); const wheel = (deltaX) => canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, clientX: 720, clientY: 480, deltaX, deltaY: 0 })); for (let index = 0; index < 120; index += 1) { wheel(1); await frame(); wheel(-1); await frame(); } await new Promise((resolve) => setTimeout(resolve, 300)); return document.querySelector("[aria-label=\"Render evidence\"]")?.getAttribute("data-render-performance") ?? ""; })()'
 
-session="makefigma-phase1-render-composite-evidence"
+session="makefigma-phase1-render-composite-${RANDOM}${RANDOM}"
 "$pwcli" --session "$session" open "$evidence_url" | tee "$evidence_dir/open.log"
 "$pwcli" --session "$session" resize 1440 960 | tee "$evidence_dir/resize.log"
 ready=0
@@ -51,6 +51,8 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 "$pwcli" --session "$session" screenshot --filename "$evidence_dir/phase1-render-composite.png" | tee "$evidence_dir/screenshot.log"
+environment_probe='JSON.stringify({ userAgent: navigator.userAgent, viewport: { width: window.innerWidth, height: window.innerHeight }, dpr: window.devicePixelRatio, webgpu: Boolean(navigator.gpu), hardwareConcurrency: navigator.hardwareConcurrency ?? null })'
+"$pwcli" --session "$session" eval "$environment_probe" | tee "$evidence_dir/browser-environment.txt"
 "$pwcli" --session "$session" console | tee "$evidence_dir/console.txt"
 if ! rg -Fq "Errors: 0" "$evidence_dir/console.txt"; then
   echo "Phase 1 composite evidence capture emitted browser console errors." >&2

@@ -33,6 +33,9 @@ esac
 }
 
 describe("Phase 1 editing evidence capture", () => {
+  // This fixture starts a shell runner; under a fully parallel Vitest suite it
+  // can wait behind other evidence processes despite normally finishing in
+  // well under a second.
   it("records toolbar creation, pointer drawing, undo and redo", () => {
     const directory = mkdtempSync(join(tmpdir(), "makefigma-phase1-editing-"));
     const evidenceDirectory = join(directory, "evidence");
@@ -53,5 +56,5 @@ describe("Phase 1 editing evidence capture", () => {
       rmSync(stateFile, { force: true });
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

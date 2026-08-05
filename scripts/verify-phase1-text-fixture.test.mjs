@@ -17,6 +17,8 @@ function setup({ corrupt = false } = {}) {
       { id: "one", name: "Mixed script styles", kind: "text", text: "A😀B", textProperties: { runs: [{ start: 0, end: corrupt ? 2 : 6 }] } },
       { id: "two", name: "RTL and Indic paragraphs", kind: "text", text: "مرحبا", textProperties: { runs: [] } },
       { id: "three", name: "Emoji and combining marks", kind: "text", text: "é", textProperties: { runs: [] } },
+      { id: "four", name: "Ligature variable font axes", kind: "text", text: "office fi ffi", textProperties: { runs: [{ start: 0, end: 13, font: { variationAxes: [{ tag: "wdth", value: 92 }, { tag: "wght", value: 650 }] } }] } },
+      { id: "five", name: "Fallback and missing glyph", kind: "text", text: "Fallback: 汉字 □", textProperties: { runs: [], fallbackFonts: [{ assetId: "fallback", faceIndex: 0 }] } },
     ],
   };
   const fixtureText = JSON.stringify(fixture);
@@ -27,7 +29,7 @@ function setup({ corrupt = false } = {}) {
     fixture: "fixture.json",
     fixtureSha256,
     fixtureName: "F-TEXT-MULTILINGUAL",
-    requiredNodeNames: ["Mixed script styles", "RTL and Indic paragraphs", "Emoji and combining marks"],
+    requiredNodeNames: ["Mixed script styles", "RTL and Indic paragraphs", "Emoji and combining marks", "Ligature variable font axes", "Fallback and missing glyph"],
   }));
   return { root, manifestPath: "manifest.json" };
 }
@@ -36,7 +38,7 @@ afterEach(() => { directories.splice(0).forEach((directory) => rmSync(directory,
 
 describe("Phase 1 text fixture verifier", () => {
   it("accepts the immutable contract", () => {
-    expect(verifyPhase1TextFixture(setup())).toMatchObject({ status: "pass", textNodeCount: 3 });
+    expect(verifyPhase1TextFixture(setup())).toMatchObject({ status: "pass", textNodeCount: 5 });
   });
 
   it("rejects a style range that cuts through an emoji", () => {

@@ -1,0 +1,24 @@
+{
+  "format": "makefigma-phase1-snapshot-fixture-manifest-v1",
+  "currentSchemaVersion": 15,
+  "fixtures": [
+    {
+      "schemaVersion": 13,
+      "fixture": "fixtures/documents/phase1-snapshot-v13.fixture.json",
+      "sourceSha256": "7613677195478720493e50fe66a7ffbb2d287c4f4424bb23a1f5a028c8977612",
+      "expectedCanonicalHash": "cb588c3ca07162fa024dc0f0f3cf514384ef4d828869f0b9bfff7b6d806285b7"
+    },
+    {
+      "schemaVersion": 14,
+      "fixture": "fixtures/documents/phase1-snapshot-v14.fixture.json",
+      "sourceSha256": "da5510d4eef9ae7440b1e91962ab3c92d4875f2602d15ead3947a2c2f797d04c",
+      "expectedCanonicalHash": "9491e6b70382099a15ac37ba861ab8c25e7a2c95b984d15b961d489f2b3c147c"
+    },
+    {
+      "schemaVersion": 15,
+      "fixture": "fixtures/documents/phase1-snapshot-v15.fixture.json",
+      "sourceSha256": "b7d764b4bd7aa25ad8359e5dbc8b8c27920f3b33db17b24b01ad2f939a4da63f",
+      "expectedCanonicalHash": "eb71386a777c71c0382a15d57f4198fcc414e8131f61a00671152c2a08ae7268"
+    }
+  ]
+}

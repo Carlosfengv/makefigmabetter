@@ -4,7 +4,7 @@ set -euo pipefail
 base_url="${1:-http://127.0.0.1:3000}"
 evidence_dir="${2:-output/phase1-image-recovery/$(date -u +%Y%m%dT%H%M%SZ)}"
 pwcli="${PWCLI:-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh}"
-session="makefigma-phase1-image-recovery"
+session="makefigma-phase1-image-recovery-${RANDOM}${RANDOM}"
 
 if ! command -v npx >/dev/null 2>&1; then
   echo "npx is required to run the Playwright recovery capture." >&2

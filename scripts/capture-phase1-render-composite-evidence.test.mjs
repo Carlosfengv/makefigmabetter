@@ -17,7 +17,13 @@ case "$3" in
   snapshot) echo "WebGPU scene active · Rust/WASM bridge ready · fixed Phase 1 render composite fixture loaded" ;;
   screenshot) printf "composite-capture" > "$5" ;;
   console) echo "Total messages: 1 (Errors: 0, Warnings: 0)" ;;
-  eval) echo '"{\\"samples\\":240,\\"p50Ms\\":0.4,\\"p95Ms\\":0.8,\\"maxMs\\":1.2}"' ;;
+  eval)
+    if [[ "$*" == *"navigator.userAgent"* ]]; then
+      echo '{"userAgent":"fixture-chromium","viewport":{"width":1440,"height":960},"dpr":1,"webgpu":true,"hardwareConcurrency":8}'
+    else
+      echo '"{\\"samples\\":240,\\"p50Ms\\":0.4,\\"p95Ms\\":0.8,\\"maxMs\\":1.2}"'
+    fi
+    ;;
   *) echo "unexpected command: $3" >&2; exit 64 ;;
 esac
 `);
@@ -35,8 +41,9 @@ describe("Phase 1 composite evidence capture", () => {
     });
     expect(result.status).toBe(0);
     const metadata = JSON.parse(readFileSync(join(evidenceDirectory, "evidence-metadata.json"), "utf8"));
-    expect(metadata).toMatchObject({ format: "makefigma-phase1-render-composite-evidence-v1", golden: { status: "pending-independent-review" } });
+    expect(metadata).toMatchObject({ format: "makefigma-phase1-render-composite-evidence-v1", browserEnvironment: { userAgent: "fixture-chromium", dpr: 1, webgpu: true }, golden: { status: "pending-independent-review", candidatePolicy: { comparison: "rgba-pixel-diff", requiresReviewerFreeze: true } } });
     expect(metadata.artifacts.some((artifact) => artifact.path.endsWith("phase1-render-composite.png"))).toBe(true);
+    expect(metadata.artifacts.some((artifact) => artifact.path.endsWith("browser-environment.txt"))).toBe(true);
     expect(JSON.parse(readFileSync(join(evidenceDirectory, "performance-summary.json"), "utf8"))).toMatchObject({ status: "pass", samplesPerRun: 240, median: { p95Ms: 0.8 } });
   });
 

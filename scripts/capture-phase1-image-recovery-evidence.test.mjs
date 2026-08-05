@@ -27,6 +27,9 @@ esac
 afterEach(() => { directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true })); });
 
 describe("Phase 1 image-backed GPU recovery evidence", () => {
+  // The shell fixture can contend with parallel evidence runners. Its own
+  // retries are bounded, so give it the same CI-safe window as the other
+  // browser-evidence wrappers instead of Vitest's default five seconds.
   it("requires recovered WebGPU state after the composite image fixture has loaded", () => {
     const { worker, evidenceDirectory } = setup();
     const result = spawnSync("bash", ["scripts/capture-phase1-image-recovery-evidence.sh", "http://localhost:3000", evidenceDirectory], {
@@ -36,5 +39,5 @@ describe("Phase 1 image-backed GPU recovery evidence", () => {
     expect(JSON.parse(readFileSync(join(evidenceDirectory, "recovery-summary.json"), "utf8"))).toEqual({
       status: "pass", fixture: "F-PHASE1-RENDER-COMPOSITE", simulateGpuLoss: 1, expected: "webgpu-recovered-after-image-upload",
     });
-  });
+  }, 15_000);
 });

@@ -9,29 +9,214 @@ permissions:
   contents: read
 
 jobs:
-  web-and-core:
+  web:
+    name: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - name: Enable pnpm
-        run: corepack enable
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
-      - name: Install wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
-      - name: Verify frontend boundaries
-        run: pnpm check:boundaries
-      - name: Verify Phase 0 compatibility matrix
-        run: pnpm check:compatibility
-      - name: Build WASM bridge
-        run: pnpm wasm:build
-      - name: Verify independent mock backend
-        run: pnpm mock:backend:check
-      - name: Lint and test web
-        run: pnpm lint && pnpm test && pnpm build
-      - name: Test Rust Core and WASM bridge
-        run: cargo test
+      - name: Verify web boundary and compatibility checks
+        run: |
+          mkdir -p ci-artifacts
+          pnpm check:boundaries 2>&1 | tee ci-artifacts/boundaries.log
+          pnpm check:compatibility 2>&1 | tee ci-artifacts/compatibility.log
+      - name: Lint, test, and build web
+        run: |
+          pnpm lint 2>&1 | tee ci-artifacts/lint.log
+          pnpm test 2>&1 | tee ci-artifacts/vitest.log
+          pnpm build 2>&1 | tee ci-artifacts/next-build.log
+      - name: Upload web logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-web-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  protocol:
+    name: protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify generated protocol types
+        run: |
+          mkdir -p ci-artifacts
+          pnpm protocol:check 2>&1 | tee ci-artifacts/protocol.log
+          git diff --exit-code 2>&1 | tee ci-artifacts/generated-protocol-diff.log
+      - name: Upload protocol logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-protocol-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Rust workspace
+        run: |
+          mkdir -p ci-artifacts
+          cargo test --workspace 2>&1 | tee ci-artifacts/cargo-workspace.log
+      - name: Upload Rust logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-rust-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  services:
+    name: services
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify Document API, Asset API, and mock backend
+        run: |
+          mkdir -p ci-artifacts
+          pnpm document:api:check 2>&1 | tee ci-artifacts/document-api.log
+          pnpm asset:api:check 2>&1 | tee ci-artifacts/asset-api.log
+          pnpm mock:backend:check 2>&1 | tee ci-artifacts/mock-backend.log
+      - name: Upload service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-services-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install wasm build tools
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.108 --locked
+      - name: Rebuild and verify WASM bridge
+        run: |
+          mkdir -p ci-artifacts
+          pnpm wasm:build 2>&1 | tee ci-artifacts/wasm-build.log
+          git diff --exit-code 2>&1 | tee ci-artifacts/generated-wasm-diff.log
+      - name: Upload WASM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-wasm-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  renderer-native:
+    name: renderer-native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test native wgpu executor
+        run: |
+          mkdir -p ci-artifacts
+          cargo test -p makefigma-renderer-wgpu --features native-wgpu-executor 2>&1 | tee ci-artifacts/native-wgpu-executor.log
+      - name: Upload renderer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-renderer-native-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  phase1-fixtures:
+    name: phase1-fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify Phase 1 fixture contracts
+        run: |
+          mkdir -p ci-artifacts
+          pnpm check:phase1-text-fixture 2>&1 | tee ci-artifacts/text-fixture.log
+          pnpm check:phase1-text-10k-fixture 2>&1 | tee ci-artifacts/text-10k-fixture.log
+          pnpm check:phase1-shape-100k-fixture 2>&1 | tee ci-artifacts/shape-100k-fixture.log
+          pnpm check:phase1-asset-hostile-fixture 2>&1 | tee ci-artifacts/asset-hostile-fixture.log
+          pnpm check:phase1-render-composite-fixture 2>&1 | tee ci-artifacts/render-composite-fixture.log
+          pnpm check:phase1-snapshot-fixtures 2>&1 | tee ci-artifacts/snapshot-fixtures.log
+      - name: Upload fixture manifests and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-fixtures-${{ github.sha }}
+          path: |
+            ci-artifacts/
+            verification/phase1/1.11/*-fixture-manifest.json
+          if-no-files-found: warn
+          retention-days: 30

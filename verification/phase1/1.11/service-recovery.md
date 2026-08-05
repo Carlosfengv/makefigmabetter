@@ -23,7 +23,7 @@ cargo test -p makefigma-document-api -p makefigma-asset-api
 
 ## GPU Device Lost 浏览器证据
 
-`scripts/capture-phase1-gpu-recovery-evidence.sh` 在固定 `phase0-basic-card` 页面上调用真实 WebGPU Device 的开发期故障注入，并对两条有界恢复路径各采集一次可访问性树和控制台记录：
+`scripts/capture-phase1-gpu-recovery-evidence.sh` 在固定 `phase0-basic-card` 页面上销毁真实当前 WebGPU Device，并通过与生产 `GPUDevice.lost` 共用的失效处理入口对两条有界恢复路径各采集一次可访问性树和控制台记录。这样在 Chromium 没有及时兑现第二次显式 `device.lost` Promise 时，已失效的当前 renderer 仍会立即进入相同的安全回退状态机：
 
 - `simulateGpuLoss=1`：状态为 `WebGPU scene recovered (1)`；
 - `simulateGpuLoss=2`：状态为 `WebGPU recovery exhausted`，随后保持 Canvas 回退；
@@ -32,7 +32,7 @@ cargo test -p makefigma-document-api -p makefigma-asset-api
 复现：
 
 ```sh
-bash scripts/capture-phase1-gpu-recovery-evidence.sh \
+pnpm evidence:phase1-gpu-recovery \
   http://127.0.0.1:3000 \
   output/phase1-gpu-recovery/local-run
 ```

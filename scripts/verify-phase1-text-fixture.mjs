@@ -44,12 +44,36 @@ export function verifyPhase1TextFixture({ manifestPath = defaultManifest, root =
   }
   const textFailure = fixture.nodes.find((node) => node.kind === "text" && !hasValidRuns(node));
   if (textFailure) return failed("INVALID_UTF8_STYLE_RUN", { fixture: manifest.fixture, nodeId: textFailure.id });
+  if (!hasVariableLigatureCase(fixture.nodes) || !hasFallbackCase(fixture.nodes)) {
+    return failed("MISSING_TEXT_SEMANTICS_CASE", { fixture: manifest.fixture });
+  }
   return {
     status: "pass",
     fixture: manifest.fixture,
     fixtureSha256,
     textNodeCount: fixture.nodes.filter((node) => node.kind === "text").length,
   };
+}
+
+function hasVariableLigatureCase(nodes) {
+  return nodes.some((node) => {
+    if (node.name !== "Ligature variable font axes" || node.text !== "office fi ffi") return false;
+    const run = node.textProperties?.runs?.[0];
+    const axes = run?.font?.variationAxes;
+    return Array.isArray(axes)
+      && new Set(axes.map((axis) => axis?.tag)).size >= 2
+      && axes.some((axis) => axis?.tag === "wght" && Number.isFinite(axis.value))
+      && axes.some((axis) => axis?.tag === "wdth" && Number.isFinite(axis.value));
+  });
+}
+
+function hasFallbackCase(nodes) {
+  return nodes.some((node) => node.name === "Fallback and missing glyph"
+    && typeof node.text === "string"
+    && node.text.includes("汉字")
+    && node.text.includes("□")
+    && Array.isArray(node.textProperties?.fallbackFonts)
+    && node.textProperties.fallbackFonts.length > 0);
 }
 
 function hasValidRuns(node) {

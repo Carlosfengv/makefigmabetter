@@ -27,7 +27,9 @@ url_for() {
 capture_case() {
   local losses="$1"
   local expected="$2"
-  local session="makefigma-phase1-gpu-recovery-$losses"
+  # Keep evidence captures isolated from a previous interrupted run and from
+  # other Phase 1 browser probes running on the same development machine.
+  local session="makefigma-phase1-gpu-recovery-${losses}-${RANDOM}${RANDOM}"
   local snapshot="$evidence_dir/gpu-loss-$losses.snapshot.txt"
 
   "$pwcli" -s="$session" open "$(url_for "$losses")" | tee "$evidence_dir/gpu-loss-$losses.open.log"

@@ -37,3 +37,5 @@ pnpm evidence:phase1-editing \
   http://127.0.0.1:3000 \
   output/phase1-editing/local-run
 ```
+
+2026-08-05 在本地候选环境 `http://127.0.0.1:3013` 的实际采集结果保存在 `output/playwright/phase1-editing/current-candidate/`：工具栏创建、画布指针绘制、撤销和重做的节点数依次为 `5 → 6 → 5 → 6`，控制台错误为 `0`。该结果只证明本地编辑链路可复现；不替代跨环境 Golden 审核或 30 分钟稳定性验收。

@@ -1,11 +1,13 @@
 {
   "format": "makefigma-phase1-text-fixture-manifest-v1",
   "fixture": "fixtures/documents/phase1-text-multilingual.fixture.json",
-  "fixtureSha256": "35486d5f3f82598f95347b5454a49ea9383c2b5c70c6befb4f541ab92d5069f9",
+  "fixtureSha256": "5f01e17e4e461a3d41d3f95881299fc2df063450a7780927d8cd6914c4cc018b",
   "fixtureName": "F-TEXT-MULTILINGUAL",
   "requiredNodeNames": [
     "Mixed script styles",
     "RTL and Indic paragraphs",
-    "Emoji and combining marks"
+    "Emoji and combining marks",
+    "Ligature variable font axes",
+    "Fallback and missing glyph"
   ]
 }
