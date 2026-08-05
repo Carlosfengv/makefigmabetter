@@ -1,0 +1,7 @@
+{
+  "format": "makefigma-phase1-asset-hostile-manifest-v1",
+  "fixture": "fixtures/assets/phase1-asset-hostile.fixture.json",
+  "fixtureSha256": "68956a0bcc3c97342bb9185fb8d9a8538bc2530ec88fb33a6154584abb0b4a12",
+  "fixtureName": "F-ASSET-HOSTILE",
+  "caseIds": ["svg-script", "svg-external-reference", "forged-png-mime", "truncated-png", "decode-amplified-png", "valid-woff2-container"]
+}

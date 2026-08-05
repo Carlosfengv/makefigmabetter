@@ -1,0 +1,23 @@
+{
+  "format": "makefigma-phase1-render-fixture-v1",
+  "name": "F-PHASE1-RENDER-COMPOSITE",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "assets": [
+    {
+      "assetId": "00000000-0000-4000-8000-000000000901",
+      "contentHash": "fe947058e63cfba192ac429afbb098a1609eaf67842f60415fb000efe3a9385d",
+      "mediaType": "image/png",
+      "byteLength": 172,
+      "pixelWidth": 24,
+      "pixelHeight": 16,
+      "bytesBase64": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAYAAAAMJL+VAAAAc0lEQVR4nGMwzPz/H4Yrw2/CMTHibxv84Pj/9jg4RhZnINdwEJ+Q4SA+A7mGwyzAZzjYAnINB2FChqNYQE5cEDIcHAfkGg6zgFBEM5Br+GgqIttSdHGKUhEx4hSlImLEKUpFxIhTlIqIEacoFREjTvNUBABqqQXuv6sGOgAAAABJRU5ErkJggg=="
+    }
+  ],
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000101", "name": "Render card", "kind": "frame", "x": -330, "y": -220, "width": 660, "height": 440, "rotation": 0, "fill": "#fbfbf8", "stroke": "#d4d5cb", "strokeWidth": 1, "radius": 20, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000102", "name": "Image cover crop", "kind": "image", "assetId": "00000000-0000-4000-8000-000000000901", "x": -274, "y": -160, "width": 300, "height": 188, "rotation": -5, "fill": "#e6edff", "stroke": "#0048ff", "strokeWidth": 1, "radius": 14, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000103", "name": "Sun disc", "kind": "ellipse", "x": 116, "y": -152, "width": 132, "height": 132, "rotation": 0, "fill": "#f6ad62", "stroke": "#b4612d", "strokeWidth": 1, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000104", "name": "Gradient signal", "kind": "rectangle", "x": 112, "y": 24, "width": 164, "height": 48, "rotation": 0, "fill": "#725bd4", "fillGradient": { "start": [0, 0], "end": [1, 0], "stops": [{ "position": 0, "color": { "space": "srgb", "components": [0.36, 0.28, 0.82], "alpha": 1 } }, { "position": 1, "color": { "space": "srgb", "components": [0.96, 0.67, 0.37], "alpha": 1 } }] }, "stroke": "#6657b7", "strokeWidth": 1, "radius": 24, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000105", "name": "Composite headline", "kind": "text", "x": -274, "y": 86, "width": 480, "height": 72, "rotation": 0, "fill": "#20221c", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "text": "Image, text, and intent.", "visible": true }
+  ]
+}

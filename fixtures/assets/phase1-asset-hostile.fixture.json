@@ -1,0 +1,48 @@
+{
+  "format": "makefigma-phase1-asset-fixture-v1",
+  "name": "F-ASSET-HOSTILE",
+  "cases": [
+    {
+      "id": "svg-script",
+      "kind": "svg",
+      "declaredMime": "image/svg+xml",
+      "utf8": "<svg><script>alert(1)</script></svg>",
+      "expected": { "accepted": false, "reason": "UNSAFE_SVG" }
+    },
+    {
+      "id": "svg-external-reference",
+      "kind": "svg",
+      "declaredMime": "image/svg+xml",
+      "utf8": "<svg><use href=\"https://evil.invalid/asset\"/></svg>",
+      "expected": { "accepted": false, "reason": "UNSAFE_SVG" }
+    },
+    {
+      "id": "forged-png-mime",
+      "kind": "raster-image",
+      "declaredMime": "image/jpeg",
+      "hex": "89504e470d0a1a0a00000000494844520000000400000004",
+      "expected": { "accepted": false, "reason": "MIME_MISMATCH" }
+    },
+    {
+      "id": "truncated-png",
+      "kind": "raster-image",
+      "declaredMime": "image/png",
+      "hex": "89504e470d0a1a0a",
+      "expected": { "accepted": false, "reason": "CORRUPT_DATA" }
+    },
+    {
+      "id": "decode-amplified-png",
+      "kind": "raster-image",
+      "declaredMime": "image/png",
+      "hex": "89504e470d0a1a0a00000000494844520000400100000001",
+      "expected": { "accepted": false, "reason": "RESOURCE_LIMIT" }
+    },
+    {
+      "id": "valid-woff2-container",
+      "kind": "font",
+      "declaredMime": "font/woff2",
+      "utf8": "wOF2bounded-font",
+      "expected": { "accepted": true, "mime": "font/woff2" }
+    }
+  ]
+}

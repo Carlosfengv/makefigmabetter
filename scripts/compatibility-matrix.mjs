@@ -3,16 +3,20 @@ import { join } from "node:path";
 
 const compatibilityStates = new Set(["Supported", "Partial", "Later", "Unsupported", "N/A"]);
 const requiredCapabilities = [
+  "Document / Page / SceneNode 层级",
   "Frame / Rectangle / Ellipse / Text",
   "Text 内容与排版",
   "无限画布、平移与缩放",
   "命令、Operation、幂等与 Undo/Redo",
   "WebGPU / WebGL2",
   "色彩空间、alpha 与渐变插值",
+  "Golden、性能采样与诊断证据",
+  "文档、Undo/Operation 与渲染表面预算",
   "对象级 AuthZ 与不可信资源",
+  "前端目录、UI Primitive 与构建边界",
 ];
 
-/** Validates the Phase 0 compatibility matrix without inferring implementation status. */
+/** Validates the active Phase 1 compatibility matrix without inferring implementation status. */
 export function compatibilityMatrixViolations(root) {
   const path = join(root, "docs", "compatibility-matrix.md");
   if (!existsSync(path)) return ["docs/compatibility-matrix.md must be present."];

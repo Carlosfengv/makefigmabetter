@@ -1,0 +1,9 @@
+{
+  "format": "makefigma-phase1-generated-fixture-v1",
+  "name": "F-SHAPE-100K",
+  "generator": "phase1-shape-100k-v1",
+  "seed": 1507138393,
+  "nodeCount": 100000,
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "distribution": { "rectangle": 80000, "ellipse": 10000, "text": 6000, "frame": 4000 }
+}

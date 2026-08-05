@@ -8,4 +8,4 @@ if (violations.length) {
   console.error("Compatibility matrix check failed:\n" + violations.map((message) => `- ${message}`).join("\n"));
   process.exit(1);
 }
-console.log("Phase 0 compatibility matrix verified.");
+console.log("Phase 1 compatibility matrix verified.");

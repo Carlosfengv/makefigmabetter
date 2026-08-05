@@ -1,0 +1,6 @@
+{
+  "format": "makefigma-phase1-text-10k-manifest-v1",
+  "fixture": "fixtures/documents/phase1-text-10k.fixture.json",
+  "fixtureName": "F-TEXT-10K",
+  "fixtureSha256": "28c97405134b9f2fd631120ab545ce2c6b683ae04a9c3f1b06fce32e5224690b"
+}

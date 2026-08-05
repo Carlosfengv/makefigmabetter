@@ -1,0 +1,63 @@
+{
+  "format": "makefigma-phase1-fixture-v1",
+  "name": "F-TEXT-10K",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "nodes": [
+    {
+      "id": "12000000-0000-4000-8000-000000000001",
+      "name": "Text performance board",
+      "kind": "frame",
+      "x": -330,
+      "y": -290,
+      "width": 660,
+      "height": 580,
+      "rotation": 0,
+      "fill": "#fbfbf8",
+      "stroke": "#d4d5cb",
+      "strokeWidth": 1,
+      "radius": 18,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "12000000-0000-4000-8000-000000000002",
+      "name": "F-TEXT-10K source",
+      "kind": "text",
+      "x": -278,
+      "y": -242,
+      "width": 556,
+      "height": 484,
+      "rotation": 0,
+      "fill": "#20221c",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "text": "office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office office offi",
+      "textProperties": {
+        "runs": [
+          {
+            "start": 0,
+            "end": 10000,
+            "fontSize": 16,
+            "fontWeight": 500,
+            "italic": false,
+            "letterSpacing": 0
+          }
+        ],
+        "paragraph": {
+          "alignment": "left",
+          "lineHeight": 24,
+          "paragraphSpacing": 0
+        },
+        "autoSize": "fixed",
+        "fallbackFonts": []
+      },
+      "visible": true
+    }
+  ]
+}

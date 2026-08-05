@@ -1,0 +1,6 @@
+{
+  "format": "makefigma-phase1-render-composite-manifest-v1",
+  "fixture": "fixtures/documents/phase1-render-composite.fixture.json",
+  "fixtureName": "F-PHASE1-RENDER-COMPOSITE",
+  "fixtureSha256": "ab8c8449fd7a1556261a92f21167becc31c59bfec3845d6a98d3ee6083cc2f9b"
+}

@@ -1,0 +1,10 @@
+{
+  "format": "makefigma-phase1-shape-100k-manifest-v1",
+  "fixture": "fixtures/documents/phase1-shape-100k.fixture.json",
+  "fixtureSha256": "4682402b68efd43cd375fdf592873a3481846f50e3772d785c32264304dcd523",
+  "fixtureName": "F-SHAPE-100K",
+  "generator": "phase1-shape-100k-v1",
+  "seed": 1507138393,
+  "nodeCount": 100000,
+  "distribution": { "rectangle": 80000, "ellipse": 10000, "text": 6000, "frame": 4000 }
+}

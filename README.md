@@ -107,7 +107,15 @@ pnpm build
 pnpm check:boundaries
 pnpm check:compatibility
 pnpm mock:backend:check
+pnpm document:api:check
+pnpm protocol:check
 cargo test
+```
+
+原生 Rust `wgpu` MainScene executor 是 Phase 1 的可选编译特性；它不进入浏览器 WASM 包，也不持有 Canonical Document：
+
+```bash
+cargo test -p makefigma-renderer-wgpu --features native-wgpu-executor
 ```
 
 GitHub Actions 会额外重新生成 WASM bridge，并验证前端、Rust Core、Mock Backend 和工程边界。
@@ -134,6 +142,26 @@ bash scripts/capture-phase0-evidence.sh \
 
 采集器默认先预热 30 秒，再执行 3 轮受控渲染采样（每轮 240 个样本），并将中位 P50/P95/最大值写入 `performance-summary.json` 和验收报告。固定 Fixture 的截图会保持性能文字稳定，性能原始值仍会作为证据保存，因此瞬态指标不会造成 Golden 误报。
 
+Phase 1 的图片/形状/文字组合输入可通过以下命令确认；它固定验证图片字节哈希、PNG IHDR CRC、尺寸与场景组成，浏览器入口为 `/?fixture=phase1-render-composite`。跨环境图片 Golden 仍需独立人工审核后冻结。
+
+```bash
+pnpm check:phase1-render-composite-fixture
+```
+
+```bash
+pnpm evidence:phase1-render-composite \
+  http://127.0.0.1:3000 \
+  output/phase1-render-composite/local-run
+```
+
+同一夹具的工具栏创建、画布拖拽创建、Undo/Redo 可用以下命令复核：
+
+```bash
+pnpm evidence:phase1-editing \
+  http://127.0.0.1:3000 \
+  output/phase1-editing/local-run
+```
+
 ## 故障注入
 
 以下参数只在开发环境和固定 Fixture 下生效：
@@ -148,6 +176,14 @@ bash scripts/capture-phase0-evidence.sh \
 - 第一次 GPU Device Lost 会触发一次有界恢复；第二次会稳定降级；
 - 第一次 Worker Crash 会从最近确认的 Core Snapshot 恢复；连续失败会进入安全模式。
 
+可运行以下命令，采集两条 GPU 恢复路径的状态与控制台证据：
+
+```bash
+bash scripts/capture-phase1-gpu-recovery-evidence.sh \
+  http://127.0.0.1:3000 \
+  output/phase1-gpu-recovery/local-run
+```
+
 ## 资源边界
 
 | 资源 | 当前限制 |
@@ -157,7 +193,7 @@ bash scripts/capture-phase0-evidence.sh \
 | WASM linear memory 软阈值 | 256 MiB |
 | Canvas backing surface | 512 MiB |
 | WebGPU Scene 估算资源 | 256 MiB |
-| Asset Probe 在途预算 | 128 MiB |
+| Asset Probe 在途预算 | 256 MiB |
 
 超限请求会在修改现有文档、渲染表面或资源状态前被拒绝。
 
@@ -168,6 +204,26 @@ bash scripts/capture-phase0-evidence.sh \
 ```bash
 pnpm mock:backend
 pnpm mock:backend:check
+```
+
+## 本地 Document API
+
+Phase 1 的 Rust Document API 与 Next.js 独立启动，默认仅绑定在回环地址 `127.0.0.1:8788`。它接收原始 Protobuf `OperationEnvelope`，并返回 Protobuf `OperationAck` 或 `ProtocolError`；SQLite 状态写入被忽略的 `.local/` 目录。
+
+```bash
+pnpm document:api
+curl http://127.0.0.1:8788/health
+```
+
+本地开发身份通过两个明确的 `x-makefigma-dev-*` 请求头模拟；它只用于开发环境，生产认证适配器必须在服务端从会话注入 Tenant/Actor，不能信任浏览器 Header 或 Envelope 字段。
+
+## 本地 Asset API
+
+Phase 1 的资源服务独立绑定在 `127.0.0.1:8789`，支持带服务端确认 offset 的分段上传、完成时 SHA-256/MIME 校验与租户内去重，以及文档 Writer/Reader 授权下的短期下载凭据。它同样只使用本地开发身份头，SQLite 状态保存在忽略的 `.local/` 目录。
+
+```bash
+pnpm asset:api
+curl http://127.0.0.1:8789/health
 ```
 
 ## 项目结构
@@ -181,6 +237,12 @@ src/lib/                 协议、渲染、输入、恢复与持久化模块
 src/wasm/generated/      wasm-bindgen 浏览器产物
 crates/editor-core/      Canonical Document Core
 crates/editor-wasm/      Rust Core 的 WASM bridge
+crates/protocol/         从 schemas/proto 生成的 Rust 服务端契约
+crates/document-service/ SQLite 事务、AuthZ 与 Operation accepted revision 服务基础
+crates/asset-service/    受控上传、Hash 去重与文档级下载授权服务基础
+services/document-api/   独立 Rust Protobuf HTTP 适配层（默认 loopback）
+schemas/proto/           Operation、Snapshot、Ack 与版本协商 Schema
+packages/protocol-types/ 从同一 Schema 生成的 TypeScript 契约
 services/mock-backend/   独立契约服务
 fixtures/                固定文档与视觉 Golden
 verification/            Phase 0 验收基线
@@ -191,11 +253,10 @@ docs/adr/                架构决策记录
 
 当前尚未实现：
 
-- Document/Page 的完整层级投影、Section、Group、Line 和嵌套图层编辑；
-- 服务端 accepted revision、持久 pending Operation、断线重试与对账；
+- Section、Group、Line 和嵌套图层编辑；
 - HarfBuzz/ICU4X/FreeType 字体栈、富文本、Caret、Selection 和 IME；
 - Rust `wgpu` Render Graph、完整 GPU 资源重建、效果与图片渲染；
-- 图片/字体的 Asset 引用、解码、缓存、上传和对象存储闭环；
+- 字体节点级 Asset 引用、完整隔离解码、客户端缓存和对象存储部署闭环（图片导入、受控上传、Document 附加、Resource Index 注册、选中图层的图片填充 / 无选择时新建 Image 节点与刷新恢复已落地）；
 - Auto Layout、Constraints、Components 和 Variables；
 - Figma 导入/写回与生产级导出；
 - 任意 Path Boolean、Clip/Mask、深层选择和生产级 R-tree/BVH 空间索引；

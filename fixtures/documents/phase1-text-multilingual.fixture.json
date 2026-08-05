@@ -1,0 +1,11 @@
+{
+  "format": "makefigma-phase1-fixture-v1",
+  "name": "F-TEXT-MULTILINGUAL",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "11000000-0000-4000-8000-000000000001", "name": "Text baseline board", "kind": "frame", "x": -330, "y": -190, "width": 660, "height": 380, "rotation": 0, "fill": "#fbfbf8", "stroke": "#d4d5cb", "strokeWidth": 1, "radius": 18, "opacity": 1, "visible": true },
+    { "id": "11000000-0000-4000-8000-000000000002", "name": "Mixed script styles", "kind": "text", "x": -278, "y": -128, "width": 556, "height": 56, "rotation": 0, "fill": "#20221c", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "text": "Latin · 中文 · العربية · 👩‍💻", "textProperties": { "runs": [{ "start": 0, "end": 9, "fontSize": 29, "fontWeight": 500, "italic": false, "letterSpacing": 0 }, { "start": 9, "end": 19, "fontSize": 31, "fontWeight": 600, "italic": false, "letterSpacing": 0 }, { "start": 19, "end": 37, "fontSize": 29, "fontWeight": 500, "italic": false, "letterSpacing": 0 }, { "start": 37, "end": 48, "fontSize": 31, "fontWeight": 500, "italic": false, "letterSpacing": 0 }], "paragraph": { "alignment": "left", "lineHeight": 40, "paragraphSpacing": 0 }, "autoSize": "fixed", "fallbackFonts": [] }, "visible": true },
+    { "id": "11000000-0000-4000-8000-000000000003", "name": "RTL and Indic paragraphs", "kind": "text", "x": -278, "y": -26, "width": 556, "height": 112, "rotation": 0, "fill": "#20221c", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "text": "مرحبا بالعالم\nनमस्ते दुनिया", "textProperties": { "runs": [], "paragraph": { "alignment": "left", "lineHeight": 42, "paragraphSpacing": 14 }, "autoSize": "fixed", "fallbackFonts": [] }, "visible": true },
+    { "id": "11000000-0000-4000-8000-000000000004", "name": "Emoji and combining marks", "kind": "text", "x": -278, "y": 110, "width": 556, "height": 72, "rotation": 0, "fill": "#20221c", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "text": "Emoji: 👨🏽‍🚀   Combining: é", "textProperties": { "runs": [], "paragraph": { "alignment": "left", "paragraphSpacing": 0 }, "autoSize": "fixed", "fallbackFonts": [] }, "visible": true }
+  ]
+}
