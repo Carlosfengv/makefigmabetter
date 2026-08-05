@@ -8,6 +8,8 @@ license.workspace = true
 getrandom = "0.2"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 sha2 = "0.10"
+ttf-parser = "0.25"
 
 [dev-dependencies]
 tempfile = "3"
+font-test-data = "0.8"

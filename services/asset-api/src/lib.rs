@@ -12,7 +12,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, options, post, put},
@@ -31,8 +31,15 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(service: AssetService) -> Self {
+        Self::from_shared(Arc::new(service))
+    }
+
+    /// Lets the process-level maintenance task and the HTTP adapter share the
+    /// same durable service without exposing its storage implementation to
+    /// individual routes.
+    pub fn from_shared(service: Arc<AssetService>) -> Self {
         Self {
-            service: Arc::new(service),
+            service,
         }
     }
 }
@@ -52,6 +59,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/assets/uploads/{session_id}/complete",
             post(complete_upload).options(preflight),
         )
+        .route("/v1/assets/audit-events", get(audit_events).options(preflight))
         .route(
             "/v1/documents/{document_id}/writers",
             put(grant_writer).options(preflight),
@@ -118,6 +126,31 @@ struct GrantBody {
 struct GrantResponse {
     token: String,
     expires_at_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventsQuery {
+    after_sequence: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventBody {
+    sequence: i64,
+    document_id: Option<String>,
+    asset_id: Option<String>,
+    action: String,
+    outcome: String,
+    at_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventsResponse {
+    events: Vec<AuditEventBody>,
+    next_sequence: i64,
 }
 
 async fn begin_upload(
@@ -229,6 +262,47 @@ async fn complete_upload(
         ),
         Err(error) => error_response(error),
     }
+}
+
+async fn audit_events(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditEventsQuery>,
+) -> Response {
+    let principal = match principal(&headers) {
+        Ok(principal) => principal,
+        Err(error) => return error_response(error),
+    };
+    let after_sequence = query.after_sequence.unwrap_or(0).max(0);
+    let events = match state.service.audit_events_page(
+        principal,
+        after_sequence,
+        query.limit.unwrap_or(100),
+    ) {
+        Ok(events) => events,
+        Err(error) => return error_response(error),
+    };
+    let next_sequence = events
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or(after_sequence);
+    json_value(
+        StatusCode::OK,
+        AuditEventsResponse {
+            events: events
+                .into_iter()
+                .map(|event| AuditEventBody {
+                    sequence: event.sequence,
+                    document_id: event.document_id.map(|id| hex(&id)),
+                    asset_id: event.asset_id.map(|id| hex(&id)),
+                    action: event.action,
+                    outcome: event.outcome,
+                    at_seconds: event.at_seconds,
+                })
+                .collect(),
+            next_sequence,
+        },
+    )
 }
 
 async fn grant_writer(
@@ -401,6 +475,7 @@ fn error_code(error: &AssetServiceError) -> &'static str {
         AssetServiceError::ResourceLimit => "RESOURCE_LIMIT",
         AssetServiceError::ContentHashMismatch => "CONTENT_HASH_MISMATCH",
         AssetServiceError::MimeMismatch => "MIME_MISMATCH",
+        AssetServiceError::FontInvalid => "FONT_INVALID",
         AssetServiceError::Storage => "STORAGE",
         AssetServiceError::InvalidRequest => "INVALID_REQUEST",
     }
@@ -584,6 +659,41 @@ mod tests {
                 .as_ref(),
             bytes
         );
+    }
+
+    #[tokio::test]
+    async fn returns_tenant_scoped_incremental_audit_metadata() {
+        let app = app();
+        let bytes = b"\x89PNG\r\n\x1a\naudit";
+        let content_hash = hex(&Sha256::digest(bytes));
+        let session = id_hex(1);
+        let begin = headers(Request::post(format!("/v1/assets/uploads/{session}")))
+            .header(header::CONTENT_TYPE, JSON)
+            .body(Body::from(format!("{{\"kind\":\"raster-image\",\"contentHash\":\"{content_hash}\",\"mediaType\":\"image/png\",\"byteLength\":{}}}", bytes.len())))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(begin).await.unwrap().status(), StatusCode::CREATED);
+
+        let page = headers(Request::get("/v1/assets/audit-events?afterSequence=0&limit=1"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(page).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(payload["events"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["events"][0]["action"], "upload_started");
+        assert_eq!(payload["events"][0]["outcome"], "accepted");
+        let next_sequence = payload["nextSequence"].as_i64().unwrap();
+        assert!(next_sequence > 0);
+        assert!(!String::from_utf8_lossy(&body).contains(&session));
+
+        let empty = headers(Request::get(format!("/v1/assets/audit-events?afterSequence={next_sequence}")))
+            .body(Body::empty())
+            .unwrap();
+        let empty = app.oneshot(empty).await.unwrap();
+        let empty = serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(empty.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(empty["events"].as_array().unwrap().is_empty());
+        assert_eq!(empty["nextSequence"], next_sequence);
     }
 
     #[tokio::test]
