@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import { probeUntrustedAsset } from "../lib/asset-probe";
+import { probeUntrustedAsset, type AssetProbeResult } from "../lib/asset-probe";
 import { AssetProbeBudget } from "../lib/asset-probe-budget";
 import type { AssetAdmission, AssetKind } from "../lib/untrusted-asset";
 import { auditAssetProbe, auditCancelledAssetProbe, type AssetProbeAuditEvent } from "../lib/security-audit";
@@ -17,7 +17,7 @@ type ProbeRequest = {
 type CancelRequest = { type: "cancel"; requestId: string };
 type MainToAssetProbe = ProbeRequest | CancelRequest;
 type AssetProbeResponse =
-  | { type: "result"; requestId: string; detectedMime: string; admission: AssetAdmission; audit: AssetProbeAuditEvent }
+  | { type: "result"; requestId: string; detectedMime: string; admission: AssetAdmission; rasterDimensions?: AssetProbeResult["rasterDimensions"]; audit: AssetProbeAuditEvent }
   | { type: "cancelled"; requestId: string; audit: AssetProbeAuditEvent };
 
 const cancelledRequests = new Set<string>();

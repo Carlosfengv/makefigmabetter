@@ -41,9 +41,9 @@ function probe(kind: "svg" | "raster-image" | "font", declaredMime: string, byte
 
 describe("untrusted asset probe", () => {
   it("detects bounded PNG, JPEG, and WebP dimensions before any decoder allocation", () => {
-    expect(probe("raster-image", "image/png", png(400, 200))).toEqual({ detectedMime: "image/png", admission: { accepted: true, mime: "image/png" } });
-    expect(probe("raster-image", "image/jpeg", jpeg(640, 480))).toEqual({ detectedMime: "image/jpeg", admission: { accepted: true, mime: "image/jpeg" } });
-    expect(probe("raster-image", "image/webp", webp(320, 240))).toEqual({ detectedMime: "image/webp", admission: { accepted: true, mime: "image/webp" } });
+    expect(probe("raster-image", "image/png", png(400, 200))).toEqual({ detectedMime: "image/png", admission: { accepted: true, mime: "image/png" }, rasterDimensions: { width: 400, height: 200 } });
+    expect(probe("raster-image", "image/jpeg", jpeg(640, 480))).toEqual({ detectedMime: "image/jpeg", admission: { accepted: true, mime: "image/jpeg" }, rasterDimensions: { width: 640, height: 480 } });
+    expect(probe("raster-image", "image/webp", webp(320, 240))).toEqual({ detectedMime: "image/webp", admission: { accepted: true, mime: "image/webp" }, rasterDimensions: { width: 320, height: 240 } });
   });
 
   it("rejects forged, corrupt, and decode-amplified raster input", () => {

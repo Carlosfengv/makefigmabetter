@@ -16,7 +16,7 @@ export type AssetAdmission = { accepted: true; mime: string } | { accepted: fals
 
 const MAX_BYTES: Readonly<Record<AssetKind, number>> = {
   svg: 1 * 1024 * 1024,
-  "raster-image": 80 * 1024 * 1024,
+  "raster-image": 256 * 1024 * 1024,
   font: 32 * 1024 * 1024,
 };
 
@@ -24,7 +24,9 @@ const MAX_BYTES: Readonly<Record<AssetKind, number>> = {
 export const MAX_SVG_ELEMENTS = 20_000;
 export const MAX_SVG_NESTING = 64;
 export const MAX_RASTER_DIMENSION = 16_384;
-export const MAX_RASTER_PIXELS = 64 * 1024 * 1024;
+/** Source pixels may exceed the interactive bitmap cache; the renderer creates
+ * a bounded proxy bitmap without altering the original uploaded asset. */
+export const MAX_RASTER_PIXELS = 256 * 1024 * 1024;
 export const MAX_RASTER_DECODED_BYTES = 256 * 1024 * 1024;
 
 const MIMES: Readonly<Record<AssetKind, readonly string[]>> = {
@@ -72,8 +74,8 @@ export function checkUntrustedAssetByteLength(kind: AssetKind, byteLength: numbe
 
 /**
  * Header dimensions are verified before any image decoder, Canvas, or GPU upload
- * allocates pixels. The RGBA8 estimate is intentionally conservative for this
- * admission boundary; real decoders must retain their own cancellation path.
+ * allocates pixels. Oversized-but-bounded sources are rendered through a proxy
+ * bitmap, keeping the original bytes and Resource Index dimensions intact.
  */
 function admitRasterDimensions(dimensions: UntrustedAssetCandidate["rasterDimensions"]): AssetAdmission {
   if (!dimensions) return { accepted: false, reason: "MISSING_RASTER_DIMENSIONS" };
@@ -82,8 +84,7 @@ function admitRasterDimensions(dimensions: UntrustedAssetCandidate["rasterDimens
     return { accepted: false, reason: "INVALID_DIMENSIONS" };
   }
   const pixels = width * height;
-  const decodedBytes = pixels * 4;
-  if (width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION || !Number.isSafeInteger(pixels) || !Number.isSafeInteger(decodedBytes) || pixels > MAX_RASTER_PIXELS || decodedBytes > MAX_RASTER_DECODED_BYTES) {
+  if (width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION || !Number.isSafeInteger(pixels) || pixels > MAX_RASTER_PIXELS) {
     return { accepted: false, reason: "RESOURCE_LIMIT" };
   }
   return { accepted: true, mime: "" };

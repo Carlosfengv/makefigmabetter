@@ -33,7 +33,7 @@ describe("untrusted asset admission", () => {
   });
 
   it("rejects hostile sizes before parser or decoder allocation", () => {
-    expect(admitUntrustedAsset({ kind: "raster-image", declaredMime: "image/png", detectedMime: "image/png", byteLength: 80 * 1024 * 1024 + 1 })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
+    expect(admitUntrustedAsset({ kind: "raster-image", declaredMime: "image/png", detectedMime: "image/png", byteLength: 256 * 1024 * 1024 + 1 })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
     expect(admitUntrustedAsset({ kind: "font", declaredMime: "font/woff2", detectedMime: "font/woff2", byteLength: Number.POSITIVE_INFINITY })).toEqual({ accepted: false, reason: "INVALID_SIZE" });
   });
 
@@ -44,11 +44,13 @@ describe("untrusted asset admission", () => {
     expect(admitUntrustedAsset({ ...image, declaredMime: "image/avif", detectedMime: "image/avif" })).toEqual({ accepted: false, reason: "UNSUPPORTED_MIME" });
   });
 
-  it("rejects invalid or decode-amplified raster dimensions before Canvas allocation", () => {
+  it("rejects invalid or unbounded raster dimensions before Canvas allocation", () => {
     const image = { kind: "raster-image" as const, declaredMime: "image/png", detectedMime: "image/png", byteLength: 2_048 };
     expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 0, height: 1 } })).toEqual({ accepted: false, reason: "INVALID_DIMENSIONS" });
     expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 16_385, height: 1 } })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
-    expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 8_192, height: 8_193 } })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
+    expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 8_192, height: 8_193 } })).toEqual({ accepted: true, mime: "image/png" });
+    expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 16_384, height: 16_384 } })).toEqual({ accepted: true, mime: "image/png" });
+    expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: 16_384, height: 16_385 } })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
     expect(admitUntrustedAsset({ ...image, rasterDimensions: { width: Number.MAX_SAFE_INTEGER, height: 2 } })).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
   });
 

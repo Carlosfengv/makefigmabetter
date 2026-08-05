@@ -1,5 +1,5 @@
 /** Caps bytes concurrently owned by the isolated Asset Probe Worker. */
-export const MAX_ASSET_PROBE_IN_FLIGHT_BYTES = 128 * 1024 * 1024;
+export const MAX_ASSET_PROBE_IN_FLIGHT_BYTES = 256 * 1024 * 1024;
 
 /**
  * Tracks only request identifiers and byte counts. It intentionally never retains

@@ -9,6 +9,8 @@ export interface AssetProbeRequest {
 export interface AssetProbeResult {
   detectedMime: string;
   admission: AssetAdmission;
+  /** Header-only raster dimensions, safe to persist as Resource Index metadata. */
+  rasterDimensions?: { width: number; height: number };
 }
 
 /**
@@ -36,7 +38,8 @@ export function probeUntrustedAsset(request: AssetProbeRequest): AssetProbeResul
 }
 
 function admitted(candidate: Parameters<typeof admitUntrustedAsset>[0]): AssetProbeResult {
-  return { detectedMime: candidate.detectedMime, admission: admitUntrustedAsset(candidate) };
+  const admission = admitUntrustedAsset(candidate);
+  return { detectedMime: candidate.detectedMime, admission, ...(admission.accepted && candidate.rasterDimensions ? { rasterDimensions: candidate.rasterDimensions } : {}) };
 }
 
 function rejected(detectedMime: string, reason: "CORRUPT_DATA" | "INVALID_SIZE" | "RESOURCE_LIMIT"): AssetProbeResult {
@@ -71,7 +74,9 @@ function jpegDimensions(bytes: Uint8Array): { width: number; height: number } | 
     if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) { index += 1; continue; }
     const length = readU16(bytes, index + 1);
     if (length < 2 || index + 1 + length > bytes.length) return undefined;
-    if (isSof(marker)) return dimensions(readU16(bytes, index + 4), readU16(bytes, index + 6));
+    // SOF stores precision, then height, then width. The Resource Index records
+    // width × height, so preserve the container's actual order here.
+    if (isSof(marker)) return dimensions(readU16(bytes, index + 6), readU16(bytes, index + 4));
     index += 1 + length;
   }
   return undefined;
