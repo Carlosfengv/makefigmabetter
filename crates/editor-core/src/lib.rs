@@ -4,14 +4,14 @@
 //! A document is the only source of truth; consumers derive scene and GPU state after a
 //! transaction has been accepted.
 
-pub mod color;
 pub mod authz;
+pub mod color;
 pub mod geometry;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use sha2::{Digest, Sha256};
 use crate::color::{Color, ColorSpace, DocumentColorProfile, Paint};
+use sha2::{Digest, Sha256};
 
 pub const MAX_TRANSACTION_COMMANDS: usize = 10_000;
 pub const MAX_TRANSACTION_BYTES: usize = 4 * 1024 * 1024;
@@ -24,9 +24,17 @@ pub const MAX_OPERATION_DEDUPE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DOCUMENT_NODES: usize = 100_000;
 pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1 * 1024 * 1024;
+pub const MAX_TEXT_STYLE_RUNS: usize = 4_096;
+pub const MAX_TEXT_FALLBACK_FONTS: usize = 32;
+pub const MAX_FONT_VARIATION_AXES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u128);
+
+/// Stable identity for a canvas page. Page IDs never depend on their display name
+/// or on their position in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageId(pub u128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ActorId(pub u128);
@@ -36,6 +44,12 @@ pub struct OperationId(pub u128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u128);
+
+/// Stable content-addressed resource identity. Raw image/font bytes never live
+/// in the Document; the resource service owns those bytes and the Document keeps
+/// only this verified reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AssetId(pub u128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TransactionId(pub u128);
@@ -55,16 +69,26 @@ pub enum PositionError {
 
 impl PositionId {
     pub fn for_node(id: NodeId) -> Self {
-        Self { key: id.0, actor: ActorId(0) }
+        Self {
+            key: id.0,
+            actor: ActorId(0),
+        }
     }
 
-    pub fn between(left: Option<Self>, right: Option<Self>, actor: ActorId) -> Result<Self, PositionError> {
+    pub fn between(
+        left: Option<Self>,
+        right: Option<Self>,
+        actor: ActorId,
+    ) -> Result<Self, PositionError> {
         let lower = left.map(|position| position.key).unwrap_or(0);
         let upper = right.map(|position| position.key).unwrap_or(u128::MAX);
         if lower >= upper.saturating_sub(1) {
             return Err(PositionError::NoSpaceBetween);
         }
-        Ok(Self { key: lower + (upper - lower) / 2, actor })
+        Ok(Self {
+            key: lower + (upper - lower) / 2,
+            actor,
+        })
     }
 }
 
@@ -74,6 +98,7 @@ pub enum NodeKind {
     Rectangle,
     Ellipse,
     Text,
+    Image,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,12 +129,116 @@ pub struct Node {
     pub locked: bool,
 }
 
+/// A top-level canvas container. Scene nodes belong to exactly one Page while
+/// `parent_id` continues to describe the hierarchy *within* that page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub id: PageId,
+    pub name: String,
+    pub position: PositionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetReference {
+    pub asset_id: AssetId,
+    pub content_hash: [u8; 32],
+    pub media_type: String,
+    pub byte_length: u64,
+    /// Raster dimensions are present only for image resources; fonts retain
+    /// `None` for both dimensions.
+    pub dimensions: Option<[u32; 2]>,
+}
+
+/// A content-addressed font face. Font bytes stay in the Asset Service; the
+/// document records the exact face and variation coordinates it expects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontReference {
+    pub asset_id: AssetId,
+    pub face_index: u32,
+    pub variation_axes: BTreeMap<String, f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAutoSize {
+    Fixed,
+    Height,
+    WidthAndHeight,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextStyleRun {
+    /// UTF-8 byte offsets. Boundaries must coincide with Unicode scalar value
+    /// boundaries; grapheme-level editing belongs to the text engine layer.
+    pub start: u32,
+    pub end: u32,
+    pub font: Option<FontReference>,
+    pub font_size: f64,
+    pub font_weight: u16,
+    pub italic: bool,
+    pub letter_spacing: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParagraphStyle {
+    pub alignment: TextAlign,
+    pub line_height: Option<f64>,
+    pub paragraph_spacing: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextProperties {
+    pub runs: Vec<TextStyleRun>,
+    pub paragraph: ParagraphStyle,
+    pub auto_size: TextAutoSize,
+    pub fallback_fonts: Vec<FontReference>,
+}
+
+impl Default for TextProperties {
+    fn default() -> Self {
+        Self {
+            runs: Vec::new(),
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: None,
+                paragraph_spacing: 0.0,
+            },
+            auto_size: TextAutoSize::Fixed,
+            fallback_fonts: Vec::new(),
+        }
+    }
+}
+
+pub const DEFAULT_PAGE_ID: PageId = PageId(1);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     id: DocumentId,
     pub revision: u64,
     color_profile: DocumentColorProfile,
+    pages: BTreeMap<PageId, Page>,
+    /// Kept separately from `Node` during the Phase 0 → Phase 1 migration so the
+    /// public node construction contract remains source-compatible. The mapping is
+    /// nevertheless canonical state and participates in hashing and snapshots.
+    node_pages: BTreeMap<NodeId, PageId>,
+    node_assets: BTreeMap<NodeId, AssetId>,
+    node_text_properties: BTreeMap<NodeId, TextProperties>,
+    /// Retained page membership for node tombstones; undo/redo therefore restores
+    /// a node to the page it came from.
+    retired_node_pages: BTreeMap<NodeId, PageId>,
+    retired_node_assets: BTreeMap<NodeId, AssetId>,
+    retired_node_text_properties: BTreeMap<NodeId, TextProperties>,
     nodes: BTreeMap<NodeId, Node>,
+    /// Versioned Resource Index. Asset references are canonical state even before
+    /// an Image/Text node consumes them, so cache eviction cannot alter a document.
+    assets: BTreeMap<AssetId, AssetReference>,
     node_bytes: usize,
     /// IDs are never allocated to an unrelated new node after deletion.
     retired_ids: BTreeSet<NodeId>,
@@ -144,6 +273,16 @@ struct AcceptedOperationRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    CreatePage(Page),
+    CreateInPage {
+        page_id: PageId,
+        node: Node,
+    },
+    CreateImageInPage {
+        page_id: PageId,
+        node: Node,
+        asset_id: AssetId,
+    },
     Create(Node),
     UpdateGeometry {
         id: NodeId,
@@ -161,12 +300,33 @@ pub enum Command {
         id: NodeId,
         appearance: Appearance,
     },
+    /// Associates an admitted raster Asset with a fill-capable node. The image
+    /// bytes remain outside Canonical state; this stable reference participates
+    /// in snapshots, hashes, undo/redo and remote Operations.
+    SetNodeAsset {
+        id: NodeId,
+        asset_id: Option<AssetId>,
+    },
     SetText {
         id: NodeId,
         text: String,
     },
+    SetTextProperties {
+        id: NodeId,
+        properties: TextProperties,
+    },
+    /// Replaces a canonical sibling-order key without changing geometry or
+    /// hierarchy. Positions are resolved before this command crosses the
+    /// collaboration boundary, making a reorder deterministic to replay.
+    SetNodePosition {
+        id: NodeId,
+        position: PositionId,
+    },
     SetDocumentColorProfile {
         profile: DocumentColorProfile,
+    },
+    RegisterAsset {
+        asset: AssetReference,
     },
     Delete {
         id: NodeId,
@@ -205,6 +365,9 @@ pub enum Origin {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppliedChange {
+    PageCreated {
+        page: Page,
+    },
     NodeCreated {
         node: Node,
     },
@@ -223,14 +386,34 @@ pub enum AppliedChange {
         before: Appearance,
         after: Appearance,
     },
+    NodeAssetChanged {
+        id: NodeId,
+        before: Option<AssetId>,
+        after: Option<AssetId>,
+    },
     TextChanged {
         id: NodeId,
         before: String,
         after: String,
+        before_properties: Option<TextProperties>,
+        after_properties: Option<TextProperties>,
+    },
+    TextPropertiesChanged {
+        id: NodeId,
+        before: Option<TextProperties>,
+        after: Option<TextProperties>,
+    },
+    NodePositionChanged {
+        id: NodeId,
+        before: PositionId,
+        after: PositionId,
     },
     DocumentColorProfileChanged {
         before: DocumentColorProfile,
         after: DocumentColorProfile,
+    },
+    AssetRegistered {
+        asset: AssetReference,
     },
     NodeDeleted {
         node: Node,
@@ -297,25 +480,59 @@ pub struct MemoryStats {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
-    RevisionConflict { expected: u64, actual: u64 },
+    RevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
     EmptyTransaction,
-    MissingNode { id: NodeId },
-    DuplicateNode { id: NodeId },
-    RetiredNodeId { id: NodeId },
+    MissingNode {
+        id: NodeId,
+    },
+    DuplicateNode {
+        id: NodeId,
+    },
+    RetiredNodeId {
+        id: NodeId,
+    },
     InvalidGeometry,
     InvalidName,
     InvalidAppearance,
     InvalidText,
-    MissingParent { id: NodeId },
-    NodeHasChildren { id: NodeId },
-    TransactionIdConflict { id: TransactionId },
-    OperationIdConflict { id: OperationId },
-    UnsupportedOperationSchema { found: u32 },
-    OperationDocumentMismatch { expected: DocumentId, actual: DocumentId },
+    InvalidTextProperties,
+    MissingParent {
+        id: NodeId,
+    },
+    MissingPage {
+        id: PageId,
+    },
+    DuplicatePage {
+        id: PageId,
+    },
+    InvalidPageName,
+    NodeHasChildren {
+        id: NodeId,
+    },
+    TransactionIdConflict {
+        id: TransactionId,
+    },
+    OperationIdConflict {
+        id: OperationId,
+    },
+    UnsupportedOperationSchema {
+        found: u32,
+    },
+    OperationDocumentMismatch {
+        expected: DocumentId,
+        actual: DocumentId,
+    },
     OperationTransactionMismatch,
     OperationPayloadHashMismatch,
     ResourceLimit,
     PositionExhausted,
+    DuplicateAsset {
+        id: AssetId,
+    },
+    InvalidAsset,
 }
 
 impl Document {
@@ -328,7 +545,22 @@ impl Document {
             id,
             revision: 0,
             color_profile: DocumentColorProfile::Srgb,
+            pages: BTreeMap::from([(
+                DEFAULT_PAGE_ID,
+                Page {
+                    id: DEFAULT_PAGE_ID,
+                    name: "Page 1".into(),
+                    position: PositionId::for_node(NodeId(DEFAULT_PAGE_ID.0)),
+                },
+            )]),
+            node_pages: BTreeMap::new(),
+            node_assets: BTreeMap::new(),
+            node_text_properties: BTreeMap::new(),
+            retired_node_pages: BTreeMap::new(),
+            retired_node_assets: BTreeMap::new(),
+            retired_node_text_properties: BTreeMap::new(),
             nodes: BTreeMap::new(),
+            assets: BTreeMap::new(),
             node_bytes: 0,
             retired_ids: BTreeSet::new(),
             undo_stack: Vec::new(),
@@ -350,6 +582,41 @@ impl Document {
 
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.values()
+    }
+
+    pub fn pages(&self) -> impl Iterator<Item = &Page> {
+        self.pages.values()
+    }
+
+    pub fn page(&self, id: PageId) -> Option<&Page> {
+        self.pages.get(&id)
+    }
+
+    pub fn page_for_node(&self, id: NodeId) -> Option<PageId> {
+        self.node_pages.get(&id).copied()
+    }
+
+    pub fn asset_for_node(&self, id: NodeId) -> Option<AssetId> {
+        self.node_assets.get(&id).copied()
+    }
+
+    /// Returns explicit properties only. An absent record means the stable
+    /// default text semantics, preserving snapshots written before rich text.
+    pub fn text_properties_for_node(&self, id: NodeId) -> Option<&TextProperties> {
+        self.node_text_properties.get(&id)
+    }
+
+    pub fn ordered_nodes_on_page(&self, page_id: PageId) -> Result<Vec<&Node>, CommandError> {
+        if !self.pages.contains_key(&page_id) {
+            return Err(CommandError::MissingPage { id: page_id });
+        }
+        let mut nodes = self
+            .nodes
+            .values()
+            .filter(|node| self.node_pages.get(&node.id) == Some(&page_id))
+            .collect::<Vec<_>>();
+        nodes.sort_unstable_by_key(|node| (node.parent_id, node.position, node.id));
+        Ok(nodes)
     }
 
     pub fn ordered_nodes(&self) -> Vec<&Node> {
@@ -400,6 +667,14 @@ impl Document {
         self.nodes.get(&id)
     }
 
+    pub fn assets(&self) -> impl Iterator<Item = &AssetReference> {
+        self.assets.values()
+    }
+
+    pub fn asset(&self, id: AssetId) -> Option<&AssetReference> {
+        self.assets.get(&id)
+    }
+
     pub fn retired_ids(&self) -> impl Iterator<Item = &NodeId> {
         self.retired_ids.iter()
     }
@@ -434,9 +709,61 @@ impl Document {
         let mut hasher = Sha256::new();
         hasher.update(b"makefigma/editor-core/canonical-v1");
         hash_document_color_profile(&mut hasher, self.color_profile);
+        hash_len(&mut hasher, self.pages.len());
+        for page in self.pages.values() {
+            hasher.update(page.id.0.to_be_bytes());
+            hasher.update(page.position.key.to_be_bytes());
+            hasher.update(page.position.actor.0.to_be_bytes());
+            hash_text(&mut hasher, &page.name);
+        }
         hash_len(&mut hasher, self.nodes.len());
         for node in self.nodes.values() {
+            // A missing mapping can only appear transiently while loading a legacy
+            // snapshot. Persisted and accepted documents always assign Page 1.
+            hasher.update(
+                self.node_pages
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or(DEFAULT_PAGE_ID)
+                    .0
+                    .to_be_bytes(),
+            );
             hash_node(&mut hasher, node);
+        }
+        // Keep every pre-image canonical hash valid: documents without image
+        // bindings retain their original byte stream. Once the first binding is
+        // present, a domain separator and the ordered mapping become semantic
+        // state alongside the nodes themselves.
+        if !self.node_assets.is_empty() {
+            hasher.update(b"makefigma/editor-core/node-assets-v1");
+            hash_len(&mut hasher, self.node_assets.len());
+            for (node_id, asset_id) in &self.node_assets {
+                hasher.update(node_id.0.to_be_bytes());
+                hasher.update(asset_id.0.to_be_bytes());
+            }
+        }
+        if !self.node_text_properties.is_empty() {
+            hasher.update(b"makefigma/editor-core/text-properties-v1");
+            hash_len(&mut hasher, self.node_text_properties.len());
+            for (node_id, properties) in &self.node_text_properties {
+                hasher.update(node_id.0.to_be_bytes());
+                hash_text_properties(&mut hasher, properties);
+            }
+        }
+        hash_len(&mut hasher, self.assets.len());
+        for asset in self.assets.values() {
+            hasher.update(asset.asset_id.0.to_be_bytes());
+            hasher.update(asset.content_hash);
+            hash_text(&mut hasher, &asset.media_type);
+            hasher.update(asset.byte_length.to_be_bytes());
+            match asset.dimensions {
+                Some([width, height]) => {
+                    hasher.update([1]);
+                    hasher.update(width.to_be_bytes());
+                    hasher.update(height.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
         }
         hash_len(&mut hasher, self.retired_ids.len());
         for id in &self.retired_ids {
@@ -457,6 +784,73 @@ impl Document {
     /// enter the local undo history.
     pub fn seed_node(&mut self, node: Node) -> Result<(), CommandError> {
         self.apply(&Command::Create(node)).map(|_| ())
+    }
+
+    /// Trusted snapshot hydration entrypoint for Phase 1 records. Legacy callers
+    /// use `seed_node`, which deterministically migrates every node to Page 1.
+    pub fn seed_node_on_page(&mut self, page_id: PageId, node: Node) -> Result<(), CommandError> {
+        self.create_node_in_page(page_id, node).map(|_| ())
+    }
+
+    pub fn seed_image_node_on_page(
+        &mut self,
+        page_id: PageId,
+        node: Node,
+        asset_id: AssetId,
+    ) -> Result<(), CommandError> {
+        self.create_image_node_in_page(page_id, node, asset_id)
+            .map(|_| ())
+    }
+
+    /// Trusted snapshot hydration for explicit rich-text semantics. Legacy text
+    /// nodes intentionally omit this record and use `TextProperties::default()`.
+    pub fn seed_text_properties(
+        &mut self,
+        id: NodeId,
+        properties: TextProperties,
+    ) -> Result<(), CommandError> {
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        if node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, &properties) {
+            return Err(CommandError::InvalidTextProperties);
+        }
+        self.replace_text_properties(id, properties);
+        Ok(())
+    }
+
+    pub fn seed_page(&mut self, page: Page) -> Result<(), CommandError> {
+        if page.name.trim().is_empty() {
+            return Err(CommandError::InvalidPageName);
+        }
+        if self.pages.contains_key(&page.id) {
+            return Err(CommandError::DuplicatePage { id: page.id });
+        }
+        self.pages.insert(page.id, page);
+        Ok(())
+    }
+
+    /// Inserts a resource record while hydrating a verified snapshot. Attachment
+    /// operations will be added with Image/Text node semantics; this registry is
+    /// deliberately separate from raw bytes and cache lifetime.
+    pub fn seed_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
+        self.insert_asset(asset)
+    }
+
+    fn insert_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
+        if asset.media_type.trim().is_empty()
+            || asset.byte_length == 0
+            || asset.content_hash == [0; 32]
+            || matches!(asset.dimensions, Some([0, _] | [_, 0]))
+        {
+            return Err(CommandError::InvalidAsset);
+        }
+        if self.assets.contains_key(&asset.asset_id) {
+            return Err(CommandError::DuplicateAsset { id: asset.asset_id });
+        }
+        self.assets.insert(asset.asset_id, asset);
+        Ok(())
     }
 
     /// Restores an ID tombstone from a trusted snapshot. A tombstone is semantic
@@ -492,7 +886,9 @@ impl Document {
         if transaction.commands.is_empty() {
             return Err(CommandError::EmptyTransaction);
         }
-        if transaction.commands.len() > MAX_TRANSACTION_COMMANDS || transaction.estimated_bytes() > MAX_TRANSACTION_BYTES {
+        if transaction.commands.len() > MAX_TRANSACTION_COMMANDS
+            || transaction.estimated_bytes() > MAX_TRANSACTION_BYTES
+        {
             return Err(CommandError::ResourceLimit);
         }
 
@@ -629,23 +1025,29 @@ impl Document {
         }
     }
 
-    fn insert_accepted_transaction(&mut self, id: TransactionId, record: AcceptedTransactionRecord) {
+    fn insert_accepted_transaction(
+        &mut self,
+        id: TransactionId,
+        record: AcceptedTransactionRecord,
+    ) {
         self.accepted_transaction_bytes += record.estimated_bytes();
         self.accepted_transactions.insert(id, record);
         self.accepted_transaction_order.push_back(id);
-        while self.accepted_transactions.len() > MAX_DEDUPE_ITEMS || self.accepted_transaction_bytes > MAX_DEDUPE_BYTES {
-            let Some(expired_id) = self.accepted_transaction_order.pop_front() else { break };
+        while self.accepted_transactions.len() > MAX_DEDUPE_ITEMS
+            || self.accepted_transaction_bytes > MAX_DEDUPE_BYTES
+        {
+            let Some(expired_id) = self.accepted_transaction_order.pop_front() else {
+                break;
+            };
             if let Some(expired) = self.accepted_transactions.remove(&expired_id) {
-                self.accepted_transaction_bytes = self.accepted_transaction_bytes.saturating_sub(expired.estimated_bytes());
+                self.accepted_transaction_bytes = self
+                    .accepted_transaction_bytes
+                    .saturating_sub(expired.estimated_bytes());
             }
         }
     }
 
-    fn insert_accepted_operation(
-        &mut self,
-        id: OperationId,
-        record: AcceptedOperationRecord,
-    ) {
+    fn insert_accepted_operation(&mut self, id: OperationId, record: AcceptedOperationRecord) {
         self.accepted_operation_bytes += record.estimated_bytes;
         self.accepted_operations.insert(id, record);
         self.accepted_operation_order.push_back(id);
@@ -665,24 +1067,25 @@ impl Document {
 
     fn apply(&mut self, command: &Command) -> Result<AppliedChange, CommandError> {
         match command {
-            Command::Create(node) => {
-                if self.nodes.len() >= MAX_DOCUMENT_NODES {
-                    return Err(CommandError::ResourceLimit);
+            Command::CreatePage(page) => {
+                if page.name.trim().is_empty() {
+                    return Err(CommandError::InvalidPageName);
                 }
-                self.validate_node(node)?;
-                if self.node_bytes.saturating_add(node.estimated_bytes()) > MAX_DOCUMENT_BYTES {
-                    return Err(CommandError::ResourceLimit);
+                if self.pages.contains_key(&page.id) {
+                    return Err(CommandError::DuplicatePage { id: page.id });
                 }
-                if self.nodes.contains_key(&node.id) {
-                    return Err(CommandError::DuplicateNode { id: node.id });
-                }
-                if self.retired_ids.contains(&node.id) {
-                    return Err(CommandError::RetiredNodeId { id: node.id });
-                }
-                self.nodes.insert(node.id, node.clone());
-                self.node_bytes += node.estimated_bytes();
-                Ok(AppliedChange::NodeCreated { node: node.clone() })
+                self.pages.insert(page.id, page.clone());
+                Ok(AppliedChange::PageCreated { page: page.clone() })
             }
+            Command::CreateInPage { page_id, node } => {
+                self.create_node_in_page(*page_id, node.clone())
+            }
+            Command::CreateImageInPage {
+                page_id,
+                node,
+                asset_id,
+            } => self.create_image_node_in_page(*page_id, node.clone(), *asset_id),
+            Command::Create(node) => self.create_node_in_page(DEFAULT_PAGE_ID, node.clone()),
             Command::UpdateGeometry {
                 id,
                 x,
@@ -797,10 +1200,41 @@ impl Document {
                     after: appearance.clone(),
                 })
             }
+            Command::SetNodeAsset { id, asset_id } => {
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                if !image_fill_supported(&node.kind)
+                    || asset_id.is_some_and(|asset_id| !self.assets.get(&asset_id).is_some_and(|asset| asset.media_type.starts_with("image/")))
+                {
+                    return Err(CommandError::InvalidAsset);
+                }
+                let before = self.node_assets.get(id).copied();
+                match asset_id {
+                    Some(asset_id) => {
+                        self.node_assets.insert(*id, *asset_id);
+                    }
+                    None => {
+                        self.node_assets.remove(id);
+                    }
+                }
+                Ok(AppliedChange::NodeAssetChanged {
+                    id: *id,
+                    before,
+                    after: *asset_id,
+                })
+            }
             Command::SetText { id, text } => {
                 if text.len() > MAX_TEXT_BYTES {
                     return Err(CommandError::InvalidText);
                 }
+                let before_properties = self.node_text_properties.get(id).cloned();
+                let after_properties = before_properties.as_ref().and_then(|properties| {
+                    let mut next = properties.clone();
+                    next.runs.clear();
+                    (next != TextProperties::default()).then_some(next)
+                });
                 let node = self
                     .nodes
                     .get_mut(id)
@@ -823,10 +1257,46 @@ impl Document {
                     .node_bytes
                     .saturating_sub(before_bytes)
                     .saturating_add(after_bytes);
+                self.replace_text_properties_option(*id, after_properties.clone());
                 Ok(AppliedChange::TextChanged {
                     id: *id,
                     before,
                     after: text.clone(),
+                    before_properties,
+                    after_properties,
+                })
+            }
+            Command::SetTextProperties { id, properties } => {
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                if node.kind != NodeKind::Text
+                    || !self.valid_text_properties(&node.text, properties)
+                {
+                    return Err(CommandError::InvalidTextProperties);
+                }
+                let before = self.node_text_properties.get(id).cloned();
+                let after =
+                    (properties != &TextProperties::default()).then_some(properties.clone());
+                self.replace_text_properties_option(*id, after.clone());
+                Ok(AppliedChange::TextPropertiesChanged {
+                    id: *id,
+                    before,
+                    after,
+                })
+            }
+            Command::SetNodePosition { id, position } => {
+                let node = self
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                let before = node.position;
+                node.position = *position;
+                Ok(AppliedChange::NodePositionChanged {
+                    id: *id,
+                    before,
+                    after: *position,
                 })
             }
             Command::Delete { id } => {
@@ -838,6 +1308,15 @@ impl Document {
                     .remove(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
                 self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
+                if let Some(properties) = self.node_text_properties.remove(id) {
+                    self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
+                    self.retired_node_text_properties.insert(*id, properties);
+                }
+                let page_id = self.node_pages.remove(id).unwrap_or(DEFAULT_PAGE_ID);
+                self.retired_node_pages.insert(*id, page_id);
+                if let Some(asset_id) = self.node_assets.remove(id) {
+                    self.retired_node_assets.insert(*id, asset_id);
+                }
                 self.retired_ids.insert(*id);
                 Ok(AppliedChange::NodeDeleted { node })
             }
@@ -849,28 +1328,63 @@ impl Document {
                     after: *profile,
                 })
             }
+            Command::RegisterAsset { asset } => {
+                self.insert_asset(asset.clone())?;
+                Ok(AppliedChange::AssetRegistered {
+                    asset: asset.clone(),
+                })
+            }
         }
     }
 
     fn apply_inverse(&mut self, change: &AppliedChange) {
         match change {
+            AppliedChange::PageCreated { page } => {
+                self.pages.remove(&page.id);
+            }
             AppliedChange::NodeCreated { node } => self.retire_node(node.id),
             AppliedChange::GeometryChanged { id, before, .. } => {
                 if let Some(node) = self.nodes.get_mut(id) {
-                    (node.x, node.y, node.width, node.height, node.rotation) =
-                        (before.x, before.y, before.width, before.height, before.rotation);
+                    (node.x, node.y, node.width, node.height, node.rotation) = (
+                        before.x,
+                        before.y,
+                        before.width,
+                        before.height,
+                        before.rotation,
+                    );
                 }
             }
             AppliedChange::NameChanged { id, before, .. } => self.set_name(*id, before),
             AppliedChange::AppearanceChanged { id, before, .. } => self.set_appearance(*id, before),
-            AppliedChange::TextChanged { id, before, .. } => self.set_text(*id, before),
-            AppliedChange::DocumentColorProfileChanged { before, .. } => self.color_profile = *before,
+            AppliedChange::NodeAssetChanged { id, before, .. } => self.set_node_asset(*id, *before),
+            AppliedChange::TextChanged {
+                id,
+                before,
+                before_properties,
+                ..
+            } => {
+                self.set_text(*id, before);
+                self.replace_text_properties_option(*id, before_properties.clone());
+            }
+            AppliedChange::TextPropertiesChanged { id, before, .. } => {
+                self.replace_text_properties_option(*id, before.clone());
+            }
+            AppliedChange::NodePositionChanged { id, before, .. } => self.set_node_position(*id, *before),
+            AppliedChange::DocumentColorProfileChanged { before, .. } => {
+                self.color_profile = *before
+            }
+            AppliedChange::AssetRegistered { asset } => {
+                self.assets.remove(&asset.asset_id);
+            }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
         }
     }
 
     fn apply_forward(&mut self, change: &AppliedChange) {
         match change {
+            AppliedChange::PageCreated { page } => {
+                self.pages.insert(page.id, page.clone());
+            }
             AppliedChange::NodeCreated { node } => self.restore_node(node),
             AppliedChange::GeometryChanged { id, after, .. } => {
                 if let Some(node) = self.nodes.get_mut(id) {
@@ -880,8 +1394,24 @@ impl Document {
             }
             AppliedChange::NameChanged { id, after, .. } => self.set_name(*id, after),
             AppliedChange::AppearanceChanged { id, after, .. } => self.set_appearance(*id, after),
-            AppliedChange::TextChanged { id, after, .. } => self.set_text(*id, after),
+            AppliedChange::NodeAssetChanged { id, after, .. } => self.set_node_asset(*id, *after),
+            AppliedChange::TextChanged {
+                id,
+                after,
+                after_properties,
+                ..
+            } => {
+                self.set_text(*id, after);
+                self.replace_text_properties_option(*id, after_properties.clone());
+            }
+            AppliedChange::TextPropertiesChanged { id, after, .. } => {
+                self.replace_text_properties_option(*id, after.clone());
+            }
+            AppliedChange::NodePositionChanged { id, after, .. } => self.set_node_position(*id, *after),
             AppliedChange::DocumentColorProfileChanged { after, .. } => self.color_profile = *after,
+            AppliedChange::AssetRegistered { asset } => {
+                self.assets.insert(asset.asset_id, asset.clone());
+            }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
         }
     }
@@ -905,6 +1435,23 @@ impl Document {
                 .node_bytes
                 .saturating_sub(before_bytes)
                 .saturating_add(after_bytes);
+        }
+    }
+
+    fn set_node_position(&mut self, id: NodeId, position: PositionId) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.position = position;
+        }
+    }
+
+    fn set_node_asset(&mut self, id: NodeId, asset_id: Option<AssetId>) {
+        match asset_id {
+            Some(asset_id) => {
+                self.node_assets.insert(id, asset_id);
+            }
+            None => {
+                self.node_assets.remove(&id);
+            }
         }
     }
 
@@ -932,20 +1479,181 @@ impl Document {
         }
     }
 
+    fn replace_text_properties(&mut self, id: NodeId, properties: TextProperties) {
+        self.replace_text_properties_option(
+            id,
+            (properties != TextProperties::default()).then_some(properties),
+        );
+    }
+
+    fn replace_text_properties_option(&mut self, id: NodeId, properties: Option<TextProperties>) {
+        let before = self.node_text_properties.remove(&id);
+        self.node_bytes = self.node_bytes.saturating_sub(
+            before
+                .as_ref()
+                .map(TextProperties::estimated_bytes)
+                .unwrap_or(0),
+        );
+        if let Some(properties) = properties {
+            self.node_bytes = self.node_bytes.saturating_add(properties.estimated_bytes());
+            self.node_text_properties.insert(id, properties);
+        }
+    }
+
+    fn valid_text_properties(&self, text: &str, properties: &TextProperties) -> bool {
+        if properties.runs.len() > MAX_TEXT_STYLE_RUNS
+            || properties.fallback_fonts.len() > MAX_TEXT_FALLBACK_FONTS
+            || !properties.paragraph.paragraph_spacing.is_finite()
+            || properties.paragraph.paragraph_spacing < 0.0
+            || properties
+                .paragraph
+                .line_height
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        {
+            return false;
+        }
+        let mut expected_start = 0usize;
+        for run in &properties.runs {
+            let start = run.start as usize;
+            let end = run.end as usize;
+            if start != expected_start
+                || start >= end
+                || end > text.len()
+                || !text.is_char_boundary(start)
+                || !text.is_char_boundary(end)
+                || !run.font_size.is_finite()
+                || !(0.1..=10_000.0).contains(&run.font_size)
+                || run.font_weight == 0
+                || run.font_weight > 1_000
+                || !run.letter_spacing.is_finite()
+                || !(-10_000.0..=10_000.0).contains(&run.letter_spacing)
+                || !run
+                    .font
+                    .as_ref()
+                    .is_none_or(|font| self.valid_font_reference(font))
+            {
+                return false;
+            }
+            expected_start = end;
+        }
+        if !properties.runs.is_empty() && expected_start != text.len() {
+            return false;
+        }
+        let mut seen_fonts = BTreeSet::new();
+        properties
+            .fallback_fonts
+            .iter()
+            .all(|font| seen_fonts.insert(font.asset_id) && self.valid_font_reference(font))
+    }
+
+    fn valid_font_reference(&self, font: &FontReference) -> bool {
+        self.assets
+            .get(&font.asset_id)
+            .is_some_and(|asset| asset.media_type.starts_with("font/"))
+            && font.variation_axes.len() <= MAX_FONT_VARIATION_AXES
+            && font
+                .variation_axes
+                .iter()
+                .all(|(tag, value)| tag.len() == 4 && tag.is_ascii() && value.is_finite())
+    }
+
     fn retire_node(&mut self, id: NodeId) {
         if let Some(node) = self.nodes.remove(&id) {
             self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
         }
+        if let Some(properties) = self.node_text_properties.remove(&id) {
+            self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
+            self.retired_node_text_properties.insert(id, properties);
+        }
+        let page_id = self.node_pages.remove(&id).unwrap_or(DEFAULT_PAGE_ID);
+        self.retired_node_pages.insert(id, page_id);
+        if let Some(asset_id) = self.node_assets.remove(&id) {
+            self.retired_node_assets.insert(id, asset_id);
+        }
         self.retired_ids.insert(id);
+    }
+
+    fn create_node_in_page(
+        &mut self,
+        page_id: PageId,
+        node: Node,
+    ) -> Result<AppliedChange, CommandError> {
+        if node.kind == NodeKind::Image {
+            return Err(CommandError::InvalidAsset);
+        }
+        self.create_node_in_page_with_asset(page_id, node, None)
+    }
+
+    fn create_image_node_in_page(
+        &mut self,
+        page_id: PageId,
+        node: Node,
+        asset_id: AssetId,
+    ) -> Result<AppliedChange, CommandError> {
+        if !image_fill_supported(&node.kind)
+            || !self
+                .assets
+                .get(&asset_id)
+                .is_some_and(|asset| asset.media_type.starts_with("image/"))
+        {
+            return Err(CommandError::InvalidAsset);
+        }
+        self.create_node_in_page_with_asset(page_id, node, Some(asset_id))
+    }
+
+    fn create_node_in_page_with_asset(
+        &mut self,
+        page_id: PageId,
+        node: Node,
+        asset_id: Option<AssetId>,
+    ) -> Result<AppliedChange, CommandError> {
+        if self.nodes.len() >= MAX_DOCUMENT_NODES {
+            return Err(CommandError::ResourceLimit);
+        }
+        self.validate_node_page(page_id, &node)?;
+        if self.node_bytes.saturating_add(node.estimated_bytes()) > MAX_DOCUMENT_BYTES {
+            return Err(CommandError::ResourceLimit);
+        }
+        if self.nodes.contains_key(&node.id) {
+            return Err(CommandError::DuplicateNode { id: node.id });
+        }
+        if self.retired_ids.contains(&node.id) {
+            return Err(CommandError::RetiredNodeId { id: node.id });
+        }
+        self.nodes.insert(node.id, node.clone());
+        self.node_pages.insert(node.id, page_id);
+        if let Some(asset_id) = asset_id {
+            self.node_assets.insert(node.id, asset_id);
+        }
+        self.retired_node_pages.remove(&node.id);
+        self.retired_node_assets.remove(&node.id);
+        self.retired_node_text_properties.remove(&node.id);
+        self.node_bytes += node.estimated_bytes();
+        Ok(AppliedChange::NodeCreated { node })
     }
 
     fn restore_node(&mut self, node: &Node) {
         self.nodes.insert(node.id, node.clone());
+        let page_id = self
+            .retired_node_pages
+            .remove(&node.id)
+            .unwrap_or(DEFAULT_PAGE_ID);
+        self.node_pages.insert(node.id, page_id);
+        if let Some(asset_id) = self.retired_node_assets.remove(&node.id) {
+            self.node_assets.insert(node.id, asset_id);
+        }
+        if let Some(properties) = self.retired_node_text_properties.remove(&node.id) {
+            self.node_bytes = self.node_bytes.saturating_add(properties.estimated_bytes());
+            self.node_text_properties.insert(node.id, properties);
+        }
         self.node_bytes += node.estimated_bytes();
         self.retired_ids.remove(&node.id);
     }
 
-    fn validate_node(&self, node: &Node) -> Result<(), CommandError> {
+    fn validate_node_page(&self, page_id: PageId, node: &Node) -> Result<(), CommandError> {
+        if !self.pages.contains_key(&page_id) {
+            return Err(CommandError::MissingPage { id: page_id });
+        }
         if node.name.trim().is_empty() {
             return Err(CommandError::InvalidName);
         }
@@ -955,8 +1663,7 @@ impl Document {
             width: node.width,
             height: node.height,
             rotation: node.rotation,
-        })
-        {
+        }) {
             return Err(CommandError::InvalidGeometry);
         }
         if !valid_appearance(&Appearance {
@@ -970,11 +1677,22 @@ impl Document {
         }) {
             return Err(CommandError::InvalidAppearance);
         }
-        if node.text.len() > MAX_TEXT_BYTES || (node.kind != NodeKind::Text && !node.text.is_empty()) {
+        if node.text.len() > MAX_TEXT_BYTES
+            || (node.kind != NodeKind::Text && !node.text.is_empty())
+        {
             return Err(CommandError::InvalidText);
         }
         if let Some(parent_id) = node.parent_id {
             if !self.nodes.contains_key(&parent_id) {
+                return Err(CommandError::MissingParent { id: parent_id });
+            }
+            if self
+                .node_pages
+                .get(&parent_id)
+                .copied()
+                .unwrap_or(DEFAULT_PAGE_ID)
+                != page_id
+            {
                 return Err(CommandError::MissingParent { id: parent_id });
             }
         }
@@ -984,8 +1702,13 @@ impl Document {
 
 impl Transaction {
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<TransactionId>() + std::mem::size_of::<u64>()
-            + self.commands.iter().map(Command::estimated_bytes).sum::<usize>()
+        std::mem::size_of::<TransactionId>()
+            + std::mem::size_of::<u64>()
+            + self
+                .commands
+                .iter()
+                .map(Command::estimated_bytes)
+                .sum::<usize>()
     }
 }
 
@@ -1080,12 +1803,37 @@ impl OperationEnvelope {
 impl Command {
     fn estimated_bytes(&self) -> usize {
         match self {
+            Command::CreatePage(page) => std::mem::size_of::<Page>() + page.name.len(),
+            Command::CreateInPage { node, .. } => {
+                std::mem::size_of::<PageId>() + node.estimated_bytes()
+            }
+            Command::CreateImageInPage { node, .. } => {
+                std::mem::size_of::<PageId>()
+                    + std::mem::size_of::<AssetId>()
+                    + node.estimated_bytes()
+            }
             Command::Create(node) => node.estimated_bytes(),
-            Command::UpdateGeometry { .. } => std::mem::size_of::<Geometry>() + std::mem::size_of::<NodeId>(),
+            Command::UpdateGeometry { .. } => {
+                std::mem::size_of::<Geometry>() + std::mem::size_of::<NodeId>()
+            }
             Command::Rename { name, .. } => std::mem::size_of::<NodeId>() + name.len(),
-            Command::SetAppearance { appearance, .. } => std::mem::size_of::<NodeId>() + appearance.estimated_bytes(),
+            Command::SetAppearance { appearance, .. } => {
+                std::mem::size_of::<NodeId>() + appearance.estimated_bytes()
+            }
+            Command::SetNodeAsset { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>()
+            }
             Command::SetText { text, .. } => std::mem::size_of::<NodeId>() + text.len(),
+            Command::SetTextProperties { properties, .. } => {
+                std::mem::size_of::<NodeId>() + properties.estimated_bytes()
+            }
+            Command::SetNodePosition { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>()
+            }
             Command::SetDocumentColorProfile { .. } => std::mem::size_of::<DocumentColorProfile>(),
+            Command::RegisterAsset { asset } => {
+                std::mem::size_of::<AssetReference>() + asset.media_type.len()
+            }
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -1093,32 +1841,126 @@ impl Command {
 
 impl Node {
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<Node>() + self.name.len() + self.text.len() + self.fill.estimated_bytes() + self.stroke.estimated_bytes()
+        std::mem::size_of::<Node>()
+            + self.name.len()
+            + self.text.len()
+            + self.fill.estimated_bytes()
+            + self.stroke.estimated_bytes()
     }
 }
 
 impl Appearance {
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<Appearance>() + self.fill.estimated_bytes() + self.stroke.estimated_bytes()
+        std::mem::size_of::<Appearance>()
+            + self.fill.estimated_bytes()
+            + self.stroke.estimated_bytes()
+    }
+}
+
+impl TextProperties {
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .runs
+                .iter()
+                .map(|run| {
+                    std::mem::size_of::<TextStyleRun>()
+                        + run
+                            .font
+                            .as_ref()
+                            .map(FontReference::estimated_bytes)
+                            .unwrap_or(0)
+                })
+                .sum::<usize>()
+            + self
+                .fallback_fonts
+                .iter()
+                .map(FontReference::estimated_bytes)
+                .sum::<usize>()
+    }
+}
+
+impl FontReference {
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .variation_axes
+                .iter()
+                .map(|(tag, _)| tag.len() + std::mem::size_of::<f32>())
+                .sum::<usize>()
     }
 }
 
 impl AppliedChange {
     fn estimated_bytes(&self) -> usize {
         match self {
-            AppliedChange::NodeCreated { node } | AppliedChange::NodeDeleted { node } => node.estimated_bytes(),
-            AppliedChange::GeometryChanged { .. } => std::mem::size_of::<Geometry>() * 2 + std::mem::size_of::<NodeId>(),
-            AppliedChange::NameChanged { before, after, .. } => std::mem::size_of::<NodeId>() + before.len() + after.len(),
-            AppliedChange::AppearanceChanged { before, after, .. } => std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes(),
-            AppliedChange::TextChanged { before, after, .. } => std::mem::size_of::<NodeId>() + before.len() + after.len(),
-            AppliedChange::DocumentColorProfileChanged { .. } => std::mem::size_of::<DocumentColorProfile>() * 2,
+            AppliedChange::PageCreated { page } => std::mem::size_of::<Page>() + page.name.len(),
+            AppliedChange::NodeCreated { node } | AppliedChange::NodeDeleted { node } => {
+                node.estimated_bytes()
+            }
+            AppliedChange::GeometryChanged { .. } => {
+                std::mem::size_of::<Geometry>() * 2 + std::mem::size_of::<NodeId>()
+            }
+            AppliedChange::NameChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>() + before.len() + after.len()
+            }
+            AppliedChange::AppearanceChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::NodeAssetChanged { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>() * 2
+            }
+            AppliedChange::TextChanged {
+                before,
+                after,
+                before_properties,
+                after_properties,
+                ..
+            } => {
+                std::mem::size_of::<NodeId>()
+                    + before.len()
+                    + after.len()
+                    + before_properties
+                        .as_ref()
+                        .map(TextProperties::estimated_bytes)
+                        .unwrap_or(0)
+                    + after_properties
+                        .as_ref()
+                        .map(TextProperties::estimated_bytes)
+                        .unwrap_or(0)
+            }
+            AppliedChange::TextPropertiesChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>()
+                    + before
+                        .as_ref()
+                        .map(TextProperties::estimated_bytes)
+                        .unwrap_or(0)
+                    + after
+                        .as_ref()
+                        .map(TextProperties::estimated_bytes)
+                        .unwrap_or(0)
+            }
+            AppliedChange::NodePositionChanged { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>() * 2
+            }
+            AppliedChange::DocumentColorProfileChanged { .. } => {
+                std::mem::size_of::<DocumentColorProfile>() * 2
+            }
+            AppliedChange::AssetRegistered { asset } => {
+                std::mem::size_of::<AssetReference>() + asset.media_type.len()
+            }
         }
     }
 }
 
 impl HistoryItem {
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<HistoryItem>() + self.changes.iter().map(AppliedChange::estimated_bytes).sum::<usize>()
+        std::mem::size_of::<HistoryItem>()
+            + self
+                .changes
+                .iter()
+                .map(AppliedChange::estimated_bytes)
+                .sum::<usize>()
     }
 }
 
@@ -1140,7 +1982,11 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 fn hash_number(hasher: &mut Sha256, value: f64) {
     // Document validation rules rule out NaN/Infinity. Normalizing signed zero keeps
     // a harmless transport representation detail from splitting canonical hashes.
-    hasher.update((if value == 0.0 { 0.0 } else { value }).to_bits().to_be_bytes());
+    hasher.update(
+        (if value == 0.0 { 0.0 } else { value })
+            .to_bits()
+            .to_be_bytes(),
+    );
 }
 
 fn hash_color(hasher: &mut Sha256, color: Color) {
@@ -1150,9 +1996,17 @@ fn hash_color(hasher: &mut Sha256, color: Color) {
         ColorSpace::LinearSrgb => 2,
     }]);
     for component in color.components {
-        hasher.update((if component == 0.0 { 0.0 } else { component }).to_bits().to_be_bytes());
+        hasher.update(
+            (if component == 0.0 { 0.0 } else { component })
+                .to_bits()
+                .to_be_bytes(),
+        );
     }
-    hasher.update((if color.alpha == 0.0 { 0.0 } else { color.alpha }).to_bits().to_be_bytes());
+    hasher.update(
+        (if color.alpha == 0.0 { 0.0 } else { color.alpha })
+            .to_bits()
+            .to_be_bytes(),
+    );
 }
 
 fn hash_paint(hasher: &mut Sha256, paint: &Paint) {
@@ -1164,11 +2018,23 @@ fn hash_paint(hasher: &mut Sha256, paint: &Paint) {
         Paint::LinearGradient(gradient) => {
             hasher.update([1]);
             for value in gradient.start.into_iter().chain(gradient.end) {
-                hasher.update((if value == 0.0 { 0.0 } else { value }).to_bits().to_be_bytes());
+                hasher.update(
+                    (if value == 0.0 { 0.0 } else { value })
+                        .to_bits()
+                        .to_be_bytes(),
+                );
             }
             hash_len(hasher, gradient.stops.len());
             for stop in &gradient.stops {
-                hasher.update((if stop.position == 0.0 { 0.0 } else { stop.position }).to_bits().to_be_bytes());
+                hasher.update(
+                    (if stop.position == 0.0 {
+                        0.0
+                    } else {
+                        stop.position
+                    })
+                    .to_bits()
+                    .to_be_bytes(),
+                );
                 hash_color(hasher, stop.color);
             }
         }
@@ -1180,6 +2046,62 @@ fn hash_document_color_profile(hasher: &mut Sha256, profile: DocumentColorProfil
         DocumentColorProfile::Srgb => 0,
         DocumentColorProfile::DisplayP3 => 1,
     }]);
+}
+
+fn hash_font_reference(hasher: &mut Sha256, font: &FontReference) {
+    hasher.update(font.asset_id.0.to_be_bytes());
+    hasher.update(font.face_index.to_be_bytes());
+    hash_len(hasher, font.variation_axes.len());
+    for (tag, value) in &font.variation_axes {
+        hash_text(hasher, tag);
+        hasher.update(
+            (if *value == 0.0 { 0.0 } else { *value })
+                .to_bits()
+                .to_be_bytes(),
+        );
+    }
+}
+
+fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
+    hash_len(hasher, properties.runs.len());
+    for run in &properties.runs {
+        hasher.update(run.start.to_be_bytes());
+        hasher.update(run.end.to_be_bytes());
+        match &run.font {
+            Some(font) => {
+                hasher.update([1]);
+                hash_font_reference(hasher, font);
+            }
+            None => hasher.update([0]),
+        }
+        hash_number(hasher, run.font_size);
+        hasher.update(run.font_weight.to_be_bytes());
+        hasher.update([u8::from(run.italic)]);
+        hash_number(hasher, run.letter_spacing);
+    }
+    hasher.update([match properties.paragraph.alignment {
+        TextAlign::Left => 0,
+        TextAlign::Center => 1,
+        TextAlign::Right => 2,
+        TextAlign::Justify => 3,
+    }]);
+    match properties.paragraph.line_height {
+        Some(value) => {
+            hasher.update([1]);
+            hash_number(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+    hash_number(hasher, properties.paragraph.paragraph_spacing);
+    hasher.update([match properties.auto_size {
+        TextAutoSize::Fixed => 0,
+        TextAutoSize::Height => 1,
+        TextAutoSize::WidthAndHeight => 2,
+    }]);
+    hash_len(hasher, properties.fallback_fonts.len());
+    for font in &properties.fallback_fonts {
+        hash_font_reference(hasher, font);
+    }
 }
 
 fn hash_node(hasher: &mut Sha256, node: &Node) {
@@ -1199,8 +2121,18 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
         NodeKind::Rectangle => 1,
         NodeKind::Ellipse => 2,
         NodeKind::Text => 3,
+        NodeKind::Image => 4,
     }]);
-    for value in [node.x, node.y, node.width, node.height, node.rotation, node.stroke_width, node.opacity, node.corner_radius] {
+    for value in [
+        node.x,
+        node.y,
+        node.width,
+        node.height,
+        node.rotation,
+        node.stroke_width,
+        node.opacity,
+        node.corner_radius,
+    ] {
         hash_number(hasher, value);
     }
     hash_paint(hasher, &node.fill);
@@ -1211,8 +2143,30 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
 
 fn hash_command(hasher: &mut Sha256, command: &Command) {
     match command {
-        Command::Create(node) => {
+        Command::CreatePage(page) => {
             hasher.update([0]);
+            hasher.update(page.id.0.to_be_bytes());
+            hasher.update(page.position.key.to_be_bytes());
+            hasher.update(page.position.actor.0.to_be_bytes());
+            hash_text(hasher, &page.name);
+        }
+        Command::CreateInPage { page_id, node } => {
+            hasher.update([8]);
+            hasher.update(page_id.0.to_be_bytes());
+            hash_node(hasher, node);
+        }
+        Command::CreateImageInPage {
+            page_id,
+            node,
+            asset_id,
+        } => {
+            hasher.update([10]);
+            hasher.update(page_id.0.to_be_bytes());
+            hasher.update(asset_id.0.to_be_bytes());
+            hash_node(hasher, node);
+        }
+        Command::Create(node) => {
+            hasher.update([1]);
             hash_node(hasher, node);
         }
         Command::UpdateGeometry {
@@ -1223,19 +2177,19 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             height,
             rotation,
         } => {
-            hasher.update([1]);
+            hasher.update([2]);
             hasher.update(id.0.to_be_bytes());
             for value in [*x, *y, *width, *height, *rotation] {
                 hash_number(hasher, value);
             }
         }
         Command::Rename { id, name } => {
-            hasher.update([2]);
+            hasher.update([3]);
             hasher.update(id.0.to_be_bytes());
             hash_text(hasher, name);
         }
         Command::SetAppearance { id, appearance } => {
-            hasher.update([3]);
+            hasher.update([4]);
             hasher.update(id.0.to_be_bytes());
             hash_paint(hasher, &appearance.fill);
             hash_paint(hasher, &appearance.stroke);
@@ -1244,20 +2198,61 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hash_number(hasher, appearance.corner_radius);
             hasher.update([u8::from(appearance.visible), u8::from(appearance.locked)]);
         }
+        Command::SetNodeAsset { id, asset_id } => {
+            hasher.update([12]);
+            hasher.update(id.0.to_be_bytes());
+            match asset_id {
+                Some(asset_id) => {
+                    hasher.update([1]);
+                    hasher.update(asset_id.0.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
         Command::SetText { id, text } => {
-            hasher.update([4]);
+            hasher.update([5]);
             hasher.update(id.0.to_be_bytes());
             hash_text(hasher, text);
         }
+        Command::SetTextProperties { id, properties } => {
+            hasher.update([11]);
+            hasher.update(id.0.to_be_bytes());
+            hash_text_properties(hasher, properties);
+        }
+        Command::SetNodePosition { id, position } => {
+            hasher.update([13]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(position.key.to_be_bytes());
+            hasher.update(position.actor.0.to_be_bytes());
+        }
+        Command::RegisterAsset { asset } => {
+            hasher.update([9]);
+            hasher.update(asset.asset_id.0.to_be_bytes());
+            hasher.update(asset.content_hash);
+            hash_text(hasher, &asset.media_type);
+            hasher.update(asset.byte_length.to_be_bytes());
+            match asset.dimensions {
+                Some([width, height]) => {
+                    hasher.update([1]);
+                    hasher.update(width.to_be_bytes());
+                    hasher.update(height.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
         Command::SetDocumentColorProfile { profile } => {
-            hasher.update([5]);
+            hasher.update([6]);
             hash_document_color_profile(hasher, *profile);
         }
         Command::Delete { id } => {
-            hasher.update([6]);
+            hasher.update([7]);
             hasher.update(id.0.to_be_bytes());
         }
     }
+}
+
+fn image_fill_supported(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image)
 }
 
 fn valid_geometry(geometry: Geometry) -> bool {
@@ -1474,24 +2469,190 @@ mod tests {
         let mut p3 = Document::empty();
         let srgb_node = node(1);
         let mut p3_node = node(1);
-        p3_node.fill = Paint::Solid(Color::new(ColorSpace::DisplayP3, [0.2, 0.8, 0.4], 1.0).unwrap());
-        srgb.submit(transaction(0, vec![Command::Create(srgb_node)]), Origin::LocalUser).unwrap();
-        p3.submit(transaction(0, vec![Command::Create(p3_node)]), Origin::LocalUser).unwrap();
+        p3_node.fill =
+            Paint::Solid(Color::new(ColorSpace::DisplayP3, [0.2, 0.8, 0.4], 1.0).unwrap());
+        srgb.submit(
+            transaction(0, vec![Command::Create(srgb_node)]),
+            Origin::LocalUser,
+        )
+        .unwrap();
+        p3.submit(
+            transaction(0, vec![Command::Create(p3_node)]),
+            Origin::LocalUser,
+        )
+        .unwrap();
         assert_ne!(srgb.canonical_hash_hex(), p3.canonical_hash_hex());
 
         let mut invalid = node(2);
-        invalid.fill = Paint::Solid(Color { space: ColorSpace::Srgb, components: [f32::NAN, 0.0, 0.0], alpha: 1.0 });
+        invalid.fill = Paint::Solid(Color {
+            space: ColorSpace::Srgb,
+            components: [f32::NAN, 0.0, 0.0],
+            alpha: 1.0,
+        });
         assert_eq!(
-            p3.submit(transaction(1, vec![Command::Create(invalid)]), Origin::LocalUser),
+            p3.submit(
+                transaction(1, vec![Command::Create(invalid)]),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance)
         );
         assert_eq!(p3.nodes().count(), 1);
     }
 
     #[test]
+    fn resource_index_is_canonical_and_rejects_invalid_asset_records() {
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash();
+        let asset = AssetReference {
+            asset_id: AssetId(7),
+            content_hash: [9; 32],
+            media_type: "image/png".into(),
+            byte_length: 128,
+            dimensions: Some([16, 8]),
+        };
+        document.seed_asset(asset.clone()).unwrap();
+        assert_eq!(document.asset(AssetId(7)), Some(&asset));
+        assert_ne!(document.canonical_hash(), baseline);
+        assert_eq!(
+            document.seed_asset(asset),
+            Err(CommandError::DuplicateAsset { id: AssetId(7) })
+        );
+        assert_eq!(
+            document.seed_asset(AssetReference {
+                asset_id: AssetId(8),
+                content_hash: [0; 32],
+                media_type: "image/png".into(),
+                byte_length: 1,
+                dimensions: None
+            }),
+            Err(CommandError::InvalidAsset)
+        );
+    }
+
+    #[test]
+    fn registered_asset_is_hashed_undoable_and_never_accepts_partial_dimensions() {
+        let asset = AssetReference {
+            asset_id: AssetId(9),
+            content_hash: [4; 32],
+            media_type: "image/png".into(),
+            byte_length: 128,
+            dimensions: Some([16, 8]),
+        };
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterAsset {
+                        asset: asset.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.asset(asset.asset_id), Some(&asset));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert_eq!(document.asset(asset.asset_id), None);
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.asset(asset.asset_id), Some(&asset));
+    }
+
+    #[test]
+    fn image_nodes_reference_registered_image_assets_and_restore_through_history() {
+        let asset = AssetReference {
+            asset_id: AssetId(10),
+            content_hash: [5; 32],
+            media_type: "image/png".into(),
+            byte_length: 256,
+            dimensions: Some([64, 32]),
+        };
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterAsset {
+                        asset: asset.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let resource_hash = document.canonical_hash_hex();
+        let mut image = node(11);
+        image.kind = NodeKind::Image;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::CreateImageInPage {
+                        page_id: DEFAULT_PAGE_ID,
+                        node: image,
+                        asset_id: asset.asset_id,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.asset_for_node(NodeId(11)), Some(asset.asset_id));
+        assert_ne!(document.canonical_hash_hex(), resource_hash);
+
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(11)), None);
+        assert_eq!(document.asset_for_node(NodeId(11)), None);
+        assert_ne!(document.canonical_hash_hex(), resource_hash);
+
+        document.redo().unwrap();
+        assert_eq!(document.asset_for_node(NodeId(11)), Some(asset.asset_id));
+    }
+
+    #[test]
+    fn shape_image_fills_are_canonical_and_undoable() {
+        let asset = AssetReference {
+            asset_id: AssetId(11),
+            content_hash: [8; 32],
+            media_type: "image/png".into(),
+            byte_length: 128,
+            dimensions: Some([16, 8]),
+        };
+        let mut document = Document::empty();
+        document.seed_asset(asset.clone()).unwrap();
+        document
+            .submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser)
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeAsset {
+                        id: NodeId(1),
+                        asset_id: Some(asset.asset_id),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.asset_for_node(NodeId(1)), Some(asset.asset_id));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo();
+        assert_eq!(document.asset_for_node(NodeId(1)), None);
+        document.redo();
+        assert_eq!(document.asset_for_node(NodeId(1)), Some(asset.asset_id));
+    }
+
+    #[test]
     fn stroke_and_width_are_canonical_hashed_and_undoable() {
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline_hash = document.canonical_hash_hex();
 
         document
@@ -1514,7 +2675,10 @@ mod tests {
                 Origin::LocalUser,
             )
             .unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke, Paint::Solid(Color::from_srgb_u8([37, 99, 235], 255)));
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke,
+            Paint::Solid(Color::from_srgb_u8([37, 99, 235], 255))
+        );
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 3.0);
         assert_ne!(document.canonical_hash_hex(), baseline_hash);
 
@@ -1562,8 +2726,14 @@ mod tests {
             [0.0, 0.0],
             [1.0, 1.0],
             vec![
-                crate::color::GradientStop { position: 0.0, color: Color::from_srgb_u8([16, 24, 48], 255) },
-                crate::color::GradientStop { position: 1.0, color: Color::from_srgb_u8([112, 224, 192], 204) },
+                crate::color::GradientStop {
+                    position: 0.0,
+                    color: Color::from_srgb_u8([16, 24, 48], 255),
+                },
+                crate::color::GradientStop {
+                    position: 1.0,
+                    color: Color::from_srgb_u8([112, 224, 192], 204),
+                },
             ],
         )
         .unwrap();
@@ -1571,7 +2741,10 @@ mod tests {
         gradient_node.fill = Paint::LinearGradient(gradient.clone());
         let mut document = Document::empty();
         document
-            .submit(transaction(0, vec![Command::Create(gradient_node)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(gradient_node)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let gradient_hash = document.canonical_hash_hex();
         let gradient_bytes = document.memory_stats().node_bytes;
@@ -1600,33 +2773,162 @@ mod tests {
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), gradient_hash);
         assert_eq!(document.memory_stats().node_bytes, gradient_bytes);
-        assert_eq!(document.node(NodeId(1)).unwrap().fill, Paint::LinearGradient(gradient));
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().fill,
+            Paint::LinearGradient(gradient)
+        );
     }
 
     #[test]
     fn position_ids_define_deterministic_sibling_order_and_gap_allocation() {
-        let left = PositionId { key: 10, actor: ActorId(1) };
-        let right = PositionId { key: 20, actor: ActorId(2) };
-        assert_eq!(PositionId::between(Some(left), Some(right), ActorId(9)).unwrap(), PositionId { key: 15, actor: ActorId(9) });
-        assert_eq!(PositionId::between(Some(left), Some(PositionId { key: 11, actor: ActorId(2) }), ActorId(9)), Err(PositionError::NoSpaceBetween));
+        let left = PositionId {
+            key: 10,
+            actor: ActorId(1),
+        };
+        let right = PositionId {
+            key: 20,
+            actor: ActorId(2),
+        };
+        assert_eq!(
+            PositionId::between(Some(left), Some(right), ActorId(9)).unwrap(),
+            PositionId {
+                key: 15,
+                actor: ActorId(9)
+            }
+        );
+        assert_eq!(
+            PositionId::between(
+                Some(left),
+                Some(PositionId {
+                    key: 11,
+                    actor: ActorId(2)
+                }),
+                ActorId(9)
+            ),
+            Err(PositionError::NoSpaceBetween)
+        );
 
         let mut document = Document::empty();
         let mut parent = node(1);
-        parent.position = PositionId { key: 50, actor: ActorId(0) };
+        parent.position = PositionId {
+            key: 50,
+            actor: ActorId(0),
+        };
         let mut later = node(2);
         later.parent_id = Some(NodeId(1));
-        later.position = PositionId { key: 20, actor: ActorId(1) };
+        later.position = PositionId {
+            key: 20,
+            actor: ActorId(1),
+        };
         let mut earlier = node(3);
         earlier.parent_id = Some(NodeId(1));
-        earlier.position = PositionId { key: 10, actor: ActorId(2) };
+        earlier.position = PositionId {
+            key: 10,
+            actor: ActorId(2),
+        };
         document
             .submit(
-                transaction(0, vec![Command::Create(parent), Command::Create(later), Command::Create(earlier)]),
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(parent),
+                        Command::Create(later),
+                        Command::Create(earlier),
+                    ],
+                ),
                 Origin::LocalUser,
             )
             .unwrap();
-        assert_eq!(document.ordered_nodes().iter().map(|node| node.id).collect::<Vec<_>>(), vec![NodeId(1), NodeId(3), NodeId(2)]);
-        assert_eq!(document.position_between(Some(NodeId(1)), Some(NodeId(3)), Some(NodeId(2)), ActorId(4)).unwrap(), PositionId { key: 15, actor: ActorId(4) });
+        assert_eq!(
+            document
+                .ordered_nodes()
+                .iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![NodeId(1), NodeId(3), NodeId(2)]
+        );
+        assert_eq!(
+            document
+                .position_between(
+                    Some(NodeId(1)),
+                    Some(NodeId(3)),
+                    Some(NodeId(2)),
+                    ActorId(4)
+                )
+                .unwrap(),
+            PositionId {
+                key: 15,
+                actor: ActorId(4)
+            }
+        );
+    }
+
+    #[test]
+    fn pages_are_canonical_and_reject_cross_page_parent_references() {
+        let mut document = Document::empty();
+        let design_page = Page {
+            id: PageId(2),
+            name: "Design".into(),
+            position: PositionId {
+                key: 2,
+                actor: ActorId(0),
+            },
+        };
+        document.seed_page(design_page).unwrap();
+
+        let parent = node(1);
+        document.seed_node_on_page(PageId(2), parent).unwrap();
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
+        document.seed_node_on_page(PageId(2), child).unwrap();
+        assert_eq!(document.page_for_node(NodeId(2)), Some(PageId(2)));
+        assert_eq!(document.ordered_nodes_on_page(PageId(2)).unwrap().len(), 2);
+
+        let mut invalid = node(3);
+        invalid.parent_id = Some(NodeId(1));
+        assert_eq!(
+            document.seed_node(invalid),
+            Err(CommandError::MissingParent { id: NodeId(1) })
+        );
+        assert_eq!(
+            document
+                .ordered_nodes_on_page(DEFAULT_PAGE_ID)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn page_creation_and_page_scoped_node_creation_are_atomic_and_undoable() {
+        let mut document = Document::empty();
+        let page = Page {
+            id: PageId(2),
+            name: "Design".into(),
+            position: PositionId::for_node(NodeId(2)),
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::CreatePage(page.clone()),
+                        Command::CreateInPage {
+                            page_id: page.id,
+                            node: node(7),
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.page_for_node(NodeId(7)), Some(PageId(2)));
+        assert_eq!(document.ordered_nodes_on_page(PageId(2)).unwrap().len(), 1);
+        document.undo().unwrap();
+        assert!(document.page(PageId(2)).is_none());
+        assert!(document.node(NodeId(7)).is_none());
+        document.redo().unwrap();
+        assert_eq!(document.page_for_node(NodeId(7)), Some(PageId(2)));
     }
 
     #[test]
@@ -1662,12 +2964,18 @@ mod tests {
         let before = Transaction {
             id: TransactionId(90),
             base_revision: 4,
-            commands: vec![Command::SetText { id: NodeId(1), text: "Before".into() }],
+            commands: vec![Command::SetText {
+                id: NodeId(1),
+                text: "Before".into(),
+            }],
         };
         let after = Transaction {
             id: TransactionId(91),
             base_revision: 4,
-            commands: vec![Command::SetText { id: NodeId(1), text: "After".into() }],
+            commands: vec![Command::SetText {
+                id: NodeId(1),
+                text: "After".into(),
+            }],
         };
         assert_ne!(
             OperationEnvelope::payload_hash_for(&before),
@@ -1687,6 +2995,148 @@ mod tests {
             Err(CommandError::InvalidText)
         );
         assert_eq!(document.node(NodeId(1)).unwrap().text, "After");
+    }
+
+    #[test]
+    fn rich_text_properties_are_canonical_validated_and_undoable() {
+        let font = AssetReference {
+            asset_id: AssetId(12),
+            content_hash: [12; 32],
+            media_type: "font/woff2".into(),
+            byte_length: 256,
+            dimensions: None,
+        };
+        let mut text_node = node(13);
+        text_node.kind = NodeKind::Text;
+        text_node.text = "A😀B".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::RegisterAsset {
+                            asset: font.clone(),
+                        },
+                        Command::Create(text_node),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let font_reference = FontReference {
+            asset_id: font.asset_id,
+            face_index: 0,
+            variation_axes: BTreeMap::from([("wght".into(), 650.0)]),
+        };
+        let properties = TextProperties {
+            runs: vec![
+                TextStyleRun {
+                    start: 0,
+                    end: 1,
+                    font: Some(font_reference.clone()),
+                    font_size: 18.0,
+                    font_weight: 650,
+                    italic: false,
+                    letter_spacing: 0.0,
+                },
+                TextStyleRun {
+                    start: 1,
+                    end: 5,
+                    font: Some(font_reference.clone()),
+                    font_size: 18.0,
+                    font_weight: 650,
+                    italic: false,
+                    letter_spacing: 0.0,
+                },
+                TextStyleRun {
+                    start: 5,
+                    end: 6,
+                    font: Some(font_reference.clone()),
+                    font_size: 18.0,
+                    font_weight: 650,
+                    italic: false,
+                    letter_spacing: 0.0,
+                },
+            ],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Center,
+                line_height: Some(24.0),
+                paragraph_spacing: 8.0,
+            },
+            auto_size: TextAutoSize::Height,
+            fallback_fonts: vec![font_reference.clone()],
+        };
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(13),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.text_properties_for_node(NodeId(13)),
+            Some(&properties)
+        );
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert_eq!(document.text_properties_for_node(NodeId(13)), None);
+        document.redo().unwrap();
+        assert_eq!(
+            document.text_properties_for_node(NodeId(13)),
+            Some(&properties)
+        );
+
+        let mut invalid = properties.clone();
+        invalid.runs[1].start = 2;
+        assert_eq!(
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(13),
+                        properties: invalid,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+        assert_eq!(
+            document.text_properties_for_node(NodeId(13)),
+            Some(&properties)
+        );
+
+        document
+            .submit(
+                transaction(
+                    4,
+                    vec![Command::SetText {
+                        id: NodeId(13),
+                        text: "changed".into(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(
+            document
+                .text_properties_for_node(NodeId(13))
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+        document.undo().unwrap();
+        assert_eq!(
+            document.text_properties_for_node(NodeId(13)),
+            Some(&properties)
+        );
     }
 
     #[test]
@@ -1757,7 +3207,9 @@ mod tests {
             commands: vec![Command::Create(node(1))],
         };
 
-        let first = document.submit(transaction.clone(), Origin::LocalUser).unwrap();
+        let first = document
+            .submit(transaction.clone(), Origin::LocalUser)
+            .unwrap();
         let retried = document.submit(transaction, Origin::LocalUser).unwrap();
 
         assert_eq!(retried, first);
@@ -1774,7 +3226,9 @@ mod tests {
                 },
                 Origin::LocalUser,
             ),
-            Err(CommandError::TransactionIdConflict { id: TransactionId(99) })
+            Err(CommandError::TransactionIdConflict {
+                id: TransactionId(99)
+            })
         );
     }
 
@@ -1914,7 +3368,10 @@ mod tests {
         }
         assert_eq!(first.revision, 2);
         assert_eq!(first.canonical_hash(), second.canonical_hash());
-        assert!(!first.can_undo(), "remote operations do not enter local undo");
+        assert!(
+            !first.can_undo(),
+            "remote operations do not enter local undo"
+        );
     }
 
     #[test]
@@ -1962,7 +3419,11 @@ mod tests {
         let commands = vec![Command::Delete { id: NodeId(1) }; MAX_TRANSACTION_COMMANDS + 1];
         assert_eq!(
             document.submit(
-                Transaction { id: TransactionId(1), base_revision: 0, commands },
+                Transaction {
+                    id: TransactionId(1),
+                    base_revision: 0,
+                    commands
+                },
                 Origin::LocalUser,
             ),
             Err(CommandError::ResourceLimit)
@@ -1974,7 +3435,11 @@ mod tests {
         huge.name = "x".repeat(MAX_TRANSACTION_BYTES);
         assert_eq!(
             document.submit(
-                Transaction { id: TransactionId(2), base_revision: 0, commands: vec![Command::Create(huge)] },
+                Transaction {
+                    id: TransactionId(2),
+                    base_revision: 0,
+                    commands: vec![Command::Create(huge)]
+                },
                 Origin::LocalUser,
             ),
             Err(CommandError::ResourceLimit)
@@ -2049,8 +3514,14 @@ mod tests {
                     id: TransactionId(50_002),
                     base_revision: 0,
                     commands: vec![
-                        Command::Rename { id: NodeId(1), name: "A longer name".into() },
-                        Command::SetText { id: NodeId(1), text: "A longer canonical text value".into() },
+                        Command::Rename {
+                            id: NodeId(1),
+                            name: "A longer name".into(),
+                        },
+                        Command::SetText {
+                            id: NodeId(1),
+                            text: "A longer canonical text value".into(),
+                        },
                     ],
                 },
                 Origin::LocalUser,

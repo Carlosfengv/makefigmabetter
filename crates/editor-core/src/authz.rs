@@ -6,7 +6,10 @@
 
 use std::collections::BTreeSet;
 
-use crate::{ActorId, AppliedOperation, CommandError, Document, DocumentId, OperationEnvelope, OperationId, Origin};
+use crate::{
+    ActorId, AppliedOperation, CommandError, Document, DocumentId, OperationEnvelope, OperationId,
+    Origin,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TenantId(pub u128);
@@ -130,12 +133,38 @@ impl Document {
         let revision_before = self.revision;
         let result = self.submit_authorized_operation(principal, policy, operation);
         let (outcome, code, accepted_revision) = match &result {
-            Ok(applied) => (AuthorizationAuditOutcome::Accepted, AuthorizationAuditCode::Accepted, Some(applied.accepted_revision)),
-            Err(AuthorizedOperationError::Authorization(AuthorizationError::TenantMismatch)) => (AuthorizationAuditOutcome::Rejected, AuthorizationAuditCode::TenantMismatch, None),
-            Err(AuthorizedOperationError::Authorization(AuthorizationError::DocumentMismatch)) => (AuthorizationAuditOutcome::Rejected, AuthorizationAuditCode::DocumentMismatch, None),
-            Err(AuthorizedOperationError::Authorization(AuthorizationError::WriteDenied)) => (AuthorizationAuditOutcome::Rejected, AuthorizationAuditCode::WriteDenied, None),
-            Err(AuthorizedOperationError::Authorization(AuthorizationError::PolicyDoesNotMatchLoadedDocument)) => (AuthorizationAuditOutcome::Rejected, AuthorizationAuditCode::PolicyDoesNotMatchLoadedDocument, None),
-            Err(AuthorizedOperationError::Command(_)) => (AuthorizationAuditOutcome::Rejected, AuthorizationAuditCode::OperationRejected, None),
+            Ok(applied) => (
+                AuthorizationAuditOutcome::Accepted,
+                AuthorizationAuditCode::Accepted,
+                Some(applied.accepted_revision),
+            ),
+            Err(AuthorizedOperationError::Authorization(AuthorizationError::TenantMismatch)) => (
+                AuthorizationAuditOutcome::Rejected,
+                AuthorizationAuditCode::TenantMismatch,
+                None,
+            ),
+            Err(AuthorizedOperationError::Authorization(AuthorizationError::DocumentMismatch)) => (
+                AuthorizationAuditOutcome::Rejected,
+                AuthorizationAuditCode::DocumentMismatch,
+                None,
+            ),
+            Err(AuthorizedOperationError::Authorization(AuthorizationError::WriteDenied)) => (
+                AuthorizationAuditOutcome::Rejected,
+                AuthorizationAuditCode::WriteDenied,
+                None,
+            ),
+            Err(AuthorizedOperationError::Authorization(
+                AuthorizationError::PolicyDoesNotMatchLoadedDocument,
+            )) => (
+                AuthorizationAuditOutcome::Rejected,
+                AuthorizationAuditCode::PolicyDoesNotMatchLoadedDocument,
+                None,
+            ),
+            Err(AuthorizedOperationError::Command(_)) => (
+                AuthorizationAuditOutcome::Rejected,
+                AuthorizationAuditCode::OperationRejected,
+                None,
+            ),
         };
         AuditedAuthorizedOperation {
             result,
@@ -158,20 +187,44 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Command, Node, NodeId, NodeKind, OperationId, PositionId, Transaction, TransactionId};
+    use crate::{
+        Command, Node, NodeId, NodeKind, OperationId, PositionId, Transaction, TransactionId,
+    };
 
     fn node(id: u128) -> Node {
         Node {
-            id: NodeId(id), parent_id: None, position: PositionId::for_node(NodeId(id)), name: "Authorized".into(), kind: NodeKind::Rectangle,
-            x: 0.0, y: 0.0, width: 100.0, height: 80.0, rotation: 0.0, fill: "#fff".into(), stroke: "#00000000".into(), stroke_width: 0.0,
-            opacity: 1.0, corner_radius: 0.0, text: String::new(), visible: true, locked: false,
+            id: NodeId(id),
+            parent_id: None,
+            position: PositionId::for_node(NodeId(id)),
+            name: "Authorized".into(),
+            kind: NodeKind::Rectangle,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation: 0.0,
+            fill: "#fff".into(),
+            stroke: "#00000000".into(),
+            stroke_width: 0.0,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            text: String::new(),
+            visible: true,
+            locked: false,
         }
     }
 
     fn operation(document_id: DocumentId, actor_id: ActorId) -> OperationEnvelope {
         OperationEnvelope::new(
-            document_id, OperationId(55), actor_id, vec![],
-            Transaction { id: TransactionId(56), base_revision: 0, commands: vec![Command::Create(node(1))] },
+            document_id,
+            OperationId(55),
+            actor_id,
+            vec![],
+            Transaction {
+                id: TransactionId(56),
+                base_revision: 0,
+                commands: vec![Command::Create(node(1))],
+            },
         )
     }
 
@@ -179,13 +232,23 @@ mod tests {
     fn authenticated_actor_overrides_a_forged_transport_actor() {
         let document_id = DocumentId(1);
         let trusted = ActorId(7);
-        let principal = Principal { tenant_id: TenantId(2), actor_id: trusted };
-        let policy = DocumentPolicy { tenant_id: TenantId(2), document_id, editors: BTreeSet::from([trusted]) };
-        let authorized = authorize_operation(principal, &policy, operation(document_id, ActorId(999))).unwrap();
+        let principal = Principal {
+            tenant_id: TenantId(2),
+            actor_id: trusted,
+        };
+        let policy = DocumentPolicy {
+            tenant_id: TenantId(2),
+            document_id,
+            editors: BTreeSet::from([trusted]),
+        };
+        let authorized =
+            authorize_operation(principal, &policy, operation(document_id, ActorId(999))).unwrap();
 
         assert_eq!(authorized.actor_id, trusted);
         let mut document = Document::with_id(document_id);
-        document.submit_authorized_operation(principal, &policy, authorized).unwrap();
+        document
+            .submit_authorized_operation(principal, &policy, authorized)
+            .unwrap();
         assert_eq!(document.revision, 1);
         assert!(document.node(NodeId(1)).is_some());
     }
@@ -194,25 +257,62 @@ mod tests {
     fn rejects_cross_tenant_cross_document_and_ungranted_writes_without_mutation() {
         let document_id = DocumentId(1);
         let actor = ActorId(7);
-        let policy = DocumentPolicy { tenant_id: TenantId(2), document_id, editors: BTreeSet::from([actor]) };
+        let policy = DocumentPolicy {
+            tenant_id: TenantId(2),
+            document_id,
+            editors: BTreeSet::from([actor]),
+        };
         assert_eq!(
-            authorize_operation(Principal { tenant_id: TenantId(3), actor_id: actor }, &policy, operation(document_id, actor)),
+            authorize_operation(
+                Principal {
+                    tenant_id: TenantId(3),
+                    actor_id: actor
+                },
+                &policy,
+                operation(document_id, actor)
+            ),
             Err(AuthorizationError::TenantMismatch)
         );
         assert_eq!(
-            authorize_operation(Principal { tenant_id: TenantId(2), actor_id: actor }, &policy, operation(DocumentId(9), actor)),
+            authorize_operation(
+                Principal {
+                    tenant_id: TenantId(2),
+                    actor_id: actor
+                },
+                &policy,
+                operation(DocumentId(9), actor)
+            ),
             Err(AuthorizationError::DocumentMismatch)
         );
         assert_eq!(
-            authorize_operation(Principal { tenant_id: TenantId(2), actor_id: ActorId(8) }, &policy, operation(document_id, ActorId(8))),
+            authorize_operation(
+                Principal {
+                    tenant_id: TenantId(2),
+                    actor_id: ActorId(8)
+                },
+                &policy,
+                operation(document_id, ActorId(8))
+            ),
             Err(AuthorizationError::WriteDenied)
         );
 
         let mut document = Document::with_id(document_id);
-        let mismatch = DocumentPolicy { document_id: DocumentId(9), ..policy };
+        let mismatch = DocumentPolicy {
+            document_id: DocumentId(9),
+            ..policy
+        };
         assert_eq!(
-            document.submit_authorized_operation(Principal { tenant_id: TenantId(2), actor_id: actor }, &mismatch, operation(document_id, actor)),
-            Err(AuthorizedOperationError::Authorization(AuthorizationError::PolicyDoesNotMatchLoadedDocument))
+            document.submit_authorized_operation(
+                Principal {
+                    tenant_id: TenantId(2),
+                    actor_id: actor
+                },
+                &mismatch,
+                operation(document_id, actor)
+            ),
+            Err(AuthorizedOperationError::Authorization(
+                AuthorizationError::PolicyDoesNotMatchLoadedDocument
+            ))
         );
         assert_eq!(document.revision, 0);
     }
@@ -221,26 +321,53 @@ mod tests {
     fn audit_event_uses_the_trusted_principal_and_preserves_rejection_non_mutation() {
         let document_id = DocumentId(1);
         let trusted = ActorId(7);
-        let principal = Principal { tenant_id: TenantId(2), actor_id: trusted };
-        let policy = DocumentPolicy { tenant_id: TenantId(2), document_id, editors: BTreeSet::from([trusted]) };
+        let principal = Principal {
+            tenant_id: TenantId(2),
+            actor_id: trusted,
+        };
+        let policy = DocumentPolicy {
+            tenant_id: TenantId(2),
+            document_id,
+            editors: BTreeSet::from([trusted]),
+        };
         let mut document = Document::with_id(document_id);
 
-        let accepted = document.submit_authorized_operation_with_audit(principal, &policy, operation(document_id, ActorId(999)));
-        assert!(accepted.result.is_ok());
-        assert_eq!(accepted.audit, AuthorizationAuditEvent {
-            schema_version: AUTHORIZATION_AUDIT_SCHEMA_VERSION,
-            tenant_id: TenantId(2), authenticated_actor_id: trusted,
-            requested_document_id: document_id, loaded_document_id: document_id,
-            operation_id: OperationId(55), revision_before: 0, accepted_revision: Some(1),
-            outcome: AuthorizationAuditOutcome::Accepted, code: AuthorizationAuditCode::Accepted,
-        });
-
-        let denied = document.submit_authorized_operation_with_audit(
-            Principal { tenant_id: TenantId(2), actor_id: ActorId(8) },
+        let accepted = document.submit_authorized_operation_with_audit(
+            principal,
             &policy,
             operation(document_id, ActorId(999)),
         );
-        assert_eq!(denied.result, Err(AuthorizedOperationError::Authorization(AuthorizationError::WriteDenied)));
+        assert!(accepted.result.is_ok());
+        assert_eq!(
+            accepted.audit,
+            AuthorizationAuditEvent {
+                schema_version: AUTHORIZATION_AUDIT_SCHEMA_VERSION,
+                tenant_id: TenantId(2),
+                authenticated_actor_id: trusted,
+                requested_document_id: document_id,
+                loaded_document_id: document_id,
+                operation_id: OperationId(55),
+                revision_before: 0,
+                accepted_revision: Some(1),
+                outcome: AuthorizationAuditOutcome::Accepted,
+                code: AuthorizationAuditCode::Accepted,
+            }
+        );
+
+        let denied = document.submit_authorized_operation_with_audit(
+            Principal {
+                tenant_id: TenantId(2),
+                actor_id: ActorId(8),
+            },
+            &policy,
+            operation(document_id, ActorId(999)),
+        );
+        assert_eq!(
+            denied.result,
+            Err(AuthorizedOperationError::Authorization(
+                AuthorizationError::WriteDenied
+            ))
+        );
         assert_eq!(denied.audit.outcome, AuthorizationAuditOutcome::Rejected);
         assert_eq!(denied.audit.code, AuthorizationAuditCode::WriteDenied);
         assert_eq!(denied.audit.authenticated_actor_id, ActorId(8));

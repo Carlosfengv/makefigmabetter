@@ -484,11 +484,7 @@ fn lerp_point(from: Point, to: Point, amount: f64) -> Point {
     }
 }
 fn normalize_zero(value: f64) -> f64 {
-    if value == 0.0 {
-        0.0
-    } else {
-        value
-    }
+    if value == 0.0 { 0.0 } else { value }
 }
 
 #[cfg(test)]
@@ -500,8 +496,14 @@ mod tests {
     }
 
     fn assert_point_near(actual: Point, expected: Point) {
-        assert!((actual.x - expected.x).abs() < 1e-12, "x: {actual:?} != {expected:?}");
-        assert!((actual.y - expected.y).abs() < 1e-12, "y: {actual:?} != {expected:?}");
+        assert!(
+            (actual.x - expected.x).abs() < 1e-12,
+            "x: {actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.y - expected.y).abs() < 1e-12,
+            "y: {actual:?} != {expected:?}"
+        );
     }
 
     #[test]
