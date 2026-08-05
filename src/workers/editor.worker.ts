@@ -1,18 +1,18 @@
 /// <reference lib="webworker" />
 
-import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingRemoteOperation, PresentationNode, RendererPreference, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
+import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
 import { findTopmostHit } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
 import { admitRenderSurface, MAX_RENDER_SURFACE_BYTES } from "@/lib/render-surface-budget";
 import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
-import { createNode, documentColorFromCssHex } from "@/lib/editor-protocol";
+import { createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
 import { sampleLinearGradientForCanvas } from "@/lib/color-rendering";
 import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
 import { styledTextSpans, type RenderTextStyle } from "@/lib/text-style-runs";
-import { GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
+import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { resolveCoreBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { coreProjectionNode, resolveCoreBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
 import { classifyEditorError, editorError, type EditorErrorCode } from "@/lib/editor-error";
@@ -30,16 +30,21 @@ import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/
 import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
 import { cacheAsset, readCachedAsset } from "@/lib/asset-byte-cache";
 import { ImageBitmapCache } from "@/lib/image-bitmap-cache";
+import { decodeRasterInWorker } from "@/lib/asset-decode-client";
 import { MAX_RASTER_DECODED_BYTES } from "@/lib/untrusted-asset";
 import { FontFaceRegistry } from "@/lib/font-face-registry";
 import { cssLineBoxBaseline as resolveCssLineBoxBaseline } from "@/lib/text-baseline";
 import { parseRustGpuSceneBatch } from "@/lib/rust-gpu-batch";
 import { parseRustTextLayout, type RustTextLayout } from "@/lib/rust-text-layout";
+import { parseRustTextCaretLayout } from "@/lib/rust-text-caret";
 import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
+import { orderNodesByRustRenderCommands, parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { hasCommittedMove } from "@/lib/move-commit";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
 import { orderNewLayerAtFront, sortNodesByLayerOrder } from "@/lib/layer-order";
+import { planPendingOperationReconciliation } from "@/lib/pending-operation-reconciliation";
+import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -116,6 +121,7 @@ let wasmDocument: WasmDocumentEngine | undefined;
 let bridgeLoadSequence = 0;
 let ephemeralBenchmarkProjection = false;
 let remoteBootstrapPending = false;
+let remoteResetPending = false;
 const localDevActorId = "00000000-0000-0000-0000-000000000007";
 const assetApiUrl = new URL("/asset-api", self.location.origin).toString().replace(/\/$/, "");
 const remoteSessionId = crypto.randomUUID();
@@ -130,9 +136,14 @@ let rendererPreference: RendererPreference = "auto";
 let simulatedGpuLossesRequested = 0;
 let simulatedGpuLosses = 0;
 let simulateGpuLossAfterImage = false;
+let simulatedGpuFault: SimulatedGpuFault | undefined;
+let simulatedGpuFaultReported = false;
 let gpuSceneBytes = 0;
 let gpuSceneWithinBudget = true;
 let gpuSceneLimitReported = false;
+let textAtlasStatsSignature = "";
+let imageTextureStatsSignature = "";
+let rustRenderGraphFailureSignature = "";
 type RustGpuScene = { revision: number; pageId: string; transientSceneVersion: number; instances: Float32Array; renderedNodeIds: ReadonlySet<string> };
 let rustGpuScene: RustGpuScene | undefined;
 const MAX_RUST_GPU_INSTANCE_NODES = 20_000;
@@ -186,7 +197,7 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
   const fontAvailability = Object.fromEntries(assets.filter((asset) => asset.mediaType.startsWith("font/")).map((asset) => [asset.assetId, fontFaces.statusFor(asset.assetId)]));
-  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts }, documentCore, localSnapshot, localJournalEntry } });
+  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
 }
 function emitRemoteBootstrap() {
   if (!wasmDocument || documentCore !== "Rust/WASM bridge ready") return;
@@ -194,10 +205,10 @@ function emitRemoteBootstrap() {
   const snapshot = wasmDocument.snapshot_protobuf();
   self.postMessage({ type: "remote-bootstrap", documentId, revision, snapshot } satisfies WorkerToMain, [snapshot.buffer]);
 }
-function hydrateRemoteSnapshot(snapshot: Uint8Array) {
+function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
   if (!wasmDocument) {
     emitError(undefined, "TRANSIENT");
-    return;
+    return false;
   }
   try {
     wasmDocument.load_snapshot_protobuf(snapshot);
@@ -210,52 +221,192 @@ function hydrateRemoteSnapshot(snapshot: Uint8Array) {
     if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
     rebuildNodeIndex();
     render();
-    diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_APPLIED", documentRevision: revision });
-    emitSnapshot();
+    if (publish) {
+      diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_APPLIED", documentRevision: revision });
+      emitSnapshot();
+    }
+    return true;
   } catch (error) {
     diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_REJECTED", documentRevision: revision });
     emitError(error, "CORRUPT_DATA");
+    return false;
   }
 }
+function hydrateRemoteSnapshot(snapshot: Uint8Array) { applyRemoteSnapshot(snapshot); }
 
 /** Serializing envelope derivation preserves the same client sequence and order
  * as the locally committed Core revision stream, even when WebCrypto resolves
  * hashes asynchronously. */
 function queueRemoteOperation(transactionId: string, baseRevision: number, batch: readonly CoreBatchCommand[], localDocumentHash: string) {
-  queueRemotePayload(transactionId, baseRevision, encodeCoreBatchPayload(batch), localDocumentHash);
+  queueRemotePayload(transactionId, baseRevision, encodeCoreBatchPayload(batch), localDocumentHash, { kind: "core-batch", batch: structuredClone([...batch]) });
 }
-function queueRemotePayload(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string) {
+
+/** Turns the already-applied Core undo/redo state into resolved Operations.
+ * Reappearing nodes use `restore`, never `create`: Core intentionally reserves
+ * tombstoned IDs, while a history replay is allowed to revive that exact node. */
+function historyReplayBatch(before: readonly CanvasNode[], after: readonly CanvasNode[]): CoreBatchCommand[] {
+  const beforeById = new Map(before.map((node) => [node.id, node]));
+  const afterById = new Map(after.map((node) => [node.id, node]));
+  const deletedIds = before.filter((node) => !afterById.has(node.id)).map((node) => node.id);
+  const restores = after
+    .filter((node) => !beforeById.has(node.id))
+    .map((node) => ({ type: "restore" as const, node: coreProjectionNode(node) }));
+  const updates: CoreBatchCommand[] = [];
+  const positions: Array<{ id: string; positionId: string }> = [];
+  for (const [id, current] of afterById) {
+    const previous = beforeById.get(id);
+    if (!previous) continue;
+    const previousProjection = coreProjectionNode(previous);
+    const currentProjection = coreProjectionNode(current);
+    const { positionId: previousPosition, ...previousSemantic } = previousProjection;
+    const { positionId: currentPosition, ...currentSemantic } = currentProjection;
+    if (JSON.stringify(previousSemantic) !== JSON.stringify(currentSemantic)) {
+      updates.push({ type: "update", node: currentProjection });
+    }
+    if (previousPosition !== currentPosition && currentPosition) positions.push({ id, positionId: currentPosition });
+  }
+  return [
+    ...(deletedIds.length ? [{ type: "delete" as const, ids: deletedIds }] : []),
+    ...restores,
+    ...updates,
+    ...(positions.length ? [{ type: "reposition" as const, positionIds: positions }] : []),
+  ];
+}
+async function buildPendingRemoteOperation(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string, replay?: PendingOperationReplay): Promise<PendingRemoteOperation> {
   const documentForOperation = documentId;
   const clientSequence = ++remoteClientSequence;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(payload).buffer));
+  const envelope = await encodeOperationPayloadEnvelope({
+    documentId: documentForOperation,
+    operationId: transactionId,
+    transactionId,
+    actorId: localDevActorId,
+    sessionId: remoteSessionId,
+    clientSequence,
+    baseRevision: BigInt(baseRevision),
+    engineSemanticsVersion: 3,
+  }, payload);
+  return {
+    format: "pending-operation-v1",
+    operationId: transactionId,
+    transactionId,
+    documentId: documentForOperation,
+    baseRevision,
+    envelope,
+    payloadHash: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    localDocumentHash,
+    createdAtMs: Date.now(),
+    attempts: 0,
+    ...(replay ? { replay } : {}),
+  };
+}
+function queueRemotePayload(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string, replay?: PendingOperationReplay) {
   remoteOperationQueue = remoteOperationQueue
     .catch(() => undefined)
     .then(async () => {
-      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(payload).buffer));
-      const envelope = await encodeOperationPayloadEnvelope({
-        documentId: documentForOperation,
-        operationId: transactionId,
-        transactionId,
-        actorId: localDevActorId,
-        sessionId: remoteSessionId,
-        clientSequence,
-        baseRevision: BigInt(baseRevision),
-        engineSemanticsVersion: 3,
-      }, payload);
-      const operation: PendingRemoteOperation = {
-        format: "pending-operation-v1",
-        operationId: transactionId,
-        transactionId,
-        documentId: documentForOperation,
-        baseRevision,
-        envelope,
-        payloadHash: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
-        localDocumentHash,
-        createdAtMs: Date.now(),
-        attempts: 0,
-      };
-      self.postMessage({ type: "remote-operation", operation } satisfies WorkerToMain, [envelope.buffer]);
+      const operation = await buildPendingRemoteOperation(transactionId, baseRevision, payload, localDocumentHash, replay);
+      self.postMessage({ type: "remote-operation", operation } satisfies WorkerToMain, [operation.envelope.buffer]);
     })
     .catch((error) => emitError(error, "TRANSIENT", transactionId));
+}
+
+function applyPendingReplay(replay: PendingOperationReplay, transactionId: string) {
+  if (!wasmDocument) throw new Error("WASM_DOCUMENT_UNAVAILABLE");
+  const baseRevision = Number(wasmDocument.revision);
+  let payload: Uint8Array;
+  if (replay.kind === "core-batch") {
+    const batch = rebaseCoreBatchForSnapshot(nodes, replay.batch);
+    wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(batch));
+    payload = encodeCoreBatchPayload(batch);
+    replay = { kind: "core-batch", batch };
+  } else if (replay.kind === "create-page") {
+    wasmDocument.create_page(transactionId, wasmDocument.revision, replay.page.id, replay.page.name);
+    payload = encodeCreatePagePayload(replay.page);
+  } else {
+    const asset = replay.asset;
+    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0);
+    payload = encodeRegisterResourcePayload(asset);
+  }
+  return { baseRevision, payload, replay };
+}
+
+/** Rebuilds the local projection from the service-owned Snapshot, then applies
+ * only concrete intents that Rust still accepts. Every replacement receives a
+ * fresh Operation/Transaction ID and current base revision; old envelopes are
+ * never mutated, preserving service idempotency and the causal audit trail. */
+async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: PendingRemoteOperation[]) {
+  if (!applyRemoteSnapshot(snapshot, false) || !wasmDocument) return;
+  const plan = planPendingOperationReconciliation(operations);
+  const removeOperationIds = [...plan.removeOperationIds];
+  const discardedOperationIds = [...plan.discardedOperationIds];
+  const rejectionDiagnostics = operations
+    .filter((operation) => plan.discardedOperationIds.includes(operation.operationId) && operation.reconciliation?.kind === "rejected")
+    .map((operation) => operation.reconciliation?.diagnostic)
+    .filter((diagnostic): diagnostic is string => Boolean(diagnostic));
+  const coreRejectedOperationIds: string[] = [];
+  const blockedOperationIds = [...plan.blockedOperationIds];
+  const replacements: PendingRemoteOperation[] = [];
+  for (const operation of plan.replayable) {
+    const replay = operation.replay;
+    // `planPendingOperationReconciliation` only returns records with replay
+    // data. Keep this guard at the Worker boundary in case an old IndexedDB
+    // record is malformed after structured-clone deserialization.
+    if (!replay) {
+      blockedOperationIds.push(operation.operationId);
+      break;
+    }
+    const replacementId = crypto.randomUUID();
+    let replayed: ReturnType<typeof applyPendingReplay>;
+    try {
+      replayed = applyPendingReplay(replay, replacementId);
+    } catch {
+      // The target may have been deleted or become invalid in the authoritative
+      // remote state. It is no longer a valid local intent; continue so a later
+      // independent create can still be recovered.
+      diagnostics.record({ category: "recovery", code: "REMOTE_REPLAY_CORE_REJECTED", documentRevision: revision, transactionId: operation.transactionId });
+      removeOperationIds.push(operation.operationId);
+      discardedOperationIds.push(operation.operationId);
+      coreRejectedOperationIds.push(operation.operationId);
+      continue;
+    }
+    try {
+      const replacement = await buildPendingRemoteOperation(
+        replacementId,
+        replayed.baseRevision,
+        replayed.payload,
+        wasmDocument.canonical_hash(),
+        structuredClone(replayed.replay),
+      );
+      removeOperationIds.push(operation.operationId);
+      replacements.push(replacement);
+    } catch {
+      // The Core has tentatively accepted this intent, but the replacement
+      // cannot be made durable without its envelope. Restore the authoritative
+      // snapshot and retain every replay candidate: emitting an earlier
+      // replacement while an older original remains queued would invert their
+      // causal order on the next flush.
+      applyRemoteSnapshot(snapshot, false);
+      removeOperationIds.splice(plan.removeOperationIds.length);
+      replacements.splice(0);
+      diagnostics.record({ category: "recovery", code: "REMOTE_REPLAY_ENVELOPE_FAILED", documentRevision: revision, transactionId: operation.transactionId });
+      blockedOperationIds.push(operation.operationId);
+      break;
+    }
+  }
+  // A render/projection refresh is recoverable presentation work. It must never
+  // turn an already accepted Rust replay into a discarded document operation.
+  try { syncProjectionFromWasm(false); }
+  catch {
+    diagnostics.record({ category: "renderer", code: "REMOTE_RECONCILIATION_PROJECTION_FAILED", documentRevision: revision });
+  }
+  diagnostics.record({
+    category: "recovery",
+    code: blockedOperationIds.length ? "REMOTE_RECONCILIATION_BLOCKED" : "REMOTE_RECONCILIATION_APPLIED",
+    documentRevision: revision,
+    details: { replacements: replacements.length, discarded: discardedOperationIds.length, blocked: blockedOperationIds.length },
+  });
+  emitSnapshot();
+  self.postMessage({ type: "remote-reconciled", removeOperationIds, replacements, discardedOperationIds, coreRejectedOperationIds, blockedOperationIds, rejectionDiagnostics } satisfies WorkerToMain);
 }
 function emitViewportCheckpoint() {
   if (!wasmDocument) return;
@@ -324,9 +475,22 @@ async function probeGpuDevice(recovery = false) {
     if (sequence !== gpuProbeSequence) { renderer.destroy(); return; }
     gpuRenderer?.destroy();
     gpuRenderer = renderer;
+    renderer.setFailureListener((code) => {
+      if (gpuRenderer !== renderer) return;
+      diagnostics.record({ category: "renderer", code, documentRevision: revision, details: { errorKind: code } });
+      // OOM means the current derived allocation set is no longer trustworthy.
+      // Follow the same bounded recovery path as device loss; validation errors
+      // remain observable but do not discard a device that the browser keeps valid.
+      if (code === "WEBGPU_OUT_OF_MEMORY" || code === "WEBGPU_UPLOAD_FAILED") {
+        renderer.destroy();
+        handleGpuDeviceLoss(renderer);
+      } else emitSnapshot(undefined, false);
+    });
     gpuSceneBytes = 0;
     gpuSceneWithinBudget = true;
     gpuSceneLimitReported = false;
+    textAtlasStatsSignature = "";
+    imageTextureStatsSignature = "";
     gpuStatus = "ready";
     diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_READY" });
     // The first draw uploads the derived instance scene. It is renderer startup,
@@ -335,43 +499,83 @@ async function probeGpuDevice(recovery = false) {
     render();
     renderPerformance.start();
     emitSnapshot(undefined, false);
-    maybeSimulateGpuLoss(sequence, renderer);
-    void renderer.deviceLost.then(() => {
-      if (sequence !== gpuProbeSequence) return;
-      gpuRenderer = undefined;
-      gpuSceneBytes = 0;
-      if (gpuRecoveryAttempts >= 1) {
-        gpuStatus = "unavailable";
-        diagnostics.record({ category: "renderer", code: "WEBGPU_RECOVERY_EXHAUSTED" });
-        emitSnapshot(undefined, false);
-        return;
-      }
-      gpuRecoveryAttempts += 1;
-      gpuStatus = "recovering";
-      emitSnapshot(undefined, false);
-      setTimeout(() => { void probeGpuDevice(true); }, 250);
-    });
-  } catch {
+    maybeSimulateGpuLoss();
+    maybeSimulateGpuFault();
+    void renderer.deviceLost.then(() => { handleGpuDeviceLoss(renderer); });
+  } catch (error) {
     if (sequence !== gpuProbeSequence) return;
     gpuRenderer?.destroy();
     gpuRenderer = undefined;
     gpuSceneBytes = 0;
     gpuStatus = "unavailable";
-    diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_FAILED" });
+    const code = classifyWebGpuRendererFailure(error);
+    diagnostics.record({ category: "renderer", code, documentRevision: revision, details: { errorKind: code } });
     emitSnapshot(undefined, false);
   }
+}
+
+/**
+ * Handles loss exactly once for the renderer that still owns presentation.
+ * The browser's `device.lost` promise is the production signal. Development
+ * fault injection also calls this after destroying a real device: Chromium
+ * may not settle `device.lost` a second time promptly after explicit destroy,
+ * but the renderer is already unusable and must follow the same bounded path.
+ */
+function handleGpuDeviceLoss(renderer: WebGpuSceneRenderer) {
+  if (gpuRenderer !== renderer) return;
+  gpuRenderer = undefined;
+  gpuSceneBytes = 0;
+  textAtlasStatsSignature = "";
+  imageTextureStatsSignature = "";
+  if (gpuRecoveryAttempts >= 1) {
+    gpuStatus = "unavailable";
+    diagnostics.record({ category: "renderer", code: "WEBGPU_RECOVERY_EXHAUSTED" });
+    emitSnapshot(undefined, false);
+    return;
+  }
+  gpuRecoveryAttempts += 1;
+  gpuStatus = "recovering";
+  emitSnapshot(undefined, false);
+  setTimeout(() => {
+    if (gpuRenderer === undefined && gpuStatus === "recovering") void probeGpuDevice(true);
+  }, 250);
 }
 
 /** Destroy only derived GPU state. The image-fixture variant waits until a
  * decoded bitmap is actually bound to a visible Image node, so recovery proves
  * texture recreation rather than merely rebuilding an empty renderer. */
-function maybeSimulateGpuLoss(sequence = gpuProbeSequence, renderer = gpuRenderer) {
-  if (!renderer || simulatedGpuLosses >= simulatedGpuLossesRequested) return;
+function maybeSimulateGpuLoss() {
+  if (!gpuRenderer || simulatedGpuLosses >= simulatedGpuLossesRequested) return;
   if (simulateGpuLossAfterImage && !activeNodes().some((node) => node.kind === "image" && Boolean(node.assetId) && imageBitmaps.has(node.assetId!))) return;
-  simulatedGpuLosses += 1;
-  diagnostics.record({ category: "renderer", code: "WEBGPU_DEVICE_LOSS_SIMULATION", details: { loss: simulatedGpuLosses, afterImage: simulateGpuLossAfterImage } });
   setTimeout(() => {
-    if (sequence === gpuProbeSequence && gpuRenderer === renderer) renderer.destroy();
+    // Fault injection must target the renderer that is actively presenting at
+    // execution time. A recovery can replace the initially captured renderer
+    // before this timer runs; destroying that stale device neither tests nor
+    // protects the bounded fallback path.
+    const activeRenderer = gpuRenderer;
+    if (!activeRenderer || simulatedGpuLosses >= simulatedGpuLossesRequested) return;
+    simulatedGpuLosses += 1;
+    diagnostics.record({ category: "renderer", code: "WEBGPU_DEVICE_LOSS_SIMULATION", details: { loss: simulatedGpuLosses, afterImage: simulateGpuLossAfterImage } });
+    activeRenderer.destroy();
+    handleGpuDeviceLoss(activeRenderer);
+  }, 100);
+}
+
+/** Development-only evidence uses the same renderer error listener as a real
+ * uncaptured GPU failure while keeping actual device allocation untouched. */
+function maybeSimulateGpuFault() {
+  if (!gpuRenderer || !simulatedGpuFault || simulatedGpuFaultReported) return;
+  simulatedGpuFaultReported = true;
+  setTimeout(() => {
+    const activeRenderer = gpuRenderer;
+    if (!activeRenderer || !simulatedGpuFault) return;
+    const error = simulatedGpuFault === "out-of-memory"
+      ? { name: "GPUOutOfMemoryError", message: "simulated allocation" }
+      : simulatedGpuFault === "upload"
+        ? { name: "GPUValidationError", message: "queue.writeTexture simulated" }
+        : { name: "GPUValidationError", message: "simulated validation" };
+    diagnostics.record({ category: "renderer", code: "WEBGPU_FAULT_SIMULATION", documentRevision: revision, details: { errorKind: simulatedGpuFault } });
+    activeRenderer.reportFailure(error);
   }, 100);
 }
 function presentationNode(node: CanvasNode): PresentationNode {
@@ -458,18 +662,57 @@ function refreshRustGpuScene() {
   }
 }
 
+/**
+ * The Rust graph is the authoritative derived command stream for the current
+ * visible scene. A missing node or revision mismatch is treated as unavailable
+ * rather than allowing a stale graph to hide a Canvas fallback node.
+ */
+function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; width: number; height: number }, visibleNodes: readonly CanvasNode[]): RustRenderGraphPlan | undefined {
+  if (!wasmDocument) return undefined;
+  try {
+    const plan = parseRustRenderGraphPlan(wasmDocument.render_graph_plan_for_page_json(
+      activePageId,
+      viewportBounds.x,
+      viewportBounds.y,
+      viewportBounds.width,
+      viewportBounds.height,
+    ));
+    if (!plan || plan.documentRevision !== revision || visibleNodes.some((node) => !plan.orderByNodeId.has(node.id))) {
+      throw new Error("RUST_RENDER_GRAPH_STALE_OR_INCOMPLETE");
+    }
+    rustRenderGraphFailureSignature = "";
+    return plan;
+  } catch {
+    const signature = `${revision}:${activePageId}:${visibleNodes.map((node) => node.id).join(",")}`;
+    if (signature !== rustRenderGraphFailureSignature) {
+      rustRenderGraphFailureSignature = signature;
+      diagnostics.record({ category: "renderer", code: "RUST_RENDER_GRAPH_UNAVAILABLE", documentRevision: revision });
+    }
+    return undefined;
+  }
+}
+
 /** Derives line ranges only for a fully explicit, single-face run. Mixed runs
  * remain on the documented Canvas transition path until per-run shaping and
  * glyph raster passes are available. */
+function variationAxesKey(font: DocumentFontReference | undefined) {
+  return JSON.stringify([...(font?.variationAxes ?? [])]
+    // Do not discard malformed coordinates here: the Rust boundary must reject
+    // them instead of silently rendering the default variable-font instance.
+    .sort((left, right) => left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0)
+    .map((axis) => ({ tag: axis.tag, value: axis.value })));
+}
+
 function rustTextLayoutRequest(node: CanvasNode) {
   const source = node.text ?? "Text";
   const properties = node.textProperties;
   const run = properties?.runs.length === 1 ? properties.runs[0] : undefined;
-  if (!run?.font || (run.font.variationAxes?.length ?? 0) > 0 || !Number.isFinite(run.fontSize) || run.fontSize <= 0 || !Number.isFinite(node.width) || node.width <= 0) return undefined;
+  if (!run?.font || !Number.isFinite(run.fontSize) || run.fontSize <= 0 || !Number.isFinite(node.width) || node.width <= 0) return undefined;
   const sourceByteLength = new TextEncoder().encode(source).byteLength;
   if (run.start !== 0 || run.end !== sourceByteLength) return undefined;
-  const key = JSON.stringify([revision, node.id, source, node.width, run.font.assetId, run.font.faceIndex, run.fontSize]);
-  return { key, source, font: run.font, fontSize: run.fontSize, widthEm: node.width / run.fontSize };
+  const axesKey = variationAxesKey(run.font);
+  const key = JSON.stringify([revision, node.id, source, node.width, run.font.assetId, run.font.faceIndex, axesKey, run.fontSize]);
+  return { key, source, font: run.font, axesKey, fontSize: run.fontSize, widthEm: node.width / run.fontSize };
 }
 
 function refreshRustTextLayouts() {
@@ -498,9 +741,10 @@ async function loadRustTextLayout(
     const blob = await loadAssetBlob(asset);
     if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
     const wasm = await loadWasmRuntime();
-    const payload = wasm.layout_shaped_text_json(
+    const payload = wasm.layout_shaped_text_with_variations_json(
       new Uint8Array(await blob.arrayBuffer()),
       request.font.faceIndex,
+      request.axesKey,
       request.source,
       request.widthEm,
     );
@@ -518,9 +762,26 @@ async function loadRustTextLayout(
   }
 }
 
+/** Returns the Core-owned set of legal UTF-8 caret stops for a live DOM edit.
+ * This never changes the Document: it only prevents browser UTF-16 selections
+ * from splitting graphemes before a later atomic text transaction commits. */
+async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "text-caret-layout" }>) {
+  try {
+    const wasm = await loadWasmRuntime();
+    const maxGraphemes = Math.max(1, Math.min(65_535, Array.from(request.text).length));
+    const layout = parseRustTextCaretLayout(JSON.parse(wasm.fallback_text_layout_json(request.text, maxGraphemes)));
+    if (!layout) throw new Error("INVALID_RUST_TEXT_CARET_LAYOUT");
+    emit({ type: "text-caret-layout", requestId: request.requestId, nodeId: request.nodeId, text: request.text, layout });
+  } catch {
+    diagnostics.record({ category: "renderer", code: "RUST_TEXT_CARET_UNAVAILABLE", documentRevision: revision });
+    emit({ type: "text-caret-layout", requestId: request.requestId, nodeId: request.nodeId, text: request.text });
+  }
+}
+
 /** Converts only the already-validated single-face LTR layout into ephemeral
- * GPU glyph draws. Mixed styles, variable fonts and RTL remain Canvas so this
- * partial pass cannot silently change the documented text contract. */
+ * GPU glyph draws. Mixed styles and RTL remain Canvas until the Text Pass has
+ * the equivalent line transform model. Variable Font coordinates stay in the
+ * Rust layout/raster path and renderer cache key. */
 function rustGpuTextRequest(node: CanvasNode) {
   const layoutRequest = rustTextLayoutRequest(node);
   const layout = rustTextLayoutFor(node);
@@ -579,13 +840,14 @@ async function loadRustGpuTextGlyphs(
       for (const glyph of line.glyphs) {
         if (glyph.glyphId === 0) throw new Error("MISSING_GLYPH_OUTLINE");
         if (rasters.has(glyph.glyphId)) continue;
-        rasters.set(glyph.glyphId, parseRustGlyphRaster(wasm.rasterize_glyph_json(fontBytes, request.font.faceIndex, glyph.glyphId, request.pixelSize)));
+        rasters.set(glyph.glyphId, parseRustGlyphRaster(wasm.rasterize_glyph_with_variations_json(fontBytes, request.font.faceIndex, request.axesKey, glyph.glyphId, request.pixelSize)));
       }
     }
     const glyphs = projectGpuTextGlyphs({
       nodeId,
       fontAssetId: request.font.assetId,
       faceIndex: request.font.faceIndex,
+      variationAxesKey: request.axesKey,
       fontSize: request.fontSize,
       pixelSize: request.pixelSize,
       x: request.nodeX,
@@ -593,7 +855,7 @@ async function loadRustGpuTextGlyphs(
       rotation: request.nodeRotation,
       fill: request.nodeFill,
       opacity: request.nodeOpacity,
-      lineHeight: request.nodeLineHeight ?? request.fontSize * 1.25,
+      lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
       layout: request.layout,
       rasters,
     });
@@ -614,32 +876,29 @@ function rustTextLayoutFor(node: CanvasNode): RustTextLayout | undefined {
   return cached?.revision === revision ? cached.layout : undefined;
 }
 
+function imageDecodeBudget(assetId: string) {
+  const visibleAssetIds = new Set(activeNodes()
+    .filter((node) => node.visible !== false && node.kind !== "text" && Boolean(node.assetId))
+    .map((node) => node.assetId!));
+  // Dividing the global cache budget ensures every simultaneously visible
+  // background can stay resident instead of repeatedly evicting one another.
+  const assetCount = Math.max(1, visibleAssetIds.has(assetId) ? visibleAssetIds.size : 1);
+  return Math.max(4, Math.floor(MAX_RASTER_DECODED_BYTES / assetCount));
+}
+
 function cacheImageBitmap(assetId: string, bitmap: ImageBitmap) {
   imageBitmaps.set(assetId, bitmap, bitmap.width * bitmap.height * 4);
   render();
 }
 
-/** Keeps uploaded originals intact while bounding the decoded working bitmap.
- * This mirrors an editor's image proxy: large camera images remain exportable
- * and synchronizable without forcing a full-resolution RGBA allocation. */
-function imageDecodeOptions(asset: DocumentAsset): ImageBitmapOptions | undefined {
+/** Image bytes are decoded by the short-lived isolation Worker. The editor
+ * Worker retains only the bounded ImageBitmap used for rendering. */
+async function decodeImageBitmap(asset: DocumentAsset, blob: Blob): Promise<ImageBitmap> {
   const width = asset.pixelWidth;
   const height = asset.pixelHeight;
-  if (!width || !height) return undefined;
-  const pixels = width * height;
-  const maxPixels = Math.floor(MAX_RASTER_DECODED_BYTES / 4);
-  if (!Number.isSafeInteger(pixels) || pixels <= maxPixels) return undefined;
-  const scale = Math.sqrt(maxPixels / pixels);
-  return {
-    resizeWidth: Math.max(1, Math.floor(width * scale)),
-    resizeHeight: Math.max(1, Math.floor(height * scale)),
-    resizeQuality: "high",
-  };
-}
-
-function decodeImageBitmap(asset: DocumentAsset, blob: Blob) {
-  const options = imageDecodeOptions(asset);
-  return options ? createImageBitmap(blob, options) : createImageBitmap(blob);
+  if (!width || !height) throw new Error("MISSING_RASTER_DIMENSIONS");
+  const decoded = await decodeRasterInWorker(asset.mediaType, new Uint8Array(await blob.arrayBuffer()), { width, height }, { maxDecodedBytes: imageDecodeBudget(asset.assetId) });
+  return decoded.bitmap;
 }
 
 async function ensureImageBitmap(assetId: string) {
@@ -691,7 +950,7 @@ async function ensureFontFace(assetId: string) {
   emitSnapshot(undefined, false);
 }
 
-function seedAssetBytes(assetId: string, mediaType: string, bytes: ArrayBuffer) {
+function seedAssetBytes(assetId: string, mediaType: string, bytes: ArrayBuffer, decodedBitmap?: ImageBitmap) {
   const blob = new Blob([bytes], { type: mediaType });
   const asset = assets.find((candidate) => candidate.assetId === assetId);
   if (asset) void cacheAsset(asset, blob);
@@ -700,6 +959,10 @@ function seedAssetBytes(assetId: string, mediaType: string, bytes: ArrayBuffer) 
   } else {
     const imageAsset = asset;
     if (!imageAsset) return;
+    if (decodedBitmap) {
+      cacheImageBitmap(assetId, decodedBitmap);
+      return;
+    }
     void decodeImageBitmap(imageAsset, blob)
       .then((bitmap) => cacheImageBitmap(assetId, bitmap))
       .catch(() => {
@@ -728,7 +991,7 @@ function registerAsset(transactionId: string, asset: DocumentAsset) {
     syncProjectionFromWasm(false);
     render();
     emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
-    queueRemotePayload(transactionId, baseRevision, encodeRegisterResourcePayload(asset), wasmDocument.canonical_hash());
+    queueRemotePayload(transactionId, baseRevision, encodeRegisterResourcePayload(asset), wasmDocument.canonical_hash(), { kind: "register-resource", asset: structuredClone(asset) });
   } catch (error) { emitError(error, "INVALID_COMMAND", transactionId); }
 }
 type JournalReplayEngine = Pick<WasmDocumentEngine, "revision" | "snapshot_json" | "apply_transaction_json" | "move_nodes" | "load_snapshot_json">;
@@ -813,6 +1076,11 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     renderPerformance.start();
   }
   emitSnapshot();
+  if (remoteResetPending && wasmDocument && documentCore === "Rust/WASM bridge ready") {
+    remoteResetPending = false;
+    const snapshot = wasmDocument.snapshot_protobuf();
+    self.postMessage({ type: "remote-reset", documentId, revision, snapshot } satisfies WorkerToMain, [snapshot.buffer]);
+  }
   if (remoteBootstrapPending) emitRemoteBootstrap();
 }
 async function loadWasmRuntime(): Promise<typeof import("@/wasm/generated/editor_wasm")> {
@@ -836,7 +1104,13 @@ function admitToWasm(command: EditorCommand) {
   if (!wasmDocument) return true;
   try {
     if (command.type === "create") {
-      wasmDocument.create_node_on_page(crypto.randomUUID(), wasmDocument.revision, command.node.pageId ?? activePageId, command.node.id, command.node.kind, command.node.name, command.node.x, command.node.y, command.node.width, command.node.height, command.node.rotation, command.node.fill, command.node.stroke, command.node.strokeWidth, command.node.opacity, command.node.radius, command.node.visible !== false, Boolean(command.node.locked), command.node.text ?? "");
+      // Do not use the legacy narrow create bridge here: it derives a PositionId
+      // from the node ID, while the operation sent to the service uses the
+      // resolved page-layer key. Applying that exact Core Batch keeps the local
+      // reducer and the service reducer byte-for-byte equivalent.
+      const resolved = resolveCoreBatch(nodes, [command]);
+      if (!resolved) throw new Error("INVALID_TRANSACTION");
+      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
     if (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)) {
       const previous = nodes.find((node) => node.id === command.id);
@@ -869,6 +1143,7 @@ function resetDocumentToStarterNodes() {
   // transient snapshot deliberately carries no Core payload, so persistence can
   // retain the last confirmed document until the replacement Core is ready.
   bridgeLoadSequence += 1;
+  remoteResetPending = true;
   wasmDocument = undefined;
   ephemeralBenchmarkProjection = false;
   rustGpuScene = undefined;
@@ -894,6 +1169,10 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
   // WASM narrow bridge below may publish a newer projection, but remote payloads
   // must retain this operation's original base state and revision.
   const nodesBeforeCommit = appliedByWasm && remoteCommand ? structuredClone(nodes) : undefined;
+  // A journal entry and its remote envelope describe the same user intent.
+  // Keeping one ID across both stores gives the reconciler a durable join key
+  // instead of trying to infer intent from a later Core snapshot.
+  const remoteOperationId = appliedByWasm && remoteCommand ? crypto.randomUUID() : undefined;
   if (!appliedByWasm) {
     history.push({ nodes: cloneDocument(), advancesRevision });
     if (history.length > 100) {
@@ -910,10 +1189,10 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
     if (advancesRevision) revision += 1;
   }
   render();
-  emitSnapshot(operation && baseRevision !== undefined ? journalEntry(operation, baseRevision) : undefined);
+  emitSnapshot(operation && baseRevision !== undefined ? journalEntry(operation, baseRevision, remoteOperationId) : undefined);
   if (appliedByWasm && remoteCommand && nodesBeforeCommit && wasmDocument && baseRevision !== undefined) {
     const resolved = resolveCoreBatch(nodesBeforeCommit, [remoteCommand]);
-    if (resolved) queueRemoteOperation(crypto.randomUUID(), baseRevision, resolved.batch, wasmDocument.canonical_hash());
+    if (resolved && remoteOperationId) queueRemoteOperation(remoteOperationId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
     else emitError(undefined, "TRANSIENT");
   }
 }
@@ -1039,7 +1318,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     const primaryStyle = node.textProperties?.runs[0];
     const baseMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
     const fontSize = (primaryStyle?.fontSize ?? 31) * viewport.zoom;
-    const lineHeight = (node.textProperties?.paragraph.lineHeight ?? (primaryStyle?.fontSize ?? 31) * 1.25) * viewport.zoom;
+    const lineHeight = (node.textProperties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
     const textMetrics = { ...baseMetrics, fontSize, lineHeight };
     const source = node.text ?? "Text";
     const sourceBytes = new TextEncoder().encode(source);
@@ -1069,7 +1348,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
       const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
       if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineY += (node.textProperties?.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
       const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
-      const lineHeight = (node.textProperties?.paragraph.lineHeight ?? Math.max(...spans.map((span) => span.style.fontSize * 1.25), primaryRenderStyle.fontSize * 1.25)) * viewport.zoom;
+      const lineHeight = (node.textProperties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
       if (lineY < textMetrics.height) {
         // A CSS line has one shared alphabetic baseline. Measuring each style
         // run separately made a larger CJK/emoji run jump a few pixels from
@@ -1171,7 +1450,7 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
     const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
     if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) height += (properties.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
     const spans = styledTextSpans(source, line.start, line.end, properties);
-    const lineHeight = (properties.paragraph.lineHeight ?? Math.max(...spans.map((span) => span.style.fontSize * 1.25), primaryStyle.fontSize * 1.25)) * viewport.zoom;
+    const lineHeight = (properties.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
     height += lineHeight;
     if (spans.length <= 1) {
       applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle);
@@ -1351,14 +1630,22 @@ function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
 }
 function render(rendersPerInputFrame?: number) {
   if (!context || !canvas) return;
+  // Cache eviction is presentation-only. Re-request each visible missing asset
+  // so a page converges on the shared per-image proxy budget instead of
+  // leaving an evicted layer on its striped placeholder indefinitely.
+  new Set(activeNodes()
+    .filter((node) => node.visible !== false && node.kind !== "text" && Boolean(node.assetId) && !imageBitmaps.has(node.assetId!))
+    .map((node) => node.assetId!))
+    .forEach((assetId) => void ensureImageBitmap(assetId));
   const startedAt = performance.now();
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
   const candidateNodes = spatialGrid.query(viewportBounds);
   const visibleNodes = candidateNodes.filter((node) => node.visible !== false && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
-  // Rust's graph may optimize passes, but presentation must keep the document
-  // stack intact. GPU receives the identical ordered prefix further below.
-  const renderOrderedNodes = sortNodesByLayerOrder(visibleNodes);
+  // Rust supplies the committed command order. Canvas keeps interleaved layer
+  // order for nodes that cannot safely enter the GPU pass prefix.
+  const rustRenderGraph = rustRenderGraphForVisibleNodes(viewportBounds, visibleNodes);
+  const renderOrderedNodes = orderNodesByRustRenderCommands(sortNodesByLayerOrder(visibleNodes), rustRenderGraph);
   const cullingMs = performance.now() - cullingStartedAt;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
@@ -1404,6 +1691,19 @@ function render(rendersPerInputFrame?: number) {
       gpuUploadBytes = result.gpuUploadBytes;
       imageBitmapMs = result.imageBitmapMs;
       gpuSceneBytes = result.resourceBytes;
+      const imageTextureSignature = `${result.imageTextures.textures}:${result.imageTextures.bytes}`;
+      if (imageTextureSignature !== imageTextureStatsSignature) {
+        imageTextureStatsSignature = imageTextureSignature;
+        diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_STATS", documentRevision: revision, details: { textures: result.imageTextures.textures, bytes: result.imageTextures.bytes, cacheHits: result.imageTextures.cacheHits, uploads: result.imageTextures.uploads, releases: result.imageTextures.releases } });
+      }
+      if (result.imageTextures.releases) diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_RELEASED", documentRevision: revision, details: { textures: result.imageTextures.textures, releases: result.imageTextures.releases, bytes: result.imageTextures.bytes } });
+      const textAtlasSignature = `${result.textAtlas.pages}:${result.textAtlas.entries}:${result.textAtlas.bytes}`;
+      if (textAtlasSignature !== textAtlasStatsSignature) {
+        textAtlasStatsSignature = textAtlasSignature;
+        diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_STATS", documentRevision: revision, details: { pages: result.textAtlas.pages, entries: result.textAtlas.entries, bytes: result.textAtlas.bytes, cacheHits: result.textAtlas.cacheHits, uploads: result.textAtlas.uploads, evictions: result.textAtlas.evictions, rejectedNodes: result.textAtlas.rejectedNodes } });
+      }
+      if (result.textAtlas.evictions) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_EVICTED", documentRevision: revision, details: { pages: result.textAtlas.pages, evictions: result.textAtlas.evictions, entries: result.textAtlas.entries } });
+      if (result.textAtlas.rejectedNodes) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_NODE_FALLBACK", documentRevision: revision, details: { pages: result.textAtlas.pages, rejectedNodes: result.textAtlas.rejectedNodes } });
       gpuSceneWithinBudget = true;
       gpuSceneLimitReported = false;
     } catch (error) {
@@ -1413,12 +1713,13 @@ function render(rendersPerInputFrame?: number) {
         if (!gpuSceneLimitReported) diagnostics.record({ category: "renderer", code: "GPU_SCENE_RESOURCE_LIMIT" });
         gpuSceneLimitReported = true;
       } else {
+        const code = classifyWebGpuRendererFailure(error);
         gpuSceneBytes = 0;
         gpuSceneWithinBudget = true;
         gpuRenderer.destroy();
         gpuRenderer = undefined;
         gpuStatus = "unavailable";
-        diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_RENDER_FAILED" });
+        diagnostics.record({ category: "renderer", code, documentRevision: revision, details: { errorKind: code } });
       }
     }
   }
@@ -1476,9 +1777,9 @@ function dispatch(command: EditorCommand) {
         selectedIds = [];
         rebuildNodeIndex();
         render();
-        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pageBaseRevision));
+        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pageBaseRevision, pageTransactionId));
         const page = pages.find((candidate) => candidate.id === command.id);
-        if (page) queueRemotePayload(pageTransactionId, pageBaseRevision, encodeCreatePagePayload(page), wasmDocument.canonical_hash());
+        if (page) queueRemotePayload(pageTransactionId, pageBaseRevision, encodeCreatePagePayload(page), wasmDocument.canonical_hash(), { kind: "create-page", page: structuredClone(page) });
         else emitError(undefined, "TRANSIENT");
       } catch (error) { emitError(error); }
       break;
@@ -1504,14 +1805,15 @@ function dispatch(command: EditorCommand) {
       const resolved = resolveCoreBatch(nodes, [command]);
       if (!resolved) { emitError(undefined, "INVALID_COMMAND"); break; }
       const duplicateBaseRevision = Number(wasmDocument.revision);
+      const duplicateTransactionId = crypto.randomUUID();
       try {
-        wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
+        wasmDocument.apply_transaction_json(duplicateTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
         recordHistory("core");
         syncProjectionFromWasm(false);
         selectedIds = resolved.createdIds;
         render();
-        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, duplicateBaseRevision));
-        queueRemoteOperation(crypto.randomUUID(), duplicateBaseRevision, resolved.batch, wasmDocument.canonical_hash());
+        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, duplicateBaseRevision, duplicateTransactionId));
+        queueRemoteOperation(duplicateTransactionId, duplicateBaseRevision, resolved.batch, wasmDocument.canonical_hash());
       } catch (error) { emitError(error); }
       break;
     }
@@ -1530,7 +1832,14 @@ function dispatch(command: EditorCommand) {
       }
       if (!wasmDocument?.can_undo) { undoOrder.push(kind); break; }
       const undoBaseRevision = Number(wasmDocument.revision);
-      wasmDocument.undo(); redoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render(); emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, undoBaseRevision)); break;
+      const before = cloneDocument();
+      wasmDocument.undo(); redoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
+      const batch = historyReplayBatch(before, nodes);
+      if (!batch.length) { emitError(undefined, "TRANSIENT"); break; }
+      const undoTransactionId = crypto.randomUUID();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, undoBaseRevision, undoTransactionId));
+      queueRemoteOperation(undoTransactionId, undoBaseRevision, batch, wasmDocument.canonical_hash());
+      break;
     }
     case "redo": {
       const kind = redoOrder.pop();
@@ -1547,7 +1856,14 @@ function dispatch(command: EditorCommand) {
       }
       if (!wasmDocument?.can_redo) { redoOrder.push(kind); break; }
       const redoBaseRevision = Number(wasmDocument.revision);
-      wasmDocument.redo(); undoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render(); emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, redoBaseRevision)); break;
+      const before = cloneDocument();
+      wasmDocument.redo(); undoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
+      const batch = historyReplayBatch(before, nodes);
+      if (!batch.length) { emitError(undefined, "TRANSIENT"); break; }
+      const redoTransactionId = crypto.randomUUID();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, redoBaseRevision, redoTransactionId));
+      queueRemoteOperation(redoTransactionId, redoBaseRevision, batch, wasmDocument.canonical_hash());
+      break;
     }
     case "reset": resetDocumentToStarterNodes(); break;
     case "hydrate": {
@@ -1728,13 +2044,14 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       if (wasmDocument) {
         try {
           const baseRevision = Number(wasmDocument.revision);
-          wasmDocument.move_nodes(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(updates));
+          const moveTransactionId = crypto.randomUUID();
+          wasmDocument.move_nodes(moveTransactionId, wasmDocument.revision, JSON.stringify(updates));
           recordHistory("core");
           syncProjectionFromWasm();
           render();
-          emitSnapshot(journalEntry({ type: "move", updates }, baseRevision));
+          emitSnapshot(journalEntry({ type: "move", updates }, baseRevision, moveTransactionId));
           const resolved = resolveCoreBatch(activeDrag.before, updates.map((update) => ({ type: "update" as const, id: update.id, patch: update })));
-          if (resolved) queueRemoteOperation(crypto.randomUUID(), baseRevision, resolved.batch, wasmDocument.canonical_hash());
+          if (resolved) queueRemoteOperation(moveTransactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
           else emitError(undefined, "TRANSIENT");
         } catch (error) {
           nodes = activeDrag.before;
@@ -1770,7 +2087,7 @@ function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "poin
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
-    if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
+    if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
     else if (data.type === "tool") { tool = data.tool; }
     else if (data.type === "checkpoint") emitViewportCheckpoint();
@@ -1779,9 +2096,11 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
       if (documentCore === "Rust/WASM bridge ready") emitRemoteBootstrap();
     }
     else if (data.type === "remote-hydrate") hydrateRemoteSnapshot(data.snapshot);
+    else if (data.type === "remote-reconcile") void reconcileRemoteSnapshot(data.snapshot, data.operations);
     else if (data.type === "register-asset") registerAsset(data.transactionId, data.asset);
-    else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes);
+    else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes, data.decodedBitmap);
     else if (data.type === "editing-text") { editingTextNodeId = data.nodeId; render(); }
+    else if (data.type === "text-caret-layout") void emitRustTextCaretLayout(data);
     else if (data.type === "simulate-crash") {
       setTimeout(() => { throw new Error("Development-only Engine Worker crash simulation"); }, 0);
     }

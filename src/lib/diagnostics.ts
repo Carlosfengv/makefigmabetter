@@ -60,4 +60,4 @@ function sanitizeDetails(details: Readonly<Record<string, DiagnosticValue>>): Re
   return sanitized;
 }
 
-const SAFE_DETAIL_KEYS = new Set(["commandCount", "errorCode", "recoveryAttempt", "visibleNodes", "webgl2Available"]);
+const SAFE_DETAIL_KEYS = new Set(["commandCount", "errorCode", "errorKind", "recoveryAttempt", "visibleNodes", "webgl2Available", "pages", "entries", "textures", "bytes", "cacheHits", "uploads", "releases", "evictions", "rejectedNodes"]);

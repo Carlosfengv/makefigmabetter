@@ -22,7 +22,7 @@ describe("protocol operation codec", () => {
     expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setAppearance", "setText", "setTextProperties"]);
     expect(batch.operations[3].setText).toMatchObject({ nodeId: idBytes(id), text: "after" });
     expect(batch.operations[4].setTextProperties?.properties).toMatchObject({ autoSize: 1, paragraph: { alignment: 1 } });
-    expect(batch.operations[4].setTextProperties?.properties?.paragraph?.lineHeight).toBeUndefined();
+    expect(batch.operations[4].setTextProperties?.properties?.paragraph?.lineHeight).toBe(20);
   });
 
   it("serializes an image fill with the rest of a shape update", () => {
@@ -57,6 +57,12 @@ describe("protocol operation codec", () => {
     expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["createNode", "setTextProperties"]);
     expect(batch.operations[0].createNode?.node?.textProperties).toBeUndefined();
     expect(batch.operations[1].setTextProperties?.properties).toMatchObject({ autoSize: 2, paragraph: { alignment: 2 }, runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700 }] });
+  });
+
+  it("serializes a tombstone restore as a distinct history operation", () => {
+    const node = { ...createNode("rectangle", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{ type: "restore", node: { ...node, cornerRadius: node.radius, text: "" } }]));
+    expect(batch.operations).toEqual([{ restoreNode: { node: expect.objectContaining({ nodeId: idBytes(id), name: node.name }) } }]);
   });
 
   it("serializes page creation through the same generated operation batch", () => {

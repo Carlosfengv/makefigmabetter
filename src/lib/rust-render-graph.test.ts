@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderNodesByRustRenderGraph, parseRustRenderGraphPlan, RUST_RENDER_PASSES } from "./rust-render-graph";
+import { orderNodesByRustRenderCommands, orderNodesByRustRenderGraph, parseRustRenderGraphPlan, RUST_RENDER_PASSES } from "./rust-render-graph";
 
 const plan = (commands: unknown) => JSON.stringify({ documentRevision: 7, fullScene: true, passes: RUST_RENDER_PASSES, commands });
 
@@ -18,6 +18,17 @@ describe("Rust render graph boundary", () => {
     expect(parseRustRenderGraphPlan(JSON.stringify({ documentRevision: 7, fullScene: true, passes: ["text"], commands: [] }))).toBeUndefined();
     const parsed = parseRustRenderGraphPlan(plan([{ nodeId: "shape", pass: "mainScene" }]));
     expect(orderNodesByRustRenderGraph([{ id: "unknown" }, { id: "shape" }], parsed).map(({ id }) => id)).toEqual(["shape", "unknown"]);
+  });
+
+  it("uses Rust command order without grouping Canvas fallback nodes by pass", () => {
+    const parsed = parseRustRenderGraphPlan(plan([
+      { nodeId: "shape-first", pass: "mainScene" },
+      { nodeId: "image", pass: "images" },
+      { nodeId: "shape-after-image", pass: "mainScene" },
+    ]));
+    expect(orderNodesByRustRenderCommands([
+      { id: "shape-after-image" }, { id: "image" }, { id: "shape-first" },
+    ], parsed).map(({ id }) => id)).toEqual(["shape-first", "image", "shape-after-image"]);
   });
 
   it("keeps a 100k-node plan while sorting only the visible viewport subset", () => {

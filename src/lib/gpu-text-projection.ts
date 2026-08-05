@@ -6,6 +6,8 @@ export type GpuTextProjectionInput = {
   nodeId: string;
   fontAssetId: string;
   faceIndex: number;
+  /** Stable, sorted JSON identity of the FontReference variation axes. */
+  variationAxesKey: string;
   fontSize: number;
   pixelSize: number;
   x: number;
@@ -34,7 +36,7 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
       if (!raster) return undefined;
       ascent ??= raster.ascent;
       glyphs.push({
-        textureKey: `${input.fontAssetId}:${input.faceIndex}:${glyph.glyphId}:${input.pixelSize}`,
+        textureKey: `${input.fontAssetId}:${input.faceIndex}:${input.variationAxesKey}:${glyph.glyphId}:${input.pixelSize}`,
         nodeId: input.nodeId,
         x: input.x + penX + glyph.xOffset * scale + raster.bearingX,
         y: input.y + lineY + ascent - raster.bearingY - glyph.yOffset * scale,

@@ -16,4 +16,22 @@ describe("diagnostic recorder", () => {
       ],
     });
   });
+
+  it("retains bounded atlas lifecycle measurements without accepting arbitrary details", () => {
+    const recorder = createDiagnosticRecorder();
+    recorder.record({ category: "renderer", code: "text atlas stats", details: { pages: 4, entries: 1_024, bytes: 4_194_304, cacheHits: 900, uploads: 12, evictions: 1, rejectedNodes: 0, documentText: "must not be retained" } });
+    expect(recorder.summary().recent[0]).toMatchObject({
+      code: "TEXT_ATLAS_STATS",
+      details: { pages: 4, entries: 1_024, bytes: 4_194_304, cacheHits: 900, uploads: 12, evictions: 1, rejectedNodes: 0 },
+    });
+  });
+
+  it("retains only the fixed renderer failure kind, never a browser error message", () => {
+    const recorder = createDiagnosticRecorder();
+    recorder.record({ category: "renderer", code: "webgpu upload failed", details: { errorKind: "WEBGPU_UPLOAD_FAILED", browserMessage: "untrusted browser detail" } });
+    expect(recorder.summary().recent[0]).toMatchObject({
+      code: "WEBGPU_UPLOAD_FAILED",
+      details: { errorKind: "WEBGPU_UPLOAD_FAILED" },
+    });
+  });
 });

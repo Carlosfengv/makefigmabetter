@@ -1,10 +1,10 @@
-import { documentColorFromCssHex, type CanvasNode, type EditorCommand } from "./editor-protocol";
+import { documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type EditorCommand } from "./editor-protocol";
+import { orderNewLayerAtFront } from "./layer-order";
 
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokeWidth" | "opacity" | "visible" | "locked" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
-export type CoreBatchCommand = { type: "create"; node: CoreProjectionNode } | { type: "update"; node: CoreProjectionNode } | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> } | { type: "delete"; ids: string[] };
+export type { CoreBatchCommand, CoreProjectionNode } from "./editor-protocol";
 export type ResolvedCoreBatch = { batch: CoreBatchCommand[]; nextNodes: CanvasNode[]; createdIds: string[] };
 
-function projectionNode(node: CanvasNode): CoreProjectionNode {
+export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
   return { id: node.id, pageId: node.pageId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, opacity: node.opacity, cornerRadius: node.radius, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), assetId: node.assetId };
 }
 
@@ -20,7 +20,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (nextNodes.some((node) => node.id === command.node.id)) return undefined;
       const node = structuredClone(command.node);
       nextNodes.push(node);
-      batch.push({ type: "create", node: projectionNode(node) });
+      batch.push({ type: "create", node: coreProjectionNode(node) });
       createdIds.push(node.id);
       continue;
     }
@@ -33,7 +33,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if ("fill" in command.patch) { node.fillColor = documentColorFromCssHex(node.fill); node.fillGradient = undefined; }
       if ("stroke" in command.patch) { node.strokeColor = documentColorFromCssHex(node.stroke); node.strokeGradient = undefined; }
       nextNodes[index] = node;
-      batch.push({ type: "update", node: projectionNode(node) });
+      batch.push({ type: "update", node: coreProjectionNode(node) });
       continue;
     }
     if (command.type === "delete") {
@@ -53,13 +53,20 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
     }
     if (command.type === "duplicate") {
       if (!command.ids.length || new Set(command.ids).size !== command.ids.length || command.ids.some((id) => !nextNodes.some((node) => node.id === id))) return undefined;
-      const copies = nextNodes.filter((node) => command.ids.includes(node.id)).map((node, index) => ({ ...node, id: createId(), name: `${node.name} copy`, x: node.x + 24 + index * 8, y: node.y + 24 + index * 8 }));
-      if (new Set(copies.map((node) => node.id)).size !== copies.length || copies.some((node) => nextNodes.some((current) => current.id === node.id))) return undefined;
-      copies.forEach((node) => {
+      const sourceNodes = nextNodes.filter((node) => command.ids.includes(node.id));
+      const copies: CanvasNode[] = [];
+      for (const [index, source] of sourceNodes.entries()) {
+        const id = createId();
+        if (copies.some((node) => node.id === id) || nextNodes.some((node) => node.id === id)) return undefined;
+        const pageId = source.pageId;
+        const siblings = nextNodes.filter((node) => node.pageId === pageId);
+        const positionId = orderNewLayerAtFront(siblings, id);
+        copies.push({ ...source, id, name: `${source.name} copy`, x: source.x + 24 + index * 8, y: source.y + 24 + index * 8, positionId });
+        const node = copies.at(-1)!;
         nextNodes.push(node);
-        batch.push({ type: "create", node: projectionNode(node) });
+        batch.push({ type: "create", node: coreProjectionNode(node) });
         createdIds.push(node.id);
-      });
+      }
       continue;
     }
     return undefined;

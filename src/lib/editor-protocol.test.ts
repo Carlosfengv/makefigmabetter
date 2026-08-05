@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createNode, documentColorFromCssHex } from "./editor-protocol";
+import { createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "./editor-protocol";
 
 describe("editor protocol node presets", () => {
+  it("uses a stable 20px line-height when a legacy text record omits it", () => {
+    expect(DEFAULT_TEXT_LINE_HEIGHT).toBe(20);
+  });
+
   it("creates a complete, UUID-addressable rectangle intent", () => {
     const node = createNode("rectangle", 12, -8);
 

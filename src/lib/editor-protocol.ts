@@ -4,8 +4,13 @@ export type { EditorErrorCode } from "./editor-error";
 
 export type ToolKind = "select" | "frame" | "rectangle" | "ellipse" | "text" | "hand";
 export type NodeKind = "frame" | "rectangle" | "ellipse" | "text" | "image";
+/** Stable line-height for text records that predate an explicit paragraph value. */
+export const DEFAULT_TEXT_LINE_HEIGHT = 20;
 /** A deterministic capture may opt out of the otherwise automatic WebGPU spike. */
 export type RendererPreference = "auto" | "canvas2d";
+/** Development-only fault injection for browser evidence. This never enters a
+ * document, operation or persisted editor snapshot. */
+export type SimulatedGpuFault = "out-of-memory" | "validation" | "upload";
 
 /** Explicit non-premultiplied Canonical color. `fill` remains the Canvas/CSS display fallback. */
 export interface DocumentColor {
@@ -40,6 +45,7 @@ export interface DocumentTextProperties {
   }>;
   paragraph: {
     alignment: "left" | "center" | "right" | "justify";
+    /** Optional only for legacy snapshots; omission resolves to 20px. */
     lineHeight?: number;
     paragraphSpacing: number;
   };
@@ -96,6 +102,18 @@ export interface DocumentAsset {
   pixelHeight?: number;
 }
 
+/** A fully resolved Core mutation. It is intentionally byte-free so a pending
+ * remote operation can be reapplied to a newer canonical snapshot after a
+ * rejected base revision. */
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokeWidth" | "opacity" | "visible" | "locked" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
+export type CoreBatchCommand =
+  | { type: "create"; node: CoreProjectionNode }
+  /** Explicit history replay; only a Core tombstone may be restored. */
+  | { type: "restore"; node: CoreProjectionNode }
+  | { type: "update"; node: CoreProjectionNode }
+  | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
+  | { type: "delete"; ids: string[] };
+
 export interface Viewport {
   x: number;
   y: number;
@@ -126,6 +144,12 @@ export interface RenderPerformanceSummary {
   visibleNodesP95: number;
   gpuUploadBytesP95: number;
   rendersPerInputFrameMax: number;
+}
+
+/** Rust-owned legal caret stops for an active DOM text-edit session. This is
+ * transient input state; neither offsets nor selections enter Canonical state. */
+export interface RustTextCaretLayout {
+  carets: Array<{ byteOffset: number; lineIndex: number }>;
 }
 
 export interface ViewportCheckpointMessage {
@@ -166,6 +190,14 @@ export interface LocalJournalEntry {
   viewport: Viewport;
 }
 
+/** Keeps enough concrete local intent to derive a new opaque envelope after the
+ * server rejects an older base revision. The original envelope remains opaque
+ * during normal delivery; this data is used only by explicit reconciliation. */
+export type PendingOperationReplay =
+  | { kind: "core-batch"; batch: CoreBatchCommand[] }
+  | { kind: "create-page"; page: CanvasPage }
+  | { kind: "register-resource"; asset: DocumentAsset };
+
 /** A local-first operation awaiting a server-side accepted revision. Its envelope
  * is generated from schemas/proto and remains opaque to IndexedDB persistence. */
 export interface PendingRemoteOperation {
@@ -179,6 +211,7 @@ export interface PendingRemoteOperation {
   localDocumentHash: string;
   createdAtMs: number;
   attempts: number;
+  replay?: PendingOperationReplay;
   /** A non-accepted server outcome is durable UI state. It is never resent until
    * a reconciler explicitly replaces it with a new operation. */
   reconciliation?: Extract<PendingOperationResolution, { kind: "transformed" | "conflict" | "rejected" }>;
@@ -247,7 +280,13 @@ export interface EditorSnapshot {
   canRedo: boolean;
   /** WebGPU scene primitives are composited onto the Canvas 2D grid/text overlay. */
   renderer: "Canvas 2D" | "WebGPU + Canvas 2D overlay";
-  gpu?: { webgpu: "checking" | "ready" | "recovering" | "unavailable"; webgl2Available: boolean; recoveryAttempts: number };
+  gpu?: {
+    webgpu: "checking" | "ready" | "recovering" | "unavailable";
+    webgl2Available: boolean;
+    recoveryAttempts: number;
+    /** Development-only evidence for the bounded Device Lost recovery fixture. */
+    developmentSimulation?: { requestedLosses: number; completedLosses: number };
+  };
   documentCore: "Starting Rust/WASM bridge" | "Rust/WASM bridge ready" | "TypeScript document prototype";
   localSnapshot?: CoreLocalSnapshot;
   localJournalEntry?: LocalJournalEntry;
@@ -282,7 +321,7 @@ export type EditorInputEvent =
   | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean };
 
 export type MainToWorker =
-  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean }
+  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
   | { type: "resize"; width: number; height: number; dpr: number }
   | { type: "tool"; tool: ToolKind }
   /** Requests a durable Core snapshot after a burst of ephemeral viewport input. */
@@ -293,16 +332,21 @@ export type MainToWorker =
   /** Delivers a server-owned Protobuf snapshot for Rust/WASM validation and
    * reconciliation. It is never decoded into a TypeScript document model. */
   | { type: "remote-hydrate"; snapshot: Uint8Array }
+  /** Applies a server snapshot, then replays every still-valid concrete local
+   * pending intent before generating a replacement remote sequence. */
+  | { type: "remote-reconcile"; snapshot: Uint8Array; operations: PendingRemoteOperation[] }
   /** Commits an already admitted, document-attached AssetId into the canonical
    * Resource Index and queues its own opaque remote operation. */
   | { type: "register-asset"; transactionId: string; asset: DocumentAsset }
   /** Browser-owned bytes may seed a freshly imported image bitmap. They are
    * transient and are never retained in a document snapshot. */
-  | { type: "asset-bytes"; assetId: string; mediaType: string; bytes: ArrayBuffer }
+  | { type: "asset-bytes"; assetId: string; mediaType: string; bytes: ArrayBuffer; decodedBitmap?: ImageBitmap }
   /** Transient presentation state. The Canvas renderer omits this glyph layer
    * while the DOM editor draws the same text, avoiding the double-rendered
    * visual jump that browsers otherwise introduce on focus. */
   | { type: "editing-text"; nodeId?: string }
+  /** Worker-owned Rust layout request used to legalize DOM caret offsets. */
+  | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string }
   /** Development-only fault injection, issued after a confirmed Core snapshot. */
   | { type: "simulate-crash" }
   | { type: "transaction"; transaction: EditorTransaction }
@@ -314,9 +358,16 @@ export type MainToWorker =
 export type WorkerToMain =
   | { type: "snapshot"; snapshot: EditorSnapshot }
   | { type: "remote-bootstrap"; documentId: string; revision: number; snapshot: Uint8Array }
+  /** Requests an authorized destructive replacement of the remote demo root. */
+  | { type: "remote-reset"; documentId: string; revision: number; snapshot: Uint8Array }
   /** A committed local Core batch represented as an opaque Protobuf envelope.
    * The main thread must durably append it before attempting network delivery. */
   | { type: "remote-operation"; operation: PendingRemoteOperation }
+  /** A complete conflict/rejection reconciliation result. The main thread must
+   * atomically replace the listed old queue IDs with these new envelopes before
+   * resuming ordered delivery. */
+  | { type: "remote-reconciled"; removeOperationIds: string[]; replacements: PendingRemoteOperation[]; discardedOperationIds: string[]; coreRejectedOperationIds: string[]; blockedOperationIds: string[]; rejectionDiagnostics: string[] }
+  | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string; layout?: RustTextCaretLayout }
   /** Lightweight high-frequency projection update; never contains durable document data. */
   | { type: "view-state"; viewport: Viewport; selectedIds: string[]; performance: RenderPerformanceSummary; viewportChanged: boolean }
   /** A durable viewport payload deliberately separated from the full Core snapshot. */

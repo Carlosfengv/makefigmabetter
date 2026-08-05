@@ -91,6 +91,8 @@ describe("Core transaction batch resolution", () => {
       expect.objectContaining({ type: "create", node: expect.objectContaining({ id: copyId, name: "Rectangle copy", x: 34, y: 44, fillGradient: gradient, strokeGradient: gradient, text: "Preserve me" }) }),
     ]);
     expect(resolved?.nextNodes).toEqual([source, expect.objectContaining({ id: copyId, x: 34, y: 44 })]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "create", node: { positionId: expect.stringMatching(/^[0-9a-f]{32}:[0-9a-f]{32}$/) } });
+    expect((resolved?.batch[0] as Extract<NonNullable<typeof resolved>["batch"][number], { type: "create" }>).node.positionId).not.toBe(source.positionId);
   });
 
   it("rejects duplicate requests with empty, repeated, missing, or colliding IDs", () => {

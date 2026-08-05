@@ -9,7 +9,7 @@ import {
   type Paint,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { documentColorFromCssHex, type CanvasPage, type DocumentColor, type DocumentTextProperties } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentColor, type DocumentTextProperties } from "./editor-protocol";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
 
 export type ResourceRegistration = {
@@ -91,6 +91,7 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
     }
     return operations;
   }
+  if (command.type === "restore") return [{ restoreNode: { node: nodeProto(command.node) } }];
   if (command.type === "delete") return command.ids.map((nodeId) => ({ deleteNode: { nodeId: idBytes(nodeId) } }));
   if (command.type === "reposition") return command.positionIds.map(({ id, positionId }) => {
     const [key, actorId] = positionBytes(positionId, id);
@@ -136,7 +137,7 @@ function colorProto(color: DocumentColor) {
 function textPropertiesProto(properties: DocumentTextProperties | undefined) {
   const value = properties ?? {
     runs: [],
-    paragraph: { alignment: "left" as const, paragraphSpacing: 0 },
+    paragraph: { alignment: "left" as const, lineHeight: DEFAULT_TEXT_LINE_HEIGHT, paragraphSpacing: 0 },
     autoSize: "fixed" as const,
     fallbackFonts: [],
   };

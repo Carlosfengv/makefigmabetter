@@ -26,6 +26,7 @@ type GpuDevice = {
   createSampler(descriptor: { magFilter: "linear"; minFilter: "linear" }): GpuSampler;
   createBindGroup(descriptor: { layout: unknown; entries: Array<{ binding: number; resource: unknown }> }): GpuBindGroup;
   createCommandEncoder(): GpuCommandEncoder;
+  addEventListener?(type: "uncapturederror", listener: (event: { error?: unknown }) => void): void;
   destroy?(): void;
 };
 type GpuAdapter = { requestDevice(): Promise<GpuDevice> };
@@ -80,6 +81,29 @@ export interface WebGpuSceneRenderResult {
   resourceBytes: number;
   gpuUploadBytes: number;
   imageBitmapMs: number;
+  imageTextures: WebGpuImageTextureStats;
+  textAtlas: WebGpuTextAtlasStats;
+}
+
+/** Per-frame cache evidence. These counters are presentation-only and never
+ * enter a Snapshot or operation payload. */
+export interface WebGpuTextAtlasStats {
+  pages: number;
+  bytes: number;
+  entries: number;
+  cacheHits: number;
+  uploads: number;
+  evictions: number;
+  rejectedNodes: number;
+}
+
+/** Per-frame evidence for the bounded, per-asset Image texture cache. */
+export interface WebGpuImageTextureStats {
+  textures: number;
+  bytes: number;
+  cacheHits: number;
+  uploads: number;
+  releases: number;
 }
 
 /** World-space instance payload used by the next renderer pass. Camera state is
@@ -95,6 +119,8 @@ export const GPU_TEXT_INSTANCE_BYTES_PER_NODE = GPU_TEXT_INSTANCE_FLOATS * BYTES
 /** A single R8 texture avoids unbounded per-glyph WebGPU allocations. */
 export const GPU_GLYPH_ATLAS_DIMENSION = 1024;
 export const GPU_GLYPH_ATLAS_BYTES = GPU_GLYPH_ATLAS_DIMENSION * GPU_GLYPH_ATLAS_DIMENSION;
+/** A bounded page set keeps a full first atlas from permanently disabling GPU text. */
+export const MAX_GPU_GLYPH_ATLAS_PAGES = 4;
 const GPU_GLYPH_ATLAS_PADDING = 1;
 export interface GpuSceneCacheKey { documentRevision: number; rendererGeneration: number; colorProfile: string; }
 export interface GpuCameraUniform { viewportX: number; viewportY: number; zoom: number; canvasWidth: number; canvasHeight: number; dpr: number; }
@@ -107,6 +133,8 @@ type GpuGlyphAtlas = {
   nextX: number;
   nextY: number;
   rowHeight: number;
+  /** Monotonic renderer-local LRU marker. Atlas contents are derived only. */
+  lastUsed: number;
 };
 
 export function buildWebGpuInstances(nodes: readonly CanvasNode[]): { instances: Float32Array; renderedNodeIds: ReadonlySet<string> } {
@@ -173,6 +201,27 @@ export class GpuSceneResourceLimitError extends Error {
   }
 }
 
+/** Stable, content-free GPU failure classes that are safe to retain in the
+ * diagnostic trail. Browser error messages can include implementation details,
+ * so they must never cross the renderer boundary. */
+export type WebGpuRendererFailureCode =
+  | "WEBGPU_OUT_OF_MEMORY"
+  | "WEBGPU_VALIDATION_ERROR"
+  | "WEBGPU_UPLOAD_FAILED"
+  | "WEBGPU_SCENE_RENDER_FAILED";
+
+export function classifyWebGpuRendererFailure(error: unknown): WebGpuRendererFailureCode {
+  const candidate = error && typeof error === "object" ? error as { name?: unknown; message?: unknown } : {};
+  const name = typeof candidate.name === "string" ? candidate.name.toLowerCase() : "";
+  const message = typeof candidate.message === "string" ? candidate.message.toLowerCase() : "";
+  if (name.includes("outofmemory") || message.includes("out of memory")) return "WEBGPU_OUT_OF_MEMORY";
+  // Texture, buffer and external-image transfers are an independently
+  // actionable upload boundary even when browsers surface them as validation.
+  if (message.includes("writetexture") || message.includes("copyexternalimagetotexture") || message.includes("writebuffer") || message.includes("texture upload")) return "WEBGPU_UPLOAD_FAILED";
+  if (name.includes("validation") || message.includes("validation")) return "WEBGPU_VALIDATION_ERROR";
+  return "WEBGPU_SCENE_RENDER_FAILED";
+}
+
 /**
  * A real, bounded WebGPU scene. It renders solid Frame/Rectangle/Ellipse fills,
  * strokes and decoded ImageBitmap resources on an auxiliary OffscreenCanvas.
@@ -203,13 +252,16 @@ export class WebGpuSceneRenderer {
   private imageTextures = new Map<string, { source: ImageBitmap; width: number; height: number; texture: GpuTexture; bindGroup: GpuBindGroup }>();
   /** Derived, device-generation-local glyph cache. It intentionally contains
    * no Canonical document state and is discarded on renderer destruction. */
-  private textAtlas: GpuGlyphAtlas | undefined;
+  private textAtlases: GpuGlyphAtlas[] = [];
+  private atlasAccessTick = 0;
+  private textAtlasEvictions = 0;
   private cachedSceneKey: string | number | undefined;
   private hasCachedScene = false;
   private cachedInstanceCount = 0;
   private cachedRenderedNodeIds: ReadonlySet<string> = new Set();
   private pixelWidth = 0;
   private pixelHeight = 0;
+  private failureListener: ((code: WebGpuRendererFailureCode) => void) | undefined;
 
   private constructor(canvas: OffscreenCanvas, context: GpuCanvasContext, device: GpuDevice, format: string) {
     this.canvas = canvas;
@@ -217,6 +269,7 @@ export class WebGpuSceneRenderer {
     this.device = device;
     this.format = format;
     this.deviceLost = device.lost;
+    device.addEventListener?.("uncapturederror", (event) => this.reportFailure(event.error));
     this.pipeline = createPipeline(device, format);
     this.imagePipeline = createImagePipeline(device, format);
     this.textPipeline = createTextPipeline(device, format);
@@ -246,6 +299,16 @@ export class WebGpuSceneRenderer {
       throw new Error("WEBGPU_CONTEXT_UNAVAILABLE");
     }
     return new WebGpuSceneRenderer(canvas, context, device, gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm");
+  }
+
+  /** GPU validation/OOM errors may arrive asynchronously through an uncaptured
+   * error event; expose only their stable category to the Engine Worker. */
+  setFailureListener(listener: ((code: WebGpuRendererFailureCode) => void) | undefined) {
+    this.failureListener = listener;
+  }
+
+  reportFailure(error: unknown) {
+    this.failureListener?.(classifyWebGpuRendererFailure(error));
   }
 
   render(input: WebGpuSceneRenderInput): WebGpuSceneRenderResult {
@@ -302,7 +365,7 @@ export class WebGpuSceneRenderer {
     this.device.queue.submit([encoder.finish()]);
     const transferStartedAt = performance.now();
     const bitmap = this.canvas.transferToImageBitmap();
-    return { bitmap, renderedNodeIds: new Set([...this.cachedRenderedNodeIds, ...images.renderedNodeIds, ...text.renderedNodeIds]), resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt };
+    return { bitmap, renderedNodeIds: new Set([...this.cachedRenderedNodeIds, ...images.renderedNodeIds, ...text.renderedNodeIds]), resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt, imageTextures: images.stats, textAtlas: text.stats };
   }
 
   destroy() {
@@ -359,27 +422,49 @@ export class WebGpuSceneRenderer {
     const renderedNodeIds = new Set<string>();
     const requiredAssets = new Set<string>();
     let uploadBytes = 0;
+    let cacheHits = 0;
+    let uploads = 0;
     for (const node of nodes) {
       if (node.kind !== "image" || node.visible === false || !node.assetId) continue;
       const bitmap = imageBitmaps?.get(node.assetId);
       if (!bitmap || bitmap.width <= 0 || bitmap.height <= 0) continue;
       requiredAssets.add(node.assetId);
       const texture = this.ensureImageTexture(node.assetId, bitmap);
-      if (texture.uploaded) uploadBytes += bitmap.width * bitmap.height * RGBA8_BYTES_PER_PIXEL;
+      if (texture.uploaded) {
+        uploadBytes += bitmap.width * bitmap.height * RGBA8_BYTES_PER_PIXEL;
+        uploads += 1;
+      } else cacheHits += 1;
       const offset = instances.length * BYTES_PER_FLOAT;
       instances.push(...imageInstance(node, bitmap));
       draws.push({ bindGroup: texture.entry.bindGroup, offset });
       renderedNodeIds.add(node.id);
     }
+    let releases = 0;
     for (const [assetId, entry] of this.imageTextures) {
-      if (!requiredAssets.has(assetId)) { entry.texture.destroy?.(); this.imageTextures.delete(assetId); }
+      if (!requiredAssets.has(assetId)) {
+        entry.texture.destroy?.();
+        this.imageTextures.delete(assetId);
+        releases += 1;
+      }
     }
     const payload = new Float32Array(instances);
     if (payload.length) {
       this.ensureImageInstanceBuffer(payload.byteLength);
       this.device.queue.writeBuffer(this.imageInstanceBuffer!, 0, payload);
     } else this.releaseImageInstanceBuffer();
-    return { instances: payload, draws, renderedNodeIds, uploadBytes: uploadBytes + payload.byteLength };
+    return {
+      instances: payload,
+      draws,
+      renderedNodeIds,
+      uploadBytes: uploadBytes + payload.byteLength,
+      stats: {
+        textures: this.imageTextures.size,
+        bytes: [...this.imageTextures.values()].reduce((total, entry) => total + entry.width * entry.height * RGBA8_BYTES_PER_PIXEL, 0),
+        cacheHits,
+        uploads,
+        releases,
+      },
+    };
   }
 
   private ensureImageTexture(assetId: string, source: ImageBitmap) {
@@ -421,6 +506,10 @@ export class WebGpuSceneRenderer {
     const draws: Array<{ bindGroup: GpuBindGroup; offset: number }> = [];
     const renderedNodeIds = new Set<string>();
     let uploadBytes = 0;
+    let cacheHits = 0;
+    let uploads = 0;
+    let rejectedNodes = 0;
+    const evictionsAtStart = this.textAtlasEvictions;
     const glyphsByNode = new Map<string, WebGpuTextGlyph[]>();
     for (const glyph of glyphs ?? []) {
       if (!isValidTextGlyph(glyph) || !cssColor(glyph.fill, glyph.opacity)) continue;
@@ -428,6 +517,10 @@ export class WebGpuSceneRenderer {
       group.push(glyph);
       glyphsByNode.set(glyph.nodeId, group);
     }
+    // An atlas page is replaced only when none of its cells will be sampled in
+    // this frame. That gives the bounded cache an LRU escape hatch without
+    // invalidating a bind group or UV used by an already prepared draw.
+    const requiredTextureKeys = new Set([...glyphsByNode.values()].flatMap((nodeGlyphs) => nodeGlyphs.map((glyph) => glyph.textureKey)));
     // A node is all-GPU or all-Canvas. This prevents a full Canvas fallback
     // from double-painting the subset of glyphs that fit in the atlas.
     for (const [nodeId, nodeGlyphs] of glyphsByNode) {
@@ -436,10 +529,13 @@ export class WebGpuSceneRenderer {
       let nodeUploadBytes = 0;
       let complete = true;
       for (const glyph of nodeGlyphs) {
-        const atlas = this.ensureTextAtlasEntry(glyph);
+        const atlas = this.ensureTextAtlasEntry(glyph, requiredTextureKeys);
         if (!atlas) { complete = false; break; }
         const color = cssColor(glyph.fill, glyph.opacity)!;
-        if (atlas.uploaded) nodeUploadBytes += glyph.alphaMask.byteLength;
+        if (atlas.uploaded) {
+          nodeUploadBytes += glyph.alphaMask.byteLength;
+          uploads += 1;
+        } else cacheHits += 1;
         const offset = (instances.length + nodeInstances.length) * BYTES_PER_FLOAT;
         nodeInstances.push(
           glyph.x, glyph.y, glyph.width, glyph.height, glyph.rotation, ...color,
@@ -448,9 +544,12 @@ export class WebGpuSceneRenderer {
           atlas.entry.width / GPU_GLYPH_ATLAS_DIMENSION,
           atlas.entry.height / GPU_GLYPH_ATLAS_DIMENSION,
         );
-        nodeDraws.push({ bindGroup: this.textAtlas!.bindGroup, offset });
+        nodeDraws.push({ bindGroup: atlas.bindGroup, offset });
       }
-      if (!complete) continue;
+      if (!complete) {
+        rejectedNodes += 1;
+        continue;
+      }
       instances.push(...nodeInstances);
       draws.push(...nodeDraws);
       uploadBytes += nodeUploadBytes;
@@ -461,33 +560,73 @@ export class WebGpuSceneRenderer {
       this.ensureTextInstanceBuffer(payload.byteLength);
       this.device.queue.writeBuffer(this.textInstanceBuffer!, 0, payload);
     } else this.releaseTextInstanceBuffer();
-    return { instances: payload, draws, renderedNodeIds, uploadBytes: uploadBytes + payload.byteLength };
+    const entries = this.textAtlases.reduce((count, atlas) => count + atlas.entries.size, 0);
+    return {
+      instances: payload,
+      draws,
+      renderedNodeIds,
+      uploadBytes: uploadBytes + payload.byteLength,
+      stats: {
+        pages: this.textAtlases.length,
+        bytes: this.textAtlases.length * GPU_GLYPH_ATLAS_BYTES,
+        entries,
+        cacheHits,
+        uploads,
+        evictions: this.textAtlasEvictions - evictionsAtStart,
+        rejectedNodes,
+      },
+    };
   }
 
-  private ensureTextAtlasEntry(glyph: WebGpuTextGlyph): { entry: GlyphAtlasEntry; uploaded: boolean } | undefined {
+  private ensureTextAtlasEntry(glyph: WebGpuTextGlyph, requiredTextureKeys: ReadonlySet<string>): { entry: GlyphAtlasEntry; bindGroup: GpuBindGroup; uploaded: boolean } | undefined {
     const allocatedWidth = glyph.maskWidth + GPU_GLYPH_ATLAS_PADDING * 2;
     const allocatedHeight = glyph.maskHeight + GPU_GLYPH_ATLAS_PADDING * 2;
     if (allocatedWidth > GPU_GLYPH_ATLAS_DIMENSION || allocatedHeight > GPU_GLYPH_ATLAS_DIMENSION) return undefined;
-    const atlas = this.textAtlas ?? this.createTextAtlas();
-    const current = atlas.entries.get(glyph.textureKey);
-    if (current && current.width === glyph.maskWidth && current.height === glyph.maskHeight) return { entry: current, uploaded: false };
-    // A cache key is immutable font/glyph/size identity. A key that changes
-    // dimensions is rejected rather than mutating an already drawn atlas cell.
-    if (current) return undefined;
+    for (const atlas of this.textAtlases) {
+      const current = atlas.entries.get(glyph.textureKey);
+      if (current && current.width === glyph.maskWidth && current.height === glyph.maskHeight) {
+        atlas.lastUsed = ++this.atlasAccessTick;
+        return { entry: current, bindGroup: atlas.bindGroup, uploaded: false };
+      }
+      // A cache key is immutable font/glyph/size identity. A key that changes
+      // dimensions is rejected rather than mutating an already drawn atlas cell.
+      if (current) return undefined;
+      const entry = this.allocateTextAtlasEntry(atlas, glyph, allocatedWidth, allocatedHeight);
+      if (entry) return this.uploadTextAtlasEntry(atlas, glyph, entry);
+    }
+    let target: GpuGlyphAtlas;
+    if (this.textAtlases.length >= MAX_GPU_GLYPH_ATLAS_PAGES) {
+      const evictionIndex = this.textAtlases
+        .map((atlas, index) => ({ atlas, index }))
+        .filter(({ atlas }) => [...atlas.entries.keys()].every((key) => !requiredTextureKeys.has(key)))
+        .sort((left, right) => left.atlas.lastUsed - right.atlas.lastUsed)[0]?.index;
+      if (evictionIndex === undefined) return undefined;
+      this.textAtlases[evictionIndex]!.texture.destroy?.();
+      this.textAtlasEvictions += 1;
+      target = this.createTextAtlas();
+      this.textAtlases[evictionIndex] = target;
+    } else {
+      target = this.createTextAtlas();
+      this.textAtlases.push(target);
+    }
+    const entry = this.allocateTextAtlasEntry(target, glyph, allocatedWidth, allocatedHeight);
+    return entry ? this.uploadTextAtlasEntry(target, glyph, entry) : undefined;
+  }
+
+  private allocateTextAtlasEntry(atlas: GpuGlyphAtlas, glyph: WebGpuTextGlyph, allocatedWidth: number, allocatedHeight: number): GlyphAtlasEntry | undefined {
     if (atlas.nextX + allocatedWidth > GPU_GLYPH_ATLAS_DIMENSION) {
       atlas.nextX = 0;
       atlas.nextY += atlas.rowHeight;
       atlas.rowHeight = 0;
     }
     if (atlas.nextY + allocatedHeight > GPU_GLYPH_ATLAS_DIMENSION) return undefined;
-    const entry = {
-      x: atlas.nextX + GPU_GLYPH_ATLAS_PADDING,
-      y: atlas.nextY + GPU_GLYPH_ATLAS_PADDING,
-      width: glyph.maskWidth,
-      height: glyph.maskHeight,
-    };
+    const entry = { x: atlas.nextX + GPU_GLYPH_ATLAS_PADDING, y: atlas.nextY + GPU_GLYPH_ATLAS_PADDING, width: glyph.maskWidth, height: glyph.maskHeight };
     atlas.nextX += allocatedWidth;
     atlas.rowHeight = Math.max(atlas.rowHeight, allocatedHeight);
+    return entry;
+  }
+
+  private uploadTextAtlasEntry(atlas: GpuGlyphAtlas, glyph: WebGpuTextGlyph, entry: GlyphAtlasEntry) {
     const bytesPerRow = Math.ceil(glyph.maskWidth / 256) * 256;
     const padded = new Uint8Array(bytesPerRow * glyph.maskHeight);
     for (let row = 0; row < glyph.maskHeight; row += 1) {
@@ -495,7 +634,8 @@ export class WebGpuSceneRenderer {
     }
     this.device.queue.writeTexture({ texture: atlas.texture, origin: { x: entry.x, y: entry.y, z: 0 } }, padded, { bytesPerRow, rowsPerImage: glyph.maskHeight }, { width: glyph.maskWidth, height: glyph.maskHeight, depthOrArrayLayers: 1 });
     atlas.entries.set(glyph.textureKey, entry);
-    return { entry, uploaded: true };
+    atlas.lastUsed = ++this.atlasAccessTick;
+    return { entry, bindGroup: atlas.bindGroup, uploaded: true };
   }
 
   private createTextAtlas(): GpuGlyphAtlas {
@@ -507,8 +647,8 @@ export class WebGpuSceneRenderer {
       nextX: 0,
       nextY: 0,
       rowHeight: 0,
+      lastUsed: ++this.atlasAccessTick,
     };
-    this.textAtlas = atlas;
     return atlas;
   }
 
@@ -528,8 +668,9 @@ export class WebGpuSceneRenderer {
 
   private releaseTextResources() {
     this.releaseTextInstanceBuffer();
-    this.textAtlas?.texture.destroy?.();
-    this.textAtlas = undefined;
+    this.textAtlases.forEach((atlas) => atlas.texture.destroy?.());
+    this.textAtlases = [];
+    this.textAtlasEvictions = 0;
   }
 
   private releaseImageResources() {
@@ -569,9 +710,10 @@ export function admitWebGpuSceneResources(
     ? Math.max(imageInstanceCount * GPU_IMAGE_INSTANCE_BYTES_PER_NODE, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES)
     : 0;
   const textInstanceCount = (input.textGlyphs ?? []).filter(isValidTextGlyph).length;
-  // The Text pass has one bounded, derived R8 texture per renderer generation,
-  // not an unbounded texture per glyph. It is cleared with the device.
-  const textAtlasBytes = textInstanceCount ? GPU_GLYPH_ATLAS_BYTES : 0;
+  // Reserve the bounded page set before allocating any glyph texture. A full
+  // first page can therefore advance to a second page without exceeding the
+  // admission contract mid-frame; all pages are cleared with the device.
+  const textAtlasBytes = textInstanceCount ? GPU_GLYPH_ATLAS_BYTES * MAX_GPU_GLYPH_ATLAS_PAGES : 0;
   const textureBytes = imageTextureBytes + textAtlasBytes;
   const textInstanceBytes = textInstanceCount
     ? Math.max(textInstanceCount * GPU_TEXT_INSTANCE_BYTES_PER_NODE, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES)

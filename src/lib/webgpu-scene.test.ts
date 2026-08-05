@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { admitWebGpuSceneResources, buildWebGpuVertices, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
+import { admitWebGpuSceneResources, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
 
 describe("WebGPU scene vertex projection", () => {
+  it("classifies GPU failures without retaining browser error text", () => {
+    expect(classifyWebGpuRendererFailure({ name: "GPUOutOfMemoryError", message: "device allocation exceeded" })).toBe("WEBGPU_OUT_OF_MEMORY");
+    expect(classifyWebGpuRendererFailure({ name: "GPUValidationError", message: "queue.writeTexture validation failed" })).toBe("WEBGPU_UPLOAD_FAILED");
+    expect(classifyWebGpuRendererFailure({ name: "GPUValidationError", message: "invalid bind group" })).toBe("WEBGPU_VALIDATION_ERROR");
+    expect(classifyWebGpuRendererFailure(new Error("opaque implementation failure"))).toBe("WEBGPU_SCENE_RENDER_FAILED");
+  });
+
   it("triangulates supported solid nodes in screen space and leaves text/gradients for the overlay", () => {
     const rectangle = { ...createNode("rectangle", 0, 0), width: 100, height: 50, rotation: 0, fill: "#ff000080", stroke: "#000000", strokeWidth: 2, opacity: 0.5, radius: 6 };
     const text = createNode("text", 0, 0);
@@ -41,7 +48,7 @@ describe("WebGPU scene vertex projection", () => {
     });
   });
 
-  it("packs, reuses and releases bounded alpha masks in one GPU Text atlas", async () => {
+  it("packs, reuses and releases bounded alpha masks in GPU Text atlas pages", async () => {
     const textureWrites: Array<{ byteLength: number; bytesPerRow: number; origin?: { x: number; y: number; z?: number } }> = [];
     const textureSizes: Array<{ width: number; height: number }> = [];
     const destroyedTextures: number[] = [];
@@ -99,13 +106,13 @@ describe("WebGPU scene vertex projection", () => {
     const glyph = (nodeId: string): WebGpuTextGlyph => ({ textureKey: "font-a:1:16", nodeId, x: 0, y: 0, width: 2, height: 2, rotation: 0, fill: "#000000", opacity: 1, maskWidth: 2, maskHeight: 2, alphaMask: Uint8Array.from([0, 255, 255, 0]) });
     expect(admitWebGpuSceneResources({ nodes: [], width: 10, height: 10, dpr: 1, textGlyphs: [glyph("one"), glyph("two")] })).toMatchObject({
       accepted: true,
-      textureBytes: 1_048_576,
-      textAtlasBytes: 1_048_576,
-      resourceBytes: 1_053_872,
+      textureBytes: GPU_GLYPH_ATLAS_BYTES * MAX_GPU_GLYPH_ATLAS_PAGES,
+      textAtlasBytes: GPU_GLYPH_ATLAS_BYTES * MAX_GPU_GLYPH_ATLAS_PAGES,
+      resourceBytes: 4_199_600,
     });
   });
 
-  it("falls an entire text node back when its glyphs cannot all fit in the atlas", async () => {
+  it("continues onto a second atlas page before falling an entire node back", async () => {
     const draws: number[] = [];
     const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
     const device = {
@@ -136,9 +143,52 @@ describe("WebGPU scene vertex projection", () => {
       const first: WebGpuTextGlyph = { textureKey: "font-a:large", nodeId: "text-a", x: 0, y: 0, width: 1022, height: 1022, rotation: 0, fill: "#000000", opacity: 1, maskWidth: 1022, maskHeight: 1022, alphaMask: largeMask };
       const second: WebGpuTextGlyph = { textureKey: "font-a:extra", nodeId: "text-a", x: 0, y: 0, width: 1, height: 1, rotation: 0, fill: "#000000", opacity: 1, maskWidth: 1, maskHeight: 1, alphaMask: Uint8Array.of(255) };
       const result = renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: "atlas-overflow", textGlyphs: [first, second] });
-      expect(result.renderedNodeIds).toEqual(new Set());
-      expect(draws).toEqual([]);
+      expect(result.renderedNodeIds).toEqual(new Set(["text-a"]));
+      expect(draws).toEqual([6, 6]);
       renderer.destroy();
+    } finally {
+      if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+      else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
+    }
+  });
+
+  it("evicts an unused least-recently-used glyph page only between frames", async () => {
+    const destroyedTextures: number[] = [];
+    const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
+    const device = {
+      lost: new Promise<unknown>(() => undefined),
+      queue: { writeBuffer: () => undefined, writeTexture: () => undefined, copyExternalImageToTexture: () => undefined, submit: () => undefined },
+      createShaderModule: () => ({}),
+      createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
+      createSampler: () => ({}),
+      createTexture: () => ({ createView: () => ({}), destroy: () => destroyedTextures.push(1) }),
+      createBuffer: () => ({ destroy: () => undefined }),
+      createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline: () => undefined, setBindGroup: () => undefined, setVertexBuffer: () => undefined, draw: () => undefined, end: () => undefined }), finish: () => ({}) }),
+      destroy: () => undefined,
+    };
+    const original = globalThis.OffscreenCanvas;
+    class FakeOffscreenCanvas {
+      width: number;
+      height: number;
+      constructor(width: number, height: number) { this.width = width; this.height = height; }
+      getContext() { return context; }
+      transferToImageBitmap() { return { close: () => undefined } as ImageBitmap; }
+    }
+    Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeOffscreenCanvas });
+    try {
+      const navigatorLike: Parameters<typeof WebGpuSceneRenderer.create>[0] = { gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } };
+      const renderer = await WebGpuSceneRenderer.create(navigatorLike);
+      const mask = new Uint8Array(1022 * 1022).fill(255);
+      const glyph = (textureKey: string, nodeId: string): WebGpuTextGlyph => ({ textureKey, nodeId, x: 0, y: 0, width: 1022, height: 1022, rotation: 0, fill: "#000000", opacity: 1, maskWidth: 1022, maskHeight: 1022, alphaMask: mask });
+      const firstFrame = [glyph("font:a", "first"), glyph("font:b", "second"), glyph("font:c", "third"), glyph("font:d", "fourth")];
+      expect(renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: "four-pages", textGlyphs: firstFrame }).renderedNodeIds).toEqual(new Set(["first", "second", "third", "fourth"]));
+      const replacement = renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: "new-page", textGlyphs: [glyph("font:replacement", "replacement")] });
+      expect(replacement.renderedNodeIds).toEqual(new Set(["replacement"]));
+      expect(replacement.textAtlas).toMatchObject({ pages: MAX_GPU_GLYPH_ATLAS_PAGES, entries: MAX_GPU_GLYPH_ATLAS_PAGES, evictions: 1, rejectedNodes: 0 });
+      expect(destroyedTextures).toHaveLength(1);
+      renderer.destroy();
+      expect(destroyedTextures).toHaveLength(MAX_GPU_GLYPH_ATLAS_PAGES + 1);
     } finally {
       if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
       else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
@@ -184,8 +234,12 @@ describe("WebGPU scene vertex projection", () => {
       const first = { ...createNode("image", 0, 0), assetId: "asset-a", width: 32, height: 16 };
       const second = { ...createNode("image", 40, 0), assetId: "asset-a", width: 32, height: 16 };
       const input = { nodes: [first, second], viewport: { x: 0, y: 0, zoom: 1 }, width: 100, height: 50, dpr: 1, sceneKey: "images", imageBitmaps: new Map([["asset-a", bitmap]]) };
-      expect(renderer.render(input).renderedNodeIds).toEqual(new Set([first.id, second.id]));
+      const initial = renderer.render(input);
+      expect(initial.renderedNodeIds).toEqual(new Set([first.id, second.id]));
+      expect(initial.imageTextures).toEqual({ textures: 1, bytes: 2_048, cacheHits: 1, uploads: 1, releases: 0 });
       expect(renderer.render(input).gpuUploadBytes).toBe(GPU_CAMERA_UNIFORM_BYTES + 80);
+      const released = renderer.render({ ...input, nodes: [], imageBitmaps: new Map(), sceneKey: "images-removed" });
+      expect(released.imageTextures).toEqual({ textures: 0, bytes: 0, cacheHits: 0, uploads: 0, releases: 1 });
       renderer.destroy();
       expect(textureWrites).toEqual([{ byteLength: 4_096, bytesPerRow: 256, width: 32, height: 16 }]);
       expect(draws).toEqual([6, 6, 6, 6]);

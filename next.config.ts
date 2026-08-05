@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const development = process.env.NODE_ENV !== "production";
+const documentApiTarget = process.env.MAKEFIGMA_DOCUMENT_API_TARGET ?? "http://127.0.0.1:8788";
+const assetApiTarget = process.env.MAKEFIGMA_ASSET_API_TARGET ?? "http://127.0.0.1:8789";
 const contentSecurityPolicy = [
   "default-src 'self'",
   // Next emits inline bootstrapping/style tags. WASM evaluation is explicitly allowed
@@ -9,9 +11,9 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  // Loopback Document/Asset APIs are development-only Rust processes. They are
-  // never granted in production CSP; deployment supplies authenticated origins.
-  `connect-src 'self'${development ? " http://127.0.0.1:8788 http://127.0.0.1:8789 ws: wss:" : ""}`,
+  // Browser traffic stays same-origin; deployment supplies authenticated proxy
+  // targets instead of granting the page direct API origins in CSP.
+  `connect-src 'self'${development ? " ws: wss:" : ""}`,
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -20,6 +22,9 @@ const contentSecurityPolicy = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  // Allows an evidence run to use its own build output while a developer's
+  // interactive `next dev` instance keeps the default `.next` lock.
+  distDir: process.env.MAKEFIGMA_NEXT_DIST_DIR ?? ".next",
   outputFileTracingRoot: process.cwd(),
   // The local editor and its evidence browser both use the loopback host.
   // Declare it explicitly so Next development HMR is not rejected as a
@@ -29,7 +34,10 @@ const nextConfig: NextConfig = {
     // The desktop in-app browser can enforce stricter private-network rules
     // than a normal Chrome tab. Keep Asset API calls same-origin and proxy them
     // through Next so imports never depend on cross-port browser fetch support.
-    return [{ source: "/asset-api/:path*", destination: "http://127.0.0.1:8789/:path*" }];
+    return [
+      { source: "/document-api/:path*", destination: `${documentApiTarget}/:path*` },
+      { source: "/asset-api/:path*", destination: `${assetApiTarget}/:path*` },
+    ];
   },
   async headers() {
     return [{

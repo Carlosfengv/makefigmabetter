@@ -56,3 +56,20 @@ export function orderNodesByRustRenderGraph<T extends IdentifiedNode>(nodes: rea
     })
     .map(({ node }) => node);
 }
+
+/**
+ * Keeps Canonical z-order while making Rust's immutable command stream the
+ * browser presentation source. Unlike `orderNodesByRustRenderGraph`, this does
+ * not group nodes by pass: the transitional Canvas compositor still needs the
+ * original interleaving when a later node cannot enter the GPU prefix.
+ */
+export function orderNodesByRustRenderCommands<T extends IdentifiedNode>(nodes: readonly T[], plan: RustRenderGraphPlan | undefined): T[] {
+  if (!plan) return [...nodes];
+  return nodes
+    .map((node, localIndex) => ({ node, localIndex, order: plan.orderByNodeId.get(node.id) }))
+    .sort((left, right) => {
+      if (!left.order || !right.order) return left.localIndex - right.localIndex;
+      return left.order.commandIndex - right.order.commandIndex;
+    })
+    .map(({ node }) => node);
+}
