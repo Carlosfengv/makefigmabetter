@@ -45,8 +45,13 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/documents/{document_id}",
             post(create_document)
+                .delete(delete_document)
                 .options(preflight)
                 .layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BYTES)),
+        )
+        .route(
+            "/v1/documents/{document_id}/copies/{target_document_id}",
+            post(clone_document).options(preflight),
         )
         .route(
             "/v1/documents/{document_id}/operations",
@@ -162,6 +167,51 @@ async fn submit_operation(
                 .ack(routed_document_id, operation_id)
                 .encode_to_vec(),
         ),
+        Err(error) => protocol_error(error),
+    }
+}
+
+async fn clone_document(
+    State(state): State<ApiState>,
+    Path((document_id, target_document_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (principal, source_id, target_id) = match (dev_principal(&headers), parse_id(&document_id), parse_id(&target_document_id)) {
+        (Ok(principal), Ok(source_id), Ok(target_id)) if source_id != target_id => (principal, source_id, target_id),
+        _ => return protocol_error(ServiceError::InvalidEnvelope),
+    };
+    let source = match state.service.load_document(source_id) {
+        Ok(source) => source,
+        Err(error) => return protocol_error(error),
+    };
+    if !state.service.can_read_document(principal, source_id).unwrap_or(false) {
+        return protocol_error(ServiceError::PermissionDenied);
+    }
+    let snapshot = match makefigma_document_codec::clone_wire_snapshot(&source.snapshot, target_id)
+        .and_then(|snapshot| makefigma_document_codec::document_from_wire_snapshot(&snapshot)) {
+        Ok(document) => match initial_document_state(&document, principal.tenant_id, ENGINE_SEMANTICS_VERSION) {
+            Ok(state) => state,
+            Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
+        },
+        Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
+    };
+    match state.service.clone_document(principal, source_id, source.document_hash, snapshot) {
+        Ok(()) => plain_response(StatusCode::CREATED, Vec::new(), PROTOBUF_CONTENT_TYPE),
+        Err(error) => protocol_error(error),
+    }
+}
+
+async fn delete_document(
+    State(state): State<ApiState>,
+    Path(document_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (principal, document_id) = match (dev_principal(&headers), parse_id(&document_id)) {
+        (Ok(principal), Ok(document_id)) => (principal, document_id),
+        (Err(error), _) | (_, Err(error)) => return protocol_error(error),
+    };
+    match state.service.delete_document(principal, document_id) {
+        Ok(()) => plain_response(StatusCode::NO_CONTENT, Vec::new(), PROTOBUF_CONTENT_TYPE),
         Err(error) => protocol_error(error),
     }
 }
@@ -302,7 +352,7 @@ fn cors_response(status: StatusCode, body: Vec<u8>, content_type: &str) -> Respo
     );
     response.headers_mut().insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, OPTIONS"),
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
     );
     response.headers_mut().insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
@@ -652,6 +702,39 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(app.oneshot(retry).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn clones_a_document_with_a_new_identity_and_purges_it_durably() {
+        let app = app();
+        let source = headers(Request::post(format!("/v1/documents/{}", id_hex(1))))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.clone().oneshot(source).await.unwrap().status(), StatusCode::CREATED);
+        let copy = headers(Request::post(format!(
+            "/v1/documents/{}/copies/{}", id_hex(1), id_hex(4)
+        )))
+        .body(Body::empty())
+        .unwrap();
+        assert_eq!(app.clone().oneshot(copy).await.unwrap().status(), StatusCode::CREATED);
+        let snapshot = headers(Request::get(format!("/v1/documents/{}/snapshot", id_hex(4))))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(snapshot).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let copy = makefigma_document_codec::document_from_wire_snapshot(
+            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(copy.id().0.to_be_bytes(), id(4));
+        assert_eq!(copy.revision, 0);
+        let delete = headers(Request::delete(format!("/v1/documents/{}", id_hex(4))))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.clone().oneshot(delete).await.unwrap().status(), StatusCode::NO_CONTENT);
+        let missing = headers(Request::get(format!("/v1/documents/{}/snapshot", id_hex(4))))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(missing).await.unwrap().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

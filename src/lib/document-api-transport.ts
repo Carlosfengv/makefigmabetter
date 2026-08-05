@@ -70,6 +70,20 @@ export class DocumentApiTransport implements PendingOperationTransport {
     throw new Error(response.status === 409 ? "REMOTE_DOCUMENT_CONFLICT" : "REMOTE_DOCUMENT_CREATE_FAILED");
   }
 
+  async cloneDocument(sourceDocumentId: string, targetDocumentId: string) {
+    const response = await this.fetch(`${this.config.baseUrl.replace(/\/$/, "")}/v1/documents/${encodeURIComponent(sourceDocumentId)}/copies/${encodeURIComponent(targetDocumentId)}`, {
+      method: "POST", headers: this.principalHeaders(),
+    });
+    if (!response.ok) throw new Error(response.status === 404 ? "REMOTE_DOCUMENT_MISSING" : "REMOTE_DOCUMENT_CLONE_FAILED");
+  }
+
+  async deleteDocument(documentId: string) {
+    const response = await this.fetch(`${this.config.baseUrl.replace(/\/$/, "")}/v1/documents/${encodeURIComponent(documentId)}`, {
+      method: "DELETE", headers: this.principalHeaders(),
+    });
+    if (!response.ok && response.status !== 404) throw new Error("REMOTE_DOCUMENT_DELETE_FAILED");
+  }
+
   /** Replaces the remote canonical root for the explicit destructive Reset demo
    * action. The server validates and authorizes the opaque snapshot. */
   async resetDocument(documentId: string, snapshot: Uint8Array) {
@@ -107,6 +121,13 @@ export class DocumentApiTransport implements PendingOperationTransport {
       snapshot: new Uint8Array(await response.arrayBuffer()),
       ...(revision !== undefined ? { revision } : {}),
       ...(documentHash ? { documentHash } : {}),
+    };
+  }
+
+  private principalHeaders() {
+    return {
+      "x-makefigma-dev-tenant-id": this.config.tenantId,
+      "x-makefigma-dev-actor-id": this.config.actorId,
     };
   }
 }

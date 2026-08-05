@@ -246,6 +246,58 @@ impl<R: CanonicalReducer> DocumentService<R> {
         load_document(&connection, document_id)?.ok_or(ServiceError::MissingDocument)
     }
 
+    /// Atomically creates a new independent document from an already validated
+    /// source root. The caller supplies the cloned wire snapshot because this
+    /// storage crate intentionally does not own snapshot encoding semantics.
+    pub fn clone_document(
+        &self,
+        principal: TrustedPrincipal,
+        source_document_id: Id,
+        source_hash: Hash,
+        cloned: DocumentState,
+    ) -> Result<(), ServiceError> {
+        if cloned.snapshot.len() > MAX_SNAPSHOT_BYTES { return Err(ServiceError::ResourceLimit); }
+        let mut connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|_| ServiceError::Storage)?;
+        let source = load_document(&transaction, source_document_id)?.ok_or(ServiceError::MissingDocument)?;
+        if source.tenant_id != principal.tenant_id || source.document_hash != source_hash || cloned.tenant_id != principal.tenant_id {
+            return Err(ServiceError::PermissionDenied);
+        }
+        let editor = transaction.query_row(
+            "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
+            params![source_document_id.as_slice(), principal.actor_id.as_slice()], |_| Ok(()),
+        ).optional().map_err(|_| ServiceError::Storage)?;
+        if editor.is_none() { return Err(ServiceError::PermissionDenied); }
+        if load_document(&transaction, cloned.document_id)?.is_some() {
+            return Err(ServiceError::BaseRevisionConflict { expected: 0, actual: 0 });
+        }
+        transaction.execute(
+            "INSERT INTO documents (document_id, tenant_id, accepted_revision, document_hash, snapshot) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![cloned.document_id.as_slice(), cloned.tenant_id.as_slice(), cloned.accepted_revision, cloned.document_hash.as_slice(), cloned.snapshot],
+        ).map_err(|_| ServiceError::Storage)?;
+        transaction.execute(
+            "INSERT INTO document_editors (document_id, actor_id) VALUES (?1, ?2)",
+            params![cloned.document_id.as_slice(), principal.actor_id.as_slice()],
+        ).map_err(|_| ServiceError::Storage)?;
+        transaction.commit().map_err(|_| ServiceError::Storage)
+    }
+
+    /// Removes a document and its operation/editor rows in one durable
+    /// transaction. SQLite foreign keys clean the dependent rows.
+    pub fn delete_document(&self, principal: TrustedPrincipal, document_id: Id) -> Result<(), ServiceError> {
+        let mut connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|_| ServiceError::Storage)?;
+        let document = load_document(&transaction, document_id)?.ok_or(ServiceError::MissingDocument)?;
+        if document.tenant_id != principal.tenant_id { return Err(ServiceError::PermissionDenied); }
+        let editor = transaction.query_row(
+            "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
+            params![document_id.as_slice(), principal.actor_id.as_slice()], |_| Ok(()),
+        ).optional().map_err(|_| ServiceError::Storage)?;
+        if editor.is_none() { return Err(ServiceError::PermissionDenied); }
+        transaction.execute("DELETE FROM documents WHERE document_id = ?1", params![document_id.as_slice()]).map_err(|_| ServiceError::Storage)?;
+        transaction.commit().map_err(|_| ServiceError::Storage)
+    }
+
     /** Replaces a document's canonical root after the caller has validated a
      * complete snapshot. This is reserved for destructive demo resets: its
      * prior operation history cannot be replayed against the replacement root. */

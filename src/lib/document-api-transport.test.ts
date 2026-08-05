@@ -33,6 +33,17 @@ describe("DocumentApiTransport", () => {
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining(`/v1/documents/${operation.documentId}`), expect.objectContaining({ method: "POST", body: expect.any(ArrayBuffer) }));
   });
 
+  it("clones and permanently deletes through explicit document lifecycle endpoints", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const transport = new DocumentApiTransport({ baseUrl: "http://127.0.0.1:8788", ...principal, fetch });
+    await transport.cloneDocument(operation.documentId, "00000000-0000-0000-0000-000000000003");
+    await transport.deleteDocument(operation.documentId);
+    expect(fetch.mock.calls[0][0]).toContain(`/v1/documents/${operation.documentId}/copies/00000000-0000-0000-0000-000000000003`);
+    expect(fetch.mock.calls[0][1]).toMatchObject({ method: "POST", headers: { "x-makefigma-dev-tenant-id": principal.tenantId } });
+    expect(fetch.mock.calls[1][0]).toContain(`/v1/documents/${operation.documentId}`);
+    expect(fetch.mock.calls[1][1]).toMatchObject({ method: "DELETE" });
+  });
+
   it("loads the server snapshot without attempting to decode it in TypeScript", async () => {
     const fetch = vi.fn(async () => new Response(Uint8Array.from([8, 1, 2]), { status: 200 }));
     const transport = new DocumentApiTransport({ baseUrl: "http://127.0.0.1:8788", ...principal, fetch });

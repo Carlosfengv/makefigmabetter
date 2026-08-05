@@ -172,6 +172,22 @@ pub fn document_from_wire_snapshot(bytes: &[u8]) -> Result<Document, SnapshotErr
     document_from_snapshot(bytes, document_id, hash)
 }
 
+/// Creates a new document root from an existing canonical wire snapshot. The
+/// clone retains only semantic scene state: it receives a new identity and a
+/// fresh revision chain, while the content hash remains valid because identity
+/// and revision are intentionally not part of the canonical document hash.
+pub fn clone_wire_snapshot(bytes: &[u8], target_document_id: Id) -> Result<Vec<u8>, SnapshotError> {
+    let mut snapshot = v1::DocumentSnapshot::decode(bytes).map_err(|_| SnapshotError::Invalid)?;
+    // Validate before changing the two transport-owned fields. This prevents a
+    // clone endpoint from becoming a way to persist a malformed source root.
+    document_from_wire_snapshot(bytes)?;
+    snapshot.document_id = target_document_id.to_vec();
+    snapshot.revision = 0;
+    let cloned = snapshot.encode_to_vec();
+    document_from_wire_snapshot(&cloned)?;
+    Ok(cloned)
+}
+
 fn page_hash(document: &Document, page_id: PageId) -> Vec<u8> {
     let mut bytes = page_id.0.to_be_bytes().to_vec();
     for node in document.ordered_nodes_on_page(page_id).unwrap_or_default() {
