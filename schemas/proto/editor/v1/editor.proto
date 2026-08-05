@@ -1,0 +1,344 @@
+syntax = "proto3";
+
+package makefigma.editor.v1;
+
+// Field numbers in this file are append-only. Removed fields must be reserved;
+// durable operations and snapshots are never represented by in-memory Rust types.
+
+message VersionRange {
+  uint32 min_protocol_version = 1;
+  uint32 max_protocol_version = 2;
+}
+
+message PositionId {
+  bytes key = 1;       // exactly 16 big-endian bytes
+  bytes actor_id = 2;  // exactly 16 big-endian bytes
+}
+
+message PageRef {
+  bytes page_id = 1;       // exactly 16 bytes
+  string name = 2;
+  PositionId position_id = 3;
+}
+
+message SceneNodeRef {
+  bytes node_id = 1;       // exactly 16 bytes
+  optional bytes parent_id = 2;
+  bytes page_id = 3;       // exactly 16 bytes
+  PositionId position_id = 4;
+  bytes canonical_node = 5; // versioned canonical node payload, owned by editor-core
+}
+
+message PageChunk {
+  uint32 format_version = 1;
+  PageRef page = 2;
+  repeated SceneNodeRef nodes = 3;
+  bytes content_hash = 4; // SHA-256 over canonical page state, not protobuf bytes
+  map<string, bytes> extensions = 5;
+}
+
+message ResourceIndexEntry {
+  bytes asset_id = 1;
+  bytes content_hash = 2;
+  string media_type = 3;
+  optional uint64 byte_length = 4;
+  optional uint32 pixel_width = 5;
+  optional uint32 pixel_height = 6;
+}
+
+message DocumentSnapshot {
+  uint32 format_version = 1;
+  uint32 engine_semantics_version = 2;
+  bytes document_id = 3;
+  uint64 revision = 4;
+  bytes content_hash = 5; // SHA-256 over canonical document state
+  repeated PageChunk page_chunks = 6;
+  repeated ResourceIndexEntry resource_index = 7;
+  map<string, bytes> extensions = 8;
+  reserved 9 to 15;
+  DocumentColorProfile document_color_profile = 16;
+  repeated bytes retired_node_ids = 17;
+}
+
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  NODE_KIND_FRAME = 1;
+  NODE_KIND_RECTANGLE = 2;
+  NODE_KIND_ELLIPSE = 3;
+  NODE_KIND_TEXT = 4;
+  NODE_KIND_IMAGE = 5;
+}
+
+enum ColorSpace {
+  COLOR_SPACE_UNSPECIFIED = 0;
+  COLOR_SPACE_SRGB = 1;
+  COLOR_SPACE_DISPLAY_P3 = 2;
+  COLOR_SPACE_LINEAR_SRGB = 3;
+}
+
+enum DocumentColorProfile {
+  DOCUMENT_COLOR_PROFILE_UNSPECIFIED = 0;
+  DOCUMENT_COLOR_PROFILE_SRGB = 1;
+  DOCUMENT_COLOR_PROFILE_DISPLAY_P3 = 2;
+}
+
+message Color {
+  ColorSpace space = 1;
+  float red = 2;
+  float green = 3;
+  float blue = 4;
+  float alpha = 5;
+}
+
+message GradientStop {
+  float position = 1;
+  Color color = 2;
+}
+
+message LinearGradient {
+  float start_x = 1;
+  float start_y = 2;
+  float end_x = 3;
+  float end_y = 4;
+  repeated GradientStop stops = 5;
+}
+
+message Paint {
+  oneof kind {
+    Color solid = 1;
+    LinearGradient linear_gradient = 2;
+  }
+}
+
+message FontVariation {
+  string tag = 1; // exactly four ASCII bytes
+  float value = 2;
+}
+
+message FontReference {
+  bytes asset_id = 1;
+  uint32 face_index = 2;
+  repeated FontVariation variation_axes = 3;
+}
+
+enum TextAlignment {
+  TEXT_ALIGNMENT_UNSPECIFIED = 0;
+  TEXT_ALIGNMENT_LEFT = 1;
+  TEXT_ALIGNMENT_CENTER = 2;
+  TEXT_ALIGNMENT_RIGHT = 3;
+  TEXT_ALIGNMENT_JUSTIFY = 4;
+}
+
+enum TextAutoSize {
+  TEXT_AUTO_SIZE_UNSPECIFIED = 0;
+  TEXT_AUTO_SIZE_FIXED = 1;
+  TEXT_AUTO_SIZE_HEIGHT = 2;
+  TEXT_AUTO_SIZE_WIDTH_AND_HEIGHT = 3;
+}
+
+message TextStyleRun {
+  uint32 start = 1; // UTF-8 byte offset at a scalar boundary
+  uint32 end = 2;
+  FontReference font = 3;
+  double font_size = 4;
+  uint32 font_weight = 5;
+  bool italic = 6;
+  double letter_spacing = 7;
+}
+
+message ParagraphStyle {
+  TextAlignment alignment = 1;
+  optional double line_height = 2;
+  double paragraph_spacing = 3;
+}
+
+message TextProperties {
+  repeated TextStyleRun runs = 1;
+  ParagraphStyle paragraph = 2;
+  TextAutoSize auto_size = 3;
+  repeated FontReference fallback_fonts = 4;
+}
+
+message SceneNode {
+  bytes node_id = 1;
+  optional bytes parent_id = 2;
+  bytes page_id = 3;
+  PositionId position_id = 4;
+  string name = 5;
+  NodeKind kind = 6;
+  double x = 7;
+  double y = 8;
+  double width = 9;
+  double height = 10;
+  double rotation = 11;
+  Paint fill = 12;
+  Paint stroke = 13;
+  double stroke_width = 14;
+  double opacity = 15;
+  double corner_radius = 16;
+  string text = 17;
+  bool visible = 18;
+  bool locked = 19;
+  optional bytes asset_id = 20;
+  optional TextProperties text_properties = 21;
+}
+
+message GeometryUpdate {
+  bytes node_id = 1;
+  double x = 2;
+  double y = 3;
+  double width = 4;
+  double height = 5;
+  double rotation = 6;
+}
+
+message AppearanceUpdate {
+  bytes node_id = 1;
+  Paint fill = 2;
+  Paint stroke = 3;
+  double stroke_width = 4;
+  double opacity = 5;
+  double corner_radius = 6;
+  bool visible = 7;
+  bool locked = 8;
+}
+
+message CreatePage {
+  PageRef page = 1;
+}
+
+message CreateNode {
+  SceneNode node = 1;
+}
+
+message RenameNode {
+  bytes node_id = 1;
+  string name = 2;
+}
+
+message SetText {
+  bytes node_id = 1;
+  string text = 2;
+}
+
+message SetTextProperties {
+  bytes node_id = 1;
+  TextProperties properties = 2;
+}
+
+message DeleteNode {
+  bytes node_id = 1;
+}
+
+// A resolved sibling-order key. It is intentionally separate from geometry so
+// reorders are durable, atomic document operations rather than UI array edits.
+message SetNodePosition {
+  bytes node_id = 1;
+  PositionId position_id = 2;
+}
+
+message SetDocumentColorProfile {
+  DocumentColorProfile profile = 1;
+}
+
+// Registers metadata for an Asset that the Asset Service has already admitted
+// and attached to this document. Raw bytes never cross the Document protocol.
+message RegisterResource {
+  ResourceIndexEntry resource = 1;
+}
+
+// Assigns or clears an image fill on a Frame, Rectangle, Ellipse, or Image
+// node. The asset must already be a registered document resource.
+message ImageFillUpdate {
+  bytes node_id = 1;
+  optional bytes asset_id = 2;
+}
+
+message ResolvedOperation {
+  oneof kind {
+    CreatePage create_page = 1;
+    CreateNode create_node = 2;
+    GeometryUpdate update_geometry = 3;
+    RenameNode rename_node = 4;
+    AppearanceUpdate set_appearance = 5;
+    SetText set_text = 6;
+    SetDocumentColorProfile set_document_color_profile = 7;
+    DeleteNode delete_node = 8;
+    RegisterResource register_resource = 9;
+    SetTextProperties set_text_properties = 10;
+    ImageFillUpdate set_image_fill = 11;
+    SetNodePosition set_node_position = 12;
+  }
+}
+
+message ResolvedOperationBatch {
+  repeated ResolvedOperation operations = 1;
+}
+
+message OperationEnvelope {
+  uint32 schema_version = 1;
+  bytes document_id = 2;
+  bytes operation_id = 3;
+  bytes transaction_id = 4;
+  bytes actor_id = 5;
+  bytes session_id = 6;
+  uint64 client_sequence = 7;
+  uint64 base_revision = 8;
+  repeated bytes causal_parent_ids = 9;
+  bytes payload = 10; // encoded ResolvedOperationBatch
+  bytes payload_hash = 11; // SHA-256 over canonical payload, not protobuf bytes
+  optional uint32 engine_semantics_version = 12;
+  reserved 13 to 15;
+}
+
+enum AckResult {
+  ACK_RESULT_UNSPECIFIED = 0;
+  ACK_RESULT_ACCEPTED = 1;
+  ACK_RESULT_ACCEPTED_WITH_TRANSFORM = 2;
+  ACK_RESULT_REJECTED_CONFLICT = 3;
+  ACK_RESULT_REJECTED_PERMANENT = 4;
+}
+
+message OperationAck {
+  uint32 schema_version = 1;
+  bytes document_id = 2;
+  bytes operation_id = 3;
+  AckResult result = 4;
+  optional uint64 accepted_revision = 5;
+  optional bytes document_hash = 6;
+  optional OperationEnvelope canonical_operation = 7;
+  optional ProtocolError error = 8;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_PROTOCOL_VERSION_UNSUPPORTED = 1;
+  ERROR_CODE_SCHEMA_VERSION_UNSUPPORTED = 2;
+  ERROR_CODE_INVALID_ENVELOPE = 3;
+  ERROR_CODE_HASH_MISMATCH = 4;
+  ERROR_CODE_BASE_REVISION_CONFLICT = 5;
+  ERROR_CODE_PERMISSION_DENIED = 6;
+  ERROR_CODE_RESOURCE_LIMIT = 7;
+  ERROR_CODE_INTERNAL = 8;
+}
+
+message ProtocolError {
+  ErrorCode code = 1;
+  string safe_message = 2;
+  VersionRange supported_protocol_versions = 3;
+  optional uint32 minimum_engine_semantics_version = 4;
+  map<string, string> details = 5;
+}
+
+message VersionNegotiationRequest {
+  uint32 protocol_version = 1;
+  optional uint32 engine_semantics_version = 2;
+  string client_version = 3;
+}
+
+message VersionNegotiationResponse {
+  VersionRange supported_protocol_versions = 1;
+  uint32 selected_protocol_version = 2;
+  optional uint32 minimum_engine_semantics_version = 3;
+  optional ProtocolError error = 4;
+}

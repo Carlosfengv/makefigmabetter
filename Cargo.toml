@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/editor-core", "crates/editor-wasm"]
+members = ["crates/editor-core", "crates/editor-wasm", "crates/graphics-core", "crates/renderer-wgpu", "crates/protocol", "crates/document-codec", "crates/document-service", "crates/asset-service", "services/document-api", "services/asset-api"]
 resolver = "2"
 
 [workspace.package]
