@@ -1529,7 +1529,8 @@ function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     ctx.beginPath();
     ctx.ellipse(w / 2, h / 2, Math.max(0, w / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, h / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
     ctx.stroke();
-  } else if (node.kind === "text") {
+  } else if (node.kind === "text" || node.kind === "frame") {
+    // Frame hover bounds stay rectilinear even when the frame itself has rounded corners.
     ctx.strokeRect(canvasDesignTokens.stroke.hover.pixelInset, canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1));
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
