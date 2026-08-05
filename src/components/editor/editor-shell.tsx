@@ -1,9 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/icon-button";
-import { appendLocalJournalEntry, loadLocalDocument, prepareLocalStorage, saveLocalDocument, saveViewportRecord } from "@/lib/local-document";
-import { createId, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentColor, type DocumentLinearGradient, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
+import { appendLocalJournalEntry, appendPendingRemoteOperation, loadLocalDocument, loadPendingRemoteOperations, pendingOperationIsCoveredBySnapshot, prepareLocalStorage, removePendingRemoteOperation, removePendingRemoteOperationsCoveredBySnapshot, replacePendingRemoteOperation, saveLocalDocument, saveViewportRecord } from "@/lib/local-document";
+import { createId, createNode, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentAsset, type DocumentColor, type DocumentLinearGradient, type DocumentTextProperties, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
+import { FontFaceRegistry, fontFamilyForAsset } from "@/lib/font-face-registry";
+import { canvasDesignTokens } from "@/lib/canvas-design-tokens";
+import { layoutTextRanges, segmentGraphemes, textParagraphRanges } from "@/lib/text-layout";
+import { styledTextSpans } from "@/lib/text-style-runs";
 import { maintainWriterLease, type WriterLease, type WriterLeaseMode } from "@/lib/writer-lease";
 import { planWorkerRecovery } from "@/lib/worker-recovery";
 import { colorToOpaqueSrgbCss, colorToSrgbCss, createDefaultLinearGradient } from "@/lib/color-rendering";
@@ -13,9 +17,18 @@ import { createViewportCheckpointSampler, type ViewportCheckpointSummary } from 
 import { encodeInputBatch } from "@/lib/input-transfer";
 import { createEditorTransactionQueue } from "@/lib/editor-transaction-queue";
 import { applyOptimisticUpdates, type OptimisticUpdate } from "@/lib/optimistic-projection";
+import { DocumentApiTransport } from "@/lib/document-api-transport";
+import { AssetApiTransport } from "@/lib/asset-api-transport";
+import { probeAssetInWorker } from "@/lib/asset-probe-client";
+import { PendingOperationSynchronizer } from "@/lib/pending-operation-sync";
 import { LayerPanel } from "./layer-panel";
 import { createZoomPerformanceFixture } from "@/lib/zoom-performance-fixture";
 import phase0BasicCardFixture from "../../../fixtures/documents/phase0-basic-card.fixture.json";
+import phase1TextMultilingualFixture from "../../../fixtures/documents/phase1-text-multilingual.fixture.json";
+import phase1Text10kFixture from "../../../fixtures/documents/phase1-text-10k.fixture.json";
+import phase1RenderCompositeFixture from "../../../fixtures/documents/phase1-render-composite.fixture.json";
+import { createPhase1Shape100kFixture } from "@/lib/phase1-shape-100k-fixture";
+import { resolveLayerDrop, resolveLayerOrder, type LayerOrderAction } from "@/lib/layer-order";
 
 const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> = [
   { id: "select", label: "Move", glyph: "↖", key: "V" },
@@ -26,13 +39,45 @@ const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> 
   { id: "text", label: "Text", glyph: "T", key: "T" },
 ];
 
-const blankSnapshot: EditorSnapshot = { revision: 0, nodes: [], selectedIds: [], viewport: { x: 0, y: 0, zoom: 1 }, canUndo: false, canRedo: false, renderer: "Canvas 2D", documentCore: "Starting Rust/WASM bridge" };
-type DocumentUiState = Pick<EditorSnapshot, "revision" | "documentHash" | "memory" | "resources" | "diagnostics" | "nodes" | "canUndo" | "canRedo" | "renderer" | "gpu" | "documentCore" | "localSnapshot" | "localJournalEntry">;
+const defaultPageId = "00000000-0000-0000-0000-000000000001";
+const blankSnapshot: EditorSnapshot = { documentId: "00000000-0000-0000-0000-000000000000", revision: 0, nodes: [], pages: [{ id: defaultPageId, name: "Page 1", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" }], activePageId: defaultPageId, selectedIds: [], viewport: { x: 0, y: 0, zoom: 1 }, canUndo: false, canRedo: false, renderer: "Canvas 2D", documentCore: "Starting Rust/WASM bridge" };
+type DocumentUiState = Pick<EditorSnapshot, "documentId" | "revision" | "documentHash" | "memory" | "resources" | "diagnostics" | "nodes" | "assets" | "pages" | "activePageId" | "canUndo" | "canRedo" | "renderer" | "gpu" | "documentCore" | "localSnapshot" | "localJournalEntry">;
 type SelectionUiState = { selectedIds: string[] };
 type ViewUiState = { viewport: EditorSnapshot["viewport"]; performance?: EditorSnapshot["performance"] };
 const writerLockName = "makefigma:starter-document";
+const localDevTenantId = "00000000-0000-0000-0000-000000000002";
+const localDevActorId = "00000000-0000-0000-0000-000000000007";
+const documentApiUrl = process.env.NEXT_PUBLIC_DOCUMENT_API_URL ?? "http://127.0.0.1:8788";
+const assetApiUrl = process.env.NEXT_PUBLIC_ASSET_API_URL ?? "/asset-api";
 type EditIntent = { at: number; id: string };
+type PendingImagePlacement = { assetId: string; width?: number; height?: number; targetId?: string };
+type CanvasTextEdit = { nodeId: string; draft: string; initialDraft: string; caret: number };
 type TabMessage = { type: "snapshot"; snapshot: CoreLocalSnapshot } | { type: "request-edit"; intent: EditIntent };
+/** Fixture-only runtime seed. Canonical Document keeps `DocumentAsset` metadata
+ * and node-level image references; bytes are transferred to the Worker after hydration. */
+type FixtureAssetSeed = DocumentAsset & { bytesBase64: string };
+
+function importedImageNode(imageAsset: PendingImagePlacement, viewport: EditorSnapshot["viewport"]) {
+  const sourceWidth = imageAsset.width ?? 320;
+  const sourceHeight = imageAsset.height ?? 220;
+  const scale = Math.min(1, 480 / Math.max(sourceWidth, sourceHeight));
+  const image = createNode("image", -viewport.x - sourceWidth * scale / 2, -viewport.y - sourceHeight * scale / 2);
+  image.assetId = imageAsset.assetId;
+  image.width = Math.max(32, sourceWidth * scale);
+  image.height = Math.max(32, sourceHeight * scale);
+  image.name = "Imported image";
+  return image;
+}
+
+function imageFillTarget(nodes: readonly CanvasNode[], selectedIds: readonly string[]) {
+  const selected = selectedIds.length === 1 ? nodes.find((node) => node.id === selectedIds[0]) : undefined;
+  return selected && !selected.locked && ["frame", "rectangle", "ellipse", "image"].includes(selected.kind) ? selected : undefined;
+}
+
+function importFailureMessage(code: string) {
+  if (code === "RESOURCE_LIMIT") return "Import failed · image exceeds the 256 MB / 256 MP import limit";
+  return `Import failed · ${code.toLowerCase().replaceAll("_", " ")}`;
+}
 
 function newerEditIntent(candidate: EditIntent, current: EditIntent) {
   return candidate.at > current.at || (candidate.at === current.at && candidate.id > current.id);
@@ -42,19 +87,257 @@ function sameIds(left: readonly string[], right: readonly string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+/** Content replacement is one atomic Canonical update. Phase 2 adds selecting
+ * and styling arbitrary subranges; until then the first style remains valid
+ * over the complete new UTF-8 source. */
+function textReplacementProperties(node: CanvasNode, text: string): DocumentTextProperties {
+  const properties: DocumentTextProperties = node.textProperties ?? {
+    runs: [],
+    paragraph: { alignment: "left", paragraphSpacing: 0 },
+    autoSize: "fixed",
+    fallbackFonts: [],
+  };
+  const primary = properties.runs[0];
+  const textLength = new TextEncoder().encode(text).byteLength;
+  return {
+    ...properties,
+    runs: textLength && primary ? [{ ...primary, start: 0, end: textLength }] : [],
+  };
+}
+
+/** The Inspector owns the initial intent, so it also supplies a deterministic
+ * geometry patch for auto-sized text. The worker repeats this measurement with
+ * its loaded FontFace; including it here keeps the selected dimensions responsive
+ * even while that worker font is still becoming ready. */
+function resolveTextAutoSizePatch(node: CanvasNode, patch: Partial<CanvasNode>): Partial<CanvasNode> {
+  if (node.kind !== "text") return patch;
+  const properties = patch.textProperties ?? node.textProperties;
+  if (!properties || properties.autoSize === "fixed") return patch;
+  const primary = properties.runs[0];
+  const fontSize = primary?.fontSize ?? 31;
+  const lineHeight = properties.paragraph.lineHeight ?? fontSize * 1.25;
+  const letterSpacing = primary?.letterSpacing ?? 0;
+  const measure = (value: string) => {
+    if (typeof document === "undefined") return Array.from(value).length * fontSize * .6;
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (!ctx) return Array.from(value).length * fontSize * .6;
+    const family = primary?.font ? `"${fontFamilyForAsset(primary.font.assetId)}", ` : "";
+    ctx.font = `${primary?.italic ? "italic " : ""}${primary?.fontWeight ?? canvasDesignTokens.typography.canvasText.weight} ${fontSize}px ${family}${canvasDesignTokens.typography.canvasText.family}`;
+    return ctx.measureText(value).width + Math.max(0, Array.from(value).length - 1) * letterSpacing;
+  };
+  const text = patch.text ?? node.text ?? "";
+  const nextWidth = patch.width ?? node.width;
+  const maxWidth = properties.autoSize === "widthAndHeight" ? Number.POSITIVE_INFINITY : Math.max(1, nextWidth);
+  const lines = layoutTextRanges({ text, maxWidth, measure });
+  const paragraphBreaks = Math.max(0, (text.match(/\r\n|[\n\r\u2028\u2029]/gu) ?? []).length);
+  const height = Math.max(1, lines.length * lineHeight + paragraphBreaks * properties.paragraph.paragraphSpacing);
+  const width = Math.max(1, ...lines.map((line) => measure(line.text)));
+  return { ...patch, height, ...(properties.autoSize === "widthAndHeight" ? { width } : {}) };
+}
+
+function textNodeContainsPoint(node: CanvasNode, point: { x: number; y: number }) {
+  if (node.kind !== "text" || node.visible === false) return false;
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  const radians = -node.rotation * Math.PI / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const dx = point.x - centerX;
+  const dy = point.y - centerY;
+  const localX = dx * cosine - dy * sine + node.width / 2;
+  const localY = dx * sine + dy * cosine + node.height / 2;
+  return localX >= 0 && localX <= node.width && localY >= 0 && localY <= node.height;
+}
+
+function textLocalPoint(node: CanvasNode, point: { x: number; y: number }) {
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  const radians = -node.rotation * Math.PI / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const dx = point.x - centerX;
+  const dy = point.y - centerY;
+  return { x: dx * cosine - dy * sine + node.width / 2, y: dx * sine + dy * cosine + node.height / 2 };
+}
+
+function utf16IndexAtUtf8Offset(text: string, targetOffset: number) {
+  let utf8Offset = 0;
+  let utf16Index = 0;
+  for (const character of text) {
+    const bytes = new TextEncoder().encode(character).byteLength;
+    if (utf8Offset + bytes > targetOffset) break;
+    utf8Offset += bytes;
+    utf16Index += character.length;
+  }
+  return utf16Index;
+}
+
+/** Native textarea controls use a browser-specific internal text layout. The
+ * Canvas renderer follows ordinary CSS inline line boxes, so the editable DOM
+ * layer must do the same. This puts a collapsed selection at a UTF-16 offset
+ * without changing the document text or adding a visual wrapper. */
+function placeContentEditableCaret(editor: HTMLElement, targetOffset: number) {
+  const selection = window.getSelection();
+  if (!selection) return;
+  const placeIn = (container: Node, offset: number) => {
+    const range = document.createRange();
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let remaining = offset;
+    let textNode = walker.nextNode();
+    while (textNode) {
+      const length = textNode.textContent?.length ?? 0;
+      if (remaining <= length) {
+        range.setStart(textNode, remaining);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+      remaining -= length;
+      textNode = walker.nextNode();
+    }
+    range.selectNodeContents(container);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+  const paragraphs = [...editor.querySelectorAll<HTMLElement>(":scope > .canvas-text-paragraph")];
+  if (paragraphs.length) {
+    let remaining = targetOffset;
+    for (let index = 0; index < paragraphs.length; index += 1) {
+      const paragraph = paragraphs[index];
+      const length = paragraph.innerText.length;
+      if (remaining <= length) { placeIn(paragraph, remaining); return; }
+      remaining -= length;
+      if (index < paragraphs.length - 1) {
+        if (remaining === 0) { placeIn(paragraph, length); return; }
+        remaining -= 1;
+      }
+    }
+    placeIn(paragraphs[paragraphs.length - 1], Number.MAX_SAFE_INTEGER);
+    return;
+  }
+  const range = document.createRange();
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let remaining = targetOffset;
+  let textNode = walker.nextNode();
+  while (textNode) {
+    const length = textNode.textContent?.length ?? 0;
+    if (remaining <= length) {
+      range.setStart(textNode, remaining);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+    remaining -= length;
+    textNode = walker.nextNode();
+  }
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+/** Converts a Canvas double-click into the same insertion position the text
+ * editor would select if it had received that pointer event directly. */
+function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
+  const text = node.text ?? "";
+  const properties = node.textProperties;
+  const primary = properties?.runs[0];
+  const fontSize = primary?.fontSize ?? 31;
+  const lineHeight = properties?.paragraph.lineHeight ?? fontSize * 1.25;
+  const letterSpacing = primary?.letterSpacing ?? 0;
+  const local = textLocalPoint(node, point);
+  const ctx = typeof document === "undefined" ? undefined : document.createElement("canvas").getContext("2d");
+  const family = primary?.font ? `"${fontFamilyForAsset(primary.font.assetId)}", ` : "";
+  if (ctx) ctx.font = `${primary?.italic ? "italic " : ""}${primary?.fontWeight ?? canvasDesignTokens.typography.canvasText.weight} ${fontSize}px ${family}${canvasDesignTokens.typography.canvasText.family}`;
+  const measure = (value: string) => (ctx?.measureText(value).width ?? Array.from(value).length * fontSize * .6) + Math.max(0, segmentGraphemes(value).length - 1) * letterSpacing;
+  const lines = layoutTextRanges({ text, maxWidth: Math.max(1, node.width), measure });
+  const bytes = new TextEncoder().encode(text);
+  let lineTop = 0;
+  let previousEnd = 0;
+  for (const line of lines) {
+    const skipped = new TextDecoder().decode(bytes.slice(previousEnd, line.start));
+    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineTop += properties?.paragraph.paragraphSpacing ?? 0;
+    const lineBottom = lineTop + lineHeight;
+    if (local.y <= lineBottom) {
+      const lineWidth = measure(line.text);
+      const alignment = properties?.paragraph.alignment ?? "left";
+      let x = alignment === "center" ? (node.width - lineWidth) / 2 : alignment === "right" ? node.width - lineWidth : 0;
+      let index = utf16IndexAtUtf8Offset(text, line.start);
+      for (const grapheme of segmentGraphemes(line.text)) {
+        const width = measure(grapheme);
+        if (local.x <= x + width / 2) return index;
+        x += width;
+        index += grapheme.length;
+      }
+      return utf16IndexAtUtf8Offset(text, line.end);
+    }
+    lineTop = lineBottom;
+    previousEnd = line.end;
+  }
+  return text.length;
+}
+
 function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }> ["snapshot"] | undefined {
   if (typeof window === "undefined") return undefined;
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   if (fixture === "zoom-50k") {
     const performanceFixture = createZoomPerformanceFixture();
-    return { format: "legacy-projection-v0", nodes: performanceFixture.nodes, viewport: performanceFixture.viewport };
+    return { format: "benchmark-projection-v1", nodes: performanceFixture.nodes, viewport: performanceFixture.viewport };
   }
-  if (fixture !== "phase0-basic-card") return undefined;
+  if (fixture === "phase1-shape-100k") {
+    const performanceFixture = createPhase1Shape100kFixture();
+    return { format: "benchmark-projection-v1", nodes: performanceFixture.nodes, viewport: performanceFixture.viewport };
+  }
+  const requestedDocumentFixture = fixture === "phase0-basic-card"
+    ? phase0BasicCardFixture
+    : fixture === "phase1-text-multilingual"
+      ? phase1TextMultilingualFixture
+      : fixture === "phase1-text-10k"
+        ? phase1Text10kFixture
+        : fixture === "phase1-render-composite"
+          ? { ...phase1RenderCompositeFixture, nodes: phase1RenderCompositeFixture.nodes.filter((node) => node.kind !== "image") }
+      : undefined;
+  if (!requestedDocumentFixture) return undefined;
   return {
     format: "legacy-projection-v0",
-    nodes: structuredClone(phase0BasicCardFixture.nodes) as CanvasNode[],
-    viewport: structuredClone(phase0BasicCardFixture.viewport),
+    nodes: structuredClone(requestedDocumentFixture.nodes) as CanvasNode[],
+    viewport: structuredClone(requestedDocumentFixture.viewport),
   };
+}
+
+function requestedFixtureAssetSeeds(): FixtureAssetSeed[] {
+  if (typeof window === "undefined") return [];
+  return new URLSearchParams(window.location.search).get("fixture") === "phase1-render-composite"
+    ? structuredClone(phase1RenderCompositeFixture.assets) as FixtureAssetSeed[]
+    : [];
+}
+
+function requestedFixtureAssetNodes(): CanvasNode[] {
+  if (typeof window === "undefined") return [];
+  return new URLSearchParams(window.location.search).get("fixture") === "phase1-render-composite"
+    ? structuredClone(phase1RenderCompositeFixture.nodes.filter((node) => node.kind === "image")) as CanvasNode[]
+    : [];
+}
+
+function decodeFixtureAssetBytes(seed: FixtureAssetSeed): ArrayBuffer {
+  const encoded = atob(seed.bytesBase64);
+  const bytes = new Uint8Array(encoded.length);
+  for (let index = 0; index < encoded.length; index += 1) bytes[index] = encoded.charCodeAt(index);
+  if (bytes.byteLength !== seed.byteLength) throw new Error("FIXTURE_ASSET_LENGTH_MISMATCH");
+  return bytes.buffer;
+}
+
+function requestedFixtureStatus() {
+  if (typeof window === "undefined") return "fixed fixture loaded";
+  const fixture = new URLSearchParams(window.location.search).get("fixture");
+  if (fixture === "phase1-shape-100k") return "generated Phase 1 F-SHAPE-100K fixture loaded";
+  if (fixture === "phase1-text-10k") return "fixed Phase 1 F-TEXT-10K fixture loaded";
+  if (fixture === "phase1-text-multilingual") return "fixed Phase 1 text fixture loaded";
+  if (fixture === "phase1-render-composite") return "fixed Phase 1 render composite fixture loaded";
+  return "fixed Phase 0 fixture loaded";
 }
 
 function isDeterministicEvidenceCapture() {
@@ -71,9 +354,17 @@ function requestedRendererPreference(): RendererPreference {
 function requestedGpuLossSimulationCount(): number {
   if (process.env.NODE_ENV === "production" || typeof window === "undefined") return 0;
   const search = new URLSearchParams(window.location.search);
-  if (search.get("fixture") !== "phase0-basic-card") return 0;
+  if (!["phase0-basic-card", "phase1-render-composite"].includes(search.get("fixture") ?? "")) return 0;
   const requested = Number(search.get("simulateGpuLoss"));
   return Number.isInteger(requested) ? Math.min(2, Math.max(0, requested)) : 0;
+}
+
+/** The image fixture delays development-only loss injection until its decoded
+ * bitmap has been submitted once, exercising texture re-upload after recovery. */
+function requestedGpuLossAfterImage() {
+  if (process.env.NODE_ENV === "production" || typeof window === "undefined") return false;
+  const search = new URLSearchParams(window.location.search);
+  return search.get("fixture") === "phase1-render-composite" && requestedGpuLossSimulationCount() > 0;
 }
 
 function requestedEngineCrashSimulationCount(): number {
@@ -85,13 +376,19 @@ function requestedEngineCrashSimulationCount(): number {
 }
 
 function changesDocument(command: EditorCommand) {
-  return command.type !== "select";
+  return command.type !== "select" && command.type !== "select-page";
 }
 
 export function EditorShell() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // An OffscreenCanvas transfer is irreversible. Development Strict Mode and
+  // Fast Refresh can re-run this component effect against the old element, so
+  // replace that element before attempting to boot another worker.
+  const transferredCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const restoredRef = useRef(false);
+  const remoteBootstrapRequestedRef = useRef(false);
+  const remoteAdoptedRevisionRef = useRef<{ documentId: string; revision: number } | undefined>(undefined);
   const revisionRef = useRef(0);
   const snapshotRef = useRef<EditorSnapshot>(blankSnapshot);
   const confirmedSnapshotRef = useRef<EditorSnapshot>(blankSnapshot);
@@ -100,7 +397,14 @@ export function EditorShell() {
   const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const recoveryStabilityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const viewportCheckpointTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const assetInputRef = useRef<HTMLInputElement>(null);
+  const assetUploadAbortRef = useRef<AbortController | null>(null);
+  /** The DOM editor needs the same document-scoped family the Worker uses. */
+  const mainFontFacesRef = useRef(new FontFaceRegistry());
+  const mainFontBytesRef = useRef(new Map<string, ArrayBuffer>());
+  const pendingImagePlacementRef = useRef<PendingImagePlacement | undefined>(undefined);
   const persistenceQueue = useRef(Promise.resolve());
+  const remoteSyncQueue = useRef(Promise.resolve());
   const writerRef = useRef(false);
   const writerLeaseRef = useRef<WriterLease | null>(null);
   const editIntentRef = useRef<EditIntent | undefined>(undefined);
@@ -110,6 +414,8 @@ export function EditorShell() {
   const optimisticUpdatesRef = useRef(new Map<string, OptimisticUpdate>());
   const simulatedWorkerCrashesRef = useRef(0);
   const fixtureBenchmarkStartedRef = useRef(false);
+  const fixtureAssetsSeededRef = useRef(false);
+  const fixtureAssetNodesCreatedRef = useRef(false);
   const frameIntervalSamplerRef = useRef(createFrameIntervalSampler());
   const inputBacklogSamplerRef = useRef(createInputBatchBacklogSampler());
   const viewportCheckpointSamplerRef = useRef(createViewportCheckpointSampler());
@@ -120,6 +426,8 @@ export function EditorShell() {
   const [status, setStatus] = useState("Starting engine");
   const [storageNotice, setStorageNotice] = useState<string>();
   const [error, setError] = useState<string>();
+  const [assetStatus, setAssetStatus] = useState<string>();
+  const [assetImporting, setAssetImporting] = useState(false);
   const [writerMode, setWriterMode] = useState<WriterLeaseMode>("acquiring");
   const [accessPreference, setAccessPreference] = useState<"edit" | "view">("edit");
   const [canvasGeneration, setCanvasGeneration] = useState(0);
@@ -130,21 +438,108 @@ export function EditorShell() {
   const [viewportCheckpoints, setViewportCheckpoints] = useState<ViewportCheckpointSummary>({ samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 });
   const [mainThreadMonitor, setMainThreadMonitor] = useState<"waiting" | "monitoring" | "unavailable">("waiting");
   const [mainThreadMonitoringEnabled, setMainThreadMonitoringEnabled] = useState(false);
+  const [canvasTextEdit, setCanvasTextEdit] = useState<CanvasTextEdit>();
+  const canvasTextCommitRef = useRef(false);
+  const canvasTextEditorRef = useRef<HTMLDivElement>(null);
+  const canvasTextEditNodeId = canvasTextEdit?.nodeId;
+  const canvasTextCaret = canvasTextEdit?.caret;
   const fixtureSnapshot = useMemo(() => requestedFixtureSnapshot(), []);
-  const deterministicEvidenceCapture = useMemo(() => isDeterministicEvidenceCapture(), []);
+  const fixtureAssetSeeds = useMemo(() => requestedFixtureAssetSeeds(), []);
+  const fixtureAssetNodes = useMemo(() => requestedFixtureAssetNodes(), []);
+  const fixtureStatus = useMemo(() => requestedFixtureStatus(), []);
+  // URL-only capture mode is intentionally enabled after hydration so the
+  // server and the browser's first render have exactly the same DOM shape.
+  const [deterministicEvidenceCapture, setDeterministicEvidenceCapture] = useState(false);
   const rendererPreference = useMemo(() => requestedRendererPreference(), []);
   const simulateGpuLosses = useMemo(() => requestedGpuLossSimulationCount(), []);
+  const simulateGpuLossAfterImage = useMemo(() => requestedGpuLossAfterImage(), []);
   const simulateWorkerCrashes = useMemo(() => requestedEngineCrashSimulationCount(), []);
   const snapshot = useMemo(() => ({ ...documentState, ...selectionState, ...viewState }) as EditorSnapshot, [documentState, selectionState, viewState]);
+
+  useLayoutEffect(() => {
+    if (canvasTextEditNodeId === undefined || canvasTextCaret === undefined) return;
+    const editor = canvasTextEditorRef.current;
+    if (!editor) return;
+    editor.focus({ preventScroll: true });
+    placeContentEditableCaret(editor, canvasTextCaret);
+  }, [canvasTextCaret, canvasTextEditNodeId]);
+
+  useEffect(() => {
+    const task = window.setTimeout(() => setDeterministicEvidenceCapture(isDeterministicEvidenceCapture()), 0);
+    return () => window.clearTimeout(task);
+  }, []);
 
   const post = useCallback((message: MainToWorker, transfer?: Transferable[]) => workerRef.current?.postMessage(message, transfer ?? []), []);
   const postInput = useCallback((events: readonly EditorInputEvent[]) => {
     const buffer = encodeInputBatch(events);
     workerRef.current?.postMessage({ type: "input", buffer } satisfies MainToWorker, [buffer]);
   }, []);
+  /** Registers the exact asset bytes with document.fonts before a native
+   * textarea is allowed to edit that text. The Canvas Worker performs the same
+   * registration with its own FontFaceSet, so neither side silently falls back
+   * to a different font while an edit session is open. */
+  const ensureMainFontFace = useCallback(async (documentId: string, asset: DocumentAsset, suppliedBytes?: ArrayBuffer) => {
+    if (!asset.mediaType.startsWith("font/")) return undefined;
+    const registry = mainFontFacesRef.current;
+    const knownFamily = registry.familyFor(asset.assetId);
+    if (knownFamily) return knownFamily;
+    if (suppliedBytes) mainFontBytesRef.current.set(asset.assetId, suppliedBytes.slice(0));
+    let source = mainFontBytesRef.current.get(asset.assetId);
+    if (!source) {
+      try {
+        source = await new AssetApiTransport({ baseUrl: assetApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).download(documentId, asset.assetId);
+        mainFontBytesRef.current.set(asset.assetId, source.slice(0));
+      } catch {
+        return undefined;
+      }
+    }
+    const target = typeof document === "undefined" ? undefined : document.fonts;
+    const create = typeof FontFace === "function"
+      ? (family: string, bytes: ArrayBuffer) => new FontFace(family, bytes)
+      : undefined;
+    return registry.load(asset.assetId, source.slice(0), target, create);
+  }, []);
+  const rehydrateFromRemote = useCallback(async (documentId: string) => {
+    const snapshot = await new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).loadSnapshot(documentId);
+    // Transfer the opaque bytes straight back to the Worker; TypeScript never
+    // creates a second document representation while reconciling.
+    post({ type: "remote-hydrate", snapshot }, [snapshot.buffer]);
+  }, [post]);
+  const synchronizePendingOperations = useCallback((nextOperation?: import("@/lib/editor-protocol").PendingRemoteOperation) => {
+    const task = remoteSyncQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (nextOperation) await appendPendingRemoteOperation(nextOperation);
+        const synchronizer = new PendingOperationSynchronizer({
+          load: loadPendingRemoteOperations,
+          replace: replacePendingRemoteOperation,
+          remove: removePendingRemoteOperation,
+        }, new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }));
+        const report = await synchronizer.flush();
+        if (report.reconciliationRequiredOperationIds.length) {
+          setStatus("Engine worker online · remote reconciliation required");
+          void rehydrateFromRemote(nextOperation?.documentId ?? snapshotRef.current.documentId).catch(() => setStatus("Engine worker online · remote snapshot unavailable"));
+        }
+        else if (report.retryingOperationIds.length) setStatus("Engine worker online · remote sync retrying");
+        else if (report.acceptedOperationIds.length) setStatus("Engine worker online · remote changes saved");
+        return report;
+      })
+      .catch(() => {
+        setStatus("Engine worker online · remote sync retrying");
+        return undefined;
+      });
+    remoteSyncQueue.current = task.then(() => undefined);
+    return task;
+  }, [rehydrateFromRemote]);
   const command = useCallback((next: EditorCommand) => {
     if (safeMode) { setStatus("Engine worker safe mode · reload to retry"); return; }
     if (changesDocument(next) && !writerRef.current) { setStatus("Engine worker online · read-only tab"); return; }
+    // Selection is presentation state, not a document transaction. Sending it
+    // directly prevents a queued remote/durable edit from delaying layer focus.
+    if (!changesDocument(next)) {
+      post({ type: "command", command: next });
+      return;
+    }
     const transactionId = transactionQueueRef.current?.enqueue([next]);
     if (transactionId && next.type === "update") {
       optimisticUpdatesRef.current.set(transactionId, next);
@@ -152,8 +547,13 @@ export function EditorShell() {
       snapshotRef.current = projected;
       setDocumentState(projected);
     }
-  }, [safeMode]);
-
+  }, [post, safeMode]);
+  const reorderSelectedLayers = useCallback((action: LayerOrderAction) => {
+    const current = snapshotRef.current;
+    const pageNodes = current.nodes.filter((node) => (node.pageId ?? defaultPageId) === current.activePageId);
+    const resolved = resolveLayerOrder(pageNodes, current.selectedIds, action);
+    if (resolved) command({ type: "reposition", positionIds: [...resolved.positionIds].map(([id, positionId]) => ({ id, positionId })) });
+  }, [command]);
   const recoverWorker = useCallback((reason: "error" | "message-error") => {
     if (recoveryStabilityTimerRef.current) clearTimeout(recoveryStabilityTimerRef.current);
     const plan = planWorkerRecovery(recoveryFailuresRef.current);
@@ -183,6 +583,12 @@ export function EditorShell() {
     if (recoveryStabilityTimerRef.current) clearTimeout(recoveryStabilityTimerRef.current);
     if (viewportCheckpointTimerRef.current) clearTimeout(viewportCheckpointTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    const retry = () => { void synchronizePendingOperations(); };
+    window.addEventListener("online", retry);
+    return () => window.removeEventListener("online", retry);
+  }, [synchronizePendingOperations]);
 
   useEffect(() => {
     const queue = createEditorTransactionQueue({
@@ -328,11 +734,27 @@ export function EditorShell() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (transferredCanvasRef.current === canvas) {
+      setCanvasGeneration((generation) => generation + 1);
+      return;
+    }
     if (!("transferControlToOffscreen" in canvas)) { setError("此浏览器不支持 OffscreenCanvas，无法启动独立画布引擎。"); return; }
+    fixtureAssetsSeededRef.current = false;
+    fixtureAssetNodesCreatedRef.current = false;
+    remoteBootstrapRequestedRef.current = false;
     const worker = new Worker(new URL("../../workers/editor.worker.ts", import.meta.url), { type: "module" });
     workerRef.current = worker;
     let disposed = false;
     let crashSimulationTimer: ReturnType<typeof setTimeout> | undefined;
+    let remoteBootstrapRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    const retryRemoteBootstrap = () => {
+      remoteBootstrapRequestedRef.current = false;
+      if (remoteBootstrapRetryTimer) clearTimeout(remoteBootstrapRetryTimer);
+      remoteBootstrapRetryTimer = setTimeout(() => {
+        remoteBootstrapRetryTimer = undefined;
+        if (!disposed) post({ type: "remote-bootstrap" });
+      }, 1_500);
+    };
     const resize = () => post({ type: "resize", width: canvas.clientWidth, height: canvas.clientHeight, dpr: window.devicePixelRatio || 1 });
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
@@ -352,14 +774,131 @@ export function EditorShell() {
           const local = recoverySnapshot ?? fixtureSnapshot ?? await loadLocalDocument();
           if (local) {
             if (recoverySnapshot) setStatus("Engine worker online · recovered confirmed snapshot");
-            else if (fixtureSnapshot) setStatus("Engine worker online · fixed Phase 0 fixture loaded");
+            else if (fixtureSnapshot) setStatus(`Engine worker online · ${fixtureStatus}`);
             else if ("recoveredFromPrevious" in local && local.recoveredFromPrevious) setStatus("Engine worker online · restored previous local snapshot");
             post({ type: "command", command: { type: "hydrate", snapshot: local } });
           }
         } catch { setStatus("Engine worker online · local save unavailable"); }
         restoredRef.current = true;
+        // Hydration starts an async WASM bridge load. Post on the next task so
+        // the worker has registered that load before it records the bootstrap
+        // request; the worker then emits only the final canonical state.
+        if (!fixtureSnapshot) setTimeout(() => {
+          if (!disposed) post({ type: "remote-bootstrap" });
+        }, 0);
+      }
+      if (data.type === "remote-bootstrap") {
+        if (!restoredRef.current || fixtureSnapshot || remoteBootstrapRequestedRef.current) return;
+        remoteBootstrapRequestedRef.current = true;
+        const transport = new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId });
+        const synchronizeThenHydrate = async (knownRemoteSnapshot?: Uint8Array) => {
+          const report = await synchronizePendingOperations();
+          if (disposed) return;
+          if (!report || report.retryingOperationIds.length) {
+            retryRemoteBootstrap();
+            return;
+          }
+          const changedRemote = report.acceptedOperationIds.length > 0 || report.reconciliationRequiredOperationIds.length > 0;
+          const remoteSnapshot = changedRemote || !knownRemoteSnapshot
+            ? await transport.loadSnapshot(data.documentId)
+            : knownRemoteSnapshot;
+          if (!disposed) {
+            post({ type: "remote-hydrate", snapshot: remoteSnapshot }, [remoteSnapshot.buffer]);
+            setStatus(report.reconciliationRequiredOperationIds.length
+              ? "Engine worker online · remote reconciliation required"
+              : "Engine worker online · remote document loaded");
+          }
+        };
+        try {
+          // A normal restart must not intentionally trigger a 409 just to learn
+          // that the durable root already exists. Pending local operations must
+          // reach the service before its older snapshot can replace local state.
+          const remoteSnapshot = await transport.loadSnapshot(data.documentId);
+          if (!disposed) await synchronizeThenHydrate(remoteSnapshot);
+        } catch (reason) {
+          if (reason instanceof Error && reason.message === "REMOTE_DOCUMENT_MISSING") {
+            try {
+              const result = await transport.createDocument(data.documentId, data.snapshot);
+              if (!disposed) {
+                if (result === "created") {
+                  // The adopted root already contains every local operation up
+                  // through this canonical snapshot revision.
+                  remoteAdoptedRevisionRef.current = { documentId: data.documentId, revision: data.revision };
+                  await removePendingRemoteOperationsCoveredBySnapshot(data.documentId, data.revision);
+                }
+                setStatus(result === "created" ? "Engine worker online · remote document created" : "Engine worker online · remote document verified");
+                await synchronizeThenHydrate(result === "created" ? data.snapshot : undefined);
+              }
+            } catch (createReason) {
+              if (!disposed && createReason instanceof Error && createReason.message === "REMOTE_DOCUMENT_CONFLICT") {
+                setStatus("Engine worker online · remote reconciliation required");
+                void rehydrateFromRemote(data.documentId).then(() => setStatus("Engine worker online · remote snapshot applied")).catch(() => setStatus("Engine worker online · remote snapshot unavailable"));
+              } else if (!disposed) {
+                setStatus("Engine worker online · remote document unavailable");
+                retryRemoteBootstrap();
+              }
+            }
+          } else if (!disposed && reason instanceof Error && reason.message === "REMOTE_DOCUMENT_CONFLICT") {
+            setStatus("Engine worker online · remote reconciliation required");
+            void rehydrateFromRemote(data.documentId).then(() => setStatus("Engine worker online · remote snapshot applied")).catch(() => setStatus("Engine worker online · remote snapshot unavailable"));
+          } else if (!disposed) {
+            setStatus("Engine worker online · remote document unavailable");
+            retryRemoteBootstrap();
+          }
+        }
+      }
+      if (data.type === "remote-operation") {
+        // A named fixture is a deterministic local evidence surface. Its fixed
+        // document id may already refer to a different service-side run, so
+        // submitting fixture edits would intentionally create a 409 and make
+        // an otherwise isolated render check report a browser error. Normal
+        // documents retain the durable, ordered remote reconciliation path.
+        const adopted = remoteAdoptedRevisionRef.current;
+        const alreadyRepresented = adopted && pendingOperationIsCoveredBySnapshot(data.operation, adopted.documentId, adopted.revision);
+        if (!disposed && !fixtureSnapshot && !alreadyRepresented) void synchronizePendingOperations(data.operation);
       }
       if (data.type === "snapshot") {
+        if (
+          fixtureAssetSeeds.length
+          && !fixtureAssetsSeededRef.current
+          && data.snapshot.documentCore === "Rust/WASM bridge ready"
+        ) {
+          fixtureAssetsSeededRef.current = true;
+          try {
+            for (const seed of fixtureAssetSeeds) {
+              const asset: DocumentAsset = {
+                assetId: seed.assetId,
+                contentHash: seed.contentHash,
+                mediaType: seed.mediaType,
+                byteLength: seed.byteLength,
+                pixelWidth: seed.pixelWidth,
+                pixelHeight: seed.pixelHeight,
+              };
+              post({ type: "register-asset", transactionId: createId(), asset });
+              const bytes = decodeFixtureAssetBytes(seed);
+              if (asset.mediaType.startsWith("font/")) void ensureMainFontFace(data.snapshot.documentId, asset, bytes.slice(0));
+              post({ type: "asset-bytes", assetId: asset.assetId, mediaType: asset.mediaType, bytes }, [bytes]);
+            }
+          } catch {
+            setStatus("Engine worker online · fixture asset unavailable");
+          }
+        }
+        if (
+          fixtureAssetNodes.length
+          && fixtureAssetsSeededRef.current
+          && !fixtureAssetNodesCreatedRef.current
+          && fixtureAssetSeeds.every((asset) => data.snapshot.assets?.some((candidate) => candidate.assetId === asset.assetId))
+        ) {
+          fixtureAssetNodesCreatedRef.current = true;
+          post({
+            type: "transaction",
+            transaction: {
+              id: createId(),
+              baseRevision: data.snapshot.revision,
+              commands: fixtureAssetNodes.map((node) => ({ type: "create" as const, node })),
+            },
+          });
+        }
         // Fixture hydration is intentionally expensive and excluded from the
         // interaction window. Begin main-thread evidence after the 50K projection
         // has been confirmed, matching the benchmark contract.
@@ -375,6 +914,16 @@ export function EditorShell() {
         confirmedSnapshotRef.current = data.snapshot;
         const projectedSnapshot = applyOptimisticUpdates(data.snapshot, optimisticUpdatesRef.current.values());
         snapshotRef.current = projectedSnapshot;
+        const pendingImage = pendingImagePlacementRef.current;
+        if (pendingImage && data.snapshot.assets?.some((asset) => asset.assetId.replaceAll("-", "") === pendingImage.assetId.replaceAll("-", ""))) {
+          pendingImagePlacementRef.current = undefined;
+          const target = pendingImage.targetId ? data.snapshot.nodes.find((node) => node.id === pendingImage.targetId && !node.locked && ["frame", "rectangle", "ellipse", "image"].includes(node.kind)) : undefined;
+          transactionQueueRef.current?.enqueue([target
+            ? { type: "update", id: target.id, patch: { assetId: pendingImage.assetId } }
+            : { type: "create", node: importedImageNode(pendingImage, data.snapshot.viewport) },
+          ]);
+          setAssetStatus(target ? "Image applied as fill" : "Image added");
+        }
         if (data.snapshot.localSnapshot) {
           recoverySnapshotRef.current = data.snapshot.localSnapshot;
           setSafeMode(false);
@@ -464,9 +1013,10 @@ export function EditorShell() {
       if (!disposed) recoverWorker("message-error");
     };
     const offscreen = canvas.transferControlToOffscreen();
-    post({ type: "init", canvas: offscreen, width: canvas.clientWidth, height: canvas.clientHeight, dpr: window.devicePixelRatio || 1, rendererPreference, simulateGpuLosses }, [offscreen]);
-    return () => { disposed = true; if (crashSimulationTimer) clearTimeout(crashSimulationTimer); observer.disconnect(); worker.terminate(); if (workerRef.current === worker) workerRef.current = null; };
-  }, [canvasGeneration, fixtureSnapshot, post, recoverWorker, rendererPreference, simulateGpuLosses, simulateWorkerCrashes]);
+    transferredCanvasRef.current = canvas;
+    post({ type: "init", canvas: offscreen, width: canvas.clientWidth, height: canvas.clientHeight, dpr: window.devicePixelRatio || 1, rendererPreference, simulateGpuLosses, simulateGpuLossAfterImage }, [offscreen]);
+    return () => { disposed = true; if (crashSimulationTimer) clearTimeout(crashSimulationTimer); if (remoteBootstrapRetryTimer) clearTimeout(remoteBootstrapRetryTimer); observer.disconnect(); worker.terminate(); if (workerRef.current === worker) workerRef.current = null; };
+  }, [canvasGeneration, ensureMainFontFace, fixtureAssetNodes, fixtureAssetSeeds, fixtureSnapshot, fixtureStatus, post, recoverWorker, rehydrateFromRemote, rendererPreference, simulateGpuLossAfterImage, simulateGpuLosses, simulateWorkerCrashes, synchronizePendingOperations]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -496,11 +1046,17 @@ export function EditorShell() {
         } else setStatus("Engine worker online · read-only tab");
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") event.preventDefault();
+      if ((event.metaKey || event.ctrlKey) && ["[", "]"].includes(event.key) && writerRef.current) {
+        event.preventDefault();
+        const direction: LayerOrderAction = event.key === "]" ? (event.shiftKey ? "front" : "forward") : (event.shiftKey ? "back" : "backward");
+        reorderSelectedLayers(direction);
+        return;
+      }
       if (writerRef.current) post({ type: "key", key: event.key, metaKey: event.metaKey || event.ctrlKey, shiftKey: event.shiftKey });
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [post, safeMode]);
+  }, [post, reorderSelectedLayers, safeMode]);
 
   // Viewport updates replace `snapshot`, but keep the document and selection
   // references stable. Depending on the whole snapshot made every zoom frame
@@ -529,7 +1085,7 @@ export function EditorShell() {
   const frameEvidence = frameIntervals.samples ? `frame P95 ${frameIntervals.p95Ms.toFixed(1)}ms` : "collecting frame intervals";
   const inputBacklogEvidence = inputBacklog.samples ? `input backlog P95 ${inputBacklog.p95Ms.toFixed(1)}ms` : "collecting input backlog";
   const viewportCheckpointEvidence = viewportCheckpoints.samples ? `viewport checkpoint P95 ${viewportCheckpoints.p95Ms.toFixed(1)}ms` : "collecting viewport checkpoints";
-  const resourceEvidence = snapshot.resources ? `${snapshot.resources.documentNodes}/${snapshot.resources.maxDocumentNodes} nodes · ${(snapshot.resources.documentBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxDocumentBytes / 1024 / 1024).toFixed(0)} MB document · ${(snapshot.resources.wasmHeapBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxWasmHeapBytes / 1024 / 1024).toFixed(0)} MB WASM · ${(snapshot.resources.renderSurfaceBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxRenderSurfaceBytes / 1024 / 1024).toFixed(0)} MB surface · ${(snapshot.resources.gpuSceneBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxGpuSceneBytes / 1024 / 1024).toFixed(0)} MB GPU scene${snapshot.resources.gpuSceneWithinBudget ? "" : " (Canvas fallback)"}` : "collecting resource evidence";
+  const resourceEvidence = snapshot.resources ? `${snapshot.assets?.length ?? 0} assets · ${snapshot.resources.documentNodes}/${snapshot.resources.maxDocumentNodes} nodes · ${(snapshot.resources.documentBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxDocumentBytes / 1024 / 1024).toFixed(0)} MB document · ${(snapshot.resources.wasmHeapBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxWasmHeapBytes / 1024 / 1024).toFixed(0)} MB WASM · ${(snapshot.resources.renderSurfaceBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxRenderSurfaceBytes / 1024 / 1024).toFixed(0)} MB surface · ${(snapshot.resources.gpuSceneBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxGpuSceneBytes / 1024 / 1024).toFixed(0)} MB GPU scene${snapshot.resources.gpuSceneWithinBudget ? "" : " (Canvas fallback)"}` : "collecting resource evidence";
   const setActiveTool = useCallback((next: ToolKind) => {
     if (safeMode) return;
     if (!writerRef.current && next !== "select" && next !== "hand") {
@@ -558,16 +1114,158 @@ export function EditorShell() {
     if (batcher) batcher.flushWith(packet);
     else postInput([packet]);
   };
+  const startCanvasTextEdit = async (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!canEdit) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = {
+      x: (event.clientX - rect.left - rect.width / 2) / snapshot.viewport.zoom - snapshot.viewport.x,
+      y: (event.clientY - rect.top - rect.height / 2) / snapshot.viewport.zoom - snapshot.viewport.y,
+    };
+    const target = [...snapshot.nodes].reverse().find((node) => textNodeContainsPoint(node, point));
+    if (!target) return;
+    const fontAssetId = target.textProperties?.runs[0]?.font?.assetId;
+    if (fontAssetId) {
+      const fontAsset = snapshot.assets?.find((asset) => asset.assetId === fontAssetId);
+      if (!fontAsset || !await ensureMainFontFace(snapshot.documentId, fontAsset)) {
+        setStatus("Engine worker online · text font unavailable");
+        return;
+      }
+    }
+    command({ type: "select", ids: [target.id] });
+    canvasTextCommitRef.current = false;
+    post({ type: "editing-text", nodeId: target.id });
+    setCanvasTextEdit({ nodeId: target.id, draft: target.text ?? "", initialDraft: target.text ?? "", caret: textCaretAtPoint(target, point) });
+  };
+  const commitCanvasTextEdit = () => {
+    if (!canvasTextEdit || canvasTextCommitRef.current) return;
+    canvasTextCommitRef.current = true;
+    const node = snapshot.nodes.find((candidate) => candidate.id === canvasTextEdit.nodeId);
+    if (node && canvasTextEdit.draft !== (node.text ?? "")) {
+      command({ type: "update", id: node.id, patch: { text: canvasTextEdit.draft, textProperties: textReplacementProperties(node, canvasTextEdit.draft) } });
+    }
+    post({ type: "editing-text" });
+    setCanvasTextEdit(undefined);
+  };
+  const cancelCanvasTextEdit = () => {
+    canvasTextCommitRef.current = true;
+    post({ type: "editing-text" });
+    setCanvasTextEdit(undefined);
+  };
+  const canvasTextNode = canvasTextEdit ? snapshot.nodes.find((node) => node.id === canvasTextEdit.nodeId && node.kind === "text") : undefined;
+  const canvasTextStyle = canvasTextNode ? (() => {
+    const primary = canvasTextNode.textProperties?.runs[0];
+    const fontFamily = primary?.font ? `"${fontFamilyForAsset(primary.font.assetId)}", ` : "";
+    const fontSize = primary?.fontSize ?? 31;
+    const lineHeight = canvasTextNode.textProperties?.paragraph.lineHeight ?? fontSize * 1.25;
+    return {
+    left: `calc(50% + ${(canvasTextNode.x + snapshot.viewport.x) * snapshot.viewport.zoom}px)`,
+    top: `calc(50% + ${(canvasTextNode.y + snapshot.viewport.y) * snapshot.viewport.zoom}px)`,
+    width: `${Math.max(1, canvasTextNode.width * snapshot.viewport.zoom)}px`,
+    height: `${Math.max(1, canvasTextNode.height * snapshot.viewport.zoom)}px`,
+    fontSize: `${fontSize * snapshot.viewport.zoom}px`,
+    lineHeight: `${lineHeight * snapshot.viewport.zoom}px`,
+    fontFamily: `${fontFamily}${canvasDesignTokens.typography.canvasText.family}`,
+    fontWeight: primary?.fontWeight ?? canvasDesignTokens.typography.canvasText.weight,
+    fontStyle: primary?.italic ? "italic" : "normal",
+    fontSynthesis: "none",
+    letterSpacing: `${(primary?.letterSpacing ?? 0) * snapshot.viewport.zoom}px`,
+    color: canvasTextNode.fill,
+    textAlign: canvasTextNode.textProperties?.paragraph.alignment === "justify" ? "left" : canvasTextNode.textProperties?.paragraph.alignment ?? "left",
+    transform: `rotate(${canvasTextNode.rotation}deg)`,
+    transformOrigin: "center center",
+  } as const;
+  })() : undefined;
+  const canvasTextEditParagraphs = canvasTextNode && canvasTextEdit
+    ? textParagraphRanges(canvasTextEdit.initialDraft).map((paragraph) => ({
+      ...paragraph,
+      spans: styledTextSpans(canvasTextEdit.initialDraft, paragraph.start, paragraph.end, canvasTextNode.textProperties),
+    }))
+    : [];
   const update = (patch: Partial<CanvasNode>) => {
     if (patch.strokeWidth !== undefined && (!Number.isFinite(patch.strokeWidth) || patch.strokeWidth < 0)) return;
     if (patch.rotation !== undefined && !Number.isFinite(patch.rotation)) return;
-    if (selected) command({ type: "update", id: selected.id, patch });
+    if (selected) command({ type: "update", id: selected.id, patch: resolveTextAutoSizePatch(selected, patch) });
   };
-  const selectCreationTool = useCallback((kind: NodeKind) => setActiveTool(kind), [setActiveTool]);
+  const selectCreationTool = useCallback((kind: Exclude<NodeKind, "image">) => setActiveTool(kind), [setActiveTool]);
   const selectLayer = useCallback((id: string) => command({ type: "select", ids: [id] }), [command]);
+  const dropLayerBefore = useCallback((draggedId: string, beforeId?: string) => {
+    const current = snapshotRef.current;
+    const pageNodes = current.nodes.filter((node) => (node.pageId ?? defaultPageId) === current.activePageId);
+    const moving = current.selectedIds.includes(draggedId) ? current.selectedIds : [draggedId];
+    const resolved = resolveLayerDrop(pageNodes, moving, beforeId);
+    if (resolved) command({ type: "reposition", positionIds: [...resolved.positionIds].map(([id, positionId]) => ({ id, positionId })) });
+  }, [command]);
   const createFrame = useCallback(() => selectCreationTool("frame"), [selectCreationTool]);
   const createRectangle = useCallback(() => selectCreationTool("rectangle"), [selectCreationTool]);
   const createText = useCallback(() => selectCreationTool("text"), [selectCreationTool]);
+  const selectPage = useCallback((id: string) => command({ type: "select-page", id }), [command]);
+  const createPage = useCallback(() => command({ type: "create-page", id: createId(), name: `Page ${snapshot.pages.length + 1}` }), [command, snapshot.pages.length]);
+  const importAsset = useCallback(async (file: File) => {
+    if (!canEdit) return;
+    assetUploadAbortRef.current?.abort();
+    const controller = new AbortController();
+    assetUploadAbortRef.current = controller;
+    setAssetImporting(true);
+    const kind = file.type.startsWith("font/") || /\.(?:woff2?|ttf|otf)$/i.test(file.name) ? "font" : "raster-image" as const;
+    try {
+      setAssetStatus("Checking file");
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const probe = await probeAssetInWorker(kind, file.type, bytes);
+      if (!probe.admission.accepted) throw new Error(`ASSET_REJECTED_${probe.admission.reason}`);
+      const transport = new AssetApiTransport({ baseUrl: assetApiUrl, tenantId: localDevTenantId, actorId: localDevActorId });
+      setAssetStatus("Uploading asset");
+      const uploaded = await transport.upload({ sessionId: createId(), kind, mediaType: probe.admission.mime, bytes, signal: controller.signal });
+      if (controller.signal.aborted) throw new DOMException("The asset import was cancelled.", "AbortError");
+      await transport.grantDocumentWriter(snapshot.documentId);
+      await transport.attachToDocument(snapshot.documentId, uploaded.assetId);
+      if (snapshot.assets?.some((asset) => asset.assetId.replaceAll("-", "") === uploaded.assetId.replaceAll("-", ""))) {
+        const existing = snapshot.assets.find((asset) => asset.assetId.replaceAll("-", "") === uploaded.assetId.replaceAll("-", ""));
+        if (kind === "font" && (!existing || !await ensureMainFontFace(snapshot.documentId, existing))) throw new Error("FONT_LOAD_FAILED");
+        setAssetStatus(`${kind === "font" ? "Font" : "Image"} already available`);
+        setStatus("Engine worker online · resource already registered");
+        if (kind === "raster-image") {
+          const placement = { assetId: uploaded.assetId, width: probe.rasterDimensions?.width, height: probe.rasterDimensions?.height };
+          const target = imageFillTarget(snapshotRef.current.nodes, snapshotRef.current.selectedIds);
+          transactionQueueRef.current?.enqueue([target
+            ? { type: "update", id: target.id, patch: { assetId: placement.assetId } }
+            : { type: "create", node: importedImageNode(placement, snapshotRef.current.viewport) },
+          ]);
+          setAssetStatus(target ? "Image applied as fill" : "Image added");
+        }
+        return;
+      }
+      if (kind === "raster-image") pendingImagePlacementRef.current = {
+        assetId: uploaded.assetId,
+        width: probe.rasterDimensions?.width,
+        height: probe.rasterDimensions?.height,
+        targetId: imageFillTarget(snapshot.nodes, snapshot.selectedIds)?.id,
+      };
+      const asset: DocumentAsset = {
+        assetId: uploaded.assetId, contentHash: uploaded.contentHash, mediaType: uploaded.mediaType, byteLength: uploaded.byteLength,
+        ...(probe.rasterDimensions ? { pixelWidth: probe.rasterDimensions.width, pixelHeight: probe.rasterDimensions.height } : {}),
+      };
+      if (kind === "font") {
+        setAssetStatus("Loading font");
+        const mainBytes = new Uint8Array(bytes).buffer;
+        if (!await ensureMainFontFace(snapshot.documentId, asset, mainBytes)) throw new Error("FONT_LOAD_FAILED");
+      }
+      post({ type: "register-asset", transactionId: createId(), asset });
+      post({ type: "asset-bytes", assetId: uploaded.assetId, mediaType: uploaded.mediaType, bytes: bytes.buffer }, [bytes.buffer]);
+      setAssetStatus(`${kind === "font" ? "Font" : "Image"} added`);
+      setStatus("Engine worker online · resource registration queued");
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") {
+        setAssetStatus("Import canceled");
+        setStatus("Engine worker online · resource import canceled");
+        return;
+      }
+      const code = reason instanceof Error ? reason.message.replace(/^ASSET_REJECTED_/, "") : "UPLOAD_FAILED";
+      setAssetStatus(importFailureMessage(code));
+    } finally {
+      if (assetUploadAbortRef.current === controller) assetUploadAbortRef.current = null;
+      setAssetImporting(false);
+    }
+  }, [canEdit, ensureMainFontFace, post, snapshot.assets, snapshot.documentId, snapshot.nodes, snapshot.selectedIds]);
   const setAccessMode = (next: "edit" | "view") => {
     if (next === accessPreference) return;
     if (next === "view") {
@@ -598,6 +1296,9 @@ export function EditorShell() {
             <span className={`access-state ${canEdit ? "is-editable" : ""}`} aria-live="polite">{accessLabel}</span>
           </div>
           <span className="engine-status">{snapshot.renderer} · {snapshot.gpu?.webgpu === "ready" ? snapshot.resources?.gpuSceneWithinBudget === false ? "GPU scene resource fallback" : snapshot.gpu.recoveryAttempts ? `WebGPU scene recovered (${snapshot.gpu.recoveryAttempts})` : "WebGPU scene active" : snapshot.gpu?.webgpu === "recovering" ? "recovering WebGPU scene" : snapshot.gpu?.webgpu === "unavailable" ? snapshot.gpu.recoveryAttempts ? `WebGPU recovery exhausted · ${snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback"}` : (snapshot.gpu.webgl2Available ? "WebGL2 available" : "GPU fallback") : "checking GPU"} · {snapshot.documentCore} · {writerMode === "owner" ? "local writer" : writerMode === "read-only" ? "read-only tab" : "acquiring writer lock"} · {status}{storageNotice ? ` · ${storageNotice}` : ""}</span>
+          <input ref={assetInputRef} className="asset-file-input" type="file" accept="image/png,image/jpeg,image/webp,font/woff2,font/woff,font/ttf,font/otf,.woff2,.woff,.ttf,.otf" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void importAsset(file); }} />
+          <button className="quiet-button" disabled={!canEdit} title={assetStatus ?? "Import image or font"} onClick={() => assetImporting ? assetUploadAbortRef.current?.abort() : assetInputRef.current?.click()}>{assetImporting ? "Cancel import" : "Import"}</button>
+          {assetStatus && <span className={`asset-import-status ${assetStatus.startsWith("Import failed") ? "is-error" : ""}`} role="status" aria-live="polite">{assetStatus}</span>}
           <button className="quiet-button" disabled={!canEdit} onClick={() => command({ type: "reset" })}>Reset demo</button>
           <button className="publish-button">Share <span>↗</span></button>
         </div>
@@ -609,24 +1310,28 @@ export function EditorShell() {
         <IconButton label="Zoom in" disabled={safeMode} onClick={() => { const input: EditorInputEvent = { type: "wheel", x: window.innerWidth / 2, y: window.innerHeight / 2, deltaX: 0, deltaY: -100, ctrlKey: true }; const batcher = inputBatcherRef.current; if (batcher) batcher.enqueue(input); else postInput([input]); }}>+</IconButton>
       </aside>
 
-      <LayerPanel nodes={snapshot.nodes} selectedIds={snapshot.selectedIds} canEdit={canEdit} onSelect={selectLayer} onCreateFrame={createFrame} onCreateRectangle={createRectangle} onCreateText={createText} />
+      <LayerPanel nodes={snapshot.nodes.filter((node) => (node.pageId ?? defaultPageId) === snapshot.activePageId)} pages={snapshot.pages} activePageId={snapshot.activePageId} selectedIds={snapshot.selectedIds} canEdit={canEdit} onSelect={selectLayer} onDropBefore={dropLayerBefore} onReorder={reorderSelectedLayers} onSelectPage={selectPage} onCreatePage={createPage} onCreateFrame={createFrame} onCreateRectangle={createRectangle} onCreateText={createText} />
 
       <section className="canvas-wrap" aria-label="Design canvas">
-        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
+        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onDoubleClick={startCanvasTextEdit} />
+        {canvasTextEdit && canvasTextNode && canvasTextStyle && <div ref={canvasTextEditorRef} className="canvas-text-editor" role="textbox" aria-label="Canvas text content" aria-multiline="true" autoFocus contentEditable suppressContentEditableWarning spellCheck={false} style={canvasTextStyle} onInput={(event) => setCanvasTextEdit((current) => current ? { ...current, draft: event.currentTarget.innerText } : current)} onBlur={commitCanvasTextEdit} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); cancelCanvasTextEdit(); } else if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); commitCanvasTextEdit(); } }}>{canvasTextEditParagraphs.map((paragraph, index) => <div key={`${paragraph.start}-${paragraph.end}`} className="canvas-text-paragraph" dir={paragraph.direction} style={{ marginBottom: index < canvasTextEditParagraphs.length - 1 ? `${(canvasTextNode.textProperties?.paragraph.paragraphSpacing ?? 0) * snapshot.viewport.zoom}px` : 0, textAlign: paragraph.direction === "rtl" ? "right" : canvasTextNode.textProperties?.paragraph.alignment === "justify" ? "left" : canvasTextNode.textProperties?.paragraph.alignment ?? "left" }}>{paragraph.spans.length ? paragraph.spans.map((span) => {
+          const family = span.style.font ? `"${fontFamilyForAsset(span.style.font.assetId)}", ` : "";
+          return <span key={`${span.start}-${span.end}`} style={{ fontFamily: `${family}${canvasDesignTokens.typography.canvasText.family}`, fontSize: `${span.style.fontSize * snapshot.viewport.zoom}px`, fontWeight: span.style.fontWeight, fontStyle: span.style.italic ? "italic" : "normal", fontSynthesis: "none", letterSpacing: `${span.style.letterSpacing * snapshot.viewport.zoom}px` }}>{span.text}</span>;
+        }) : paragraph.text || "\u200b"}</div>)}</div>}
         <div className="canvas-caption"><span>WORLD</span><b>{Math.round(snapshot.viewport.zoom * 100)}%</b><span>⌘ + scroll to zoom</span><span aria-label="Render evidence" data-render-performance={renderPerformanceEvidence}>{renderEvidence}</span><span aria-label="Main thread responsiveness" data-main-thread-long-tasks={JSON.stringify(mainThreadLongTasks)}>{mainThreadEvidence}</span><span aria-label="Frame interval evidence" data-frame-intervals={JSON.stringify(frameIntervals)}>{frameEvidence}</span><span aria-label="Input backlog evidence" data-input-backlog={JSON.stringify(inputBacklog)}>{inputBacklogEvidence}</span>{!deterministicEvidenceCapture && <span aria-label="Viewport checkpoint evidence" data-viewport-checkpoints={JSON.stringify(viewportCheckpoints)}>{viewportCheckpointEvidence}</span>}<span aria-label="Resource evidence">{resourceEvidence}</span></div>
         {error && <div className="engine-error" role="alert">{error}</div>}
       </section>
 
       <aside className="inspector panel" aria-label="Properties">
         <div className="panel-heading"><span>Inspect</span><span className="revision">r{snapshot.revision}</span></div>
-        {selected ? <Inspector node={selected} onUpdate={update} readOnly={!canEdit} /> : <div className="empty-inspector">Select an object to reveal its geometry, fill and layer settings.</div>}
+        {selected ? <Inspector node={selected} assets={snapshot.assets ?? []} fontAvailability={snapshot.fontAvailability} onUpdate={update} readOnly={!canEdit} /> : <div className="empty-inspector">Select an object to reveal its geometry, fill and layer settings.</div>}
         <div className="history-actions"><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={() => command({ type: "duplicate", ids: snapshot.selectedIds })}>Duplicate ⌘D</button><button disabled={!canEdit || !snapshot.canUndo} onClick={() => command({ type: "undo" })}>↶ Undo</button><button disabled={!canEdit || !snapshot.canRedo} onClick={() => command({ type: "redo" })}>Redo ↷</button></div>
       </aside>
     </main>
   );
 }
 
-function Inspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+function Inspector({ node, assets, fontAvailability, onUpdate, readOnly }: { node: CanvasNode; assets: DocumentAsset[]; fontAvailability?: EditorSnapshot["fontAvailability"]; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
   const field = (label: string, key: keyof CanvasNode, value: string | number, unit = "") => <label className="field"><span>{label}</span><div><input aria-label={label} readOnly={readOnly} inputMode={typeof value === "number" ? "decimal" : undefined} value={value} onChange={(event) => {
     if (typeof value !== "number") { onUpdate({ [key]: event.target.value }); return; }
     const raw = event.target.value.trim();
@@ -635,6 +1340,7 @@ function Inspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (
     onUpdate({ [key]: parsed / (key === "opacity" ? 100 : 1) });
   }} /><em>{unit}</em></div></label>;
   const gradientCss = node.fillGradient ? `linear-gradient(${node.fillGradient.stops.map((stop) => `${colorCss(stop.color)} ${Math.round(stop.position * 100)}%`).join(", ")})` : undefined;
+  const imageAsset = node.assetId ? assets.find((asset) => asset.assetId === node.assetId) : undefined;
   const updateGradient = (gradient: DocumentLinearGradient) => onUpdate({ fillGradient: gradient });
   const createGradient = () => {
     const fillColor = node.fillColor ?? documentColorFromCssHex(node.fill);
@@ -671,12 +1377,80 @@ function Inspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (
   };
   const setGradientDirection = (start: [number, number], end: [number, number]) => node.fillGradient && updateGradient({ ...node.fillGradient, start, end });
   return <div className="inspector-content">
-    <div className="selection-title"><span className={`node-icon ${node.kind}`}>{node.kind === "ellipse" ? "○" : node.kind === "text" ? "T" : node.kind === "frame" ? "#" : "□"}</span><input readOnly={readOnly} value={node.name} aria-label="Layer name" onChange={(event) => onUpdate({ name: event.target.value })} /></div>
+    <div className="selection-title"><span className={`node-icon ${node.kind}`}>{node.kind === "ellipse" ? "○" : node.kind === "text" ? "T" : node.kind === "frame" ? "#" : node.kind === "image" ? "▧" : "□"}</span><input readOnly={readOnly} value={node.name} aria-label="Layer name" onChange={(event) => onUpdate({ name: event.target.value })} /></div>
     <section><h2>Geometry</h2><div className="field-grid">{field("X", "x", node.x)}{field("Y", "y", node.y)}{field("W", "width", Math.round(node.width))}{field("H", "height", Math.round(node.height))}{field("Rotation", "rotation", Math.round(node.rotation), "°")}</div></section>
-    {node.kind !== "text" && <section><h2>Appearance</h2>{node.fillGradient ? <div className="gradient-summary"><div className="gradient-preview" style={{ background: gradientCss }} /><div><strong>Linear gradient</strong><span>{node.fillGradient.stops.length} color stops</span></div><div className="gradient-directions" aria-label="Gradient direction"><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 0])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 0])}>Horizontal</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [0, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [0, 1])}>Vertical</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 1])}>Diagonal</button></div><div className="gradient-stops">{node.fillGradient.stops.map((stop, index) => <label key={`${stop.position}-${index}`} className="gradient-stop"><span>Stop {index + 1}</span><input aria-label={`Gradient stop ${index + 1} color`} disabled={readOnly} type="color" value={opaqueColorCss(stop.color)} onChange={(event) => updateGradientColor(index, event.target.value)} /><input aria-label={`Gradient stop ${index + 1} position`} disabled={readOnly} type="range" min={index === 0 ? 0 : node.fillGradient!.stops[index - 1].position} max={index === node.fillGradient!.stops.length - 1 ? 1 : node.fillGradient!.stops[index + 1].position} step="0.01" value={stop.position} onChange={(event) => updateGradientPosition(index, Number(event.target.value))} /><em>{Math.round(stop.position * 100)}%</em><button type="button" aria-label={`Remove gradient stop ${index + 1}`} disabled={readOnly || node.fillGradient!.stops.length <= 2} onClick={() => removeGradientStop(index)}>−</button></label>)}</div><button type="button" aria-label="Add gradient stop" disabled={readOnly || node.fillGradient.stops.length >= 16} onClick={addGradientStop}>Add stop</button><button type="button" disabled={readOnly} onClick={() => onUpdate({ fill: node.fill })}>Replace with solid</button></div> : <>{field("Fill", "fill", node.fill)}<div className="color-preview" style={{ background: node.fill }} /><button className="add-gradient-button" type="button" disabled={readOnly} onClick={createGradient}>Add linear gradient</button></>}{field("Stroke", "stroke", node.stroke)}{field("Stroke width", "strokeWidth", node.strokeWidth, "px")}{field("Radius", "radius", node.radius, "px")}{field("Opacity", "opacity", Math.round(node.opacity * 100), "%")}</section>}
-    {node.kind === "text" && <section><h2>Content</h2><textarea readOnly={readOnly} value={node.text} onChange={(event) => onUpdate({ text: event.target.value })} aria-label="Text content" /></section>}
+    {node.kind !== "text" && <section><h2>Appearance</h2>{node.assetId && <div className="image-fill-summary"><div className="image-fill-preview" /><div><strong>Image fill</strong><span>{imageAsset?.pixelWidth && imageAsset?.pixelHeight ? `${imageAsset.pixelWidth} × ${imageAsset.pixelHeight}` : node.assetId.slice(0, 8)}</span></div><button type="button" aria-label="Remove image fill" disabled={readOnly} onClick={() => onUpdate({ assetId: undefined })}>Remove</button></div>}{node.fillGradient ? <div className="gradient-summary"><div className="gradient-preview" style={{ background: gradientCss }} /><div><strong>Linear gradient</strong><span>{node.fillGradient.stops.length} color stops</span></div><div className="gradient-directions" aria-label="Gradient direction"><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 0])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 0])}>Horizontal</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [0, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [0, 1])}>Vertical</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 1])}>Diagonal</button></div><div className="gradient-stops">{node.fillGradient.stops.map((stop, index) => <label key={`${stop.position}-${index}`} className="gradient-stop"><span>Stop {index + 1}</span><input aria-label={`Gradient stop ${index + 1} color`} disabled={readOnly} type="color" value={opaqueColorCss(stop.color)} onChange={(event) => updateGradientColor(index, event.target.value)} /><input aria-label={`Gradient stop ${index + 1} position`} disabled={readOnly} type="range" min={index === 0 ? 0 : node.fillGradient!.stops[index - 1].position} max={index === node.fillGradient!.stops.length - 1 ? 1 : node.fillGradient!.stops[index + 1].position} step="0.01" value={stop.position} onChange={(event) => updateGradientPosition(index, Number(event.target.value))} /><em>{Math.round(stop.position * 100)}%</em><button type="button" aria-label={`Remove gradient stop ${index + 1}`} disabled={readOnly || node.fillGradient!.stops.length <= 2} onClick={() => removeGradientStop(index)}>−</button></label>)}</div><button type="button" aria-label="Add gradient stop" disabled={readOnly || node.fillGradient.stops.length >= 16} onClick={addGradientStop}>Add stop</button><button type="button" disabled={readOnly} onClick={() => onUpdate({ fill: node.fill })}>Replace with solid</button></div> : <>{field("Fill", "fill", node.fill)}<div className="color-preview" style={{ background: node.fill }} /><button className="add-gradient-button" type="button" disabled={readOnly} onClick={createGradient}>Add linear gradient</button></>}{field("Stroke", "stroke", node.stroke)}{field("Stroke width", "strokeWidth", node.strokeWidth, "px")}{field("Radius", "radius", node.radius, "px")}{field("Opacity", "opacity", Math.round(node.opacity * 100), "%")}</section>}
+    {node.kind === "text" && <TextInspector node={node} assets={assets} fontAvailability={fontAvailability} onUpdate={onUpdate} readOnly={readOnly} />}
     <section><h2>Layer</h2><label className="toggle"><input disabled={readOnly} type="checkbox" checked={node.visible !== false} onChange={(event) => onUpdate({ visible: event.target.checked })} />Visible</label><label className="toggle"><input disabled={readOnly} type="checkbox" checked={Boolean(node.locked)} onChange={(event) => onUpdate({ locked: event.target.checked })} />Lock editing</label></section>
   </div>;
+}
+
+function TextInspector({ node, assets, fontAvailability, onUpdate, readOnly }: { node: CanvasNode; assets: DocumentAsset[]; fontAvailability?: EditorSnapshot["fontAvailability"]; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const properties: DocumentTextProperties = node.textProperties ?? {
+    runs: [],
+    paragraph: { alignment: "left", paragraphSpacing: 0 },
+    autoSize: "fixed",
+    fallbackFonts: [],
+  };
+  const primary = properties.runs[0];
+  const [textDraft, setTextDraft] = useState(node.text ?? "");
+  const isComposingText = useRef(false);
+  useEffect(() => {
+    if (!isComposingText.current) setTextDraft(node.text ?? "");
+  }, [node.id, node.text]);
+  const fontStatus = primary?.font ? fontAvailability?.[primary.font.assetId] ?? "idle" : undefined;
+  const fontAssets = assets.filter((asset) => asset.mediaType.startsWith("font/"));
+  const updateProperties = (next: DocumentTextProperties) => onUpdate({ textProperties: next });
+  const updateRun = (patch: Partial<NonNullable<DocumentTextProperties["runs"][number]>>) => {
+    const textLength = new TextEncoder().encode(node.text ?? "").byteLength;
+    const current = primary ?? { start: 0, end: textLength, fontSize: 31, fontWeight: 500, italic: false, letterSpacing: 0 };
+    updateProperties({ ...properties, runs: textLength ? [{ ...current, ...patch, start: 0, end: textLength }] : [] });
+  };
+  const numeric = (value: string, apply: (number: number) => void) => {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) apply(parsed);
+  };
+  const commitText = (text: string) => {
+    if (text === (node.text ?? "")) return;
+    onUpdate({ text, textProperties: textReplacementProperties(node, text) });
+  };
+  return <section className="text-properties"><h2>Content</h2>
+    <textarea
+      readOnly={readOnly}
+      value={textDraft}
+      onCompositionStart={() => { isComposingText.current = true; }}
+      onCompositionEnd={(event) => {
+        isComposingText.current = false;
+        const text = event.currentTarget.value;
+        setTextDraft(text);
+        commitText(text);
+      }}
+      onChange={(event) => {
+        const text = event.target.value;
+        setTextDraft(text);
+        if (!isComposingText.current) commitText(text);
+      }}
+      onBlur={(event) => {
+        if (!isComposingText.current) commitText(event.currentTarget.value);
+      }}
+      aria-label="Text content"
+    />
+    <div className="field-grid">
+      <label className="field"><span>Font</span><div><select aria-label="Font" disabled={readOnly} value={primary?.font?.assetId ?? ""} onChange={(event) => updateRun({ font: event.target.value ? { assetId: event.target.value, faceIndex: primary?.font?.faceIndex ?? 0, variationAxes: primary?.font?.variationAxes } : undefined })}><option value="">System fallback</option>{fontAssets.map((asset) => <option value={asset.assetId} key={asset.assetId}>{asset.assetId.slice(0, 8)}</option>)}</select></div></label>
+      <label className="field"><span>Size</span><div><input aria-label="Font size" disabled={readOnly} inputMode="decimal" value={primary?.fontSize ?? 31} onChange={(event) => numeric(event.target.value, (fontSize) => updateRun({ fontSize }))} /><em>px</em></div></label>
+      <label className="field"><span>Weight</span><div><input aria-label="Font weight" disabled={readOnly} inputMode="numeric" value={primary?.fontWeight ?? 500} onChange={(event) => numeric(event.target.value, (fontWeight) => updateRun({ fontWeight }))} /></div></label>
+      <label className="field"><span>Tracking</span><div><input aria-label="Letter spacing" disabled={readOnly} inputMode="decimal" value={primary?.letterSpacing ?? 0} onChange={(event) => numeric(event.target.value, (letterSpacing) => updateRun({ letterSpacing }))} /><em>px</em></div></label>
+      <label className="field"><span>Line height</span><div><input aria-label="Line height" disabled={readOnly} inputMode="decimal" value={properties.paragraph.lineHeight ?? ""} onChange={(event) => { const raw = event.target.value.trim(); if (!raw) updateProperties({ ...properties, paragraph: { ...properties.paragraph, lineHeight: undefined } }); else numeric(raw, (lineHeight) => { if (lineHeight > 0) updateProperties({ ...properties, paragraph: { ...properties.paragraph, lineHeight } }); }); }} /><em>px</em></div></label>
+      <label className="field"><span>Paragraph</span><div><input aria-label="Paragraph spacing" disabled={readOnly} inputMode="decimal" value={properties.paragraph.paragraphSpacing} onChange={(event) => numeric(event.target.value, (paragraphSpacing) => { if (paragraphSpacing >= 0) updateProperties({ ...properties, paragraph: { ...properties.paragraph, paragraphSpacing } }); })} /><em>px</em></div></label>
+    </div>
+    <div className="text-controls">
+      <label>Align <select aria-label="Text alignment" disabled={readOnly} value={properties.paragraph.alignment} onChange={(event) => updateProperties({ ...properties, paragraph: { ...properties.paragraph, alignment: event.target.value as DocumentTextProperties["paragraph"]["alignment"] } })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option><option value="justify">Justify</option></select></label>
+      <label>Auto size <select aria-label="Text auto size" disabled={readOnly} value={properties.autoSize} onChange={(event) => updateProperties({ ...properties, autoSize: event.target.value as DocumentTextProperties["autoSize"] })}><option value="fixed">Fixed</option><option value="height">Auto height</option><option value="widthAndHeight">Auto width &amp; height</option></select></label>
+      <label>Fallback <select aria-label="Fallback font" disabled={readOnly} value={properties.fallbackFonts?.[0]?.assetId ?? ""} onChange={(event) => updateProperties({ ...properties, fallbackFonts: event.target.value ? [{ assetId: event.target.value, faceIndex: 0 }] : [] })}><option value="">None</option>{fontAssets.filter((asset) => asset.assetId !== primary?.font?.assetId).map((asset) => <option value={asset.assetId} key={asset.assetId}>{asset.assetId.slice(0, 8)}</option>)}</select></label>
+      <label className="toggle"><input aria-label="Italic" disabled={readOnly} type="checkbox" checked={primary?.italic ?? false} onChange={(event) => updateRun({ italic: event.target.checked })} />Italic</label>
+    </div>
+    {fontStatus && <p className="font-status" role="status">Font {fontStatus === "ready" ? "loaded" : fontStatus === "loading" ? "loading" : fontStatus === "unavailable" ? "unavailable — system fallback" : "not loaded"}</p>}
+  </section>;
 }
 
 function colorCss(color: DocumentColor): string {

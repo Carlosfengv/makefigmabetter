@@ -7,16 +7,20 @@ import { LAYER_ROW_HEIGHT, reversedIndex, virtualRange } from "@/lib/virtual-ran
 const MAX_LAYER_DOM_ROWS = 150;
 
 function icon(kind: CanvasNode["kind"]) {
-  return kind === "ellipse" ? "○" : kind === "text" ? "T" : kind === "frame" ? "#" : "□";
+  return kind === "ellipse" ? "○" : kind === "text" ? "T" : kind === "frame" ? "#" : kind === "image" ? "▧" : "□";
 }
 
-export function VirtualLayerList({ nodes, selectedIds, onSelect }: {
+export function VirtualLayerList({ nodes, selectedIds, canEdit, onSelect, onDropBefore }: {
   nodes: readonly CanvasNode[];
   selectedIds: readonly string[];
+  canEdit: boolean;
   onSelect(id: string): void;
+  onDropBefore(draggedId: string, beforeId?: string): void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ scrollTop: 0, height: 0 });
+  const [draggedId, setDraggedId] = useState<string>();
+  const [dropBeforeId, setDropBeforeId] = useState<string>();
   const selectedId = selectedIds[0];
   const range = virtualRange(nodes.length, metrics.scrollTop, metrics.height);
 
@@ -48,14 +52,33 @@ export function VirtualLayerList({ nodes, selectedIds, onSelect }: {
     if (!node) continue;
     rows.push(
       <div key={node.id} role="listitem" aria-setsize={nodes.length} aria-posinset={virtualIndex + 1}>
-      <button className={`layer-row ${selectedIds.includes(node.id) ? "selected" : ""}`} style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)` }} onClick={() => onSelect(node.id)}>
+      <button draggable={canEdit} className={`layer-row ${selectedIds.includes(node.id) ? "selected" : ""} ${dropBeforeId === node.id ? "drop-before" : ""} ${draggedId === node.id ? "dragging" : ""}`} style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)` }} onClick={() => onSelect(node.id)} onDragStart={(event) => {
+        if (!canEdit) { event.preventDefault(); return; }
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", node.id);
+        setDraggedId(node.id);
+      }} onDragOver={(event) => {
+        if (!draggedId || draggedId === node.id) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setDropBeforeId(node.id);
+      }} onDrop={(event) => {
+        event.preventDefault();
+        const id = draggedId ?? event.dataTransfer.getData("text/plain");
+        if (id && id !== node.id) onDropBefore(id, node.id);
+        setDraggedId(undefined); setDropBeforeId(undefined);
+      }} onDragEnd={() => { setDraggedId(undefined); setDropBeforeId(undefined); }}>
         <span className={`node-icon ${node.kind}`}>{icon(node.kind)}</span><span>{node.name}</span><span className="layer-visibility">{node.visible === false ? "○" : "◉"}</span>
       </button></div>,
     );
   }
   // This protects the intended performance property if the constants are changed.
   if (rows.length > MAX_LAYER_DOM_ROWS) throw new Error("Virtual layer list exceeded its DOM row budget");
-  return <div ref={listRef} className="layer-list" role="list" onScroll={(event) => {
+  return <div ref={listRef} className="layer-list" role="list" onDragOver={(event) => { if (draggedId) event.preventDefault(); }} onDrop={(event) => {
+    const id = draggedId ?? event.dataTransfer.getData("text/plain");
+    if (id && !dropBeforeId) onDropBefore(id);
+    setDraggedId(undefined); setDropBeforeId(undefined);
+  }} onScroll={(event) => {
     // React may invalidate currentTarget before a functional state updater runs.
     // Read the native value synchronously while the scroll event is still live.
     const scrollTop = event.currentTarget.scrollTop;

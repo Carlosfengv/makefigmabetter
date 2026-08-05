@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import type { CanvasNode, CoreJournalOperation, CoreLocalSnapshot, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PresentationNode, RendererPreference, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
+import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingRemoteOperation, PresentationNode, RendererPreference, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
 import { findTopmostHit } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
@@ -8,16 +8,19 @@ import { admitRenderSurface, MAX_RENDER_SURFACE_BYTES } from "@/lib/render-surfa
 import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
 import { createNode, documentColorFromCssHex } from "@/lib/editor-protocol";
 import { sampleLinearGradientForCanvas } from "@/lib/color-rendering";
-import { layoutText, resolveTextRenderMetrics } from "@/lib/text-layout";
-import { GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer } from "@/lib/webgpu-scene";
+import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
+import { styledTextSpans, type RenderTextStyle } from "@/lib/text-style-runs";
+import { GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { resolveCoreBatch, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { resolveCoreBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
 import { classifyEditorError, editorError, type EditorErrorCode } from "@/lib/editor-error";
 import { resetDocumentProjection } from "@/lib/document-reset";
 import { resolveInsideRoundedRect } from "@/lib/rounded-rect";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
+import { gpuLayerPrefix } from "@/lib/gpu-layer-prefix";
 import { exceedsMarqueeDragThreshold, resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
 import { selectionDimensions } from "@/lib/selection-label";
 import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
@@ -25,6 +28,18 @@ import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
 import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
 import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
+import { cacheAsset, readCachedAsset } from "@/lib/asset-byte-cache";
+import { ImageBitmapCache } from "@/lib/image-bitmap-cache";
+import { MAX_RASTER_DECODED_BYTES } from "@/lib/untrusted-asset";
+import { FontFaceRegistry } from "@/lib/font-face-registry";
+import { cssLineBoxBaseline as resolveCssLineBoxBaseline } from "@/lib/text-baseline";
+import { parseRustGpuSceneBatch } from "@/lib/rust-gpu-batch";
+import { parseRustTextLayout, type RustTextLayout } from "@/lib/rust-text-layout";
+import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
+import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
+import { hasCommittedMove } from "@/lib/move-commit";
+import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
+import { orderNewLayerAtFront, sortNodesByLayerOrder } from "@/lib/layer-order";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -34,28 +49,38 @@ type Drag =
   | { mode: "pan"; startX: number; startY: number }
   | { mode: "select"; startX: number; startY: number; currentX: number; currentY: number; startScreenX: number; startScreenY: number; marqueeStarted: boolean; initialSelection: string[]; additive: boolean };
 type WasmProjectionNode = CoreProjectionNode;
-type WasmProjectionSnapshot = { schemaVersion: number; revision: number; canUndo: boolean; canRedo: boolean; nodes: WasmProjectionNode[] };
+type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; nodes: WasmProjectionNode[] };
 type WasmDocumentEngine = {
   readonly revision: bigint;
   readonly can_undo: boolean;
   readonly can_redo: boolean;
   canonical_hash(): string;
+  snapshot_protobuf(): Uint8Array;
   memory_stats_json(): string;
   create_node(transactionId: string, baseRevision: bigint, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
+  create_node_on_page(transactionId: string, baseRevision: bigint, pageId: string, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
+  create_page(transactionId: string, baseRevision: bigint, pageId: string, name: string): bigint;
   seed_node(transactionId: string, baseRevision: bigint, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
   rename_node(transactionId: string, baseRevision: bigint, nodeId: string, name: string): bigint;
   update_node(transactionId: string, baseRevision: bigint, nodeId: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
   delete_nodes(transactionId: string, baseRevision: bigint, nodeIds: string): bigint;
   move_nodes(transactionId: string, baseRevision: bigint, updatesJson: string): bigint;
   apply_transaction_json(transactionId: string, baseRevision: bigint, commandsJson: string): bigint;
+  register_asset(transactionId: string, baseRevision: bigint, assetId: string, contentHash: string, mediaType: string, byteLength: bigint, pixelWidth: number, pixelHeight: number): bigint;
   undo(): bigint;
   redo(): bigint;
   snapshot_json(): string;
+  render_graph_plan_for_page_json(pageId: string, viewportX: number, viewportY: number, viewportWidth: number, viewportHeight: number): string;
+  gpu_scene_instances_json(pageId: string): string;
+  load_snapshot_protobuf(bytes: Uint8Array): bigint;
   load_snapshot_json(value: string): bigint;
   seed_batch_json(value: string): bigint;
 };
 
 let canvas: OffscreenCanvas | undefined;
+const defaultPageId = "00000000-0000-0000-0000-000000000001";
+let pages: CanvasPage[] = [{ id: defaultPageId, name: "Page 1", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" }];
+let activePageId = defaultPageId;
 let context: OffscreenCanvasRenderingContext2D | null = null;
 let width = 0;
 let height = 0;
@@ -65,6 +90,10 @@ let renderQuality: RenderQualityState = { tier: "settled", zoomBucket: "normal" 
 let renderQualityTimer: ReturnType<typeof setTimeout> | undefined;
 let tool: ToolKind = "select";
 let nodes: CanvasNode[] = starterNodes();
+let assets: DocumentAsset[] = [];
+const imageBitmaps = new ImageBitmapCache<ImageBitmap>(MAX_RASTER_DECODED_BYTES);
+const imageLoads = new Set<string>();
+const fontFaces = new FontFaceRegistry();
 let nodeById = new Map(nodes.map((node) => [node.id, node]));
 let nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
 let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
@@ -78,11 +107,20 @@ const undoOrder: HistoryKind[] = [];
 let redoOrder: HistoryKind[] = [];
 const preservedProjectionNodes = new Map<string, PresentationNode>();
 let revision = 0;
+let documentId = "00000000-0000-0000-0000-000000000000";
 let drag: Drag | undefined;
 let hoveredId: string | undefined;
+let editingTextNodeId: string | undefined;
 let documentCore: EditorSnapshot["documentCore"] = "Starting Rust/WASM bridge";
 let wasmDocument: WasmDocumentEngine | undefined;
 let bridgeLoadSequence = 0;
+let ephemeralBenchmarkProjection = false;
+let remoteBootstrapPending = false;
+const localDevActorId = "00000000-0000-0000-0000-000000000007";
+const assetApiUrl = new URL("/asset-api", self.location.origin).toString().replace(/\/$/, "");
+const remoteSessionId = crypto.randomUUID();
+let remoteClientSequence = 0n;
+let remoteOperationQueue = Promise.resolve();
 let gpuStatus: NonNullable<EditorSnapshot["gpu"]>["webgpu"] = "checking";
 let webgl2Available = false;
 let gpuProbeSequence = 0;
@@ -91,9 +129,20 @@ let gpuRenderer: WebGpuSceneRenderer | undefined;
 let rendererPreference: RendererPreference = "auto";
 let simulatedGpuLossesRequested = 0;
 let simulatedGpuLosses = 0;
+let simulateGpuLossAfterImage = false;
 let gpuSceneBytes = 0;
 let gpuSceneWithinBudget = true;
 let gpuSceneLimitReported = false;
+type RustGpuScene = { revision: number; pageId: string; transientSceneVersion: number; instances: Float32Array; renderedNodeIds: ReadonlySet<string> };
+let rustGpuScene: RustGpuScene | undefined;
+const MAX_RUST_GPU_INSTANCE_NODES = 20_000;
+type RustTextLayoutProjection = { revision: number; key: string; layout: RustTextLayout };
+const rustTextLayouts = new Map<string, RustTextLayoutProjection>();
+const rustTextLayoutLoads = new Set<string>();
+type RustGpuTextProjection = { revision: number; key: string; glyphs: readonly WebGpuTextGlyph[] };
+const rustGpuTextGlyphs = new Map<string, RustGpuTextProjection>();
+const rustGpuTextLoads = new Set<string>();
+const MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE = 4_096;
 let renderSurfaceBytes = 0;
 let wasmMemory: WebAssembly.Memory | undefined;
 let wasmRuntimePromise: Promise<typeof import("@/wasm/generated/editor_wasm")> | undefined;
@@ -106,18 +155,19 @@ const renderPerformance = createRenderPerformanceSampler();
 
 function starterNodes(): CanvasNode[] {
   return [
-    { id: "00000000-0000-4000-8000-000000000001", name: "Product card", kind: "frame", x: -250, y: -170, width: 500, height: 340, rotation: 0, fill: "#fbfbf8", stroke: "#d4d5cb", strokeWidth: 1, radius: 18, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000002", name: "Sun disc", kind: "ellipse", x: -194, y: -112, width: 130, height: 130, rotation: 0, fill: "#f6ad62", stroke: "#b4612d", strokeWidth: 1, radius: 0, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000003", name: "Signal", kind: "rectangle", x: 48, y: -92, width: 150, height: 46, rotation: 0, fill: "#e6edff", stroke: "#0048FF", strokeWidth: 1, radius: 23, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000004", name: "Headline", kind: "text", x: -194, y: 65, width: 370, height: 64, rotation: 0, fill: "#20221c", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1, text: "Design, with intent.", visible: true },
+    { id: "00000000-0000-4000-8000-000000000001", pageId: defaultPageId, name: "Product card", kind: "frame", x: -250, y: -170, width: 500, height: 340, rotation: 0, fill: "#fbfbf8", stroke: "#d4d5cb", strokeWidth: 1, radius: 18, opacity: 1, visible: true },
+    { id: "00000000-0000-4000-8000-000000000002", pageId: defaultPageId, name: "Sun disc", kind: "ellipse", x: -194, y: -112, width: 130, height: 130, rotation: 0, fill: "#f6ad62", stroke: "#b4612d", strokeWidth: 1, radius: 0, opacity: 1, visible: true },
+    { id: "00000000-0000-4000-8000-000000000003", pageId: defaultPageId, name: "Signal", kind: "rectangle", x: 48, y: -92, width: 150, height: 46, rotation: 0, fill: "#e6edff", stroke: "#0048FF", strokeWidth: 1, radius: 23, opacity: 1, visible: true },
+    { id: "00000000-0000-4000-8000-000000000004", pageId: defaultPageId, name: "Headline", kind: "text", x: -194, y: 65, width: 370, height: 64, rotation: 0, fill: "#20221c", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1, text: "Design, with intent.", visible: true },
   ];
 }
 
 function cloneDocument() { return structuredClone(nodes); }
+function activeNodes() { return sortNodesByLayerOrder(nodes.filter((node) => (node.pageId ?? defaultPageId) === activePageId)); }
 function rebuildNodeIndex() {
   nodeById = new Map(nodes.map((node) => [node.id, node]));
   nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
-  spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
+  spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
 }
 function emit(message: WorkerToMain) { self.postMessage(message); }
 function emitError(error: unknown, code?: EditorErrorCode, transactionId?: string) {
@@ -127,7 +177,7 @@ function emitError(error: unknown, code?: EditorErrorCode, transactionId?: strin
 }
 function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true) {
   const documentHash = wasmDocument?.canonical_hash();
-  const localSnapshot = persistable && wasmDocument ? { format: "rust-core-v1", coreRevision: Number(wasmDocument.revision), coreSnapshot: wasmDocument.snapshot_json(), ...(documentHash ? { documentHash } : {}), viewport: { ...viewport }, presentation: nodes.map(presentationNode) } satisfies CoreLocalSnapshot : undefined;
+  const localSnapshot = persistable && !ephemeralBenchmarkProjection && wasmDocument ? { format: "rust-core-v1", coreRevision: Number(wasmDocument.revision), coreSnapshot: wasmDocument.snapshot_json(), ...(documentHash ? { documentHash } : {}), viewport: { ...viewport }, presentation: nodes.map(presentationNode) } satisfies CoreLocalSnapshot : undefined;
   const memory = wasmDocument ? JSON.parse(wasmDocument.memory_stats_json()) as EditorSnapshot["memory"] : undefined;
   const wasmHeap = assessWasmHeap(wasmMemory?.buffer.byteLength ?? 0);
   if (!wasmHeap.withinBudget && wasmHeap.reason === "RESOURCE_LIMIT" && !wasmHeapOverBudget) {
@@ -135,7 +185,77 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
     diagnostics.record({ category: "lifecycle", code: "WASM_HEAP_SOFT_LIMIT" });
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
-  emit({ type: "snapshot", snapshot: { revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts }, documentCore, localSnapshot, localJournalEntry } });
+  const fontAvailability = Object.fromEntries(assets.filter((asset) => asset.mediaType.startsWith("font/")).map((asset) => [asset.assetId, fontFaces.statusFor(asset.assetId)]));
+  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts }, documentCore, localSnapshot, localJournalEntry } });
+}
+function emitRemoteBootstrap() {
+  if (!wasmDocument || documentCore !== "Rust/WASM bridge ready") return;
+  remoteBootstrapPending = false;
+  const snapshot = wasmDocument.snapshot_protobuf();
+  self.postMessage({ type: "remote-bootstrap", documentId, revision, snapshot } satisfies WorkerToMain, [snapshot.buffer]);
+}
+function hydrateRemoteSnapshot(snapshot: Uint8Array) {
+  if (!wasmDocument) {
+    emitError(undefined, "TRANSIENT");
+    return;
+  }
+  try {
+    wasmDocument.load_snapshot_protobuf(snapshot);
+    history.length = 0;
+    future = [];
+    undoOrder.length = 0;
+    redoOrder = [];
+    selectedIds = [];
+    syncProjectionFromWasm(false);
+    if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
+    rebuildNodeIndex();
+    render();
+    diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_APPLIED", documentRevision: revision });
+    emitSnapshot();
+  } catch (error) {
+    diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_REJECTED", documentRevision: revision });
+    emitError(error, "CORRUPT_DATA");
+  }
+}
+
+/** Serializing envelope derivation preserves the same client sequence and order
+ * as the locally committed Core revision stream, even when WebCrypto resolves
+ * hashes asynchronously. */
+function queueRemoteOperation(transactionId: string, baseRevision: number, batch: readonly CoreBatchCommand[], localDocumentHash: string) {
+  queueRemotePayload(transactionId, baseRevision, encodeCoreBatchPayload(batch), localDocumentHash);
+}
+function queueRemotePayload(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string) {
+  const documentForOperation = documentId;
+  const clientSequence = ++remoteClientSequence;
+  remoteOperationQueue = remoteOperationQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(payload).buffer));
+      const envelope = await encodeOperationPayloadEnvelope({
+        documentId: documentForOperation,
+        operationId: transactionId,
+        transactionId,
+        actorId: localDevActorId,
+        sessionId: remoteSessionId,
+        clientSequence,
+        baseRevision: BigInt(baseRevision),
+        engineSemanticsVersion: 3,
+      }, payload);
+      const operation: PendingRemoteOperation = {
+        format: "pending-operation-v1",
+        operationId: transactionId,
+        transactionId,
+        documentId: documentForOperation,
+        baseRevision,
+        envelope,
+        payloadHash: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+        localDocumentHash,
+        createdAtMs: Date.now(),
+        attempts: 0,
+      };
+      self.postMessage({ type: "remote-operation", operation } satisfies WorkerToMain, [envelope.buffer]);
+    })
+    .catch((error) => emitError(error, "TRANSIENT", transactionId));
 }
 function emitViewportCheckpoint() {
   if (!wasmDocument) return;
@@ -215,13 +335,7 @@ async function probeGpuDevice(recovery = false) {
     render();
     renderPerformance.start();
     emitSnapshot(undefined, false);
-    if (simulatedGpuLosses < simulatedGpuLossesRequested) {
-      simulatedGpuLosses += 1;
-      diagnostics.record({ category: "renderer", code: "WEBGPU_DEVICE_LOSS_SIMULATION", details: { loss: simulatedGpuLosses } });
-      setTimeout(() => {
-        if (sequence === gpuProbeSequence && gpuRenderer === renderer) renderer.destroy();
-      }, 100);
-    }
+    maybeSimulateGpuLoss(sequence, renderer);
     void renderer.deviceLost.then(() => {
       if (sequence !== gpuProbeSequence) return;
       gpuRenderer = undefined;
@@ -247,11 +361,24 @@ async function probeGpuDevice(recovery = false) {
     emitSnapshot(undefined, false);
   }
 }
+
+/** Destroy only derived GPU state. The image-fixture variant waits until a
+ * decoded bitmap is actually bound to a visible Image node, so recovery proves
+ * texture recreation rather than merely rebuilding an empty renderer. */
+function maybeSimulateGpuLoss(sequence = gpuProbeSequence, renderer = gpuRenderer) {
+  if (!renderer || simulatedGpuLosses >= simulatedGpuLossesRequested) return;
+  if (simulateGpuLossAfterImage && !activeNodes().some((node) => node.kind === "image" && Boolean(node.assetId) && imageBitmaps.has(node.assetId!))) return;
+  simulatedGpuLosses += 1;
+  diagnostics.record({ category: "renderer", code: "WEBGPU_DEVICE_LOSS_SIMULATION", details: { loss: simulatedGpuLosses, afterImage: simulateGpuLossAfterImage } });
+  setTimeout(() => {
+    if (sequence === gpuProbeSequence && gpuRenderer === renderer) renderer.destroy();
+  }, 100);
+}
 function presentationNode(node: CanvasNode): PresentationNode {
   return { id: node.id };
 }
 function journalEntry(operation: CoreJournalOperation, baseRevision: number, id = crypto.randomUUID()): LocalJournalEntry | undefined {
-  if (!wasmDocument) return undefined;
+  if (!wasmDocument || ephemeralBenchmarkProjection) return undefined;
   return {
     format: "rust-core-operation-v1",
     id,
@@ -268,16 +395,20 @@ function rememberProjection(nodesToRemember = nodes) {
 }
 function canvasNodeFromProjection(node: WasmProjectionNode): CanvasNode {
   return {
-    id: node.id, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
+    id: node.id, pageId: node.pageId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
     rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, positionId: node.positionId,
     stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth,
-    radius: node.cornerRadius, opacity: node.opacity, text: node.text, visible: node.visible, locked: node.locked,
+    radius: node.cornerRadius, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked,
   };
 }
 function syncProjectionFromWasm(rememberExisting = true) {
   if (!wasmDocument) return;
   if (rememberExisting) rememberProjection();
   const snapshot = JSON.parse(wasmDocument.snapshot_json()) as WasmProjectionSnapshot;
+  documentId = snapshot.documentId ?? documentId;
+  pages = snapshot.pages?.length ? snapshot.pages : pages;
+  assets = snapshot.resourceIndex ?? [];
+  if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
   nodes = snapshot.nodes.map((node) => {
     const previous = preservedProjectionNodes.get(node.id);
     const projected = canvasNodeFromProjection(node);
@@ -288,13 +419,326 @@ function syncProjectionFromWasm(rememberExisting = true) {
   selectedIds = selectedIds.filter((id) => nodes.some((node) => node.id === id));
   rebuildNodeIndex();
   revision = snapshot.revision;
+  refreshRustGpuScene();
+  nodes.filter((node) => node.assetId).forEach((node) => void ensureImageBitmap(node.assetId!));
+  nodes.filter((node) => node.kind === "text").forEach((node) => {
+    const properties = node.textProperties;
+    if (!properties) return;
+    const fontIds = [
+      ...properties.runs.flatMap((run) => run.font ? [run.font.assetId] : []),
+      ...(properties.fallbackFonts ?? []).map((font) => font.assetId),
+    ];
+    new Set(fontIds).forEach((assetId) => void ensureFontFace(assetId));
+  });
+  refreshRustTextLayouts();
+  refreshRustGpuTextGlyphs();
 }
-function replayJournalEntry(engine: WasmDocumentEngine, entry: LocalJournalEntry) {
+
+/** Builds the immutable, committed solid-shape batch once per Canonical sync.
+ * A drag deliberately invalidates it and uses the local projection until the
+ * resulting move transaction is accepted and projected again. */
+function refreshRustGpuScene() {
+  if (!wasmDocument || nodes.length > MAX_RUST_GPU_INSTANCE_NODES) {
+    rustGpuScene = undefined;
+    return;
+  }
+  try {
+    const payload = parseRustGpuSceneBatch(wasmDocument.gpu_scene_instances_json(activePageId));
+    if (!payload) throw new Error("INVALID_RUST_GPU_BATCH");
+    rustGpuScene = {
+      revision,
+      pageId: activePageId,
+      transientSceneVersion,
+      instances: payload.instances,
+      renderedNodeIds: payload.renderedNodeIds,
+    };
+  } catch {
+    rustGpuScene = undefined;
+    diagnostics.record({ category: "renderer", code: "RUST_GPU_BATCH_UNAVAILABLE", documentRevision: revision });
+  }
+}
+
+/** Derives line ranges only for a fully explicit, single-face run. Mixed runs
+ * remain on the documented Canvas transition path until per-run shaping and
+ * glyph raster passes are available. */
+function rustTextLayoutRequest(node: CanvasNode) {
+  const source = node.text ?? "Text";
+  const properties = node.textProperties;
+  const run = properties?.runs.length === 1 ? properties.runs[0] : undefined;
+  if (!run?.font || (run.font.variationAxes?.length ?? 0) > 0 || !Number.isFinite(run.fontSize) || run.fontSize <= 0 || !Number.isFinite(node.width) || node.width <= 0) return undefined;
+  const sourceByteLength = new TextEncoder().encode(source).byteLength;
+  if (run.start !== 0 || run.end !== sourceByteLength) return undefined;
+  const key = JSON.stringify([revision, node.id, source, node.width, run.font.assetId, run.font.faceIndex, run.fontSize]);
+  return { key, source, font: run.font, fontSize: run.fontSize, widthEm: node.width / run.fontSize };
+}
+
+function refreshRustTextLayouts() {
+  const active = new Set<string>();
+  nodes.filter((node) => node.kind === "text").forEach((node) => {
+    const request = rustTextLayoutRequest(node);
+    if (!request) return;
+    active.add(node.id);
+    if (rustTextLayouts.get(node.id)?.key === request.key || rustTextLayoutLoads.has(request.key)) return;
+    if (fontFaces.statusFor(request.font.assetId) !== "ready") return;
+    rustTextLayoutLoads.add(request.key);
+    void loadRustTextLayout(node.id, request);
+  });
+  [...rustTextLayouts].forEach(([nodeId, cached]) => {
+    if (!active.has(nodeId) || cached.revision !== revision) rustTextLayouts.delete(nodeId);
+  });
+}
+
+async function loadRustTextLayout(
+  nodeId: string,
+  request: NonNullable<ReturnType<typeof rustTextLayoutRequest>>,
+) {
+  try {
+    const asset = assets.find((candidate) => candidate.assetId === request.font.assetId);
+    if (!asset) throw new Error("FONT_ASSET_MISSING");
+    const blob = await loadAssetBlob(asset);
+    if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
+    const wasm = await loadWasmRuntime();
+    const payload = wasm.layout_shaped_text_json(
+      new Uint8Array(await blob.arrayBuffer()),
+      request.font.faceIndex,
+      request.source,
+      request.widthEm,
+    );
+    const layout = parseRustTextLayout(payload, request.source);
+    if (!layout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
+    const currentNode = nodes.find((node) => node.id === nodeId);
+    if (!currentNode || rustTextLayoutRequest(currentNode)?.key !== request.key) return;
+    rustTextLayouts.set(nodeId, { revision, key: request.key, layout });
+    refreshRustGpuTextGlyphs();
+    render();
+  } catch {
+    diagnostics.record({ category: "renderer", code: "RUST_TEXT_LAYOUT_UNAVAILABLE", documentRevision: revision });
+  } finally {
+    rustTextLayoutLoads.delete(request.key);
+  }
+}
+
+/** Converts only the already-validated single-face LTR layout into ephemeral
+ * GPU glyph draws. Mixed styles, variable fonts and RTL remain Canvas so this
+ * partial pass cannot silently change the documented text contract. */
+function rustGpuTextRequest(node: CanvasNode) {
+  const layoutRequest = rustTextLayoutRequest(node);
+  const layout = rustTextLayoutFor(node);
+  if (!layoutRequest || !layout || !layout.lines.length || layout.lines.some((line) => line.direction !== "ltr")) return undefined;
+  const properties = node.textProperties;
+  const run = properties?.runs[0];
+  // The current instance format expresses glyph-local geometry. Keep node
+  // rotation, non-left alignment, synthetic styling and paragraph gaps on the
+  // Canvas path until the Text Pass has the equivalent line transform model.
+  if (node.rotation !== 0 || properties?.paragraph.alignment !== "left" || (properties?.paragraph.paragraphSpacing ?? 0) !== 0 || run?.italic || (run?.letterSpacing ?? 0) !== 0 || run?.fontWeight !== 400) return undefined;
+  if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE) return undefined;
+  const pixelSize = Math.min(512, Math.max(8, Math.ceil(layoutRequest.fontSize)));
+  const key = JSON.stringify([layoutRequest.key, pixelSize, node.x, node.y, node.rotation, node.fill, node.opacity, node.textProperties?.paragraph.lineHeight, node.textProperties?.paragraph.paragraphSpacing]);
+  return {
+    ...layoutRequest,
+    key,
+    layout,
+    pixelSize,
+    nodeX: node.x,
+    nodeY: node.y,
+    nodeRotation: node.rotation,
+    nodeFill: node.fill,
+    nodeOpacity: node.opacity,
+    nodeLineHeight: node.textProperties?.paragraph.lineHeight,
+  };
+}
+
+function refreshRustGpuTextGlyphs() {
+  const active = new Set<string>();
+  activeNodes().filter((node) => node.kind === "text" && node.visible !== false).forEach((node) => {
+    const request = rustGpuTextRequest(node);
+    if (!request) return;
+    active.add(node.id);
+    if (rustGpuTextGlyphs.get(node.id)?.key === request.key || rustGpuTextLoads.has(request.key)) return;
+    rustGpuTextLoads.add(request.key);
+    void loadRustGpuTextGlyphs(node.id, request);
+  });
+  [...rustGpuTextGlyphs].forEach(([nodeId, cached]) => {
+    if (!active.has(nodeId) || cached.revision !== revision) rustGpuTextGlyphs.delete(nodeId);
+  });
+}
+
+async function loadRustGpuTextGlyphs(
+  nodeId: string,
+  request: NonNullable<ReturnType<typeof rustGpuTextRequest>>,
+) {
+  try {
+    const asset = assets.find((candidate) => candidate.assetId === request.font.assetId);
+    if (!asset) throw new Error("FONT_ASSET_MISSING");
+    const blob = await loadAssetBlob(asset);
+    if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
+    const wasm = await loadWasmRuntime();
+    const fontBytes = new Uint8Array(await blob.arrayBuffer());
+    const rasters = new Map<number, ReturnType<typeof parseRustGlyphRaster>>();
+    for (const line of request.layout.lines) {
+      for (const glyph of line.glyphs) {
+        if (glyph.glyphId === 0) throw new Error("MISSING_GLYPH_OUTLINE");
+        if (rasters.has(glyph.glyphId)) continue;
+        rasters.set(glyph.glyphId, parseRustGlyphRaster(wasm.rasterize_glyph_json(fontBytes, request.font.faceIndex, glyph.glyphId, request.pixelSize)));
+      }
+    }
+    const glyphs = projectGpuTextGlyphs({
+      nodeId,
+      fontAssetId: request.font.assetId,
+      faceIndex: request.font.faceIndex,
+      fontSize: request.fontSize,
+      pixelSize: request.pixelSize,
+      x: request.nodeX,
+      y: request.nodeY,
+      rotation: request.nodeRotation,
+      fill: request.nodeFill,
+      opacity: request.nodeOpacity,
+      lineHeight: request.nodeLineHeight ?? request.fontSize * 1.25,
+      layout: request.layout,
+      rasters,
+    });
+    if (!glyphs) throw new Error("INVALID_GPU_TEXT_PROJECTION");
+    const currentNode = nodes.find((node) => node.id === nodeId);
+    if (!currentNode || rustGpuTextRequest(currentNode)?.key !== request.key) return;
+    rustGpuTextGlyphs.set(nodeId, { revision, key: request.key, glyphs });
+    render();
+  } catch {
+    diagnostics.record({ category: "renderer", code: "RUST_TEXT_GLYPH_RASTER_UNAVAILABLE", documentRevision: revision });
+  } finally {
+    rustGpuTextLoads.delete(request.key);
+  }
+}
+
+function rustTextLayoutFor(node: CanvasNode): RustTextLayout | undefined {
+  const cached = rustTextLayouts.get(node.id);
+  return cached?.revision === revision ? cached.layout : undefined;
+}
+
+function cacheImageBitmap(assetId: string, bitmap: ImageBitmap) {
+  imageBitmaps.set(assetId, bitmap, bitmap.width * bitmap.height * 4);
+  render();
+}
+
+/** Keeps uploaded originals intact while bounding the decoded working bitmap.
+ * This mirrors an editor's image proxy: large camera images remain exportable
+ * and synchronizable without forcing a full-resolution RGBA allocation. */
+function imageDecodeOptions(asset: DocumentAsset): ImageBitmapOptions | undefined {
+  const width = asset.pixelWidth;
+  const height = asset.pixelHeight;
+  if (!width || !height) return undefined;
+  const pixels = width * height;
+  const maxPixels = Math.floor(MAX_RASTER_DECODED_BYTES / 4);
+  if (!Number.isSafeInteger(pixels) || pixels <= maxPixels) return undefined;
+  const scale = Math.sqrt(maxPixels / pixels);
+  return {
+    resizeWidth: Math.max(1, Math.floor(width * scale)),
+    resizeHeight: Math.max(1, Math.floor(height * scale)),
+    resizeQuality: "high",
+  };
+}
+
+function decodeImageBitmap(asset: DocumentAsset, blob: Blob) {
+  const options = imageDecodeOptions(asset);
+  return options ? createImageBitmap(blob, options) : createImageBitmap(blob);
+}
+
+async function ensureImageBitmap(assetId: string) {
+  if (imageBitmaps.has(assetId) || imageLoads.has(assetId) || !documentId) return;
+  imageLoads.add(assetId);
+  try {
+    const asset = assets.find((candidate) => candidate.assetId === assetId);
+    if (!asset) return;
+    const blob = await loadAssetBlob(asset);
+    if (!blob) return;
+    cacheImageBitmap(assetId, await decodeImageBitmap(asset, blob));
+  } catch {
+    // Rendering keeps the documented placeholder; network failure never changes Core.
+  } finally { imageLoads.delete(assetId); }
+}
+
+async function loadAssetBlob(asset: DocumentAsset): Promise<Blob | undefined> {
+  const cached = await readCachedAsset(asset);
+  if (cached) return cached;
+  if (!documentId) return undefined;
+  const headers = { "content-type": "application/json", "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": localDevActorId };
+  const grant = await fetch(`${assetApiUrl}/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(asset.assetId)}/download-grants`, { method: "POST", headers, body: JSON.stringify({ lifetimeSeconds: 300 }) });
+  if (!grant.ok) return undefined;
+  const { token } = await grant.json() as { token: string };
+  const download = await fetch(`${assetApiUrl}/v1/assets/downloads/${encodeURIComponent(token)}`, { headers: { "x-makefigma-dev-tenant-id": headers["x-makefigma-dev-tenant-id"], "x-makefigma-dev-actor-id": localDevActorId } });
+  if (!download.ok) return undefined;
+  const blob = await download.blob();
+  void cacheAsset(asset, blob);
+  return blob;
+}
+
+async function ensureFontFace(assetId: string) {
+  const status = fontFaces.statusFor(assetId);
+  if (status === "ready" || status === "loading") return;
+  const asset = assets.find((candidate) => candidate.assetId === assetId);
+  if (!asset || !asset.mediaType.startsWith("font/")) return;
+  const blob = await loadAssetBlob(asset);
+  if (!blob) {
+    diagnostics.record({ category: "renderer", code: "FONT_ASSET_UNAVAILABLE", details: { assetId } });
+    return;
+  }
+  const fontScope = self as unknown as { fonts?: { add(face: { load(): Promise<unknown> }): void } };
+  const create = typeof FontFace === "function"
+    ? (family: string, source: ArrayBuffer) => new FontFace(family, source)
+    : undefined;
+  const family = await fontFaces.load(assetId, await blob.arrayBuffer(), fontScope.fonts, create);
+  if (family) { refreshRustTextLayouts(); render(); }
+  else diagnostics.record({ category: "renderer", code: "FONT_FACE_UNAVAILABLE", details: { assetId } });
+  emitSnapshot(undefined, false);
+}
+
+function seedAssetBytes(assetId: string, mediaType: string, bytes: ArrayBuffer) {
+  const blob = new Blob([bytes], { type: mediaType });
+  const asset = assets.find((candidate) => candidate.assetId === assetId);
+  if (asset) void cacheAsset(asset, blob);
+  if (mediaType.startsWith("font/")) {
+    void ensureFontFaceFromBlob(assetId, blob);
+  } else {
+    const imageAsset = asset;
+    if (!imageAsset) return;
+    void decodeImageBitmap(imageAsset, blob)
+      .then((bitmap) => cacheImageBitmap(assetId, bitmap))
+      .catch(() => {
+        diagnostics.record({ category: "renderer", code: "IMAGE_ASSET_DECODE_FAILED", details: { assetId } });
+        emitSnapshot(undefined, false);
+      });
+  }
+}
+
+async function ensureFontFaceFromBlob(assetId: string, blob: Blob) {
+  const fontScope = self as unknown as { fonts?: { add(face: { load(): Promise<unknown> }): void } };
+  const create = typeof FontFace === "function"
+    ? (family: string, source: ArrayBuffer) => new FontFace(family, source)
+    : undefined;
+  const family = await fontFaces.load(assetId, await blob.arrayBuffer(), fontScope.fonts, create);
+  if (family) { refreshRustTextLayouts(); render(); }
+  else diagnostics.record({ category: "renderer", code: "FONT_FACE_UNAVAILABLE", details: { assetId } });
+  emitSnapshot(undefined, false);
+}
+function registerAsset(transactionId: string, asset: DocumentAsset) {
+  if (!wasmDocument) { emitError(undefined, "TRANSIENT", transactionId); return; }
+  const baseRevision = Number(wasmDocument.revision);
+  try {
+    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0);
+    recordHistory("core");
+    syncProjectionFromWasm(false);
+    render();
+    emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
+    queueRemotePayload(transactionId, baseRevision, encodeRegisterResourcePayload(asset), wasmDocument.canonical_hash());
+  } catch (error) { emitError(error, "INVALID_COMMAND", transactionId); }
+}
+type JournalReplayEngine = Pick<WasmDocumentEngine, "revision" | "snapshot_json" | "apply_transaction_json" | "move_nodes" | "load_snapshot_json">;
+
+function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntry) {
   if (entry.acceptedRevision <= Number(engine.revision)) return;
   try {
     if (entry.baseRevision !== Number(engine.revision)) throw new Error("JOURNAL_REVISION_CONFLICT");
     const operation = entry.operation;
-    if (operation.type === "create" || operation.type === "update" || operation.type === "delete") {
+    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "delete") {
       const currentNodes = (JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot).nodes.map(canvasNodeFromProjection);
       const resolved = resolveCoreBatch(currentNodes, [operation]);
       if (!resolved) throw new Error("INVALID_JOURNAL_OPERATION");
@@ -307,7 +751,7 @@ function replayJournalEntry(engine: WasmDocumentEngine, entry: LocalJournalEntry
     engine.load_snapshot_json(entry.fallbackCoreSnapshot);
   }
 }
-async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot) {
+async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkProjection = false) {
   const loadSequence = ++bridgeLoadSequence;
   renderPerformance.reset();
   try {
@@ -330,12 +774,15 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot) {
         if (migrated !== current) engine.load_snapshot_json(migrated);
       }
     } else {
-      const hydrated = resolveCoreBatch([], nodes.map((node) => ({ type: "create" as const, node })));
-      if (!hydrated) throw new Error("INVALID_LEGACY_PROJECTION");
-      engine.seed_batch_json(JSON.stringify(hydrated.batch));
+      for (const batchNodes of wasmHydrationBatches(nodes)) {
+        const hydrated = resolveCoreBatch([], batchNodes.map((node) => ({ type: "create" as const, node })));
+        if (!hydrated) throw new Error("INVALID_LEGACY_PROJECTION");
+        engine.seed_batch_json(JSON.stringify(hydrated.batch));
+      }
     }
     if (loadSequence !== bridgeLoadSequence) return;
     wasmDocument = engine;
+    ephemeralBenchmarkProjection = benchmarkProjection;
     history.length = 0;
     future = [];
     undoOrder.length = 0;
@@ -346,6 +793,11 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot) {
       preservedProjectionNodes.clear();
       (recovered?.presentation ?? localSnapshot.presentation).forEach((node) => preservedProjectionNodes.set(node.id, structuredClone(node)));
       syncProjectionFromWasm(false);
+    } else if (benchmarkProjection) {
+      // The generated projection has just been accepted by Core. Avoid building
+      // an unnecessary second 100k-node Snapshot solely for benchmark display.
+      revision = Number(engine.revision);
+      refreshRustGpuScene();
     } else syncProjectionFromWasm();
     render();
     // Do not report Canvas/WASM hydration as editing latency. The next render is
@@ -361,6 +813,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot) {
     renderPerformance.start();
   }
   emitSnapshot();
+  if (remoteBootstrapPending) emitRemoteBootstrap();
 }
 async function loadWasmRuntime(): Promise<typeof import("@/wasm/generated/editor_wasm")> {
   if (!wasmRuntimePromise) {
@@ -383,7 +836,7 @@ function admitToWasm(command: EditorCommand) {
   if (!wasmDocument) return true;
   try {
     if (command.type === "create") {
-      wasmDocument.create_node(crypto.randomUUID(), wasmDocument.revision, command.node.id, command.node.kind, command.node.name, command.node.x, command.node.y, command.node.width, command.node.height, command.node.rotation, command.node.fill, command.node.stroke, command.node.strokeWidth, command.node.opacity, command.node.radius, command.node.visible !== false, Boolean(command.node.locked), command.node.text ?? "");
+      wasmDocument.create_node_on_page(crypto.randomUUID(), wasmDocument.revision, command.node.pageId ?? activePageId, command.node.id, command.node.kind, command.node.name, command.node.x, command.node.y, command.node.width, command.node.height, command.node.rotation, command.node.fill, command.node.stroke, command.node.strokeWidth, command.node.opacity, command.node.radius, command.node.visible !== false, Boolean(command.node.locked), command.node.text ?? "");
     }
     if (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)) {
       const previous = nodes.find((node) => node.id === command.id);
@@ -394,6 +847,9 @@ function admitToWasm(command: EditorCommand) {
     if (command.type === "delete") {
       wasmDocument.delete_nodes(crypto.randomUUID(), wasmDocument.revision, command.ids.join(","));
     }
+    if (command.type === "reposition") {
+      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify([{ type: "reposition", positionIds: command.positionIds }]));
+    }
     return true;
   } catch (error) {
     emitError(error);
@@ -401,7 +857,7 @@ function admitToWasm(command: EditorCommand) {
   }
 }
 function isWasmDocumentCommand(command: EditorCommand) {
-  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)));
+  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || command.type === "reposition" || (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)));
 }
 function recordHistory(kind: HistoryKind) {
   undoOrder.push(kind);
@@ -414,6 +870,9 @@ function resetDocumentToStarterNodes() {
   // retain the last confirmed document until the replacement Core is ready.
   bridgeLoadSequence += 1;
   wasmDocument = undefined;
+  ephemeralBenchmarkProjection = false;
+  rustGpuScene = undefined;
+  rustTextLayouts.clear();
   documentCore = "Starting Rust/WASM bridge";
   const reset = resetDocumentProjection(starterNodes());
   nodes = reset.nodes;
@@ -430,7 +889,11 @@ function resetDocumentToStarterNodes() {
   emitSnapshot(undefined, false);
   void loadDocumentBridge();
 }
-function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJournalOperation, baseRevision?: number, advancesRevision = true) {
+function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJournalOperation, baseRevision?: number, advancesRevision = true, remoteCommand?: EditorCommand) {
+  // Resolve against the exact projection observed before this local commit. The
+  // WASM narrow bridge below may publish a newer projection, but remote payloads
+  // must retain this operation's original base state and revision.
+  const nodesBeforeCommit = appliedByWasm && remoteCommand ? structuredClone(nodes) : undefined;
   if (!appliedByWasm) {
     history.push({ nodes: cloneDocument(), advancesRevision });
     if (history.length > 100) {
@@ -448,6 +911,11 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
   }
   render();
   emitSnapshot(operation && baseRevision !== undefined ? journalEntry(operation, baseRevision) : undefined);
+  if (appliedByWasm && remoteCommand && nodesBeforeCommit && wasmDocument && baseRevision !== undefined) {
+    const resolved = resolveCoreBatch(nodesBeforeCommit, [remoteCommand]);
+    if (resolved) queueRemoteOperation(crypto.randomUUID(), baseRevision, resolved.batch, wasmDocument.canonical_hash());
+    else emitError(undefined, "TRANSIENT");
+  }
 }
 function toWorld(x: number, y: number) { return { x: (x - width / 2) / viewport.zoom - viewport.x, y: (y - height / 2) / viewport.zoom - viewport.y }; }
 function toScreen(x: number, y: number) { return { x: (x + viewport.x) * viewport.zoom + width / 2, y: (y + viewport.y) * viewport.zoom + height / 2 }; }
@@ -473,13 +941,13 @@ function isFrameNameHit(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode
 }
 function hitFrameName(screenX: number, screenY: number) {
   if (!context) return undefined;
-  return [...nodes].reverse().find((node) => {
+  return [...activeNodes()].reverse().find((node) => {
     if (node.kind !== "frame" || node.visible === false || node.locked) return false;
     return isFrameNameHit(context!, node, screenX, screenY);
   });
 }
 function hit(worldX: number, worldY: number) {
-  const node = findTopmostHit(nodes, { x: worldX, y: worldY });
+  const node = findTopmostHit(activeNodes(), { x: worldX, y: worldY });
   if (node) return node;
   const screen = toScreen(worldX, worldY);
   return hitFrameName(screen.x, screen.y);
@@ -526,7 +994,33 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.rotate(node.rotation * Math.PI / 180);
   ctx.translate(-w / 2, -h / 2);
   const paint = fillStyle(ctx, node, w, h);
-  if (node.kind === "ellipse") {
+  if (node.assetId) {
+    const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
+    if (node.kind === "ellipse") {
+      ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    } else roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius);
+    ctx.clip();
+    const bitmap = imageBitmaps.get(node.assetId);
+    if (bitmap) {
+      const scale = Math.max(w / bitmap.width, h / bitmap.height);
+      const drawWidth = bitmap.width * scale;
+      const drawHeight = bitmap.height * scale;
+      ctx.drawImage(bitmap, (w - drawWidth) / 2, (h - drawHeight) / 2, drawWidth, drawHeight);
+    } else {
+      ctx.fillStyle = paint;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = "rgba(0, 72, 255, .16)";
+      for (let offset = -h; offset < w; offset += 18) ctx.fillRect(offset, 0, 8, h);
+    }
+    if (hasVisibleStroke(node)) {
+      if (node.kind === "ellipse") {
+        ctx.beginPath(); ctx.ellipse(w / 2, h / 2, Math.max(0, w - 1) / 2, Math.max(0, h - 1) / 2, 0, 0, Math.PI * 2);
+      } else roundedRectPath(ctx, 0.5, 0.5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - .5));
+      ctx.strokeStyle = strokeStyle(ctx, node, w, h);
+      ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+      ctx.stroke();
+    }
+  } else if (node.kind === "ellipse") {
     const geometry = resolveInsideRoundedRect(w, h, 0, node.strokeWidth * viewport.zoom);
     ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
     if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
@@ -542,19 +1036,72 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
       ctx.fill();
     }
   } else if (node.kind === "text") {
-    const textMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
+    const primaryStyle = node.textProperties?.runs[0];
+    const baseMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
+    const fontSize = (primaryStyle?.fontSize ?? 31) * viewport.zoom;
+    const lineHeight = (node.textProperties?.paragraph.lineHeight ?? (primaryStyle?.fontSize ?? 31) * 1.25) * viewport.zoom;
+    const textMetrics = { ...baseMetrics, fontSize, lineHeight };
+    const source = node.text ?? "Text";
+    const sourceBytes = new TextEncoder().encode(source);
+    const primaryRenderStyle: RenderTextStyle = primaryStyle ? {
+      font: primaryStyle.font,
+      fontSize: primaryStyle.fontSize,
+      fontWeight: primaryStyle.fontWeight,
+      italic: primaryStyle.italic,
+      letterSpacing: primaryStyle.letterSpacing,
+    } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
     ctx.fillStyle = paint;
-    ctx.font = canvasFont({ ...canvasDesignTokens.typography.canvasText, size: textMetrics.fontSize });
-    ctx.textBaseline = "top";
+    applyCanvasTextStyle(ctx, primaryRenderStyle);
+    // CSS line boxes center the font's bounding ascent/descent inside the
+    // declared line-height. Canvas' `middle` baseline uses a different em-box
+    // convention, which was visibly a few pixels above the textarea glyphs.
+    // Draw against an explicit alphabetic baseline instead.
+    ctx.textBaseline = "alphabetic";
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, textMetrics.width, textMetrics.height); ctx.clip();
-    layoutText({ text: node.text ?? "Text", maxWidth: Math.max(1, textMetrics.width), measure: (value) => ctx.measureText(value).width }).forEach((line, index) => {
-      const lineY = index * textMetrics.lineHeight;
+    let lineY = 0;
+    let previousEnd = 0;
+    const shapedLayout = rustTextLayoutFor(node);
+    const lines = shapedLayout
+      ? shapedLayout.lines.map((line) => ({ ...line, text: new TextDecoder().decode(sourceBytes.slice(line.start, line.end)) }))
+      : layoutTextRanges({ text: source, maxWidth: Math.max(1, textMetrics.width), measure: (value) => ctx.measureText(value).width });
+    lines.forEach((line) => {
+      const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+      if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineY += (node.textProperties?.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
+      const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
+      const lineHeight = (node.textProperties?.paragraph.lineHeight ?? Math.max(...spans.map((span) => span.style.fontSize * 1.25), primaryRenderStyle.fontSize * 1.25)) * viewport.zoom;
       if (lineY < textMetrics.height) {
+        // A CSS line has one shared alphabetic baseline. Measuring each style
+        // run separately made a larger CJK/emoji run jump a few pixels from
+        // the Latin run when the DOM editor opened.
+        applyCanvasTextStyle(ctx, primaryRenderStyle);
+        const lineBaseline = cssLineBoxBaseline(ctx, lineY, lineHeight);
         ctx.direction = line.direction;
-        ctx.textAlign = line.direction === "rtl" ? "right" : "left";
-        ctx.fillText(line.text, line.direction === "rtl" ? textMetrics.width : 0, lineY);
+        const alignment = node.textProperties?.paragraph.alignment ?? "left";
+        if (line.direction === "rtl" || spans.length <= 1) {
+          const style = spans[0]?.style ?? primaryRenderStyle;
+          applyCanvasTextStyle(ctx, style);
+          ctx.textAlign = alignment === "center" ? "center" : alignment === "right" || line.direction === "rtl" ? "right" : "left";
+          const x = alignment === "center" ? textMetrics.width / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width : 0;
+          ctx.fillText(line.text, x, lineBaseline);
+        } else {
+          ctx.direction = "ltr";
+          ctx.textAlign = "left";
+          const measured = spans.map((span) => {
+            applyCanvasTextStyle(ctx, span.style);
+            return ctx.measureText(span.text).width;
+          });
+          const lineWidth = measured.reduce((sum, width) => sum + width, 0);
+          let x = alignment === "center" ? (textMetrics.width - lineWidth) / 2 : alignment === "right" ? textMetrics.width - lineWidth : 0;
+          spans.forEach((span, index) => {
+            applyCanvasTextStyle(ctx, span.style);
+            ctx.fillText(span.text, x, lineBaseline);
+            x += measured[index];
+          });
+        }
       }
+      lineY += lineHeight;
+      previousEnd = line.end;
     });
     ctx.restore();
   } else {
@@ -576,6 +1123,84 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   }
   ctx.restore();
 }
+
+function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle) {
+  const fontFamily = style.font ? fontFaces.familyFor(style.font.assetId) : undefined;
+  ctx.font = `${style.italic ? "italic " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamily ? `"${fontFamily}", ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
+  const letterSpacingTarget = ctx as unknown as { letterSpacing?: string };
+  if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * viewport.zoom}px`;
+}
+
+/** Matches the browser's inline line-box rule: center the selected font's
+ * bounding box in the line-height, then place its alphabetic baseline. */
+function cssLineBoxBaseline(ctx: OffscreenCanvasRenderingContext2D, lineTop: number, lineHeight: number): number {
+  const metrics = ctx.measureText("Mg");
+  const fallbackSize = Number.parseFloat(ctx.font.match(/(\d+(?:\.\d+)?)px/u)?.[1] ?? "16");
+  return resolveCssLineBoxBaseline(lineTop, lineHeight, metrics, fallbackSize);
+}
+
+/** Resolves Figma-style auto sizing in document coordinates before the Core
+ * transaction is built. The geometry and text update therefore share one
+ * revision and undo entry instead of leaving a DOM-only measurement behind. */
+function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
+  if (command.type !== "update" || !context) return command;
+  const ctx = context;
+  const previous = nodes.find((node) => node.id === command.id);
+  if (!previous || previous.kind !== "text") return command;
+  const node = { ...previous, ...command.patch };
+  const properties = node.textProperties;
+  if (!properties || properties.autoSize === "fixed") return command;
+
+  const primary = properties.runs[0];
+  const primaryStyle: RenderTextStyle = primary ? {
+    font: primary.font,
+    fontSize: primary.fontSize,
+    fontWeight: primary.fontWeight,
+    italic: primary.italic,
+    letterSpacing: primary.letterSpacing,
+  } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
+  const source = node.text ?? "";
+  const sourceBytes = new TextEncoder().encode(source);
+  applyCanvasTextStyle(ctx, primaryStyle);
+  const maxWidth = properties.autoSize === "widthAndHeight" ? Number.POSITIVE_INFINITY : Math.max(1, node.width * viewport.zoom);
+  const lines = layoutTextRanges({ text: source, maxWidth, measure: (value) => ctx.measureText(value).width });
+  let height = 0;
+  let widest = 1;
+  let previousEnd = 0;
+  lines.forEach((line) => {
+    const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) height += (properties.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
+    const spans = styledTextSpans(source, line.start, line.end, properties);
+    const lineHeight = (properties.paragraph.lineHeight ?? Math.max(...spans.map((span) => span.style.fontSize * 1.25), primaryStyle.fontSize * 1.25)) * viewport.zoom;
+    height += lineHeight;
+    if (spans.length <= 1) {
+      applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle);
+      widest = Math.max(widest, ctx.measureText(line.text).width);
+    } else {
+      const measured = spans.reduce((total, span) => {
+        applyCanvasTextStyle(ctx, span.style);
+        return total + ctx.measureText(span.text).width;
+      }, 0);
+      widest = Math.max(widest, measured);
+    }
+    previousEnd = line.end;
+  });
+  const patch: Partial<CanvasNode> = {
+    ...command.patch,
+    height: Math.max(1, height / viewport.zoom),
+    ...(properties.autoSize === "widthAndHeight" ? { width: Math.max(1, widest / viewport.zoom) } : {}),
+  };
+  return { ...command, patch };
+}
+
+/** New page-root layers behave like Figma: they enter above the current stack.
+ * Existing explicit keys are retained for snapshots, imports and remote replay. */
+function withResolvedLayerPosition(command: EditorCommand): EditorCommand {
+  if (command.type !== "create" || command.node.positionId) return command;
+  const pageId = command.node.pageId ?? activePageId;
+  const siblings = nodes.filter((node) => (node.pageId ?? defaultPageId) === pageId);
+  return { ...command, node: { ...command.node, pageId, positionId: orderNewLayerAtFront(siblings, command.node.id) } };
+}
 function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (!selectedIds.includes(node.id)) return;
   const point = toScreen(node.x, node.y);
@@ -586,6 +1211,27 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.rotate(node.rotation * Math.PI / 180);
   ctx.translate(-w / 2, -h / 2);
   ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(canvasDesignTokens.stroke.selection.pixelInset, canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1)); ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/** Text stays outside the document until pointer-up, so its ordinary selected
+ * state is unavailable while the user is defining the editable box. Render the
+ * same bounds directly over that transient node to make an empty text drag
+ * feel continuous with the selected text layer that follows. */
+function renderTextCreationHighlight(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (node.kind !== "text") return;
+  const point = toScreen(node.x, node.y);
+  const w = node.width * viewport.zoom;
+  const h = node.height * viewport.zoom;
+  ctx.save();
+  ctx.translate(point.x + w / 2, point.y + h / 2);
+  ctx.rotate(node.rotation * Math.PI / 180);
+  ctx.translate(-w / 2, -h / 2);
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]);
+  ctx.strokeRect(canvasDesignTokens.stroke.selection.pixelInset, canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1));
+  ctx.setLineDash([]);
   ctx.restore();
 }
 function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
@@ -683,7 +1329,7 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
 function updateMarqueeSelection(activeDrag: Extract<Drag, { mode: "select" }>, endX: number, endY: number) {
   activeDrag.currentX = endX;
   activeDrag.currentY = endY;
-  const marqueeIds = selectNodesInMarquee(nodes, { x: activeDrag.startX, y: activeDrag.startY }, { x: endX, y: endY });
+  const marqueeIds = selectNodesInMarquee(activeNodes(), { x: activeDrag.startX, y: activeDrag.startY }, { x: endX, y: endY });
   selectedIds = resolveMarqueeSelection(activeDrag.initialSelection, marqueeIds, activeDrag.additive);
 }
 function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
@@ -709,7 +1355,10 @@ function render(rendersPerInputFrame?: number) {
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
   const candidateNodes = spatialGrid.query(viewportBounds);
-  const visibleNodes = candidateNodes.filter((node) => node.visible !== false && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  const visibleNodes = candidateNodes.filter((node) => node.visible !== false && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  // Rust's graph may optimize passes, but presentation must keep the document
+  // stack intact. GPU receives the identical ordered prefix further below.
+  const renderOrderedNodes = sortNodesByLayerOrder(visibleNodes);
   const cullingMs = performance.now() - cullingStartedAt;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
@@ -724,7 +1373,29 @@ function render(rendersPerInputFrame?: number) {
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
-      const result = gpuRenderer.render({ nodes, viewport, width, height, dpr, sceneKey: `${revision}:${transientSceneVersion}` });
+      const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId);
+      const decodedImageAssetIds = new Set(pageNodes
+        .filter((node) => node.kind === "image" && Boolean(node.assetId) && Boolean(imageBitmaps.get(node.assetId!)))
+        .map((node) => node.assetId!));
+      refreshRustGpuTextGlyphs();
+      const gpuTextNodeIds = new Set([...rustGpuTextGlyphs]
+        .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
+        .map(([nodeId]) => nodeId));
+      const gpuNodes = gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds);
+      const currentRustGpuScene = gpuNodes.length === pageNodes.length && rustGpuScene
+        && rustGpuScene.revision === revision
+        && rustGpuScene.pageId === activePageId
+        && rustGpuScene.transientSceneVersion === transientSceneVersion
+        ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
+        : undefined;
+      const gpuImageBitmaps = new Map<string, ImageBitmap>();
+      gpuNodes.forEach((node) => {
+        if (node.kind !== "image" || !node.assetId) return;
+        const bitmap = imageBitmaps.get(node.assetId);
+        if (bitmap) gpuImageBitmaps.set(node.assetId, bitmap);
+      });
+      const textGlyphs = gpuNodes.filter((node) => node.kind === "text").flatMap((node) => rustGpuTextGlyphs.get(node.id)?.glyphs ?? []);
+      const result = gpuRenderer.render({ nodes: gpuNodes, viewport, width, height, dpr, sceneKey: `${revision}:${activePageId}:${transientSceneVersion}:${gpuNodes.map((node) => node.id).join(",")}`, precomputedInstances: currentRustGpuScene, imageBitmaps: gpuImageBitmaps, textGlyphs });
       const compositeStartedAt = performance.now();
       context.drawImage(result.bitmap, 0, 0, width, height);
       compositeMs = performance.now() - compositeStartedAt;
@@ -753,31 +1424,78 @@ function render(rendersPerInputFrame?: number) {
   }
   const gpuPrepareMs = performance.now() - gpuStartedAt;
   const overlayStartedAt = performance.now();
-  visibleNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
+  renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
   visibleNodes.forEach((node) => renderFrameName(context!, node));
   const hovered = hoveredId ? nodeById.get(hoveredId) : undefined;
   if (hovered && visibleNodes.includes(hovered)) renderHover(context!, hovered);
-  const visibleSelected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && visibleNodes.includes(node)));
+  // The editing DOM layer intentionally replaces only glyph painting. Keep the
+  // Canvas selection geometry visible beneath it, so the edit outline remains
+  // identical to the hover/selected document bounds rather than using a browser
+  // textarea focus ring with its own outside offset.
+  const visibleSelected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(
+    node
+    && node.visible !== false
+    && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds)
+    && (visibleNodes.includes(node) || node.id === editingTextNodeId),
+  ));
   visibleSelected.forEach((node) => renderSelection(context!, node));
   if (visibleSelected.length) renderSelectionLabel(context);
   renderMarquee(context);
   renderGrid(context);
   renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
+  maybeSimulateGpuLoss();
 }
 function dispatch(command: EditorCommand) {
+  command = withResolvedTextAutoSize(command);
+  command = withResolvedLayerPosition(command);
   const baseRevision = wasmDocument ? Number(wasmDocument.revision) : undefined;
   if (!admitToWasm(command)) return;
   const appliedByWasm = isWasmDocumentCommand(command);
   switch (command.type) {
+    case "select-page": {
+      if (!pages.some((page) => page.id === command.id)) { emitError(undefined, "INVALID_COMMAND"); break; }
+      activePageId = command.id;
+      refreshRustGpuScene();
+      selectedIds = [];
+      hoveredId = undefined;
+      rebuildNodeIndex();
+      render();
+      emitSnapshot(undefined, false);
+      break;
+    }
+    case "create-page": {
+      if (!wasmDocument) { emitError(undefined, "INVALID_COMMAND"); break; }
+      try {
+        const pageBaseRevision = Number(wasmDocument.revision);
+        const pageTransactionId = crypto.randomUUID();
+        wasmDocument.create_page(pageTransactionId, wasmDocument.revision, command.id, command.name.trim());
+        recordHistory("core");
+        syncProjectionFromWasm(false);
+        activePageId = command.id;
+        refreshRustGpuScene();
+        selectedIds = [];
+        rebuildNodeIndex();
+        render();
+        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pageBaseRevision));
+        const page = pages.find((candidate) => candidate.id === command.id);
+        if (page) queueRemotePayload(pageTransactionId, pageBaseRevision, encodeCreatePagePayload(page), wasmDocument.canonical_hash());
+        else emitError(undefined, "TRANSIENT");
+      } catch (error) { emitError(error); }
+      break;
+    }
     case "create": {
-      commit(() => { nodes.push(command.node); selectedIds = [command.node.id]; }, appliedByWasm, appliedByWasm ? { type: "create", node: command.node } : undefined, baseRevision);
+      commit(() => { nodes.push(command.node); selectedIds = [command.node.id]; }, appliedByWasm, appliedByWasm ? { type: "create", node: command.node } : undefined, baseRevision, true, command);
       const nextTool = toolAfterLayerCreated(tool);
       if (nextTool !== tool) { tool = nextTool; emit({ type: "tool", tool }); }
       break;
     }
-    case "update": commit(() => { nodes = nodes.map((node) => node.id === command.id ? { ...node, ...command.patch } : node); }, appliedByWasm, appliedByWasm ? { type: "update", id: command.id, patch: command.patch } : undefined, baseRevision); break;
+    case "update": commit(() => { nodes = nodes.map((node) => node.id === command.id ? { ...node, ...command.patch } : node); }, appliedByWasm, appliedByWasm ? { type: "update", id: command.id, patch: command.patch } : undefined, baseRevision, true, command); break;
+    case "reposition": commit(() => {
+      const positions = new Map(command.positionIds.map(({ id, positionId }) => [id, positionId]));
+      nodes = nodes.map((node) => positions.has(node.id) ? { ...node, positionId: positions.get(node.id)! } : node);
+    }, appliedByWasm, appliedByWasm ? { type: "reposition", positionIds: command.positionIds } : undefined, baseRevision, true, command); break;
     case "select": selectedIds = command.ids; render(); emitViewState(); break;
-    case "delete": commit(() => { nodes = nodes.filter((node) => !command.ids.includes(node.id)); selectedIds = []; }, appliedByWasm, appliedByWasm ? { type: "delete", ids: command.ids } : undefined, baseRevision); break;
+    case "delete": commit(() => { nodes = nodes.filter((node) => !command.ids.includes(node.id)); selectedIds = []; }, appliedByWasm, appliedByWasm ? { type: "delete", ids: command.ids } : undefined, baseRevision, true, command); break;
     case "duplicate": {
       if (!wasmDocument) {
         commit(() => { const copies = nodes.filter((node) => command.ids.includes(node.id)).map((node, index) => ({ ...node, id: crypto.randomUUID(), name: `${node.name} copy`, x: node.x + 24 + index * 8, y: node.y + 24 + index * 8 })); nodes.push(...copies); selectedIds = copies.map((node) => node.id); });
@@ -793,6 +1511,7 @@ function dispatch(command: EditorCommand) {
         selectedIds = resolved.createdIds;
         render();
         emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, duplicateBaseRevision));
+        queueRemoteOperation(crypto.randomUUID(), duplicateBaseRevision, resolved.batch, wasmDocument.canonical_hash());
       } catch (error) { emitError(error); }
       break;
     }
@@ -833,15 +1552,17 @@ function dispatch(command: EditorCommand) {
     case "reset": resetDocumentToStarterNodes(); break;
     case "hydrate": {
       if (command.snapshot.format === "rust-core-v1") {
+        ephemeralBenchmarkProjection = false;
         viewport = { ...command.snapshot.viewport };
         void loadDocumentBridge(command.snapshot);
       } else {
+        ephemeralBenchmarkProjection = command.snapshot.format === "benchmark-projection-v1";
         nodes = normalizeIds(command.snapshot.nodes);
         rebuildNodeIndex();
         viewport = command.snapshot.viewport;
         render();
         emitSnapshot();
-        void loadDocumentBridge();
+        void loadDocumentBridge(undefined, ephemeralBenchmarkProjection);
       }
       break;
     }
@@ -857,7 +1578,7 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     emit({ type: "ack", transactionId: transaction.id, errorCode: "REVISION_CONFLICT" });
     return;
   }
-  const controlCommand = transaction.commands.length === 1 && ["select", "undo", "redo", "reset", "hydrate"].includes(transaction.commands[0].type);
+  const controlCommand = transaction.commands.length === 1 && ["select", "select-page", "create-page", "undo", "redo", "reset", "hydrate"].includes(transaction.commands[0].type);
   if (controlCommand) {
     dispatch(transaction.commands[0]);
     emit({ type: "ack", transactionId: transaction.id, acceptedRevision: revision });
@@ -868,7 +1589,8 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
     return;
   }
-  const resolved = resolveCoreBatch(nodes, transaction.commands);
+  const pageScopedCommands = transaction.commands.map((command) => command.type === "create" ? { ...command, node: { ...command.node, pageId: command.node.pageId ?? activePageId } } : command);
+  const resolved = resolveCoreBatch(nodes, pageScopedCommands);
   if (!resolved) {
     emitError(undefined, "INVALID_COMMAND", transaction.id);
     emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
@@ -883,6 +1605,7 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     render();
     diagnostics.record({ category: "transaction", code: "TRANSACTION_ACCEPTED", documentRevision: revision, transactionId: transaction.id, details: { commandCount: transaction.commands.length } });
     emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transaction.id));
+    queueRemoteOperation(transaction.id, baseRevision, resolved.batch, wasmDocument.canonical_hash());
     emit({ type: "ack", transactionId: transaction.id, acceptedRevision: revision });
   } catch (error) {
     const errorCode = error instanceof Error && error.message.includes("ResourceLimit") ? "RESOURCE_LIMIT" : "INVALID_TRANSACTION";
@@ -967,7 +1690,9 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       activeDrag.node.y = Math.min(activeDrag.startY, end.y);
       activeDrag.node.width = Math.max(4, Math.abs(end.x - activeDrag.startX));
       activeDrag.node.height = Math.max(4, Math.abs(end.y - activeDrag.startY));
-      render(); renderNode(context!, activeDrag.node);
+      render();
+      renderNode(context!, activeDrag.node);
+      renderTextCreationHighlight(context!, activeDrag.node);
     }
     if (activeDrag.mode === "move" && activeDrag.initial) {
       const dx = world.x - activeDrag.startX;
@@ -995,15 +1720,22 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     if (activeDrag.mode === "draw" && activeDrag.node) { dispatch({ type: "create", node: activeDrag.node }); }
     if (activeDrag.mode === "move" && activeDrag.before) {
+      const updates = nodes.filter((node) => activeDrag.initial?.has(node.id)).map(({ id, x, y, width, height }) => ({ id, x, y, width, height }));
+      const moved = hasCommittedMove(activeDrag.initial, updates);
+      // A normal click selects an object and creates a move drag boundary, but
+      // it must not mint a no-op transaction or remote Operation on pointer-up.
+      if (!moved) { drag = undefined; render(); emitViewState(); return; }
       if (wasmDocument) {
         try {
-          const updates = nodes.filter((node) => activeDrag.initial?.has(node.id)).map(({ id, x, y, width, height }) => ({ id, x, y, width, height }));
           const baseRevision = Number(wasmDocument.revision);
           wasmDocument.move_nodes(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(updates));
           recordHistory("core");
           syncProjectionFromWasm();
           render();
           emitSnapshot(journalEntry({ type: "move", updates }, baseRevision));
+          const resolved = resolveCoreBatch(activeDrag.before, updates.map((update) => ({ type: "update" as const, id: update.id, patch: update })));
+          if (resolved) queueRemoteOperation(crypto.randomUUID(), baseRevision, resolved.batch, wasmDocument.canonical_hash());
+          else emitError(undefined, "TRANSIENT");
         } catch (error) {
           nodes = activeDrag.before;
           transientSceneVersion += 1;
@@ -1038,10 +1770,18 @@ function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "poin
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
-    if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
+    if (data.type === "init") { canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
     else if (data.type === "tool") { tool = data.tool; }
     else if (data.type === "checkpoint") emitViewportCheckpoint();
+    else if (data.type === "remote-bootstrap") {
+      remoteBootstrapPending = true;
+      if (documentCore === "Rust/WASM bridge ready") emitRemoteBootstrap();
+    }
+    else if (data.type === "remote-hydrate") hydrateRemoteSnapshot(data.snapshot);
+    else if (data.type === "register-asset") registerAsset(data.transactionId, data.asset);
+    else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes);
+    else if (data.type === "editing-text") { editingTextNodeId = data.nodeId; render(); }
     else if (data.type === "simulate-crash") {
       setTimeout(() => { throw new Error("Development-only Engine Worker crash simulation"); }, 0);
     }

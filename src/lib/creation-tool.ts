@@ -1,6 +1,6 @@
 import type { NodeKind, ToolKind } from "./editor-protocol";
 
-export function isCreationTool(tool: ToolKind): tool is NodeKind {
+export function isCreationTool(tool: ToolKind): tool is Exclude<NodeKind, "image"> {
   return tool === "frame" || tool === "rectangle" || tool === "ellipse" || tool === "text";
 }
 

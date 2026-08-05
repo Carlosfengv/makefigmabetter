@@ -1,11 +1,11 @@
 import { documentColorFromCssHex, type CanvasNode, type EditorCommand } from "./editor-protocol";
 
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokeWidth" | "opacity" | "visible" | "locked"> & { cornerRadius: number; text: string };
-export type CoreBatchCommand = { type: "create"; node: CoreProjectionNode } | { type: "update"; node: CoreProjectionNode } | { type: "delete"; ids: string[] };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokeWidth" | "opacity" | "visible" | "locked" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
+export type CoreBatchCommand = { type: "create"; node: CoreProjectionNode } | { type: "update"; node: CoreProjectionNode } | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> } | { type: "delete"; ids: string[] };
 export type ResolvedCoreBatch = { batch: CoreBatchCommand[]; nextNodes: CanvasNode[]; createdIds: string[] };
 
 function projectionNode(node: CanvasNode): CoreProjectionNode {
-  return { id: node.id, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, opacity: node.opacity, cornerRadius: node.radius, text: node.text ?? "", visible: node.visible !== false, locked: Boolean(node.locked) };
+  return { id: node.id, pageId: node.pageId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, opacity: node.opacity, cornerRadius: node.radius, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), assetId: node.assetId };
 }
 
 /** Resolves UI-level partial patches to the concrete Core commands accepted by WASM.
@@ -40,6 +40,15 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (!command.ids.length || new Set(command.ids).size !== command.ids.length || command.ids.some((id) => !nextNodes.some((node) => node.id === id))) return undefined;
       nextNodes.splice(0, nextNodes.length, ...nextNodes.filter((node) => !command.ids.includes(node.id)));
       batch.push({ type: "delete", ids: command.ids });
+      continue;
+    }
+    if (command.type === "reposition") {
+      if (!command.positionIds.length || new Set(command.positionIds.map(({ id }) => id)).size !== command.positionIds.length || command.positionIds.some(({ id, positionId }) => !nextNodes.some((node) => node.id === id) || !positionId)) return undefined;
+      command.positionIds.forEach(({ id, positionId }) => {
+        const index = nextNodes.findIndex((node) => node.id === id);
+        nextNodes[index] = { ...nextNodes[index], positionId };
+      });
+      batch.push({ type: "reposition", positionIds: command.positionIds.map((entry) => ({ ...entry })) });
       continue;
     }
     if (command.type === "duplicate") {
