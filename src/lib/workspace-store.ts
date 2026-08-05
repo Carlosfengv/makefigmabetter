@@ -131,7 +131,7 @@ export async function flushWorkspaceSave(key: string) {
 
 /** Server data is the shared source of truth for the test link. LocalStorage is
  * retained only as an offline cache while the next successful request repairs it. */
-export async function fetchWorkspace(key: string) {
+export async function fetchWorkspace(key: string, { allowCachedFallback = true }: { allowCachedFallback?: boolean } = {}) {
   if (key !== DEMO_WORKSPACE_KEY) return undefined;
   try {
     const response = await fetch(`/api/workspaces/${encodeURIComponent(key)}`, { cache: "no-store" });
@@ -140,7 +140,14 @@ export async function fetchWorkspace(key: string) {
     serverRevisions.set(key, workspace.revision);
     window.localStorage.setItem(storageKey(key), JSON.stringify(workspace));
     return workspace;
-  } catch { return loadWorkspace(key); }
+  } catch { return allowCachedFallback ? loadWorkspace(key) : undefined; }
+}
+
+/** Call only after a failed queued mutation has settled and the caller has
+ * reloaded the authoritative catalogue. This deliberately never retries a
+ * stale full-catalogue payload. */
+export function resetWorkspaceSaveQueue(key: string) {
+  saveQueues.delete(key);
 }
 
 export function createWorkspaceDocument(workspace: WorkspaceData, projectId?: string) {

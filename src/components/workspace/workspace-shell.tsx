@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  createWorkspaceDocument, createWorkspaceProject, duplicateWorkspaceDocument, fetchWorkspace, flushWorkspaceSave, loadWorkspace, patchWorkspaceDocument, patchWorkspaceProject,
+  createWorkspaceDocument, createWorkspaceProject, duplicateWorkspaceDocument, fetchWorkspace, flushWorkspaceSave, loadWorkspace, patchWorkspaceDocument, patchWorkspaceProject, resetWorkspaceSaveQueue,
   removeWorkspaceDocument, removeWorkspaceProject, saveWorkspace, type WorkspaceData, type WorkspaceDocument,
 } from "@/lib/workspace-store";
 import { copyLocalDocument, removeLocalDocument } from "@/lib/local-document";
@@ -35,10 +35,8 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
   useEffect(() => { let active = true; void fetchWorkspace(workspaceKey).then((next) => { if (active) { setWorkspace(next); setLoaded(true); } }); return () => { active = false; }; }, [workspaceKey]);
   useEffect(() => {
     const onConflict = (event: Event) => { setWorkspace((event as CustomEvent<WorkspaceData>).detail); setConflict(true); };
-    const onSaveError = (event: Event) => { const detail = (event as CustomEvent<{ key: string; error: Error }>).detail; if (detail.key === workspaceKey) announce(detail.error.message === "WORKSPACE_CONFLICT" ? "保存冲突，请重新加载最新版本" : "保存失败，请检查网络后重新加载"); };
     window.addEventListener("makefigma:workspace-conflict", onConflict);
-    window.addEventListener("makefigma:workspace-save-error", onSaveError);
-    return () => { window.removeEventListener("makefigma:workspace-conflict", onConflict); window.removeEventListener("makefigma:workspace-save-error", onSaveError); };
+    return () => window.removeEventListener("makefigma:workspace-conflict", onConflict);
   }, [workspaceKey]);
   useEffect(() => { window.localStorage.setItem("makefigma:workspace-view", layout); }, [layout]);
   useEffect(() => { setLayout((window.localStorage.getItem("makefigma:workspace-view") as "grid" | "list") ?? "grid"); }, []);
@@ -73,22 +71,32 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
   const openDialog = (kind: NonNullable<typeof dialog>["kind"], id?: string, value = "") => { setActiveMenu(undefined); setDraft(value); setDialog({ kind, id }); };
   const selected = dialog?.id ? workspace.documents.find((document) => document.id === dialog.id) : undefined;
   const announce = (message: string, undo?: () => void) => { setToast({ message, undo }); window.setTimeout(() => setToast(undefined), 8_000); };
+  const persist = async (next: WorkspaceData, successMessage?: string) => {
+    update(next);
+    try {
+      await flushWorkspaceSave(workspaceKey);
+      if (successMessage) announce(successMessage);
+      return true;
+    } catch {
+      resetWorkspaceSaveQueue(workspaceKey);
+      const restored = await fetchWorkspace(workspaceKey, { allowCachedFallback: false });
+      update(restored ?? workspace);
+      announce(restored ? "保存失败，已恢复到最新已保存版本" : "保存失败，未能确认服务器状态；请重新加载");
+      return false;
+    }
+  };
   const createDocument = async () => {
     if (creating) return;
     setCreating(true);
     const next = createWorkspaceDocument(workspace, projectId);
-    update(next);
     const created = next.documents[0];
-    try {
-      await flushWorkspaceSave(workspaceKey);
+    if (await persist(next)) {
       window.location.assign(`/workspace/${workspaceKey}/design/${created.id}`);
-    } catch {
-      setCreating(false);
-      announce("创建失败，请重试");
     }
+    setCreating(false);
   };
-  const trash = (document: WorkspaceDocument) => { const next = patchWorkspaceDocument(workspace, document.id, { status: "trashed", trashedAt: new Date().toISOString() }); update(next); announce("已移至回收站", () => { const restored = patchWorkspaceDocument(next, document.id, { status: "active", trashedAt: undefined }); update(restored); }); };
-  const restore = (document: WorkspaceDocument) => { const projectExists = document.projectId && workspace.projects.some((project) => project.id === document.projectId); update(patchWorkspaceDocument(workspace, document.id, { status: "active", trashedAt: undefined, projectId: projectExists ? document.projectId : undefined })); announce("文档已恢复"); };
+  const trash = async (document: WorkspaceDocument) => persist(patchWorkspaceDocument(workspace, document.id, { status: "trashed", trashedAt: new Date().toISOString() }), "已移至回收站");
+  const restore = async (document: WorkspaceDocument) => { const projectExists = document.projectId && workspace.projects.some((project) => project.id === document.projectId); await persist(patchWorkspaceDocument(workspace, document.id, { status: "active", trashedAt: undefined, projectId: projectExists ? document.projectId : undefined }), "文档已恢复"); };
   const duplicate = async (document: WorkspaceDocument) => {
     const next = duplicateWorkspaceDocument(workspace, document.id, false);
     const copy = next.documents[0];
@@ -97,33 +105,40 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
     try {
       await new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).cloneDocument(document.id, copy.id);
       await copyLocalDocument(document.id, copy.id);
-      update(saveWorkspace(next));
-      await flushWorkspaceSave(workspaceKey);
-      announce("文档副本已创建");
+      if (!await persist(saveWorkspace(next), "文档副本已创建")) {
+        await new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).deleteDocument(copy.id).catch(() => undefined);
+      }
     } catch { announce("复制失败，请重试"); }
     finally { setSavingAction(false); }
   };
   const purge = async (document: WorkspaceDocument) => {
     setSavingAction(true);
     try {
-      await new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).deleteDocument(document.id);
-      await removeLocalDocument(document.id).catch(() => undefined);
-      update(removeWorkspaceDocument(workspace, document.id));
-      await flushWorkspaceSave(workspaceKey);
-      announce("文档已永久删除");
-      setDialog(undefined);
+      if (!await persist(removeWorkspaceDocument(workspace, document.id))) return;
+      try {
+        await new DocumentApiTransport({ baseUrl: documentApiUrl, tenantId: localDevTenantId, actorId: localDevActorId }).deleteDocument(document.id);
+        await removeLocalDocument(document.id).catch(() => undefined);
+        announce("文档已永久删除");
+        setDialog(undefined);
+      } catch {
+        // The catalogue was removed first to invalidate the link immediately;
+        // if durable cleanup rejects, restore that catalogue entry before
+        // reporting failure so the document is not silently stranded.
+        await persist(saveWorkspace(workspace));
+        announce("永久删除失败，文档已恢复");
+      }
     } catch { announce("永久删除失败，请重试"); }
     finally { setSavingAction(false); }
   };
   const confirmDialog = async () => {
     const name = draft.trim();
     if (dialog?.kind === "purge" && selected) { await purge(selected); return; }
-    if (dialog?.kind === "rename" && selected && name) { update(patchWorkspaceDocument(workspace, selected.id, { name })); announce("文档已重命名"); }
-    if (dialog?.kind === "move" && selected) { update(patchWorkspaceDocument(workspace, selected.id, { projectId: draft || undefined })); announce("文档已移动"); }
-    if (dialog?.kind === "trash" && selected) trash(selected);
-    if (dialog?.kind === "project" && name) { update(createWorkspaceProject(workspace, name)); announce("项目已创建"); }
-    if (dialog?.kind === "project-rename" && dialog.id && name) { update(patchWorkspaceProject(workspace, dialog.id, { name })); announce("项目已重命名"); }
-    if (dialog?.kind === "project-delete" && dialog.id) { update(removeWorkspaceProject(workspace, dialog.id)); setView("all"); announce("项目已删除"); }
+    if (dialog?.kind === "rename" && selected && name) await persist(patchWorkspaceDocument(workspace, selected.id, { name }), "文档已重命名");
+    if (dialog?.kind === "move" && selected) await persist(patchWorkspaceDocument(workspace, selected.id, { projectId: draft || undefined }), "文档已移动");
+    if (dialog?.kind === "trash" && selected) await trash(selected);
+    if (dialog?.kind === "project" && name) await persist(createWorkspaceProject(workspace, name), "项目已创建");
+    if (dialog?.kind === "project-rename" && dialog.id && name) await persist(patchWorkspaceProject(workspace, dialog.id, { name }), "项目已重命名");
+    if (dialog?.kind === "project-delete" && dialog.id && await persist(removeWorkspaceProject(workspace, dialog.id), "项目已删除")) setView("all");
     setDialog(undefined);
   };
   const projectDocumentCount = projectId ? workspace.documents.filter((document) => document.projectId === projectId && document.status !== "trashed").length : 0;
@@ -148,7 +163,7 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
         <div className="toolbar-actions"><label className="workspace-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文档或项目" aria-label="搜索文档或项目" /></label><select value={sort} onChange={(event) => setSort(event.target.value as Sort)} aria-label="排序方式"><option value="updated-desc">最近修改</option><option value="updated-asc">最早修改</option><option value="created-desc">创建时间：最新</option><option value="created-asc">创建时间：最早</option><option value="name-asc">文档名称：A–Z</option><option value="name-desc">文档名称：Z–A</option></select><div className="view-toggle"><button className={layout === "grid" ? "active" : ""} onClick={() => setLayout("grid")} aria-label="卡片视图">▦</button><button className={layout === "list" ? "active" : ""} onClick={() => setLayout("list")} aria-label="列表视图">☷</button></div>{view !== "trash" && <button className="new-document" disabled={creating} onClick={createDocument}>{creating ? "正在创建…" : "＋ 新建设计文档"}</button>}</div>
       </header>
       {view.startsWith("project:") && <div className="project-context"><span>项目 · {workspace.projects.find((project) => project.id === projectId)?.description || "暂无描述"}</span><button onClick={() => openDialog("project-rename", projectId, title)}>重命名</button><button disabled={projectDocumentCount > 0} title={projectDocumentCount ? "项目中仍有文档，无法删除" : "删除空项目"} onClick={() => openDialog("project-delete", projectId)}>删除项目</button></div>}
-      {documents.length === 0 ? <EmptyState view={view} query={query} onClear={() => setSearch("")} onCreate={() => void createDocument()} /> : <div className={layout === "grid" ? "document-grid" : "document-list"}>{layout === "list" && <div className="document-list-head"><span>文档名称</span><span>所属项目</span><span>创建时间</span><span>最近修改</span><span>状态</span><span /></div>}{documents.map((document) => <DocumentItem key={document.id} document={document} workspaceKey={workspaceKey} projectName={projectName(document.projectId)} layout={layout} menuOpen={activeMenu === document.id} onMenu={(event) => { event.stopPropagation(); setActiveMenu(activeMenu === document.id ? undefined : document.id); }} onAction={(action) => { if (action === "open") window.location.assign(`/workspace/${workspaceKey}/design/${document.id}`); if (action === "restore") restore(document); if (action === "rename") openDialog("rename", document.id, document.name); if (action === "copy") void duplicate(document); if (action === "move") openDialog("move", document.id, document.projectId ?? ""); if (action === "trash") openDialog("trash", document.id); if (action === "purge") openDialog("purge", document.id); }} />)}</div>}
+      {documents.length === 0 ? <EmptyState view={view} query={query} onClear={() => setSearch("")} onCreate={() => void createDocument()} /> : <div className={layout === "grid" ? "document-grid" : "document-list"}>{layout === "list" && <div className="document-list-head"><span>文档名称</span><span>所属项目</span><span>创建时间</span><span>最近修改</span><span>状态</span><span /></div>}{documents.map((document) => <DocumentItem key={document.id} document={document} workspaceKey={workspaceKey} projectName={projectName(document.projectId)} layout={layout} menuOpen={activeMenu === document.id} onMenu={(event) => { event.stopPropagation(); setActiveMenu(activeMenu === document.id ? undefined : document.id); }} onAction={(action) => { if (action === "open") window.location.assign(`/workspace/${workspaceKey}/design/${document.id}`); if (action === "restore") void restore(document); if (action === "rename") openDialog("rename", document.id, document.name); if (action === "copy") void duplicate(document); if (action === "move") openDialog("move", document.id, document.projectId ?? ""); if (action === "trash") openDialog("trash", document.id); if (action === "purge") openDialog("purge", document.id); }} />)}</div>}
     </section>
     {dialog && <Dialog title={dialog.kind === "trash" ? "移至回收站" : dialog.kind === "purge" ? "永久删除文档" : dialog.kind === "move" ? "移动到项目" : dialog.kind === "project" ? "新建项目" : dialog.kind === "project-delete" ? "删除项目" : "重命名"} onClose={() => setDialog(undefined)}>
       {dialog.kind === "trash" && selected && <p>确定将“{selected.name}”移至回收站吗？所有通过当前工作区链接访问的用户都将无法继续打开该文档。你可以稍后从回收站恢复。</p>}
