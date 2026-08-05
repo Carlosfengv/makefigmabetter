@@ -207,7 +207,7 @@ impl Default for TextProperties {
             runs: Vec::new(),
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
-                line_height: None,
+                line_height: Some(20.0),
                 paragraph_spacing: 0.0,
             },
             auto_size: TextAutoSize::Fixed,
@@ -228,6 +228,9 @@ pub struct Document {
     /// public node construction contract remains source-compatible. The mapping is
     /// nevertheless canonical state and participates in hashing and snapshots.
     node_pages: BTreeMap<NodeId, PageId>,
+    /// Tracks the unique ordering key for each sibling set, so malformed
+    /// snapshots cannot leave rendering order dependent on a node-ID tiebreaker.
+    sibling_positions: BTreeSet<(PageId, Option<NodeId>, PositionId)>,
     node_assets: BTreeMap<NodeId, AssetId>,
     node_text_properties: BTreeMap<NodeId, TextProperties>,
     /// Retained page membership for node tombstones; undo/redo therefore restores
@@ -282,6 +285,14 @@ pub enum Command {
         page_id: PageId,
         node: Node,
         asset_id: AssetId,
+    },
+    /// Restores a node that was retired by a prior canonical delete. This is a
+    /// history operation, not a second allocation of the node ID.
+    RestoreNode {
+        page_id: PageId,
+        node: Node,
+        asset_id: Option<AssetId>,
+        text_properties: Option<TextProperties>,
     },
     Create(Node),
     UpdateGeometry {
@@ -418,6 +429,9 @@ pub enum AppliedChange {
     NodeDeleted {
         node: Node,
     },
+    NodeRestored {
+        node: Node,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -494,6 +508,9 @@ pub enum CommandError {
     RetiredNodeId {
         id: NodeId,
     },
+    MissingRetiredNode {
+        id: NodeId,
+    },
     InvalidGeometry,
     InvalidName,
     InvalidAppearance,
@@ -501,6 +518,10 @@ pub enum CommandError {
     InvalidTextProperties,
     MissingParent {
         id: NodeId,
+    },
+    DuplicatePosition {
+        parent_id: Option<NodeId>,
+        position: PositionId,
     },
     MissingPage {
         id: PageId,
@@ -554,6 +575,7 @@ impl Document {
                 },
             )]),
             node_pages: BTreeMap::new(),
+            sibling_positions: BTreeSet::new(),
             node_assets: BTreeMap::new(),
             node_text_properties: BTreeMap::new(),
             retired_node_pages: BTreeMap::new(),
@@ -1085,6 +1107,12 @@ impl Document {
                 node,
                 asset_id,
             } => self.create_image_node_in_page(*page_id, node.clone(), *asset_id),
+            Command::RestoreNode {
+                page_id,
+                node,
+                asset_id,
+                text_properties,
+            } => self.restore_tombstoned_node(*page_id, node.clone(), *asset_id, text_properties.clone()),
             Command::Create(node) => self.create_node_in_page(DEFAULT_PAGE_ID, node.clone()),
             Command::UpdateGeometry {
                 id,
@@ -1206,7 +1234,12 @@ impl Document {
                     .get(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
                 if !image_fill_supported(&node.kind)
-                    || asset_id.is_some_and(|asset_id| !self.assets.get(&asset_id).is_some_and(|asset| asset.media_type.starts_with("image/")))
+                    || asset_id.is_some_and(|asset_id| {
+                        !self
+                            .assets
+                            .get(&asset_id)
+                            .is_some_and(|asset| asset.media_type.starts_with("image/"))
+                    })
                 {
                     return Err(CommandError::InvalidAsset);
                 }
@@ -1287,12 +1320,36 @@ impl Document {
                 })
             }
             Command::SetNodePosition { id, position } => {
+                let (parent_id, page_id, before) = self
+                    .nodes
+                    .get(id)
+                    .map(|node| {
+                        (
+                            node.parent_id,
+                            self.node_pages.get(id).copied().unwrap_or(DEFAULT_PAGE_ID),
+                            node.position,
+                        )
+                    })
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                if *position != before
+                    && self
+                        .sibling_positions
+                        .contains(&(page_id, parent_id, *position))
+                {
+                    return Err(CommandError::DuplicatePosition {
+                        parent_id,
+                        position: *position,
+                    });
+                }
                 let node = self
                     .nodes
                     .get_mut(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
                 let before = node.position;
                 node.position = *position;
+                self.sibling_positions.remove(&(page_id, parent_id, before));
+                self.sibling_positions
+                    .insert((page_id, parent_id, *position));
                 Ok(AppliedChange::NodePositionChanged {
                     id: *id,
                     before,
@@ -1313,6 +1370,8 @@ impl Document {
                     self.retired_node_text_properties.insert(*id, properties);
                 }
                 let page_id = self.node_pages.remove(id).unwrap_or(DEFAULT_PAGE_ID);
+                self.sibling_positions
+                    .remove(&(page_id, node.parent_id, node.position));
                 self.retired_node_pages.insert(*id, page_id);
                 if let Some(asset_id) = self.node_assets.remove(id) {
                     self.retired_node_assets.insert(*id, asset_id);
@@ -1369,7 +1428,9 @@ impl Document {
             AppliedChange::TextPropertiesChanged { id, before, .. } => {
                 self.replace_text_properties_option(*id, before.clone());
             }
-            AppliedChange::NodePositionChanged { id, before, .. } => self.set_node_position(*id, *before),
+            AppliedChange::NodePositionChanged { id, before, .. } => {
+                self.set_node_position(*id, *before)
+            }
             AppliedChange::DocumentColorProfileChanged { before, .. } => {
                 self.color_profile = *before
             }
@@ -1377,6 +1438,7 @@ impl Document {
                 self.assets.remove(&asset.asset_id);
             }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
+            AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
     }
 
@@ -1407,12 +1469,15 @@ impl Document {
             AppliedChange::TextPropertiesChanged { id, after, .. } => {
                 self.replace_text_properties_option(*id, after.clone());
             }
-            AppliedChange::NodePositionChanged { id, after, .. } => self.set_node_position(*id, *after),
+            AppliedChange::NodePositionChanged { id, after, .. } => {
+                self.set_node_position(*id, *after)
+            }
             AppliedChange::DocumentColorProfileChanged { after, .. } => self.color_profile = *after,
             AppliedChange::AssetRegistered { asset } => {
                 self.assets.insert(asset.asset_id, asset.clone());
             }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
+            AppliedChange::NodeRestored { node } => self.restore_node(node),
         }
     }
 
@@ -1439,6 +1504,13 @@ impl Document {
     }
 
     fn set_node_position(&mut self, id: NodeId, position: PositionId) {
+        if let Some(node) = self.nodes.get(&id) {
+            let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
+            self.sibling_positions
+                .remove(&(page_id, node.parent_id, node.position));
+            self.sibling_positions
+                .insert((page_id, node.parent_id, position));
+        }
         if let Some(node) = self.nodes.get_mut(&id) {
             node.position = position;
         }
@@ -1558,14 +1630,16 @@ impl Document {
     }
 
     fn retire_node(&mut self, id: NodeId) {
+        let page_id = self.node_pages.remove(&id).unwrap_or(DEFAULT_PAGE_ID);
         if let Some(node) = self.nodes.remove(&id) {
+            self.sibling_positions
+                .remove(&(page_id, node.parent_id, node.position));
             self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
         }
         if let Some(properties) = self.node_text_properties.remove(&id) {
             self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
             self.retired_node_text_properties.insert(id, properties);
         }
-        let page_id = self.node_pages.remove(&id).unwrap_or(DEFAULT_PAGE_ID);
         self.retired_node_pages.insert(id, page_id);
         if let Some(asset_id) = self.node_assets.remove(&id) {
             self.retired_node_assets.insert(id, asset_id);
@@ -1622,6 +1696,8 @@ impl Document {
         }
         self.nodes.insert(node.id, node.clone());
         self.node_pages.insert(node.id, page_id);
+        self.sibling_positions
+            .insert((page_id, node.parent_id, node.position));
         if let Some(asset_id) = asset_id {
             self.node_assets.insert(node.id, asset_id);
         }
@@ -1639,6 +1715,8 @@ impl Document {
             .remove(&node.id)
             .unwrap_or(DEFAULT_PAGE_ID);
         self.node_pages.insert(node.id, page_id);
+        self.sibling_positions
+            .insert((page_id, node.parent_id, node.position));
         if let Some(asset_id) = self.retired_node_assets.remove(&node.id) {
             self.node_assets.insert(node.id, asset_id);
         }
@@ -1648,6 +1726,87 @@ impl Document {
         }
         self.node_bytes += node.estimated_bytes();
         self.retired_ids.remove(&node.id);
+    }
+
+    /// Reconstitutes one explicit tombstone from a resolved remote history
+    /// operation. The tombstone check prevents this from becoming a backdoor
+    /// for reusing arbitrary deleted IDs as new nodes.
+    fn restore_tombstoned_node(
+        &mut self,
+        page_id: PageId,
+        node: Node,
+        asset_id: Option<AssetId>,
+        text_properties: Option<TextProperties>,
+    ) -> Result<AppliedChange, CommandError> {
+        if self.nodes.contains_key(&node.id) {
+            return Err(CommandError::DuplicateNode { id: node.id });
+        }
+        if !self.retired_ids.contains(&node.id) {
+            return Err(CommandError::MissingRetiredNode { id: node.id });
+        }
+        if self.nodes.len() >= MAX_DOCUMENT_NODES {
+            return Err(CommandError::ResourceLimit);
+        }
+        self.validate_node_page(page_id, &node)?;
+        if self
+            .sibling_positions
+            .contains(&(page_id, node.parent_id, node.position))
+        {
+            return Err(CommandError::DuplicatePosition {
+                parent_id: node.parent_id,
+                position: node.position,
+            });
+        }
+        if node.kind == NodeKind::Image && asset_id.is_none() {
+            return Err(CommandError::InvalidAsset);
+        }
+        if let Some(asset_id) = asset_id {
+            if !image_fill_supported(&node.kind)
+                || !self
+                    .assets
+                    .get(&asset_id)
+                    .is_some_and(|asset| asset.media_type.starts_with("image/"))
+            {
+                return Err(CommandError::InvalidAsset);
+            }
+        }
+        if text_properties
+            .as_ref()
+            .is_some_and(|properties| node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, properties))
+        {
+            return Err(CommandError::InvalidTextProperties);
+        }
+        let text_property_bytes = text_properties
+            .as_ref()
+            .map(TextProperties::estimated_bytes)
+            .unwrap_or(0);
+        if self
+            .node_bytes
+            .saturating_add(node.estimated_bytes())
+            .saturating_add(text_property_bytes)
+            > MAX_DOCUMENT_BYTES
+        {
+            return Err(CommandError::ResourceLimit);
+        }
+        self.nodes.insert(node.id, node.clone());
+        self.node_pages.insert(node.id, page_id);
+        self.sibling_positions
+            .insert((page_id, node.parent_id, node.position));
+        if let Some(asset_id) = asset_id {
+            self.node_assets.insert(node.id, asset_id);
+        }
+        if let Some(properties) = text_properties {
+            self.node_text_properties.insert(node.id, properties);
+        }
+        self.retired_node_pages.remove(&node.id);
+        self.retired_node_assets.remove(&node.id);
+        self.retired_node_text_properties.remove(&node.id);
+        self.retired_ids.remove(&node.id);
+        self.node_bytes = self
+            .node_bytes
+            .saturating_add(node.estimated_bytes())
+            .saturating_add(text_property_bytes);
+        Ok(AppliedChange::NodeRestored { node })
     }
 
     fn validate_node_page(&self, page_id: PageId, node: &Node) -> Result<(), CommandError> {
@@ -1695,6 +1854,15 @@ impl Document {
             {
                 return Err(CommandError::MissingParent { id: parent_id });
             }
+        }
+        if self
+            .sibling_positions
+            .contains(&(page_id, node.parent_id, node.position))
+        {
+            return Err(CommandError::DuplicatePosition {
+                parent_id: node.parent_id,
+                position: node.position,
+            });
         }
         Ok(())
     }
@@ -1812,6 +1980,19 @@ impl Command {
                     + std::mem::size_of::<AssetId>()
                     + node.estimated_bytes()
             }
+            Command::RestoreNode {
+                node,
+                text_properties,
+                ..
+            } => {
+                std::mem::size_of::<PageId>()
+                    + std::mem::size_of::<Option<AssetId>>()
+                    + node.estimated_bytes()
+                    + text_properties
+                        .as_ref()
+                        .map(TextProperties::estimated_bytes)
+                        .unwrap_or(0)
+            }
             Command::Create(node) => node.estimated_bytes(),
             Command::UpdateGeometry { .. } => {
                 std::mem::size_of::<Geometry>() + std::mem::size_of::<NodeId>()
@@ -1895,7 +2076,9 @@ impl AppliedChange {
     fn estimated_bytes(&self) -> usize {
         match self {
             AppliedChange::PageCreated { page } => std::mem::size_of::<Page>() + page.name.len(),
-            AppliedChange::NodeCreated { node } | AppliedChange::NodeDeleted { node } => {
+            AppliedChange::NodeCreated { node }
+            | AppliedChange::NodeDeleted { node }
+            | AppliedChange::NodeRestored { node } => {
                 node.estimated_bytes()
             }
             AppliedChange::GeometryChanged { .. } => {
@@ -2165,6 +2348,30 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(asset_id.0.to_be_bytes());
             hash_node(hasher, node);
         }
+        Command::RestoreNode {
+            page_id,
+            node,
+            asset_id,
+            text_properties,
+        } => {
+            hasher.update([14]);
+            hasher.update(page_id.0.to_be_bytes());
+            hash_node(hasher, node);
+            match asset_id {
+                Some(asset_id) => {
+                    hasher.update([1]);
+                    hasher.update(asset_id.0.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+            match text_properties {
+                Some(properties) => {
+                    hasher.update([1]);
+                    hash_text_properties(hasher, properties);
+                }
+                None => hasher.update([0]),
+            }
+        }
         Command::Create(node) => {
             hasher.update([1]);
             hash_node(hasher, node);
@@ -2252,7 +2459,10 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
 }
 
 fn image_fill_supported(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image)
+    matches!(
+        kind,
+        NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image
+    )
 }
 
 fn valid_geometry(geometry: Geometry) -> bool {
@@ -2424,6 +2634,45 @@ mod tests {
             Origin::LocalUser,
         );
         assert_eq!(result, Err(CommandError::RetiredNodeId { id: NodeId(1) }));
+    }
+
+    #[test]
+    fn default_text_properties_use_a_twenty_pixel_line_height() {
+        assert_eq!(TextProperties::default().paragraph.line_height, Some(20.0));
+    }
+
+    #[test]
+    fn explicit_restore_replays_a_tombstone_without_reusing_the_id() {
+        let mut document = Document::empty();
+        let restored = node(1);
+        document
+            .submit(
+                transaction(0, vec![Command::Create(restored.clone())]),
+                Origin::RemoteOperation,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(1, vec![Command::Delete { id: NodeId(1) }]),
+                Origin::RemoteOperation,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::RestoreNode {
+                        page_id: DEFAULT_PAGE_ID,
+                        node: restored,
+                        asset_id: None,
+                        text_properties: None,
+                    }],
+                ),
+                Origin::RemoteOperation,
+            )
+            .unwrap();
+        assert!(document.node(NodeId(1)).is_some());
+        assert!(!document.retired_ids().any(|id| *id == NodeId(1)));
     }
 
     #[test]
@@ -2621,7 +2870,10 @@ mod tests {
         let mut document = Document::empty();
         document.seed_asset(asset.clone()).unwrap();
         document
-            .submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let baseline = document.canonical_hash_hex();
         document
@@ -2861,6 +3113,30 @@ mod tests {
                 actor: ActorId(4)
             }
         );
+        let hash_before_rejected_reorder = document.canonical_hash();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodePosition {
+                        id: NodeId(2),
+                        position: PositionId {
+                            key: 10,
+                            actor: ActorId(2),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::DuplicatePosition {
+                parent_id: Some(NodeId(1)),
+                position: PositionId {
+                    key: 10,
+                    actor: ActorId(2),
+                },
+            })
+        );
+        assert_eq!(document.canonical_hash(), hash_before_rejected_reorder);
     }
 
     #[test]

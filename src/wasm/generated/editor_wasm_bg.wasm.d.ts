@@ -32,8 +32,10 @@ export const documentengine_update_node: (a: number, b: number, c: number, d: bi
 export const engine_semantics_version: () => number;
 export const fallback_text_layout_json: (a: number, b: number, c: number) => [number, number];
 export const layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const preview_text_replacement_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const shape_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;

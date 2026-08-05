@@ -128,7 +128,9 @@ pub struct GpuInstanceBatch {
 /// nor glyph atlas references. Colors must already match the platform
 /// executor's encoded-sRGB, non-premultiplied blend contract, so no Document
 /// color state is retained by the renderer.
-pub fn build_gpu_instance_batch(primitives: impl IntoIterator<Item = GpuPrimitive>) -> GpuInstanceBatch {
+pub fn build_gpu_instance_batch(
+    primitives: impl IntoIterator<Item = GpuPrimitive>,
+) -> GpuInstanceBatch {
     let mut instance_floats = Vec::new();
     let mut rendered_node_ids = Vec::new();
     for primitive in primitives {
@@ -142,9 +144,15 @@ pub fn build_gpu_instance_batch(primitives: impl IntoIterator<Item = GpuPrimitiv
         let width = primitive.bounds.width.abs();
         let height = primitive.bounds.height.abs();
         let limiting_dimension = width.min(height);
-        let outer_radius = primitive.corner_radius.max(0.0).min(limiting_dimension / 2.0);
+        let outer_radius = primitive
+            .corner_radius
+            .max(0.0)
+            .min(limiting_dimension / 2.0);
         let inside_stroke_width = if primitive.stroke_rgba[3] > 0.0 {
-            primitive.stroke_width.max(0.0).min(limiting_dimension / 2.0)
+            primitive
+                .stroke_width
+                .max(0.0)
+                .min(limiting_dimension / 2.0)
         } else {
             0.0
         };
@@ -154,7 +162,11 @@ pub fn build_gpu_instance_batch(primitives: impl IntoIterator<Item = GpuPrimitiv
             primitive.bounds.width,
             primitive.bounds.height,
             primitive.rotation_degrees,
-            if primitive.kind == SceneNodeKind::Ellipse { 1.0 } else { 0.0 },
+            if primitive.kind == SceneNodeKind::Ellipse {
+                1.0
+            } else {
+                0.0
+            },
             outer_radius,
             inside_stroke_width,
             primitive.fill_rgba[0],
@@ -351,7 +363,7 @@ pub fn compile_render_graph(scene: &Scene, dirty: DirtySet, viewport: Rect) -> R
 pub mod native_executor {
     use std::collections::BTreeMap;
 
-    use super::{GpuInstanceBatch, RenderGraph, RenderPass, GPU_INSTANCE_FLOATS};
+    use super::{GPU_INSTANCE_FLOATS, GpuInstanceBatch, RenderGraph, RenderPass};
 
     const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
     const GLYPH_ATLAS_DIMENSION: u32 = 1024;
@@ -562,14 +574,24 @@ pub mod native_executor {
     }
 
     impl WgpuExecutorFactory {
-        pub fn new(adapter: wgpu::Adapter, target_format: wgpu::TextureFormat, max_resource_bytes: u64) -> Self {
-            Self { adapter, target_format, max_resource_bytes }
+        pub fn new(
+            adapter: wgpu::Adapter,
+            target_format: wgpu::TextureFormat,
+            max_resource_bytes: u64,
+        ) -> Self {
+            Self {
+                adapter,
+                target_format,
+                max_resource_bytes,
+            }
         }
 
         /// Creates a fresh Device/Queue/executor tuple. Calling this after a
         /// loss is bounded by the host's recovery policy; the factory itself
         /// performs no retry loop.
-        pub async fn rebuild(&self) -> Result<(WgpuExecutor, wgpu::Device, wgpu::Queue), WgpuExecutorFactoryError> {
+        pub async fn rebuild(
+            &self,
+        ) -> Result<(WgpuExecutor, wgpu::Device, wgpu::Queue), WgpuExecutorFactoryError> {
             let (device, queue) = self
                 .adapter
                 .request_device(&wgpu::DeviceDescriptor::default())
@@ -594,7 +616,12 @@ pub mod native_executor {
     }
 
     #[derive(Clone, Copy)]
-    struct GlyphAtlasEntry { x: u32, y: u32, width: u32, height: u32 }
+    struct GlyphAtlasEntry {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    }
 
     struct GlyphAtlasTexture {
         texture: wgpu::Texture,
@@ -608,7 +635,12 @@ pub mod native_executor {
     /// Matches the browser Image Pass `cover` behavior while keeping all image
     /// pixels outside Canonical state. Return value is `(u, v, width, height)`
     /// in normalized source-texture coordinates.
-    fn cover_crop_uv(source_width: u32, source_height: u32, target_width: f32, target_height: f32) -> [f32; 4] {
+    fn cover_crop_uv(
+        source_width: u32,
+        source_height: u32,
+        target_width: f32,
+        target_height: f32,
+    ) -> [f32; 4] {
         let source_aspect = source_width as f32 / source_height as f32;
         let target_aspect = target_width / target_height;
         if source_aspect > target_aspect {
@@ -621,14 +653,28 @@ pub mod native_executor {
     }
 
     impl WgpuExecutor {
-        pub fn new(device: wgpu::Device, queue: wgpu::Queue, target_format: wgpu::TextureFormat) -> Self {
-            Self::with_resource_budget(device, queue, target_format, DEFAULT_NATIVE_GPU_RESOURCE_BYTES)
+        pub fn new(
+            device: wgpu::Device,
+            queue: wgpu::Queue,
+            target_format: wgpu::TextureFormat,
+        ) -> Self {
+            Self::with_resource_budget(
+                device,
+                queue,
+                target_format,
+                DEFAULT_NATIVE_GPU_RESOURCE_BYTES,
+            )
         }
 
         /// The limit governs only derived executor allocations. It does not
         /// alter graph/document semantics, so a rejected allocation can safely
         /// fall back to Canvas or be rebuilt after Device Lost.
-        pub fn with_resource_budget(device: wgpu::Device, queue: wgpu::Queue, target_format: wgpu::TextureFormat, max_resource_bytes: u64) -> Self {
+        pub fn with_resource_budget(
+            device: wgpu::Device,
+            queue: wgpu::Queue,
+            target_format: wgpu::TextureFormat,
+            max_resource_bytes: u64,
+        ) -> Self {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("makefigma-main-scene-wgsl"),
                 source: wgpu::ShaderSource::Wgsl(MAIN_SCENE_WGSL.into()),
@@ -672,10 +718,26 @@ pub mod native_executor {
                             array_stride: FLOAT_BYTES * GPU_INSTANCE_FLOATS as u64,
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &[
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 4, shader_location: 2 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 8, shader_location: 3 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 12, shader_location: 4 },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 1,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 4,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 8,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 12,
+                                    shader_location: 4,
+                                },
                             ],
                         }),
                     ],
@@ -717,11 +779,12 @@ pub mod native_executor {
                     },
                 ],
             });
-            let image_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("makefigma-image-pass-pipeline-layout"),
-                bind_group_layouts: &[Some(&camera_layout), Some(&image_layout)],
-                immediate_size: 0,
-            });
+            let image_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("makefigma-image-pass-pipeline-layout"),
+                    bind_group_layouts: &[Some(&camera_layout), Some(&image_layout)],
+                    immediate_size: 0,
+                });
             let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("makefigma-image-pass-wgsl"),
                 source: wgpu::ShaderSource::Wgsl(IMAGE_PASS_WGSL.into()),
@@ -737,16 +800,36 @@ pub mod native_executor {
                         Some(wgpu::VertexBufferLayout {
                             array_stride: FLOAT_BYTES * 2,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 }],
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            }],
                         }),
                         Some(wgpu::VertexBufferLayout {
                             array_stride: FLOAT_BYTES * 10,
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &[
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: FLOAT_BYTES * 4, shader_location: 2 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 5, shader_location: 3 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: FLOAT_BYTES * 9, shader_location: 4 },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 1,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32,
+                                    offset: FLOAT_BYTES * 4,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 5,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32,
+                                    offset: FLOAT_BYTES * 9,
+                                    shader_location: 4,
+                                },
                             ],
                         }),
                     ],
@@ -788,11 +871,12 @@ pub mod native_executor {
                     },
                 ],
             });
-            let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("makefigma-text-pass-pipeline-layout"),
-                bind_group_layouts: &[Some(&camera_layout), Some(&text_layout)],
-                immediate_size: 0,
-            });
+            let text_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("makefigma-text-pass-pipeline-layout"),
+                    bind_group_layouts: &[Some(&camera_layout), Some(&text_layout)],
+                    immediate_size: 0,
+                });
             let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("makefigma-text-pass-wgsl"),
                 source: wgpu::ShaderSource::Wgsl(TEXT_PASS_WGSL.into()),
@@ -808,16 +892,36 @@ pub mod native_executor {
                         Some(wgpu::VertexBufferLayout {
                             array_stride: FLOAT_BYTES * 2,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 }],
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            }],
                         }),
                         Some(wgpu::VertexBufferLayout {
                             array_stride: FLOAT_BYTES * 13,
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &[
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: FLOAT_BYTES * 4, shader_location: 2 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 5, shader_location: 3 },
-                                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: FLOAT_BYTES * 9, shader_location: 4 },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 1,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32,
+                                    offset: FLOAT_BYTES * 4,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 5,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 9,
+                                    shader_location: 4,
+                                },
                             ],
                         }),
                     ],
@@ -838,69 +942,72 @@ pub mod native_executor {
                 multiview_mask: None,
                 cache: None,
             });
-            let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("makefigma-composite-pass-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+            let composite_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("makefigma-composite-pass-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-            let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("makefigma-composite-pass-pipeline-layout"),
-                bind_group_layouts: &[Some(&composite_layout)],
-                immediate_size: 0,
-            });
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+            let composite_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("makefigma-composite-pass-pipeline-layout"),
+                    bind_group_layouts: &[Some(&composite_layout)],
+                    immediate_size: 0,
+                });
             let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("makefigma-composite-pass-wgsl"),
                 source: wgpu::ShaderSource::Wgsl(COMPOSITE_PASS_WGSL.into()),
             });
-            let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("makefigma-composite-pass-pipeline"),
-                layout: Some(&composite_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &composite_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: FLOAT_BYTES * 2,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        }],
-                    })],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &composite_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: target_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let composite_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("makefigma-composite-pass-pipeline"),
+                    layout: Some(&composite_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &composite_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: FLOAT_BYTES * 2,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            }],
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &composite_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: target_format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
             let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("makefigma-image-pass-sampler"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -955,9 +1062,20 @@ pub mod native_executor {
 
         pub fn resource_bytes(&self) -> u64 {
             let base_buffers = (UNIT_QUAD.len() as u64) * FLOAT_BYTES + FLOAT_BYTES * 8;
-            let image_textures = self.image_textures.values().fold(0_u64, |total, image| total.saturating_add(image.byte_length));
-            let glyph_atlas = if self.text_atlas.is_some() { u64::from(GLYPH_ATLAS_DIMENSION) * u64::from(GLYPH_ATLAS_DIMENSION) } else { 0 };
-            let offscreen_surfaces = self.offscreen_surfaces.values().fold(0_u64, |total, surface| total.saturating_add(surface.byte_length));
+            let image_textures = self.image_textures.values().fold(0_u64, |total, image| {
+                total.saturating_add(image.byte_length)
+            });
+            let glyph_atlas = if self.text_atlas.is_some() {
+                u64::from(GLYPH_ATLAS_DIMENSION) * u64::from(GLYPH_ATLAS_DIMENSION)
+            } else {
+                0
+            };
+            let offscreen_surfaces = self
+                .offscreen_surfaces
+                .values()
+                .fold(0_u64, |total, surface| {
+                    total.saturating_add(surface.byte_length)
+                });
             base_buffers
                 .saturating_add(self.instance_capacity)
                 .saturating_add(self.image_instance_capacity)
@@ -1001,7 +1119,11 @@ pub mod native_executor {
             self.ensure_budget(byte_length, 0)?;
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("makefigma-offscreen-surface"),
-                size: wgpu::Extent3d { width: key.width, height: key.height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: key.width,
+                    height: key.height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1045,14 +1167,21 @@ pub mod native_executor {
                 return Err(WgpuExecutorError::InvalidInstanceLayout);
             }
             let instance_count = (batch.instance_floats.len() / GPU_INSTANCE_FLOATS) as u32;
-            self.queue.write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
+            self.queue
+                .write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
             if instance_count > 0 {
                 self.ensure_instance_buffer(batch.instance_floats.len() as u64 * FLOAT_BYTES)?;
-                self.queue.write_buffer(self.instance.as_ref().expect("allocated above"), 0, bytemuck::cast_slice(&batch.instance_floats));
+                self.queue.write_buffer(
+                    self.instance.as_ref().expect("allocated above"),
+                    0,
+                    bytemuck::cast_slice(&batch.instance_floats),
+                );
             }
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("makefigma-main-scene-encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("makefigma-main-scene-encoder"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("makefigma-main-scene-pass"),
@@ -1074,7 +1203,10 @@ pub mod native_executor {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-                    pass.set_vertex_buffer(1, self.instance.as_ref().expect("allocated above").slice(..));
+                    pass.set_vertex_buffer(
+                        1,
+                        self.instance.as_ref().expect("allocated above").slice(..),
+                    );
                     pass.draw(0..6, 0..instance_count);
                 }
             }
@@ -1101,7 +1233,8 @@ pub mod native_executor {
             if !camera.is_valid() {
                 return Err(WgpuExecutorError::InvalidCamera);
             }
-            self.queue.write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
+            self.queue
+                .write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
             let mut instance_data = Vec::with_capacity(images.len() * 10);
             let mut keys = Vec::with_capacity(images.len());
             let mut uploaded_assets = 0;
@@ -1129,10 +1262,15 @@ pub mod native_executor {
                 ]);
                 keys.push(image.asset_key);
             }
-            self.image_textures.retain(|key, _| keys.iter().any(|active| *active == key));
+            self.image_textures
+                .retain(|key, _| keys.iter().any(|active| *active == key));
             let instance_count = images.len() as u32;
             if instance_count == 0 {
-                return Ok(ImagePassExecution { document_revision: graph.document_revision, instance_count, uploaded_assets });
+                return Ok(ImagePassExecution {
+                    document_revision: graph.document_revision,
+                    instance_count,
+                    uploaded_assets,
+                });
             }
             self.ensure_image_instance_buffer(instance_data.len() as u64 * FLOAT_BYTES)?;
             self.queue.write_buffer(
@@ -1140,9 +1278,11 @@ pub mod native_executor {
                 0,
                 bytemuck::cast_slice(&instance_data),
             );
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("makefigma-image-pass-encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("makefigma-image-pass-encoder"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("makefigma-image-pass"),
@@ -1150,7 +1290,10 @@ pub mod native_executor {
                         view: target,
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
                     })],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
@@ -1163,12 +1306,25 @@ pub mod native_executor {
                 for (index, key) in keys.iter().enumerate() {
                     let entry = self.image_textures.get(*key).expect("admitted above");
                     pass.set_bind_group(1, &entry.bind_group, &[]);
-                    pass.set_vertex_buffer(1, self.image_instance.as_ref().expect("allocated above").slice((index as u64 * FLOAT_BYTES * 10)..((index as u64 + 1) * FLOAT_BYTES * 10)));
+                    pass.set_vertex_buffer(
+                        1,
+                        self.image_instance
+                            .as_ref()
+                            .expect("allocated above")
+                            .slice(
+                                (index as u64 * FLOAT_BYTES * 10)
+                                    ..((index as u64 + 1) * FLOAT_BYTES * 10),
+                            ),
+                    );
                     pass.draw(0..6, 0..1);
                 }
             }
             self.queue.submit(Some(encoder.finish()));
-            Ok(ImagePassExecution { document_revision: graph.document_revision, instance_count, uploaded_assets })
+            Ok(ImagePassExecution {
+                document_revision: graph.document_revision,
+                instance_count,
+                uploaded_assets,
+            })
         }
 
         /// Draws the glyph atlas above images without clearing the target.
@@ -1187,12 +1343,15 @@ pub mod native_executor {
             if !camera.is_valid() {
                 return Err(WgpuExecutorError::InvalidCamera);
             }
-            self.queue.write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
+            self.queue
+                .write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
             let mut instances = Vec::with_capacity(glyphs.len() * 13);
             let mut uploaded_glyphs = 0;
             for glyph in glyphs {
                 let (entry, uploaded) = self.ensure_glyph_atlas_entry(glyph)?;
-                if uploaded { uploaded_glyphs += 1; }
+                if uploaded {
+                    uploaded_glyphs += 1;
+                }
                 instances.extend_from_slice(&[
                     glyph.x,
                     glyph.y,
@@ -1211,14 +1370,24 @@ pub mod native_executor {
             }
             let glyph_count = glyphs.len() as u32;
             if glyph_count == 0 {
-                return Ok(TextPassExecution { document_revision: graph.document_revision, glyph_count, uploaded_glyphs });
+                return Ok(TextPassExecution {
+                    document_revision: graph.document_revision,
+                    glyph_count,
+                    uploaded_glyphs,
+                });
             }
             self.ensure_text_instance_buffer(instances.len() as u64 * FLOAT_BYTES)?;
-            self.queue.write_buffer(self.text_instance.as_ref().expect("allocated above"), 0, bytemuck::cast_slice(&instances));
+            self.queue.write_buffer(
+                self.text_instance.as_ref().expect("allocated above"),
+                0,
+                bytemuck::cast_slice(&instances),
+            );
             let atlas = self.text_atlas.as_ref().expect("glyphs allocate atlas");
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("makefigma-text-pass-encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("makefigma-text-pass-encoder"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("makefigma-text-pass"),
@@ -1226,7 +1395,10 @@ pub mod native_executor {
                         view: target,
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
                     })],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
@@ -1237,11 +1409,21 @@ pub mod native_executor {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_bind_group(1, &atlas.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-                pass.set_vertex_buffer(1, self.text_instance.as_ref().expect("allocated above").slice(..));
+                pass.set_vertex_buffer(
+                    1,
+                    self.text_instance
+                        .as_ref()
+                        .expect("allocated above")
+                        .slice(..),
+                );
                 pass.draw(0..6, 0..glyph_count);
             }
             self.queue.submit(Some(encoder.finish()));
-            Ok(TextPassExecution { document_revision: graph.document_revision, glyph_count, uploaded_glyphs })
+            Ok(TextPassExecution {
+                document_revision: graph.document_revision,
+                glyph_count,
+                uploaded_glyphs,
+            })
         }
 
         /// Draws transient selection and guide primitives above text without
@@ -1271,16 +1453,19 @@ pub mod native_executor {
                     instance_count,
                 });
             }
-            self.queue.write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
+            self.queue
+                .write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
             self.ensure_instance_buffer(batch.instance_floats.len() as u64 * FLOAT_BYTES)?;
             self.queue.write_buffer(
                 self.instance.as_ref().expect("allocated above"),
                 0,
                 bytemuck::cast_slice(&batch.instance_floats),
             );
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("makefigma-overlay-pass-encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("makefigma-overlay-pass-encoder"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("makefigma-overlay-pass"),
@@ -1288,7 +1473,10 @@ pub mod native_executor {
                         view: target,
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
                     })],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
@@ -1298,7 +1486,10 @@ pub mod native_executor {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-                pass.set_vertex_buffer(1, self.instance.as_ref().expect("allocated above").slice(..));
+                pass.set_vertex_buffer(
+                    1,
+                    self.instance.as_ref().expect("allocated above").slice(..),
+                );
                 pass.draw(0..6, 0..instance_count);
             }
             self.queue.submit(Some(encoder.finish()));
@@ -1325,13 +1516,21 @@ pub mod native_executor {
                 label: Some("makefigma-composite-pass-source-bind-group"),
                 layout: &self.composite_pipeline.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.image_sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                    },
                 ],
             });
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("makefigma-composite-pass-encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("makefigma-composite-pass-encoder"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("makefigma-composite-pass"),
@@ -1355,7 +1554,9 @@ pub mod native_executor {
                 pass.draw(0..6, 0..1);
             }
             self.queue.submit(Some(encoder.finish()));
-            Ok(CompositePassExecution { document_revision: graph.document_revision })
+            Ok(CompositePassExecution {
+                document_revision: graph.document_revision,
+            })
         }
 
         fn ensure_instance_buffer(&mut self, required: u64) -> Result<(), WgpuExecutorError> {
@@ -1407,30 +1608,52 @@ pub mod native_executor {
         }
 
         fn ensure_budget(&self, incoming: u64, replacing: u64) -> Result<(), WgpuExecutorError> {
-            let next = self.resource_bytes().saturating_sub(replacing).saturating_add(incoming);
+            let next = self
+                .resource_bytes()
+                .saturating_sub(replacing)
+                .saturating_add(incoming);
             if next > self.max_resource_bytes {
                 return Err(WgpuExecutorError::ResourceBudgetExceeded);
             }
             Ok(())
         }
 
-        fn ensure_glyph_atlas_entry(&mut self, glyph: &TextPassInput<'_>) -> Result<(GlyphAtlasEntry, bool), WgpuExecutorError> {
-            let expected_len = usize::try_from(glyph.mask_width)
-                .ok()
-                .and_then(|width| usize::try_from(glyph.mask_height).ok().and_then(|height| width.checked_mul(height)));
+        fn ensure_glyph_atlas_entry(
+            &mut self,
+            glyph: &TextPassInput<'_>,
+        ) -> Result<(GlyphAtlasEntry, bool), WgpuExecutorError> {
+            let expected_len = usize::try_from(glyph.mask_width).ok().and_then(|width| {
+                usize::try_from(glyph.mask_height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            });
             if glyph.glyph_key.is_empty()
                 || glyph.mask_width == 0
                 || glyph.mask_height == 0
                 || glyph.width <= 0.0
                 || glyph.height <= 0.0
                 || expected_len != Some(glyph.alpha_mask.len())
-                || ![glyph.x, glyph.y, glyph.width, glyph.height, glyph.rotation_degrees].into_iter().all(f32::is_finite)
-                || !glyph.color_rgba.into_iter().all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+                || ![
+                    glyph.x,
+                    glyph.y,
+                    glyph.width,
+                    glyph.height,
+                    glyph.rotation_degrees,
+                ]
+                .into_iter()
+                .all(f32::is_finite)
+                || !glyph
+                    .color_rgba
+                    .into_iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
             {
                 return Err(WgpuExecutorError::InvalidTextInput);
             }
             if self.text_atlas.is_none() {
-                self.ensure_budget(u64::from(GLYPH_ATLAS_DIMENSION) * u64::from(GLYPH_ATLAS_DIMENSION), 0)?;
+                self.ensure_budget(
+                    u64::from(GLYPH_ATLAS_DIMENSION) * u64::from(GLYPH_ATLAS_DIMENSION),
+                    0,
+                )?;
                 self.text_atlas = Some(self.create_glyph_atlas());
             }
             let atlas = self.text_atlas.as_mut().expect("created above");
@@ -1440,8 +1663,14 @@ pub mod native_executor {
                 }
                 return Err(WgpuExecutorError::InvalidTextInput);
             }
-            let allocated_width = glyph.mask_width.checked_add(GLYPH_ATLAS_PADDING * 2).ok_or(WgpuExecutorError::GlyphAtlasFull)?;
-            let allocated_height = glyph.mask_height.checked_add(GLYPH_ATLAS_PADDING * 2).ok_or(WgpuExecutorError::GlyphAtlasFull)?;
+            let allocated_width = glyph
+                .mask_width
+                .checked_add(GLYPH_ATLAS_PADDING * 2)
+                .ok_or(WgpuExecutorError::GlyphAtlasFull)?;
+            let allocated_height = glyph
+                .mask_height
+                .checked_add(GLYPH_ATLAS_PADDING * 2)
+                .ok_or(WgpuExecutorError::GlyphAtlasFull)?;
             if allocated_width > GLYPH_ATLAS_DIMENSION || allocated_height > GLYPH_ATLAS_DIMENSION {
                 return Err(WgpuExecutorError::GlyphAtlasFull);
             }
@@ -1465,12 +1694,24 @@ pub mod native_executor {
                 wgpu::TexelCopyTextureInfo {
                     texture: &atlas.texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: entry.x, y: entry.y, z: 0 },
+                    origin: wgpu::Origin3d {
+                        x: entry.x,
+                        y: entry.y,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 glyph.alpha_mask,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(glyph.mask_width), rows_per_image: Some(glyph.mask_height) },
-                wgpu::Extent3d { width: glyph.mask_width, height: glyph.mask_height, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(glyph.mask_width),
+                    rows_per_image: Some(glyph.mask_height),
+                },
+                wgpu::Extent3d {
+                    width: glyph.mask_width,
+                    height: glyph.mask_height,
+                    depth_or_array_layers: 1,
+                },
             );
             atlas.entries.insert(glyph.glyph_key.to_owned(), entry);
             Ok((entry, true))
@@ -1479,7 +1720,11 @@ pub mod native_executor {
         fn create_glyph_atlas(&self) -> GlyphAtlasTexture {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("makefigma-text-glyph-atlas"),
-                size: wgpu::Extent3d { width: GLYPH_ATLAS_DIMENSION, height: GLYPH_ATLAS_DIMENSION, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: GLYPH_ATLAS_DIMENSION,
+                    height: GLYPH_ATLAS_DIMENSION,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1492,24 +1737,53 @@ pub mod native_executor {
                 label: Some("makefigma-text-glyph-atlas-bind-group"),
                 layout: &self.text_pipeline.get_bind_group_layout(1),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.image_sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                    },
                 ],
             });
-            GlyphAtlasTexture { texture, bind_group, entries: BTreeMap::new(), next_x: 0, next_y: 0, row_height: 0 }
+            GlyphAtlasTexture {
+                texture,
+                bind_group,
+                entries: BTreeMap::new(),
+                next_x: 0,
+                next_y: 0,
+                row_height: 0,
+            }
         }
 
         /// Returns true only when a new GPU texture upload was required.
-        fn ensure_image_texture(&mut self, image: &ImagePassInput<'_>) -> Result<bool, WgpuExecutorError> {
+        fn ensure_image_texture(
+            &mut self,
+            image: &ImagePassInput<'_>,
+        ) -> Result<bool, WgpuExecutorError> {
             let expected_len = usize::try_from(image.pixel_width)
                 .ok()
-                .and_then(|width| usize::try_from(image.pixel_height).ok().and_then(|height| width.checked_mul(height)))
+                .and_then(|width| {
+                    usize::try_from(image.pixel_height)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
                 .and_then(|pixels| pixels.checked_mul(4));
             if image.asset_key.is_empty()
                 || image.pixel_width == 0
                 || image.pixel_height == 0
                 || expected_len != Some(image.rgba8.len())
-                || ![image.bounds.x, image.bounds.y, image.bounds.width, image.bounds.height, image.rotation_degrees, image.opacity].into_iter().all(f32::is_finite)
+                || ![
+                    image.bounds.x,
+                    image.bounds.y,
+                    image.bounds.width,
+                    image.bounds.height,
+                    image.rotation_degrees,
+                    image.opacity,
+                ]
+                .into_iter()
+                .all(f32::is_finite)
                 || image.bounds.width <= 0.0
                 || image.bounds.height <= 0.0
                 || image.opacity < 0.0
@@ -1526,12 +1800,20 @@ pub mod native_executor {
                 .checked_mul(u64::from(image.pixel_height))
                 .and_then(|pixels| pixels.checked_mul(4))
                 .ok_or(WgpuExecutorError::InvalidImageInput)?;
-            let replacing = self.image_textures.get(image.asset_key).map(|entry| entry.byte_length).unwrap_or(0);
+            let replacing = self
+                .image_textures
+                .get(image.asset_key)
+                .map(|entry| entry.byte_length)
+                .unwrap_or(0);
             self.ensure_budget(byte_length, replacing)?;
             self.image_textures.remove(image.asset_key);
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("makefigma-image-pass-texture"),
-                size: wgpu::Extent3d { width: image.pixel_width, height: image.pixel_height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: image.pixel_width,
+                    height: image.pixel_height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1552,23 +1834,38 @@ pub mod native_executor {
                     bytes_per_row: Some(image.pixel_width * 4),
                     rows_per_image: Some(image.pixel_height),
                 },
-                wgpu::Extent3d { width: image.pixel_width, height: image.pixel_height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: image.pixel_width,
+                    height: image.pixel_height,
+                    depth_or_array_layers: 1,
+                },
             );
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("makefigma-image-pass-bind-group"),
                 layout: &self.image_pipeline.get_bind_group_layout(1),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture.create_view(&wgpu::TextureViewDescriptor::default())) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.image_sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                    },
                 ],
             });
-            self.image_textures.insert(image.asset_key.to_owned(), ImageTexture {
-                width: image.pixel_width,
-                height: image.pixel_height,
-                byte_length,
-                _texture: texture,
-                bind_group,
-            });
+            self.image_textures.insert(
+                image.asset_key.to_owned(),
+                ImageTexture {
+                    width: image.pixel_width,
+                    height: image.pixel_height,
+                    byte_length,
+                    _texture: texture,
+                    bind_group,
+                },
+            );
             Ok(true)
         }
     }
@@ -1706,8 +2003,14 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
     mod tests {
         use std::{sync::mpsc, time::Duration};
 
-        use super::{ImagePassInput, OffscreenSurfaceKey, TextPassInput, WgpuCamera, WgpuExecutor, WgpuExecutorError, WgpuExecutorFactory, cover_crop_uv};
-        use crate::{DirtySet, GpuPrimitive, Rect, Scene, SceneNode, SceneNodeKind, build_gpu_instance_batch, compile_render_graph};
+        use super::{
+            ImagePassInput, OffscreenSurfaceKey, TextPassInput, WgpuCamera, WgpuExecutor,
+            WgpuExecutorError, WgpuExecutorFactory, cover_crop_uv,
+        };
+        use crate::{
+            DirtySet, GpuPrimitive, Rect, Scene, SceneNode, SceneNodeKind,
+            build_gpu_instance_batch, compile_render_graph,
+        };
 
         #[test]
         fn cover_crop_matches_the_source_and_target_aspect_ratio() {
@@ -1718,18 +2021,29 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
 
         #[test]
         fn headless_device_accepts_and_submits_the_main_scene_pass_when_available() {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-            let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let Ok(adapter) = pollster::block_on(
+                instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+            ) else {
                 // Headless Linux CI may deliberately omit every GPU backend.
                 return;
             };
-            let factory = WgpuExecutorFactory::new(adapter, wgpu::TextureFormat::Rgba8Unorm, 256 * 1024 * 1024);
+            let factory = WgpuExecutorFactory::new(
+                adapter,
+                wgpu::TextureFormat::Rgba8Unorm,
+                256 * 1024 * 1024,
+            );
             let Ok((mut executor, device, queue)) = pollster::block_on(factory.rebuild()) else {
                 return;
             };
             let composited_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("makefigma-native-executor-test-composite-target"),
-                size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1737,25 +2051,41 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            let composited_view = composited_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let composited_view =
+                composited_texture.create_view(&wgpu::TextureViewDescriptor::default());
             let scene = Scene {
                 document_revision: 7,
                 nodes: vec![SceneNode {
                     id: 11,
                     kind: SceneNodeKind::Rectangle,
-                    bounds: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                    bounds: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 20.0,
+                        height: 20.0,
+                    },
                     z_index: 0,
                 }],
             };
             let graph = compile_render_graph(
                 &scene,
                 DirtySet::full_scene(7),
-                Rect { x: -1.0, y: -1.0, width: 40.0, height: 40.0 },
+                Rect {
+                    x: -1.0,
+                    y: -1.0,
+                    width: 40.0,
+                    height: 40.0,
+                },
             );
             let batch = build_gpu_instance_batch([GpuPrimitive {
                 node_id: 11,
                 kind: SceneNodeKind::Rectangle,
-                bounds: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                bounds: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
@@ -1763,24 +2093,42 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 stroke_rgba: [0.0; 4],
             }]);
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let offscreen_key = OffscreenSurfaceKey { width: 64, height: 64 };
+            let offscreen_key = OffscreenSurfaceKey {
+                width: 64,
+                height: 64,
+            };
             let offscreen = executor.acquire_offscreen_surface(offscreen_key).unwrap();
             let resource_bytes_after_first_surface = executor.resource_bytes();
             let reused_offscreen = executor.acquire_offscreen_surface(offscreen_key).unwrap();
             assert_eq!(reused_offscreen.key, offscreen_key);
-            assert_eq!(executor.resource_bytes(), resource_bytes_after_first_surface);
+            assert_eq!(
+                executor.resource_bytes(),
+                resource_bytes_after_first_surface
+            );
             let view = offscreen.view();
             let result = executor.execute_main_scene(
                 &graph,
                 &batch,
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(result.unwrap().instance_count, 1);
             let image = ImagePassInput {
                 node_id: 12,
                 asset_key: "asset-blue-v1",
-                bounds: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                bounds: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
                 rotation_degrees: 0.0,
                 opacity: 1.0,
                 pixel_width: 1,
@@ -1790,14 +2138,28 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             let image_result = executor.execute_image_pass(
                 &graph,
                 &[image],
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(image_result.unwrap().uploaded_assets, 1);
             let cached_image_result = executor.execute_image_pass(
                 &graph,
                 &[image],
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(cached_image_result.unwrap().uploaded_assets, 0);
@@ -1817,21 +2179,40 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             let text_result = executor.execute_text_pass(
                 &graph,
                 &[glyph],
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(text_result.unwrap().uploaded_glyphs, 1);
             let cached_text_result = executor.execute_text_pass(
                 &graph,
                 &[glyph],
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(cached_text_result.unwrap().uploaded_glyphs, 0);
             let overlay_batch = build_gpu_instance_batch([GpuPrimitive {
                 node_id: 14,
                 kind: SceneNodeKind::Rectangle,
-                bounds: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                bounds: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
@@ -1841,12 +2222,22 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             let overlay_result = executor.execute_overlay_pass(
                 &graph,
                 &overlay_batch,
-                WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                WgpuCamera {
+                    viewport_x: 0.0,
+                    viewport_y: 0.0,
+                    zoom: 1.0,
+                    canvas_width: 64.0,
+                    canvas_height: 64.0,
+                    dpr: 1.0,
+                },
                 &view,
             );
             assert_eq!(overlay_result.unwrap().instance_count, 1);
             assert_eq!(
-                executor.execute_composite_pass(&graph, &view, &composited_view).unwrap().document_revision,
+                executor
+                    .execute_composite_pass(&graph, &view, &composited_view)
+                    .unwrap()
+                    .document_revision,
                 7,
             );
             let mut constrained = WgpuExecutor::with_resource_budget(
@@ -1859,7 +2250,14 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 constrained.execute_text_pass(
                     &graph,
                     &[glyph],
-                    WgpuCamera { viewport_x: 0.0, viewport_y: 0.0, zoom: 1.0, canvas_width: 64.0, canvas_height: 64.0, dpr: 1.0 },
+                    WgpuCamera {
+                        viewport_x: 0.0,
+                        viewport_y: 0.0,
+                        zoom: 1.0,
+                        canvas_width: 64.0,
+                        canvas_height: 64.0,
+                        dpr: 1.0
+                    },
                     &view,
                 ),
                 Err(WgpuExecutorError::ResourceBudgetExceeded),
@@ -1869,7 +2267,8 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             assert!(executor.release_offscreen_surface(offscreen_key));
             assert_eq!(
                 executor.resource_bytes(),
-                resource_bytes_before_release - u64::from(offscreen_key.width) * u64::from(offscreen_key.height) * 4,
+                resource_bytes_before_release
+                    - u64::from(offscreen_key.width) * u64::from(offscreen_key.height) * 4,
             );
             assert!(!executor.release_offscreen_surface(offscreen_key));
             let bytes_per_row = 256;
@@ -1897,13 +2296,24 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                         rows_per_image: Some(64),
                     },
                 },
-                wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
             );
             queue.submit(Some(encoder.finish()));
             let slice = readback.slice(..);
             let (sender, receiver) = mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| sender.send(result).unwrap());
-            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) }).unwrap();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                sender.send(result).unwrap()
+            });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(5)),
+                })
+                .unwrap();
             receiver.recv().unwrap().unwrap();
             let pixels = slice.get_mapped_range().unwrap();
             let center = 42 * bytes_per_row as usize + 42 * 4;
@@ -1915,7 +2325,10 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             readback.unmap();
             assert!(pollster::block_on(error_scope.pop()).is_none());
             let rebuilt = pollster::block_on(factory.rebuild()).unwrap().0;
-            assert_eq!(rebuilt.resource_bytes(), (12 + 8) * std::mem::size_of::<f32>() as u64);
+            assert_eq!(
+                rebuilt.resource_bytes(),
+                (12 + 8) * std::mem::size_of::<f32>() as u64
+            );
         }
     }
 }
@@ -1924,8 +2337,8 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
 mod tests {
     use super::{
         DeviceState, DirtySet, GPU_INSTANCE_FLOATS, GpuPrimitive, GpuResourceDescriptor,
-        GpuResourceError, GpuResourceKind, GpuResourcePool, Rect, RenderCommand, RenderPass,
-        Scene, SceneNode, SceneNodeKind, build_gpu_instance_batch, compile_render_graph,
+        GpuResourceError, GpuResourceKind, GpuResourcePool, Rect, RenderCommand, RenderPass, Scene,
+        SceneNode, SceneNodeKind, build_gpu_instance_batch, compile_render_graph,
     };
 
     fn node(id: u128, kind: SceneNodeKind, z_index: u32, x: f32) -> SceneNode {
@@ -2047,7 +2460,12 @@ mod tests {
             GpuPrimitive {
                 node_id: 1,
                 kind: SceneNodeKind::Rectangle,
-                bounds: Rect { x: 2.0, y: 3.0, width: 40.0, height: 20.0 },
+                bounds: Rect {
+                    x: 2.0,
+                    y: 3.0,
+                    width: 40.0,
+                    height: 20.0,
+                },
                 rotation_degrees: 15.0,
                 corner_radius: 99.0,
                 stroke_width: 3.0,
@@ -2057,7 +2475,12 @@ mod tests {
             GpuPrimitive {
                 node_id: 2,
                 kind: SceneNodeKind::Text,
-                bounds: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                bounds: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,

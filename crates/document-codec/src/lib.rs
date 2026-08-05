@@ -517,7 +517,10 @@ fn id_to_bytes(value: u128) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_core::{AssetId, AssetReference, DEFAULT_PAGE_ID, NodeKind, color::Color};
+    use editor_core::{
+        AssetId, AssetReference, DEFAULT_PAGE_ID, NodeKind, Page, PageId, ParagraphStyle,
+        TextAlign, TextAutoSize, TextProperties, TextStyleRun, color::Color,
+    };
 
     #[test]
     fn wire_snapshot_round_trips_canonical_document() {
@@ -556,12 +559,125 @@ mod tests {
                 dimensions: Some([2, 2]),
             })
             .unwrap();
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                Node {
+                    id: NodeId(8),
+                    parent_id: Some(NodeId(7)),
+                    position: PositionId::for_node(NodeId(8)),
+                    name: "Nested frame".into(),
+                    kind: NodeKind::Frame,
+                    x: 8.0,
+                    y: 8.0,
+                    width: 80.0,
+                    height: 60.0,
+                    rotation: 0.0,
+                    fill: Paint::Solid(Color::from_srgb_u8([230, 237, 255], 255)),
+                    stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    corner_radius: 4.0,
+                    text: String::new(),
+                    visible: true,
+                    locked: false,
+                },
+            )
+            .unwrap();
+        document
+            .seed_image_node_on_page(
+                DEFAULT_PAGE_ID,
+                Node {
+                    id: NodeId(10),
+                    parent_id: Some(NodeId(7)),
+                    position: PositionId::for_node(NodeId(10)),
+                    name: "Image".into(),
+                    kind: NodeKind::Image,
+                    x: 16.0,
+                    y: 16.0,
+                    width: 32.0,
+                    height: 32.0,
+                    rotation: 0.0,
+                    fill: Paint::Solid(Color::from_srgb_u8([255, 255, 255], 255)),
+                    stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    corner_radius: 0.0,
+                    text: String::new(),
+                    visible: true,
+                    locked: false,
+                },
+                AssetId(42),
+            )
+            .unwrap();
+        document
+            .seed_page(Page {
+                id: PageId(9),
+                name: "Ideas".into(),
+                position: PositionId::for_node(NodeId(9)),
+            })
+            .unwrap();
+        document
+            .seed_node_on_page(
+                PageId(9),
+                Node {
+                    id: NodeId(11),
+                    parent_id: None,
+                    position: PositionId::for_node(NodeId(11)),
+                    name: "Heading".into(),
+                    kind: NodeKind::Text,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 32.0,
+                    rotation: 0.0,
+                    fill: Paint::Solid(Color::from_srgb_u8([20, 30, 40], 255)),
+                    stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    corner_radius: 0.0,
+                    text: "Phase one".into(),
+                    visible: true,
+                    locked: false,
+                },
+            )
+            .unwrap();
+        document
+            .seed_text_properties(
+                NodeId(11),
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 9,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 500,
+                        italic: false,
+                        letter_spacing: 0.0,
+                    }],
+                    paragraph: ParagraphStyle {
+                        alignment: TextAlign::Left,
+                        line_height: Some(20.0),
+                        paragraph_spacing: 0.0,
+                    },
+                    auto_size: TextAutoSize::Height,
+                    fallback_fonts: vec![],
+                },
+            )
+            .unwrap();
         let snapshot = snapshot_from_document(&document, 3).unwrap();
+        let restored = document_from_wire_snapshot(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+        assert_eq!(restored.pages().count(), 2);
+        assert_eq!(restored.node(NodeId(8)).unwrap().parent_id, Some(NodeId(7)));
+        assert_eq!(restored.asset_for_node(NodeId(10)), Some(AssetId(42)));
         assert_eq!(
-            document_from_wire_snapshot(&snapshot)
+            restored
+                .text_properties_for_node(NodeId(11))
                 .unwrap()
-                .canonical_hash(),
-            document.canonical_hash()
+                .runs
+                .len(),
+            1
         );
     }
 }

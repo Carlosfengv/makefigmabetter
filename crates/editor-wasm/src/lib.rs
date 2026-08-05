@@ -273,6 +273,28 @@ impl DocumentEngine {
                         commands.push(Command::SetTextProperties { id, properties });
                     }
                 }
+                BatchCommand::Restore { node } => {
+                    let text_properties = text_properties_from_projection(node.text_properties.as_ref())?;
+                    let page_id = node
+                        .page_id
+                        .as_deref()
+                        .map(parse_page_id)
+                        .transpose()?
+                        .unwrap_or(DEFAULT_PAGE_ID);
+                    let asset_id = node
+                        .asset_id
+                        .as_deref()
+                        .map(parse_id)
+                        .transpose()?
+                        .map(|id| AssetId(id.0));
+                    let node = node_from_projection(node)?;
+                    commands.push(Command::RestoreNode {
+                        page_id,
+                        node,
+                        asset_id,
+                        text_properties,
+                    });
+                }
                 // The Worker resolves a partial Inspector patch to this complete node
                 // payload before crossing the bridge. Keeping the bridge input fully
                 // concrete makes replay deterministic and lets the Rust reducer own
@@ -314,7 +336,9 @@ impl DocumentEngine {
                             appearance,
                         },
                     ]);
-                    if node.kind != NodeKind::Text && self.document.asset_for_node(node.id) != asset_id {
+                    if node.kind != NodeKind::Text
+                        && self.document.asset_for_node(node.id) != asset_id
+                    {
                         commands.push(Command::SetNodeAsset {
                             id: node.id,
                             asset_id,
@@ -460,6 +484,10 @@ fn default_transparent_css() -> String {
 #[serde(rename_all = "camelCase")]
 struct ProjectionNode {
     id: String,
+    /// v15 carries parent ownership in the durable JSON projection. Its absence
+    /// remains a valid root node in earlier local snapshots.
+    #[serde(default)]
+    parent_id: Option<String>,
     name: String,
     kind: String,
     x: f64,
@@ -582,13 +610,22 @@ struct ProjectionGradientStop {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum BatchCommand {
-    Create { node: ProjectionNode },
-    Update { node: ProjectionNode },
+    Create {
+        node: ProjectionNode,
+    },
+    Restore {
+        node: ProjectionNode,
+    },
+    Update {
+        node: ProjectionNode,
+    },
     Reposition {
         #[serde(rename = "positionIds")]
         position_ids: Vec<PositionUpdate>,
     },
-    Delete { ids: Vec<String> },
+    Delete {
+        ids: Vec<String>,
+    },
 }
 
 #[wasm_bindgen]
@@ -971,6 +1008,7 @@ impl DocumentEngine {
                     }
                 }
                 BatchCommand::Update { .. }
+                | BatchCommand::Restore { .. }
                 | BatchCommand::Reposition { .. }
                 | BatchCommand::Delete { .. } => {
                     return Err(JsValue::from_str("INVALID_SEED_BATCH"));
@@ -1350,7 +1388,8 @@ pub fn engine_semantics_version() -> u32 {
 /// document text or its canonical byte offsets.
 #[wasm_bindgen]
 pub fn fallback_text_layout_json(text: &str, max_graphemes_per_line: u32) -> String {
-    let layout = makefigma_graphics_core::fallback_text_layout(text, max_graphemes_per_line as usize);
+    let layout =
+        makefigma_graphics_core::fallback_text_layout(text, max_graphemes_per_line as usize);
     serde_json::json!({
         "lines": layout.lines.into_iter().map(|line| serde_json::json!({
             "start": line.start,
@@ -1427,7 +1466,8 @@ pub fn shape_text_json(
             "xOffset": glyph.x_offset,
             "yOffset": glyph.y_offset,
         })).collect::<Vec<_>>(),
-    }).to_string())
+    })
+    .to_string())
 }
 
 /// Produces a bounded, deterministic glyph alpha mask from explicit font
@@ -1440,9 +1480,36 @@ pub fn rasterize_glyph_json(
     glyph_id: u32,
     pixel_size: u16,
 ) -> Result<String, JsValue> {
-    let raster = makefigma_graphics_core::rasterize_glyph(
+    let raster =
+        makefigma_graphics_core::rasterize_glyph(font_bytes, face_index, glyph_id, pixel_size)
+            .map_err(|_| JsValue::from_str("INVALID_GLYPH_RASTER_INPUT"))?;
+    Ok(serde_json::json!({
+        "width": raster.width,
+        "height": raster.height,
+        "bearingX": raster.bearing_x,
+        "bearingY": raster.bearing_y,
+        "ascent": raster.ascent,
+        "advanceX": raster.advance_x,
+        "pixels": raster.pixels,
+    })
+    .to_string())
+}
+
+/// Rasterizes at the same declared variation coordinates as shaping. Pixels
+/// remain an ephemeral renderer resource and never enter Canonical Document.
+#[wasm_bindgen]
+pub fn rasterize_glyph_with_variations_json(
+    font_bytes: &[u8],
+    face_index: u32,
+    variation_axes_json: &str,
+    glyph_id: u32,
+    pixel_size: u16,
+) -> Result<String, JsValue> {
+    let variations = parse_font_variations(variation_axes_json)?;
+    let raster = makefigma_graphics_core::rasterize_glyph_with_variations(
         font_bytes,
         face_index,
+        &variations,
         glyph_id,
         pixel_size,
     )
@@ -1469,9 +1536,59 @@ pub fn layout_shaped_text_json(
     text: &str,
     max_width_em: f32,
 ) -> Result<String, JsValue> {
-    let layout = makefigma_graphics_core::layout_shaped_text(
+    let layout =
+        makefigma_graphics_core::layout_shaped_text(font_bytes, face_index, text, max_width_em)
+            .map_err(|_| JsValue::from_str("INVALID_TEXT_LAYOUT_INPUT"))?;
+    Ok(serde_json::json!({
+        "unitsPerEm": layout.units_per_em,
+        "lines": layout.lines.into_iter().map(|line| serde_json::json!({
+            "start": line.start,
+            "end": line.end,
+            "direction": match line.direction {
+                makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
+                makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
+            },
+            "advance": line.advance,
+            "visualRuns": line.visual_runs.into_iter().map(|run| serde_json::json!({
+                "start": run.start,
+                "end": run.end,
+                "direction": match run.direction {
+                    makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
+                    makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
+                },
+            })).collect::<Vec<_>>(),
+            "glyphs": line.glyphs.into_iter().map(|glyph| serde_json::json!({
+                "glyphId": glyph.glyph_id,
+                "cluster": glyph.cluster,
+                "xAdvance": glyph.x_advance,
+                "yAdvance": glyph.y_advance,
+                "xOffset": glyph.x_offset,
+                "yOffset": glyph.y_offset,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "carets": layout.carets.into_iter().map(|caret| serde_json::json!({
+            "byteOffset": caret.byte_offset,
+            "lineIndex": caret.line_index,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string())
+}
+
+/// Produces ICU4X line ranges at the same Variable Font coordinates used by
+/// the shaping and glyph-raster stages.
+#[wasm_bindgen]
+pub fn layout_shaped_text_with_variations_json(
+    font_bytes: &[u8],
+    face_index: u32,
+    variation_axes_json: &str,
+    text: &str,
+    max_width_em: f32,
+) -> Result<String, JsValue> {
+    let variations = parse_font_variations(variation_axes_json)?;
+    let layout = makefigma_graphics_core::layout_shaped_text_with_variations(
         font_bytes,
         face_index,
+        &variations,
         text,
         max_width_em,
     )
@@ -1507,7 +1624,36 @@ pub fn layout_shaped_text_json(
             "byteOffset": caret.byte_offset,
             "lineIndex": caret.line_index,
         })).collect::<Vec<_>>(),
-    }).to_string())
+    })
+    .to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FontVariationInput {
+    tag: String,
+    value: f32,
+}
+
+fn parse_font_variations(
+    value: &str,
+) -> Result<Vec<makefigma_graphics_core::FontVariation>, JsValue> {
+    let values = serde_json::from_str::<Vec<FontVariationInput>>(value)
+        .map_err(|_| JsValue::from_str("INVALID_FONT_VARIATIONS"))?;
+    values
+        .into_iter()
+        .map(|axis| {
+            let tag: [u8; 4] = axis
+                .tag
+                .as_bytes()
+                .try_into()
+                .map_err(|_| JsValue::from_str("INVALID_FONT_VARIATION_TAG"))?;
+            Ok(makefigma_graphics_core::FontVariation {
+                tag,
+                value: axis.value,
+            })
+        })
+        .collect()
 }
 
 fn render_pass_name(pass: makefigma_renderer_wgpu::RenderPass) -> &'static str {
@@ -1709,6 +1855,7 @@ fn projection_node(
     let (stroke, stroke_color, stroke_gradient) = project_paint(&node.stroke);
     ProjectionNode {
         id: format_uuid(node.id),
+        parent_id: node.parent_id.map(format_uuid),
         name: node.name.clone(),
         kind: match node.kind {
             NodeKind::Frame => "frame",
@@ -1877,7 +2024,7 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         .unwrap_or_else(|| PositionId::for_node(id));
     Ok(Node {
         id,
-        parent_id: None,
+        parent_id: node.parent_id.as_deref().map(parse_id).transpose()?,
         position,
         name: node.name,
         kind: parse_kind(&node.kind)?,
@@ -1982,9 +2129,10 @@ mod tests {
     #[test]
     fn exposes_ime_preview_without_mutating_the_document() {
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&preview_text_replacement_json(
-                "A😀B", 1, 5, "中"
-            ).unwrap()).unwrap(),
+            serde_json::from_str::<serde_json::Value>(
+                &preview_text_replacement_json("A😀B", 1, 5, "中").unwrap()
+            )
+            .unwrap(),
             serde_json::json!({
                 "text": "A中B",
                 "selection": { "anchor": 4, "focus": 4 },
@@ -1994,28 +2142,30 @@ mod tests {
 
     #[test]
     fn exposes_font_byte_shaping_to_the_wasm_boundary() {
-        let result = serde_json::from_str::<serde_json::Value>(&shape_text_json(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            "office",
-            "ltr",
+        let result = serde_json::from_str::<serde_json::Value>(
+            &shape_text_json(
+                font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+                0,
+                "office",
+                "ltr",
+            )
+            .unwrap(),
         )
-        .unwrap())
         .unwrap();
         assert_eq!(result["direction"], "ltr");
         assert!(result["unitsPerEm"].as_i64().is_some_and(|value| value > 0));
-        assert!(result["glyphs"].as_array().is_some_and(|glyphs| !glyphs.is_empty()));
+        assert!(
+            result["glyphs"]
+                .as_array()
+                .is_some_and(|glyphs| !glyphs.is_empty())
+        );
     }
 
     #[test]
     fn exposes_a_bounded_glyph_alpha_mask_to_the_wasm_boundary() {
-        let result = serde_json::from_str::<serde_json::Value>(&rasterize_glyph_json(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            1,
-            32,
+        let result = serde_json::from_str::<serde_json::Value>(
+            &rasterize_glyph_json(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, 1, 32).unwrap(),
         )
-        .unwrap())
         .unwrap();
         assert!(result["width"].as_u64().is_some_and(|value| value > 0));
         assert!(result["height"].as_u64().is_some_and(|value| value > 0));
@@ -2026,39 +2176,73 @@ mod tests {
     }
 
     #[test]
-    fn exposes_icu4x_shaped_line_ranges_to_the_wasm_boundary() {
-        let result = serde_json::from_str::<serde_json::Value>(&layout_shaped_text_json(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+    fn parses_variable_font_axes_for_the_wasm_layout_and_raster_boundaries() {
+        let axes = r#"[{"tag":"wght","value":800}]"#;
+        let axes = parse_font_variations(axes).unwrap();
+        assert_eq!(axes.len(), 1);
+        assert_eq!(axes[0].tag, *b"wght");
+        let layout = makefigma_graphics_core::layout_shaped_text_with_variations(
+            font_test_data::VAZIRMATN_VAR,
             0,
-            "office office",
-            3.0,
+            &axes,
+            "ا ا",
+            10.0,
         )
-        .unwrap())
+        .unwrap();
+        assert!(!layout.lines.is_empty());
+        let raster = makefigma_graphics_core::rasterize_glyph_with_variations(
+            font_test_data::VAZIRMATN_VAR,
+            0,
+            &axes,
+            1,
+            32,
+        )
+        .unwrap();
+        assert!(!raster.pixels.is_empty());
+    }
+
+    #[test]
+    fn exposes_icu4x_shaped_line_ranges_to_the_wasm_boundary() {
+        let result = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_json(
+                font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+                0,
+                "office office",
+                3.0,
+            )
+            .unwrap(),
+        )
         .unwrap();
         assert_eq!(result["lines"].as_array().map(Vec::len), Some(2));
         assert_eq!(result["lines"][0]["start"], 0);
         assert_eq!(result["lines"][0]["end"], 7);
-        assert!(result["lines"][0]["glyphs"].as_array().is_some_and(|glyphs| !glyphs.is_empty()));
-        assert!(result["carets"].as_array().is_some_and(|carets| carets.len() > 2));
+        assert!(
+            result["lines"][0]["glyphs"]
+                .as_array()
+                .is_some_and(|glyphs| !glyphs.is_empty())
+        );
+        assert!(
+            result["carets"]
+                .as_array()
+                .is_some_and(|carets| carets.len() > 2)
+        );
     }
 
     #[test]
     fn exposes_uax9_visual_runs_without_rewriting_source_offsets() {
         let source = "office مرحبا office";
-        let result = serde_json::from_str::<serde_json::Value>(&layout_shaped_text_json(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            source,
-            100.0,
+        let result = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_json(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, source, 100.0)
+                .unwrap(),
         )
-        .unwrap())
         .unwrap();
         let runs = result["lines"][0]["visualRuns"].as_array().unwrap();
         assert!(runs.len() >= 3);
         assert!(runs.iter().any(|run| run["direction"] == "rtl"));
-        let covered = runs.iter().map(|run| {
-            run["end"].as_u64().unwrap() - run["start"].as_u64().unwrap()
-        }).sum::<u64>();
+        let covered = runs
+            .iter()
+            .map(|run| run["end"].as_u64().unwrap() - run["start"].as_u64().unwrap())
+            .sum::<u64>();
         assert_eq!(covered, source.len() as u64);
     }
 
@@ -2087,9 +2271,9 @@ mod tests {
                 "",
             )
             .unwrap();
-        let plan = serde_json::from_str::<serde_json::Value>(&engine.render_graph_plan_json(
-            0.0, 0.0, 200.0, 100.0,
-        ))
+        let plan = serde_json::from_str::<serde_json::Value>(
+            &engine.render_graph_plan_json(0.0, 0.0, 200.0, 100.0),
+        )
         .unwrap();
         assert_eq!(plan["documentRevision"], 1);
         assert_eq!(
@@ -2140,10 +2324,12 @@ mod tests {
                 "Second",
             )
             .unwrap();
-        let plan = serde_json::from_str::<serde_json::Value>(&engine
-            .render_graph_plan_for_page_json(second_page, -100.0, -100.0, 200.0, 200.0)
-            .unwrap())
-            .unwrap();
+        let plan = serde_json::from_str::<serde_json::Value>(
+            &engine
+                .render_graph_plan_for_page_json(second_page, -100.0, -100.0, 200.0, 200.0)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan["documentRevision"], 2);
         assert_eq!(
             plan["commands"],
@@ -2179,11 +2365,20 @@ mod tests {
                 "",
             )
             .unwrap();
-        let instances = serde_json::from_str::<serde_json::Value>(&engine.gpu_scene_instances_json(
-            "00000000-0000-0000-0000-000000000001",
-        ).unwrap()).unwrap();
-        assert_eq!(instances["renderedNodeIds"], serde_json::json!(["00000000-0000-0000-0000-000000000322"]));
-        assert_eq!(instances["instanceFloats"].as_array().map(Vec::len), Some(16));
+        let instances = serde_json::from_str::<serde_json::Value>(
+            &engine
+                .gpu_scene_instances_json("00000000-0000-0000-0000-000000000001")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            instances["renderedNodeIds"],
+            serde_json::json!(["00000000-0000-0000-0000-000000000322"])
+        );
+        assert_eq!(
+            instances["instanceFloats"].as_array().map(Vec::len),
+            Some(16)
+        );
         assert_eq!(instances["instanceFloats"][5], 1.0);
         let floats = instances["instanceFloats"].as_array().unwrap();
         assert_eq!(floats[8], 1.0);
@@ -2351,6 +2546,7 @@ mod tests {
         };
         let second = Node {
             id: NodeId(2),
+            position: PositionId::for_node(NodeId(2)),
             ..first.clone()
         };
         engine
@@ -2464,6 +2660,138 @@ mod tests {
         );
         assert_eq!(restored.document.node(NodeId(1)).unwrap().opacity, 0.75);
         assert!(!restored.can_undo());
+    }
+
+    #[test]
+    fn core_snapshot_preserves_parent_page_and_sibling_position_invariants() {
+        let mut source = DocumentEngine::new();
+        let node = |id, parent_id, name: &str, position| Node {
+            id: NodeId(id),
+            parent_id,
+            position: PositionId::for_node(NodeId(position)),
+            name: name.into(),
+            kind: NodeKind::Frame,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation: 0.0,
+            fill: "#e6edff".into(),
+            stroke: "#00000000".into(),
+            stroke_width: 0.0,
+            opacity: 1.0,
+            corner_radius: 12.0,
+            text: String::new(),
+            visible: true,
+            locked: false,
+        };
+        source
+            .document
+            .seed_node(node(1, None, "Root frame", 1))
+            .unwrap();
+        source
+            .document
+            .seed_node(node(2, None, "Root sibling", 2))
+            .unwrap();
+        source
+            .document
+            .seed_node(node(3, Some(NodeId(1)), "Nested frame", 3))
+            .unwrap();
+        let snapshot = source.snapshot_json();
+        assert!(snapshot.contains(r#""parentId":"00000000-0000-0000-0000-000000000001""#));
+
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.node(NodeId(3)).unwrap().parent_id,
+            Some(NodeId(1))
+        );
+        assert_eq!(restored.canonical_hash(), source.canonical_hash());
+
+        let mut invalid_parent = node(4, Some(NodeId(255)), "Unknown parent", 4);
+        assert!(Document::empty().seed_node(invalid_parent.clone()).is_err());
+
+        invalid_parent.parent_id = None;
+        invalid_parent.position = PositionId::for_node(NodeId(1));
+        let mut duplicate_position = Document::empty();
+        duplicate_position
+            .seed_node(node(1, None, "First sibling", 1))
+            .unwrap();
+        assert!(duplicate_position.seed_node(invalid_parent).is_err());
+
+        let second_page = Page {
+            id: PageId(99),
+            name: "Second page".into(),
+            position: PositionId::for_node(NodeId(99)),
+        };
+        let mut cross_page_parent = Document::empty();
+        cross_page_parent.seed_page(second_page).unwrap();
+        cross_page_parent
+            .seed_node(node(1, None, "Page one parent", 1))
+            .unwrap();
+        assert!(
+            cross_page_parent
+                .seed_node_on_page(PageId(99), node(5, Some(NodeId(1)), "Cross-page child", 5))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn phase1_snapshot_fixtures_migrate_to_a_stable_current_projection() {
+        let fixtures = [
+            (
+                "v13",
+                include_str!("../../../fixtures/documents/phase1-snapshot-v13.fixture.json"),
+                "cb588c3ca07162fa024dc0f0f3cf514384ef4d828869f0b9bfff7b6d806285b7",
+            ),
+            (
+                "v14",
+                include_str!("../../../fixtures/documents/phase1-snapshot-v14.fixture.json"),
+                "9491e6b70382099a15ac37ba861ab8c25e7a2c95b984d15b961d489f2b3c147c",
+            ),
+            (
+                "v15",
+                include_str!("../../../fixtures/documents/phase1-snapshot-v15.fixture.json"),
+                "eb71386a777c71c0382a15d57f4198fcc414e8131f61a00671152c2a08ae7268",
+            ),
+        ];
+        for (version, fixture, expected_hash) in fixtures {
+            let mut migrated = DocumentEngine::new();
+            migrated.load_snapshot_json(fixture).unwrap();
+            assert_eq!(migrated.document.pages().count(), 2, "{version}");
+            assert_eq!(migrated.document.nodes().count(), 5, "{version}");
+            assert_eq!(
+                migrated
+                    .document
+                    .node(parse_id("00000000-0000-4000-8000-000000000103").unwrap())
+                    .unwrap()
+                    .parent_id,
+                Some(parse_id("00000000-0000-4000-8000-000000000101").unwrap()),
+                "{version}"
+            );
+            assert_eq!(
+                migrated
+                    .document
+                    .asset(AssetId(
+                        parse_id("00000000-0000-4000-8000-000000000201").unwrap().0,
+                    ))
+                    .unwrap()
+                    .dimensions,
+                Some([16, 16]),
+                "{version}"
+            );
+            let projection = migrated.snapshot_json();
+            assert!(projection.contains(r#""schemaVersion":15"#), "{version}");
+
+            let mut round_trip = DocumentEngine::new();
+            round_trip.load_snapshot_json(&projection).unwrap();
+            assert_eq!(
+                round_trip.canonical_hash(),
+                migrated.canonical_hash(),
+                "{version}"
+            );
+            assert_eq!(migrated.canonical_hash(), expected_hash, "{version}");
+        }
     }
 
     #[test]
@@ -2581,6 +2909,7 @@ mod tests {
         let mut engine = DocumentEngine::new();
         let node = |id: &str, name: &str| ProjectionNode {
             id: id.into(),
+            parent_id: None,
             name: name.into(),
             kind: "rectangle".into(),
             asset_id: None,
@@ -2631,26 +2960,82 @@ mod tests {
     fn reposition_batch_changes_canonical_paint_order_and_is_undoable() {
         let mut engine = DocumentEngine::new();
         let node = |id: &str, name: &str| ProjectionNode {
-            id: id.into(), name: name.into(), kind: "rectangle".into(), asset_id: None, text_properties: None,
-            x: 0.0, y: 0.0, width: 100.0, height: 80.0, rotation: 0.0,
-            fill: "#e6edff".into(), fill_color: None, fill_gradient: None,
-            stroke: "transparent".into(), stroke_color: None, stroke_gradient: None, stroke_width: 0.0,
-            position_id: None, page_id: None, opacity: 1.0, corner_radius: 12.0,
-            text: String::new(), visible: true, locked: false,
+            id: id.into(),
+            parent_id: None,
+            name: name.into(),
+            kind: "rectangle".into(),
+            asset_id: None,
+            text_properties: None,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation: 0.0,
+            fill: "#e6edff".into(),
+            fill_color: None,
+            fill_gradient: None,
+            stroke: "transparent".into(),
+            stroke_color: None,
+            stroke_gradient: None,
+            stroke_width: 0.0,
+            position_id: None,
+            page_id: None,
+            opacity: 1.0,
+            corner_radius: 12.0,
+            text: String::new(),
+            visible: true,
+            locked: false,
         };
         let first = "00000000-0000-4000-8000-000000000001";
         let second = "00000000-0000-4000-8000-000000000002";
-        engine.submit_batch(NodeId(16), 0, vec![
-            BatchCommand::Create { node: node(first, "First") },
-            BatchCommand::Create { node: node(second, "Second") },
-        ]).unwrap();
+        engine
+            .submit_batch(
+                NodeId(16),
+                0,
+                vec![
+                    BatchCommand::Create {
+                        node: node(first, "First"),
+                    },
+                    BatchCommand::Create {
+                        node: node(second, "Second"),
+                    },
+                ],
+            )
+            .unwrap();
 
-        engine.submit_batch(NodeId(17), 1, vec![BatchCommand::Reposition {
-            position_ids: vec![PositionUpdate { id: first.into(), position_id: "ffffffffffffffffffffffffffffffff:00000000000000000000000000000007".into() }],
-        }]).unwrap();
-        assert_eq!(engine.document.ordered_nodes().into_iter().map(|node| node.name.as_str()).collect::<Vec<_>>(), ["Second", "First"]);
+        engine
+            .submit_batch(
+                NodeId(17),
+                1,
+                vec![BatchCommand::Reposition {
+                    position_ids: vec![PositionUpdate {
+                        id: first.into(),
+                        position_id:
+                            "ffffffffffffffffffffffffffffffff:00000000000000000000000000000007"
+                                .into(),
+                    }],
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .document
+                .ordered_nodes()
+                .into_iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
         engine.document.undo().unwrap();
-        assert_eq!(engine.document.ordered_nodes().into_iter().map(|node| node.name.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
+        assert_eq!(
+            engine
+                .document
+                .ordered_nodes()
+                .into_iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
     }
 
     #[test]
@@ -2659,6 +3044,7 @@ mod tests {
         let id = parse_id("00000000-0000-4000-8000-000000000001").unwrap();
         let text = |value: &str| ProjectionNode {
             id: "00000000-0000-4000-8000-000000000001".into(),
+            parent_id: None,
             name: "Heading".into(),
             kind: "text".into(),
             asset_id: None,
@@ -2768,6 +3154,7 @@ mod tests {
         let id = "00000000-0000-4000-8000-000000000001";
         let node = ProjectionNode {
             id: id.into(),
+            parent_id: None,
             name: "P3 card".into(),
             kind: "rectangle".into(),
             asset_id: None,
@@ -2922,6 +3309,7 @@ mod tests {
                 vec![BatchCommand::Create {
                     node: ProjectionNode {
                         id: id.into(),
+                        parent_id: None,
                         name: "Gradient card".into(),
                         kind: "rectangle".into(),
                         asset_id: None,
@@ -3117,6 +3505,7 @@ mod tests {
             updates.push(BatchCommand::Update {
                 node: ProjectionNode {
                     id: format_uuid(id),
+                    parent_id: None,
                     name: format!("Layer {index}"),
                     kind: "rectangle".into(),
                     asset_id: None,

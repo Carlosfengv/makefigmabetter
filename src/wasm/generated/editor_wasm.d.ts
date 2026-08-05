@@ -117,6 +117,12 @@ export function fallback_text_layout_json(text: string, max_graphemes_per_line: 
 export function layout_shaped_text_json(font_bytes: Uint8Array, face_index: number, text: string, max_width_em: number): string;
 
 /**
+ * Produces ICU4X line ranges at the same Variable Font coordinates used by
+ * the shaping and glyph-raster stages.
+ */
+export function layout_shaped_text_with_variations_json(font_bytes: Uint8Array, face_index: number, variation_axes_json: string, text: string, max_width_em: number): string;
+
+/**
  * Produces a transient text-edit/IME preview. It has no DocumentEngine
  * receiver by design: only a composition commit crosses into Canonical
  * Document as an atomic text transaction.
@@ -129,6 +135,12 @@ export function preview_text_replacement_json(text: string, anchor: number, focu
  * neither the pixels nor the placement can enter Canonical Document state.
  */
 export function rasterize_glyph_json(font_bytes: Uint8Array, face_index: number, glyph_id: number, pixel_size: number): string;
+
+/**
+ * Rasterizes at the same declared variation coordinates as shaping. Pixels
+ * remain an ephemeral renderer resource and never enter Canonical Document.
+ */
+export function rasterize_glyph_with_variations_json(font_bytes: Uint8Array, face_index: number, variation_axes_json: string, glyph_id: number, pixel_size: number): string;
 
 /**
  * Shapes text from explicit font bytes without using browser font metrics.
@@ -172,8 +184,10 @@ export interface InitOutput {
     readonly engine_semantics_version: () => number;
     readonly fallback_text_layout_json: (a: number, b: number, c: number) => [number, number];
     readonly layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly preview_text_replacement_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly shape_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

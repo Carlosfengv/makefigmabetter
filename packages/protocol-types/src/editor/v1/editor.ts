@@ -283,6 +283,15 @@ export interface DeleteNode {
 }
 
 /**
+ * Restores a specific tombstoned node as part of a resolved history replay.
+ * This is intentionally distinct from CreateNode: a deleted node ID cannot be
+ * allocated to an unrelated new node, but undo/redo must be able to restore it.
+ */
+export interface RestoreNode {
+  node?: SceneNode | undefined;
+}
+
+/**
  * A resolved sibling-order key. It is intentionally separate from geometry so
  * reorders are durable, atomic document operations rather than UI array edits.
  */
@@ -325,6 +334,7 @@ export interface ResolvedOperation {
   setTextProperties?: SetTextProperties | undefined;
   setImageFill?: ImageFillUpdate | undefined;
   setNodePosition?: SetNodePosition | undefined;
+  restoreNode?: RestoreNode | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -2772,6 +2782,52 @@ export const DeleteNode: MessageFns<DeleteNode> = {
   },
 };
 
+function createBaseRestoreNode(): RestoreNode {
+  return { node: undefined };
+}
+
+export const RestoreNode: MessageFns<RestoreNode> = {
+  encode(message: RestoreNode, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.node !== undefined) {
+      SceneNode.encode(message.node, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RestoreNode {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRestoreNode();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.node = SceneNode.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RestoreNode>, I>>(base?: I): RestoreNode {
+    return RestoreNode.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RestoreNode>, I>>(object: I): RestoreNode {
+    const message = createBaseRestoreNode();
+    message.node = (object.node !== undefined && object.node !== null) ? SceneNode.fromPartial(object.node) : undefined;
+    return message;
+  },
+};
+
 function createBaseSetNodePosition(): SetNodePosition {
   return { nodeId: new Uint8Array(0), positionId: undefined };
 }
@@ -2998,6 +3054,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setTextProperties: undefined,
     setImageFill: undefined,
     setNodePosition: undefined,
+    restoreNode: undefined,
   };
 }
 
@@ -3038,6 +3095,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.setNodePosition !== undefined) {
       SetNodePosition.encode(message.setNodePosition, writer.uint32(98).fork()).join();
+    }
+    if (message.restoreNode !== undefined) {
+      RestoreNode.encode(message.restoreNode, writer.uint32(106).fork()).join();
     }
     return writer;
   },
@@ -3145,6 +3205,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.setNodePosition = SetNodePosition.decode(reader, reader.uint32());
           continue;
         }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.restoreNode = RestoreNode.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3195,6 +3263,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.setNodePosition = (object.setNodePosition !== undefined && object.setNodePosition !== null)
       ? SetNodePosition.fromPartial(object.setNodePosition)
+      : undefined;
+    message.restoreNode = (object.restoreNode !== undefined && object.restoreNode !== null)
+      ? RestoreNode.fromPartial(object.restoreNode)
       : undefined;
     return message;
   },

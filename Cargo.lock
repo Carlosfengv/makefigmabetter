@@ -824,10 +824,12 @@ dependencies = [
 name = "makefigma-asset-service"
 version = "0.1.0"
 dependencies = [
+ "font-test-data",
  "getrandom 0.2.17",
  "rusqlite",
  "sha2",
  "tempfile",
+ "ttf-parser",
 ]
 
 [[package]]

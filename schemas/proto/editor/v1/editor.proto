@@ -230,6 +230,13 @@ message DeleteNode {
   bytes node_id = 1;
 }
 
+// Restores a specific tombstoned node as part of a resolved history replay.
+// This is intentionally distinct from CreateNode: a deleted node ID cannot be
+// allocated to an unrelated new node, but undo/redo must be able to restore it.
+message RestoreNode {
+  SceneNode node = 1;
+}
+
 // A resolved sibling-order key. It is intentionally separate from geometry so
 // reorders are durable, atomic document operations rather than UI array edits.
 message SetNodePosition {
@@ -268,6 +275,7 @@ message ResolvedOperation {
     SetTextProperties set_text_properties = 10;
     ImageFillUpdate set_image_fill = 11;
     SetNodePosition set_node_position = 12;
+    RestoreNode restore_node = 13;
   }
 }
 

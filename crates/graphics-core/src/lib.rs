@@ -72,7 +72,16 @@ pub struct ShapedTextLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextShapingError {
     InvalidFont,
+    InvalidVariation,
     InvalidLineWidth,
+}
+
+/// A declared OpenType variation coordinate. Four ASCII bytes match the
+/// Canonical `FontReference` axis tag without involving platform font APIs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontVariation {
+    pub tag: [u8; 4],
+    pub value: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,6 +129,7 @@ pub struct RasterizedGlyph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlyphRasterError {
     InvalidFont,
+    InvalidVariation,
     InvalidPixelSize,
     GlyphHasNoOutline,
     ResourceLimit,
@@ -186,7 +196,12 @@ impl GlyphAtlas {
         if y.saturating_add(height) > self.height {
             return Err(GlyphAtlasError::AtlasFull);
         }
-        let entry = GlyphAtlasEntry { x, y, width, height };
+        let entry = GlyphAtlasEntry {
+            x,
+            y,
+            width,
+            height,
+        };
         self.entries.insert(key, entry);
         self.cursor_x = x.saturating_add(width);
         self.cursor_y = y;
@@ -327,8 +342,19 @@ pub fn shape_text(
     text: &str,
     direction: TextDirection,
 ) -> Result<ShapedText, TextShapingError> {
-    let face = rustybuzz::Face::from_slice(font_bytes, face_index)
-        .ok_or(TextShapingError::InvalidFont)?;
+    shape_text_with_variations(font_bytes, face_index, &[], text, direction)
+}
+
+/// Shapes explicit font bytes at declared variable-font coordinates without
+/// consulting platform font APIs.
+pub fn shape_text_with_variations(
+    font_bytes: &[u8],
+    face_index: u32,
+    variations: &[FontVariation],
+    text: &str,
+    direction: TextDirection,
+) -> Result<ShapedText, TextShapingError> {
+    let face = rustybuzz_face(font_bytes, face_index, variations)?;
     Ok(shape_text_with_face(&face, text, direction))
 }
 
@@ -371,11 +397,24 @@ pub fn rasterize_glyph(
     glyph_id: u32,
     pixel_size: u16,
 ) -> Result<RasterizedGlyph, GlyphRasterError> {
+    rasterize_glyph_with_variations(font_bytes, face_index, &[], glyph_id, pixel_size)
+}
+
+/// Rasterizes a glyph at the same variation coordinates as shaping. This keeps
+/// advances, outlines and renderer cache entries one deterministic result.
+pub fn rasterize_glyph_with_variations(
+    font_bytes: &[u8],
+    face_index: u32,
+    variations: &[FontVariation],
+    glyph_id: u32,
+    pixel_size: u16,
+) -> Result<RasterizedGlyph, GlyphRasterError> {
     if pixel_size == 0 || pixel_size > MAX_GLYPH_RASTER_DIMENSION {
         return Err(GlyphRasterError::InvalidPixelSize);
     }
-    let face = ttf_parser::Face::parse(font_bytes, face_index)
+    let mut face = ttf_parser::Face::parse(font_bytes, face_index)
         .map_err(|_| GlyphRasterError::InvalidFont)?;
+    apply_ttf_variations(&mut face, variations).map_err(|_| GlyphRasterError::InvalidVariation)?;
     let glyph_id = u16::try_from(glyph_id).map_err(|_| GlyphRasterError::GlyphHasNoOutline)?;
     let mut outline = GlyphOutline::default();
     let bounds = face
@@ -402,23 +441,40 @@ pub fn rasterize_glyph(
             for sample_y in 0..GLYPH_RASTER_SAMPLES_PER_AXIS {
                 for sample_x in 0..GLYPH_RASTER_SAMPLES_PER_AXIS {
                     let point = RasterPoint {
-                        x: x as f32 + (sample_x as f32 + 0.5) / GLYPH_RASTER_SAMPLES_PER_AXIS as f32,
-                        y: y as f32 + (sample_y as f32 + 0.5) / GLYPH_RASTER_SAMPLES_PER_AXIS as f32,
+                        x: x as f32
+                            + (sample_x as f32 + 0.5) / GLYPH_RASTER_SAMPLES_PER_AXIS as f32,
+                        y: y as f32
+                            + (sample_y as f32 + 0.5) / GLYPH_RASTER_SAMPLES_PER_AXIS as f32,
                     };
                     if point_in_outline(point, &contours) {
                         covered += 1;
                     }
                 }
             }
-            let sample_count = (GLYPH_RASTER_SAMPLES_PER_AXIS * GLYPH_RASTER_SAMPLES_PER_AXIS) as u16;
-            pixels[y * usize::from(width) + x] = ((u32::from(covered) * 255) / u32::from(sample_count)) as u8;
+            let sample_count =
+                (GLYPH_RASTER_SAMPLES_PER_AXIS * GLYPH_RASTER_SAMPLES_PER_AXIS) as u16;
+            pixels[y * usize::from(width) + x] =
+                ((u32::from(covered) * 255) / u32::from(sample_count)) as u8;
         }
     }
     let bearing_x = rounded_i16(f32::from(bounds.x_min) * scale)?;
     let bearing_y = rounded_i16(f32::from(bounds.y_max) * scale)?;
     let ascent = rounded_i16(f32::from(face.ascender()) * scale)?;
-    let advance_x = rounded_i16(f32::from(face.glyph_hor_advance(ttf_parser::GlyphId(glyph_id)).unwrap_or(0)) * scale)?;
-    Ok(RasterizedGlyph { width, height, bearing_x, bearing_y, ascent, advance_x, pixels })
+    let advance_x = rounded_i16(
+        f32::from(
+            face.glyph_hor_advance(ttf_parser::GlyphId(glyph_id))
+                .unwrap_or(0),
+        ) * scale,
+    )?;
+    Ok(RasterizedGlyph {
+        width,
+        height,
+        bearing_x,
+        bearing_y,
+        ascent,
+        advance_x,
+        pixels,
+    })
 }
 
 fn scaled_dimension(units: i16, scale: f32) -> Result<u16, GlyphRasterError> {
@@ -461,10 +517,15 @@ impl GlyphOutline {
         self.contours
             .iter()
             .filter(|contour| contour.len() >= 3)
-            .map(|contour| contour.iter().map(|point| RasterPoint {
-                x: (point.x - x_min) * scale,
-                y: (y_max - point.y) * scale,
-            }).collect())
+            .map(|contour| {
+                contour
+                    .iter()
+                    .map(|point| RasterPoint {
+                        x: (point.x - x_min) * scale,
+                        y: (y_max - point.y) * scale,
+                    })
+                    .collect()
+            })
             .collect()
     }
 }
@@ -502,8 +563,14 @@ impl ttf_parser::OutlineBuilder for GlyphOutline {
             let t = step as f32 / 12.0;
             let inverse = 1.0 - t;
             self.push(RasterPoint {
-                x: inverse.powi(3) * start.x + 3.0 * inverse * inverse * t * first.x + 3.0 * inverse * t * t * second.x + t.powi(3) * end.x,
-                y: inverse.powi(3) * start.y + 3.0 * inverse * inverse * t * first.y + 3.0 * inverse * t * t * second.y + t.powi(3) * end.y,
+                x: inverse.powi(3) * start.x
+                    + 3.0 * inverse * inverse * t * first.x
+                    + 3.0 * inverse * t * t * second.x
+                    + t.powi(3) * end.x,
+                y: inverse.powi(3) * start.y
+                    + 3.0 * inverse * inverse * t * first.y
+                    + 3.0 * inverse * t * t * second.y
+                    + t.powi(3) * end.y,
             });
         }
     }
@@ -512,7 +579,9 @@ impl ttf_parser::OutlineBuilder for GlyphOutline {
 }
 
 fn point_in_outline(point: RasterPoint, contours: &[Vec<RasterPoint>]) -> bool {
-    contours.iter().fold(false, |inside, contour| inside ^ point_in_contour(point, contour))
+    contours.iter().fold(false, |inside, contour| {
+        inside ^ point_in_contour(point, contour)
+    })
 }
 
 fn point_in_contour(point: RasterPoint, contour: &[RasterPoint]) -> bool {
@@ -521,9 +590,13 @@ fn point_in_contour(point: RasterPoint, contour: &[RasterPoint]) -> bool {
         let left = contour[index];
         let right = contour[(index + 1) % contour.len()];
         let spans_y = (left.y > point.y) != (right.y > point.y);
-        if !spans_y { continue; }
+        if !spans_y {
+            continue;
+        }
         let crossing_x = (right.x - left.x) * (point.y - left.y) / (right.y - left.y) + left.x;
-        if point.x < crossing_x { inside = !inside; }
+        if point.x < crossing_x {
+            inside = !inside;
+        }
     }
     inside
 }
@@ -537,11 +610,23 @@ pub fn layout_shaped_text(
     text: &str,
     max_width_em: f32,
 ) -> Result<ShapedTextLayout, TextShapingError> {
+    layout_shaped_text_with_variations(font_bytes, face_index, &[], text, max_width_em)
+}
+
+/// Lays out explicit font bytes at declared variable-font coordinates. Callers
+/// use this instead of CSS `font-variation-settings` so all replay paths share
+/// the same shaping semantics.
+pub fn layout_shaped_text_with_variations(
+    font_bytes: &[u8],
+    face_index: u32,
+    variations: &[FontVariation],
+    text: &str,
+    max_width_em: f32,
+) -> Result<ShapedTextLayout, TextShapingError> {
     if !max_width_em.is_finite() || max_width_em <= 0.0 {
         return Err(TextShapingError::InvalidLineWidth);
     }
-    let face = rustybuzz::Face::from_slice(font_bytes, face_index)
-        .ok_or(TextShapingError::InvalidFont)?;
+    let face = rustybuzz_face(font_bytes, face_index, variations)?;
     let max_advance = (max_width_em * face.units_per_em() as f32).max(1.0) as i32;
     let segmenter = LineSegmenter::new_auto(Default::default());
     let mut lines = Vec::new();
@@ -574,6 +659,54 @@ pub fn layout_shaped_text(
         lines,
         carets,
     })
+}
+
+fn rustybuzz_face<'a>(
+    font_bytes: &'a [u8],
+    face_index: u32,
+    variations: &[FontVariation],
+) -> Result<rustybuzz::Face<'a>, TextShapingError> {
+    let mut validation_face = ttf_parser::Face::parse(font_bytes, face_index)
+        .map_err(|_| TextShapingError::InvalidFont)?;
+    apply_ttf_variations(&mut validation_face, variations)
+        .map_err(|_| TextShapingError::InvalidVariation)?;
+    let mut face =
+        rustybuzz::Face::from_slice(font_bytes, face_index).ok_or(TextShapingError::InvalidFont)?;
+    let variations = variations
+        .iter()
+        .map(|variation| rustybuzz::Variation {
+            tag: rustybuzz::ttf_parser::Tag::from_bytes(&variation.tag),
+            value: variation.value,
+        })
+        .collect::<Vec<_>>();
+    face.set_variations(&variations);
+    Ok(face)
+}
+
+fn apply_ttf_variations(
+    face: &mut ttf_parser::Face<'_>,
+    variations: &[FontVariation],
+) -> Result<(), ()> {
+    let mut previous = None;
+    for variation in variations {
+        if !variation.value.is_finite()
+            || !variation.tag.iter().all(|byte| byte.is_ascii_graphic())
+            || previous.is_some_and(|tag| tag >= variation.tag)
+        {
+            return Err(());
+        }
+        let tag = ttf_parser::Tag::from_bytes(&variation.tag);
+        if !face
+            .variation_axes()
+            .into_iter()
+            .any(|axis| axis.tag == tag)
+            || face.set_variation(tag, variation.value).is_none()
+        {
+            return Err(());
+        }
+        previous = Some(variation.tag);
+    }
+    Ok(())
 }
 
 fn shape_text_with_face(
@@ -664,7 +797,10 @@ fn append_paragraph(
     for chunk in graphemes.chunks(limit) {
         let line_index = lines.len() as u32;
         let start = chunk[0].0;
-        let end = chunk.last().map(|(start, len)| start + len).unwrap_or(start);
+        let end = chunk
+            .last()
+            .map(|(start, len)| start + len)
+            .unwrap_or(start);
         lines.push(TextLine {
             start: start as u32,
             end: end as u32,
@@ -787,14 +923,20 @@ fn shape_visual_line(face: &rustybuzz::Face<'_>, text: &str) -> (ShapedText, Vec
         }
         glyphs.extend(shaped.glyphs);
     }
-    (ShapedText { direction, units_per_em: face.units_per_em(), glyphs }, visual_runs)
+    (
+        ShapedText {
+            direction,
+            units_per_em: face.units_per_em(),
+            glyphs,
+        },
+        visual_runs,
+    )
 }
 
 fn shaped_advance(shaped: &ShapedText) -> i32 {
-    shaped
-        .glyphs
-        .iter()
-        .fold(0_i32, |total, glyph| total.saturating_add(glyph.x_advance.abs()))
+    shaped.glyphs.iter().fold(0_i32, |total, glyph| {
+        total.saturating_add(glyph.x_advance.abs())
+    })
 }
 
 fn paragraph_direction(value: &str) -> TextDirection {
@@ -814,7 +956,11 @@ fn paragraph_boundaries(value: &str) -> Vec<(usize, usize)> {
         let len = match bytes[index] {
             b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
             b'\r' | b'\n' => 1,
-            0xE2 if bytes.get(index..index + 3) == Some(&[0xE2, 0x80, 0xA8]) || bytes.get(index..index + 3) == Some(&[0xE2, 0x80, 0xA9]) => 3,
+            0xE2 if bytes.get(index..index + 3) == Some(&[0xE2, 0x80, 0xA8])
+                || bytes.get(index..index + 3) == Some(&[0xE2, 0x80, 0xA9]) =>
+            {
+                3
+            }
             _ => {
                 index += 1;
                 continue;
@@ -833,8 +979,11 @@ fn byte_offset(value: &str, char_offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaretStop, GlyphAtlas, GlyphAtlasError, GlyphKey, GlyphRasterError, TextDirection, TextLine,
-        TextSelection, bidi_visual_runs, fallback_text_layout, layout_shaped_text, rasterize_glyph, replace_text_selection, shape_text,
+        CaretStop, FontVariation, GlyphAtlas, GlyphAtlasError, GlyphKey, GlyphRasterError,
+        TextDirection, TextLine, TextSelection, bidi_visual_runs, fallback_text_layout,
+        layout_shaped_text, layout_shaped_text_with_variations, rasterize_glyph,
+        rasterize_glyph_with_variations, replace_text_selection, shape_text,
+        shape_text_with_variations,
     };
 
     #[test]
@@ -843,18 +992,41 @@ mod tests {
         assert_eq!(
             layout.lines,
             vec![
-                TextLine { start: 0, end: 5, direction: TextDirection::LeftToRight },
-                TextLine { start: 5, end: 8, direction: TextDirection::LeftToRight },
+                TextLine {
+                    start: 0,
+                    end: 5,
+                    direction: TextDirection::LeftToRight
+                },
+                TextLine {
+                    start: 5,
+                    end: 8,
+                    direction: TextDirection::LeftToRight
+                },
             ]
         );
         assert_eq!(
             layout.carets,
             vec![
-                CaretStop { byte_offset: 0, line_index: 0 },
-                CaretStop { byte_offset: 1, line_index: 0 },
-                CaretStop { byte_offset: 5, line_index: 0 },
-                CaretStop { byte_offset: 5, line_index: 1 },
-                CaretStop { byte_offset: 8, line_index: 1 },
+                CaretStop {
+                    byte_offset: 0,
+                    line_index: 0
+                },
+                CaretStop {
+                    byte_offset: 1,
+                    line_index: 0
+                },
+                CaretStop {
+                    byte_offset: 5,
+                    line_index: 0
+                },
+                CaretStop {
+                    byte_offset: 5,
+                    line_index: 1
+                },
+                CaretStop {
+                    byte_offset: 8,
+                    line_index: 1
+                },
             ]
         );
     }
@@ -883,21 +1055,23 @@ mod tests {
         .unwrap();
         assert_eq!(result.text, "A中B");
         assert_eq!(result.selection, TextSelection::collapsed(4));
-        assert!(replace_text_selection(
-            "A😀B",
-            &layout,
-            TextSelection::collapsed(2),
-            "x",
-        )
-        .is_err());
+        assert!(
+            replace_text_selection("A😀B", &layout, TextSelection::collapsed(2), "x",).is_err()
+        );
     }
 
     #[test]
     fn snaps_untrusted_offsets_to_a_stable_caret_boundary() {
         let layout = fallback_text_layout("A😀B", 80);
         assert_eq!(
-            layout.snap_selection(TextSelection { anchor: 2, focus: 4 }),
-            TextSelection { anchor: 1, focus: 5 },
+            layout.snap_selection(TextSelection {
+                anchor: 2,
+                focus: 4
+            }),
+            TextSelection {
+                anchor: 1,
+                focus: 5
+            },
         );
     }
 
@@ -915,10 +1089,12 @@ mod tests {
         assert!(shaped.units_per_em > 0);
         assert!(!shaped.glyphs.is_empty());
         assert!(shaped.glyphs.iter().any(|glyph| glyph.glyph_id != 0));
-        assert!(shaped
-            .glyphs
-            .iter()
-            .all(|glyph| (glyph.cluster as usize) < text.len()));
+        assert!(
+            shaped
+                .glyphs
+                .iter()
+                .all(|glyph| (glyph.cluster as usize) < text.len())
+        );
         assert_eq!(
             shaped,
             shape_text(
@@ -936,23 +1112,25 @@ mod tests {
         let text = "office مرحبا office";
         let runs = bidi_visual_runs(text);
         assert!(runs.len() >= 3);
-        assert!(runs.iter().any(|run| run.direction == TextDirection::RightToLeft));
+        assert!(
+            runs.iter()
+                .any(|run| run.direction == TextDirection::RightToLeft)
+        );
         let mut logical = runs.clone();
         logical.sort_by_key(|run| run.start);
         assert_eq!(logical.first().map(|run| run.start), Some(0));
         assert_eq!(logical.last().map(|run| run.end), Some(text.len() as u32));
         assert!(logical.windows(2).all(|runs| runs[0].end == runs[1].start));
 
-        let layout = layout_shaped_text(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            text,
-            100.0,
-        )
-        .unwrap();
+        let layout =
+            layout_shaped_text(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, text, 100.0).unwrap();
         let line = &layout.lines[0];
         assert_eq!(line.visual_runs, runs);
-        assert!(line.glyphs.windows(2).any(|glyphs| glyphs[0].cluster > glyphs[1].cluster));
+        assert!(
+            line.glyphs
+                .windows(2)
+                .any(|glyphs| glyphs[0].cluster > glyphs[1].cluster)
+        );
     }
 
     #[test]
@@ -969,9 +1147,86 @@ mod tests {
         let second = rasterize_glyph(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, 1, 32).unwrap();
         assert_eq!(first, second);
         assert!(first.width > 0 && first.height > 0);
-        assert_eq!(first.pixels.len(), usize::from(first.width) * usize::from(first.height));
+        assert_eq!(
+            first.pixels.len(),
+            usize::from(first.width) * usize::from(first.height)
+        );
         assert!(first.pixels.iter().any(|alpha| *alpha > 0));
         assert!(first.advance_x > 0);
+    }
+
+    #[test]
+    fn variable_font_coordinates_are_validated_and_reach_shaping_and_rasterization() {
+        let thin = [FontVariation {
+            tag: *b"wght",
+            value: 100.0,
+        }];
+        let bold = [FontVariation {
+            tag: *b"wght",
+            value: 800.0,
+        }];
+        let thin_shape = shape_text_with_variations(
+            font_test_data::VAZIRMATN_VAR,
+            0,
+            &thin,
+            "ا",
+            TextDirection::LeftToRight,
+        )
+        .unwrap();
+        let bold_shape = shape_text_with_variations(
+            font_test_data::VAZIRMATN_VAR,
+            0,
+            &bold,
+            "ا",
+            TextDirection::LeftToRight,
+        )
+        .unwrap();
+        assert_eq!(
+            thin_shape,
+            shape_text_with_variations(
+                font_test_data::VAZIRMATN_VAR,
+                0,
+                &thin,
+                "ا",
+                TextDirection::LeftToRight
+            )
+            .unwrap()
+        );
+        // This fixture deliberately keeps glyph 1 as a simple variable glyf
+        // outline even when the test string's cmap glyph is stripped.
+        let glyph_id = 1;
+        let thin_raster =
+            rasterize_glyph_with_variations(font_test_data::VAZIRMATN_VAR, 0, &thin, glyph_id, 48)
+                .unwrap();
+        let bold_raster =
+            rasterize_glyph_with_variations(font_test_data::VAZIRMATN_VAR, 0, &bold, glyph_id, 48)
+                .unwrap();
+        assert_ne!(thin_raster.pixels, bold_raster.pixels);
+        assert!(!thin_shape.glyphs.is_empty());
+        assert!(!bold_shape.glyphs.is_empty());
+        assert!(
+            layout_shaped_text_with_variations(
+                font_test_data::VAZIRMATN_VAR,
+                0,
+                &bold,
+                "ا ا",
+                10.0
+            )
+            .is_ok()
+        );
+        assert!(
+            shape_text_with_variations(
+                font_test_data::VAZIRMATN_VAR,
+                0,
+                &[FontVariation {
+                    tag: *b"wdth",
+                    value: 100.0
+                }],
+                "ا",
+                TextDirection::LeftToRight
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -993,22 +1248,22 @@ mod tests {
     #[test]
     fn uses_icu4x_breaks_and_shaped_advances_without_splitting_ligatures() {
         let text = "office office";
-        let layout = layout_shaped_text(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            text,
-            3.0,
-        )
-        .unwrap();
+        let layout =
+            layout_shaped_text(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, text, 3.0).unwrap();
         assert_eq!(layout.lines.len(), 2);
         assert_eq!((layout.lines[0].start, layout.lines[0].end), (0, 7));
-        assert_eq!((layout.lines[1].start, layout.lines[1].end), (7, text.len() as u32));
+        assert_eq!(
+            (layout.lines[1].start, layout.lines[1].end),
+            (7, text.len() as u32)
+        );
         assert!(layout.lines.iter().all(|line| line.advance > 0));
-        assert!(layout
-            .lines
-            .iter()
-            .flat_map(|line| &line.glyphs)
-            .all(|glyph| (glyph.cluster as usize) < text.len()));
+        assert!(
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.glyphs)
+                .all(|glyph| (glyph.cluster as usize) < text.len())
+        );
     }
 
     #[test]
@@ -1016,21 +1271,24 @@ mod tests {
         let mut text = "office ".repeat(1_667);
         text.truncate(10_000);
         assert_eq!(text.len(), 10_000);
-        let layout = layout_shaped_text(
-            font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
-            0,
-            &text,
-            6.0,
-        )
-        .unwrap();
+        let layout =
+            layout_shaped_text(font_test_data::NOTO_SERIF_DISPLAY_TRIMMED, 0, &text, 6.0).unwrap();
         assert!(!layout.lines.is_empty());
         assert!(layout.lines.iter().all(|line| {
             line.start <= line.end
                 && (line.end as usize) <= text.len()
                 && line.advance >= 0
-                && line.glyphs.iter().all(|glyph| (glyph.cluster as usize) < text.len())
+                && line
+                    .glyphs
+                    .iter()
+                    .all(|glyph| (glyph.cluster as usize) < text.len())
         }));
-        assert!(layout.carets.iter().all(|caret| (caret.byte_offset as usize) <= text.len()));
+        assert!(
+            layout
+                .carets
+                .iter()
+                .all(|caret| (caret.byte_offset as usize) <= text.len())
+        );
     }
 
     #[test]
@@ -1042,13 +1300,30 @@ mod tests {
             pixel_size: 16,
         };
         let mut atlas = GlyphAtlas::new(16, 16, 2);
-        assert_eq!(atlas.insert(key, 8, 8).unwrap(), atlas.insert(key, 8, 8).unwrap());
+        assert_eq!(
+            atlas.insert(key, 8, 8).unwrap(),
+            atlas.insert(key, 8, 8).unwrap()
+        );
         assert_eq!(atlas.len(), 1);
         atlas
-            .insert(GlyphKey { glyph_id: 43, ..key }, 8, 8)
+            .insert(
+                GlyphKey {
+                    glyph_id: 43,
+                    ..key
+                },
+                8,
+                8,
+            )
             .unwrap();
         assert_eq!(
-            atlas.insert(GlyphKey { glyph_id: 44, ..key }, 1, 1),
+            atlas.insert(
+                GlyphKey {
+                    glyph_id: 44,
+                    ..key
+                },
+                1,
+                1
+            ),
             Err(GlyphAtlasError::AtlasFull)
         );
         atlas.clear();

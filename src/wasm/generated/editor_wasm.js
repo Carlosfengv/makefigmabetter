@@ -632,6 +632,41 @@ export function layout_shaped_text_json(font_bytes, face_index, text, max_width_
 }
 
 /**
+ * Produces ICU4X line ranges at the same Variable Font coordinates used by
+ * the shaping and glyph-raster stages.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {string} variation_axes_json
+ * @param {string} text
+ * @param {number} max_width_em
+ * @returns {string}
+ */
+export function layout_shaped_text_with_variations_json(font_bytes, face_index, variation_axes_json, text, max_width_em) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(variation_axes_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_shaped_text_with_variations_json(ptr0, len0, face_index, ptr1, len1, ptr2, len2, max_width_em);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
  * Produces a transient text-edit/IME preview. It has no DocumentEngine
  * receiver by design: only a composition commit crosses into Canonical
  * Document as an atomic text transaction.
@@ -692,6 +727,39 @@ export function rasterize_glyph_json(font_bytes, face_index, glyph_id, pixel_siz
         return getStringFromWasm0(ptr2, len2);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Rasterizes at the same declared variation coordinates as shaping. Pixels
+ * remain an ephemeral renderer resource and never enter Canonical Document.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {string} variation_axes_json
+ * @param {number} glyph_id
+ * @param {number} pixel_size
+ * @returns {string}
+ */
+export function rasterize_glyph_with_variations_json(font_bytes, face_index, variation_axes_json, glyph_id, pixel_size) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(variation_axes_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rasterize_glyph_with_variations_json(ptr0, len0, face_index, ptr1, len1, glyph_id, pixel_size);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
 }
 
