@@ -1,0 +1,15 @@
+[package]
+name = "makefigma-graphics-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+unicode-bidi = "0.3"
+unicode-segmentation = "1.12"
+rustybuzz = "0.20.1"
+icu_segmenter = "2.2.0"
+ttf-parser = "0.25"
+
+[dev-dependencies]
+font-test-data = "0.8"

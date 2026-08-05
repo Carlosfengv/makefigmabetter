@@ -1,0 +1,20 @@
+[package]
+name = "makefigma-renderer-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The browser still uses the small transitional TypeScript executor. Keeping
+# this target-specific lets the canonical/WASM crate compile without native GPU
+# handles while native hosts can exercise the real Rust wgpu pass.
+native-wgpu-executor = ["dep:bytemuck", "dep:wgpu"]
+
+[dependencies]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30.0.0", default-features = false, features = ["std", "wgsl", "metal", "vulkan"], optional = true }
+bytemuck = { version = "1.24.0", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+pollster = "0.4.0"
