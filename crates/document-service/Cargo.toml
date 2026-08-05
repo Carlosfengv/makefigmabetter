@@ -1,0 +1,16 @@
+[package]
+name = "makefigma-document-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+makefigma-protocol = { path = "../protocol" }
+makefigma-document-codec = { path = "../document-codec" }
+editor-core = { path = "../editor-core" }
+prost = "0.13.5"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

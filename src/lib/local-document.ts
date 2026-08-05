@@ -1,8 +1,9 @@
-import type { CoreLocalSnapshot, LegacyProjectionSnapshot, LocalDocumentSnapshot, LocalJournalEntry, ViewportRecord } from "@/lib/editor-protocol";
+import type { CoreLocalSnapshot, LegacyProjectionSnapshot, LocalDocumentSnapshot, LocalJournalEntry, PendingRemoteOperation, ViewportRecord } from "@/lib/editor-protocol";
 
 const DATABASE = "makefigma-local";
 const DOCUMENTS = "documents";
 const JOURNAL = "journal";
+const PENDING_OPERATIONS = "pending-operations";
 const SNAPSHOTS = "snapshots";
 const KEY = "starter-document";
 const VIEWPORT_KEY = `${KEY}:viewport`;
@@ -27,10 +28,11 @@ export type LocalStorageHealth = {
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 4);
+    const request = indexedDB.open(DATABASE, 5);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(DOCUMENTS)) request.result.createObjectStore(DOCUMENTS);
       if (!request.result.objectStoreNames.contains(JOURNAL)) request.result.createObjectStore(JOURNAL, { keyPath: "id" });
+      if (!request.result.objectStoreNames.contains(PENDING_OPERATIONS)) request.result.createObjectStore(PENDING_OPERATIONS, { keyPath: "operationId" });
       if (!request.result.objectStoreNames.contains(SNAPSHOTS)) request.result.createObjectStore(SNAPSHOTS, { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
@@ -207,6 +209,76 @@ export async function appendLocalJournalEntry(entry: LocalJournalEntry) {
     const request = database.transaction(JOURNAL, "readwrite").objectStore(JOURNAL).put(entry);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+  });
+}
+
+/** Pending server operations are deliberately separate from the local Core journal:
+ * the latter protects local recovery, while this queue remains until a durable
+ * service-side accepted revision (or a recorded reconciliation outcome) exists. */
+export async function appendPendingRemoteOperation(operation: PendingRemoteOperation) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database.transaction(PENDING_OPERATIONS, "readwrite").objectStore(PENDING_OPERATIONS).put(operation);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function loadPendingRemoteOperations() {
+  const database = await openDatabase();
+  return new Promise<PendingRemoteOperation[]>((resolve, reject) => {
+    const request = database.transaction(PENDING_OPERATIONS, "readonly").objectStore(PENDING_OPERATIONS).getAll();
+    request.onsuccess = () => resolve((request.result as PendingRemoteOperation[])
+      .filter((operation) => operation.format === "pending-operation-v1")
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || left.operationId.localeCompare(right.operationId)));
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function replacePendingRemoteOperation(operation: PendingRemoteOperation) {
+  return appendPendingRemoteOperation(operation);
+}
+
+export async function removePendingRemoteOperation(operationId: string) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database.transaction(PENDING_OPERATIONS, "readwrite").objectStore(PENDING_OPERATIONS).delete(operationId);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export function pendingOperationIsCoveredBySnapshot(
+  operation: PendingRemoteOperation,
+  documentId: string,
+  snapshotRevision: number,
+) {
+  const normalized = (value: string) => value.replaceAll("-", "").toLowerCase();
+  return normalized(operation.documentId) === normalized(documentId)
+    && Number.isSafeInteger(snapshotRevision)
+    && snapshotRevision >= 0
+    && Number.isSafeInteger(operation.baseRevision)
+    && operation.baseRevision >= 0
+    && operation.baseRevision < snapshotRevision;
+}
+
+/** A newly created remote root adopts the complete canonical snapshot. Operations
+ * whose resulting revisions are already represented by that snapshot must not be
+ * submitted again as if the server had started from revision zero. */
+export async function removePendingRemoteOperationsCoveredBySnapshot(documentId: string, snapshotRevision: number) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(PENDING_OPERATIONS, "readwrite");
+    const cursor = transaction.objectStore(PENDING_OPERATIONS).openCursor();
+    cursor.onsuccess = () => {
+      const entry = cursor.result;
+      if (!entry) return;
+      if (pendingOperationIsCoveredBySnapshot(entry.value as PendingRemoteOperation, documentId, snapshotRevision)) entry.delete();
+      entry.continue();
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error("Pending-operation cleanup aborted"));
   });
 }
 
