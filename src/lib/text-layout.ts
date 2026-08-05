@@ -1,3 +1,5 @@
+import { DEFAULT_TEXT_LINE_HEIGHT } from "./editor-protocol";
+
 export interface TextLayoutOptions {
   text: string;
   maxWidth: number;
@@ -43,7 +45,7 @@ export function resolveTextRenderMetrics(width: number, height: number, zoom: nu
   const scaledWidth = Math.max(0, width * safeZoom);
   const scaledHeight = Math.max(0, height * safeZoom);
   const fontSize = 31 * safeZoom;
-  return { width: scaledWidth, height: scaledHeight, fontSize, lineHeight: fontSize * 1.25 };
+  return { width: scaledWidth, height: scaledHeight, fontSize, lineHeight: DEFAULT_TEXT_LINE_HEIGHT * safeZoom };
 }
 
 /**

@@ -58,7 +58,7 @@ describe("basic text layout", () => {
     const full = resolveTextRenderMetrics(370, 64, 1);
     const small = resolveTextRenderMetrics(370, 64, 0.2);
 
-    expect(small).toEqual({ width: 74, height: 12.8, fontSize: 6.2, lineHeight: 7.75 });
+    expect(small).toEqual({ width: 74, height: 12.8, fontSize: 6.2, lineHeight: 4 });
     expect(small.width / full.width).toBeCloseTo(0.2);
     expect(small.fontSize / full.fontSize).toBeCloseTo(0.2);
     expect(small.lineHeight / full.lineHeight).toBeCloseTo(0.2);

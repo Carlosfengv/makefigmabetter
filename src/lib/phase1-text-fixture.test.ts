@@ -15,6 +15,19 @@ describe("F-TEXT-MULTILINGUAL", () => {
     ]));
   });
 
+  it("declares ligature variation axes and a deterministic fallback input", () => {
+    const variable = fixture.nodes.find((node) => node.name === "Ligature variable font axes");
+    expect(variable?.text).toBe("office fi ffi");
+    expect(variable?.textProperties?.runs[0]?.font?.variationAxes).toEqual([
+      { tag: "wdth", value: 92 },
+      { tag: "wght", value: 650 },
+    ]);
+    const fallback = fixture.nodes.find((node) => node.name === "Fallback and missing glyph");
+    expect(fallback?.text).toContain("汉字");
+    expect(fallback?.text).toContain("□");
+    expect(fallback?.textProperties?.fallbackFonts).toHaveLength(1);
+  });
+
   it("rejects a byte range that would split a UTF-8 scalar", () => {
     const malformed = structuredClone(fixture.nodes) as CanvasNode[];
     const mixed = malformed.find((node) => node.name === "Mixed script styles");
