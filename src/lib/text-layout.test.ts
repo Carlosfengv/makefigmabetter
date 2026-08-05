@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutText, layoutTextLines, resolveTextDirection, resolveTextRenderMetrics, segmentGraphemes } from "./text-layout";
+import { layoutText, layoutTextLines, layoutTextRanges, resolveTextDirection, resolveTextRenderMetrics, segmentGraphemes, textParagraphRanges } from "./text-layout";
 
 const monoMeasure = (value: string) => segmentGraphemes(value).length * 10;
 
@@ -36,6 +36,21 @@ describe("basic text layout", () => {
       { text: "بالعالم", direction: "rtl" },
       { text: "Hello", direction: "ltr" },
       { text: "世界", direction: "ltr" },
+    ]);
+  });
+
+  it("retains UTF-8 byte ranges across emoji, whitespace wrapping, and paragraphs", () => {
+    expect(layoutTextRanges({ text: "A😀 B\n中", maxWidth: 25, measure: monoMeasure })).toEqual([
+      { text: "A😀", direction: "ltr", start: 0, end: 5 },
+      { text: "B", direction: "ltr", start: 6, end: 7 },
+      { text: "中", direction: "ltr", start: 8, end: 11 },
+    ]);
+  });
+
+  it("retains hard-break paragraph ranges for DOM paragraph spacing", () => {
+    expect(textParagraphRanges("مرحبا\n中")).toEqual([
+      { text: "مرحبا", direction: "rtl", start: 0, end: 10 },
+      { text: "中", direction: "ltr", start: 11, end: 14 },
     ]);
   });
 

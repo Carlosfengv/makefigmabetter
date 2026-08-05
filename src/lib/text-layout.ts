@@ -12,6 +12,20 @@ export interface TextLayoutLine {
   direction: TextDirection;
 }
 
+export interface TextLayoutRange extends TextLayoutLine {
+  /** UTF-8 byte offsets into the original, unmodified source string. */
+  start: number;
+  end: number;
+}
+
+/** A hard-break paragraph before width wrapping. The DOM editing layer uses
+ * these ranges to apply Figma paragraph spacing without inventing a second
+ * UTF-16 based style-run coordinate system. */
+export interface TextParagraphRange extends TextLayoutLine {
+  start: number;
+  end: number;
+}
+
 export interface TextRenderMetrics {
   width: number;
   height: number;
@@ -48,11 +62,36 @@ export function layoutTextLines({ text, maxWidth, measure }: TextLayoutOptions):
  * only avoids drawing an RTL paragraph from the incorrect edge of its text box.
  */
 export function layoutText({ text, maxWidth, measure }: TextLayoutOptions): TextLayoutLine[] {
+  return layoutTextRanges({ text, maxWidth, measure }).map(({ text: line, direction }) => ({ text: line, direction }));
+}
+
+/** Retains Canonical UTF-8 offsets so presentation can apply Style Runs without
+ * inventing a second character-index coordinate system. */
+export function layoutTextRanges({ text, maxWidth, measure }: TextLayoutOptions): TextLayoutRange[] {
   const safeWidth = Number.isFinite(maxWidth) && maxWidth > 0 ? maxWidth : Number.POSITIVE_INFINITY;
-  return text.split(PARAGRAPH_SEPARATOR).flatMap((paragraph) => {
-    const direction = resolveTextDirection(paragraph);
-    return wrapParagraph(segmentGraphemes(paragraph), safeWidth, measure).map((line) => ({ text: line, direction }));
-  });
+  const ranges: TextLayoutRange[] = [];
+  let cursor = 0;
+  for (const separator of text.matchAll(PARAGRAPH_SEPARATOR)) {
+    const end = separator.index ?? cursor;
+    ranges.push(...wrapParagraphRanges(text.slice(cursor, end), byteLength(text.slice(0, cursor)), safeWidth, measure));
+    cursor = end + separator[0].length;
+  }
+  ranges.push(...wrapParagraphRanges(text.slice(cursor), byteLength(text.slice(0, cursor)), safeWidth, measure));
+  return ranges;
+}
+
+export function textParagraphRanges(text: string): TextParagraphRange[] {
+  const ranges: TextParagraphRange[] = [];
+  let cursor = 0;
+  for (const separator of text.matchAll(PARAGRAPH_SEPARATOR)) {
+    const end = separator.index ?? cursor;
+    const paragraph = text.slice(cursor, end);
+    ranges.push({ text: paragraph, direction: resolveTextDirection(paragraph), start: byteLength(text.slice(0, cursor)), end: byteLength(text.slice(0, end)) });
+    cursor = end + separator[0].length;
+  }
+  const paragraph = text.slice(cursor);
+  ranges.push({ text: paragraph, direction: resolveTextDirection(paragraph), start: byteLength(text.slice(0, cursor)), end: byteLength(text) });
+  return ranges;
 }
 
 /** Uses the first Unicode strong character, falling back to LTR for neutral text. */
@@ -100,37 +139,59 @@ function segmentGraphemesFallback(value: string): string[] {
   return clusters;
 }
 
-function wrapParagraph(clusters: string[], maxWidth: number, measure: (value: string) => number): string[] {
-  if (!clusters.length) return [""];
-  const lines: string[] = [];
-  let line: string[] = [];
+function wrapParagraphRanges(paragraph: string, baseByte: number, maxWidth: number, measure: (value: string) => number): TextLayoutRange[] {
+  const clusters = graphemeRanges(paragraph, baseByte);
+  const direction = resolveTextDirection(paragraph);
+  if (!clusters.length) return [{ text: "", direction, start: baseByte, end: baseByte }];
+  const lines: TextLayoutRange[] = [];
+  let line: GraphemeRange[] = [];
   for (const cluster of clusters) {
-    const candidate = [...line, cluster].join("");
+    const candidate = [...line, cluster].map((item) => item.text).join("");
     if (line.length && measure(candidate) > maxWidth) {
-      const breakIndex = lastWhitespace(line);
+      const breakIndex = lastWhitespaceRange(line);
       if (breakIndex >= 0) {
-        const completed = line.slice(0, breakIndex).join("");
-        if (completed) lines.push(completed);
-        line = trimLeadingWhitespace(line.slice(breakIndex + 1));
+        const completed = line.slice(0, breakIndex);
+        if (completed.length) lines.push(lineRange(completed, direction));
+        line = trimLeadingWhitespaceRanges(line.slice(breakIndex + 1));
       } else {
-        lines.push(line.join(""));
+        lines.push(lineRange(line, direction));
         line = [];
       }
-      if (isWhitespace(cluster) && line.length === 0) continue;
+      if (isWhitespace(cluster.text) && line.length === 0) continue;
     }
     line.push(cluster);
   }
-  if (line.length) lines.push(line.join(""));
-  return lines.length ? lines : [""];
+  if (line.length) lines.push(lineRange(line, direction));
+  return lines.length ? lines : [{ text: "", direction, start: baseByte, end: baseByte }];
 }
 
-function lastWhitespace(clusters: string[]): number {
-  for (let index = clusters.length - 1; index >= 0; index -= 1) if (isWhitespace(clusters[index])) return index;
+type GraphemeRange = { text: string; start: number; end: number };
+
+function graphemeRanges(value: string, baseByte: number): GraphemeRange[] {
+  let cursor = baseByte;
+  return segmentGraphemes(value).map((text) => {
+    const start = cursor;
+    cursor += byteLength(text);
+    return { text, start, end: cursor };
+  });
+}
+
+function lineRange(clusters: GraphemeRange[], direction: TextDirection): TextLayoutRange {
+  return {
+    text: clusters.map((cluster) => cluster.text).join(""),
+    direction,
+    start: clusters[0].start,
+    end: clusters[clusters.length - 1].end,
+  };
+}
+
+function lastWhitespaceRange(clusters: GraphemeRange[]): number {
+  for (let index = clusters.length - 1; index >= 0; index -= 1) if (isWhitespace(clusters[index].text)) return index;
   return -1;
 }
 
-function trimLeadingWhitespace(clusters: string[]): string[] {
-  const firstContent = clusters.findIndex((cluster) => !isWhitespace(cluster));
+function trimLeadingWhitespaceRanges(clusters: GraphemeRange[]): GraphemeRange[] {
+  const firstContent = clusters.findIndex((cluster) => !isWhitespace(cluster.text));
   return firstContent < 0 ? [] : clusters.slice(firstContent);
 }
 
@@ -144,7 +205,12 @@ function isExtend(character: string, codePoint: number): boolean {
 
 const RTL_STRONG = /[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
 const LTR_STRONG = /\p{L}/u;
-const PARAGRAPH_SEPARATOR = /\r\n|[\n\r\u2028\u2029]/u;
+const PARAGRAPH_SEPARATOR = /\r\n|[\n\r\u2028\u2029]/gu;
 const nativeGraphemeSegmenter = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
   : undefined;
+const encoder = new TextEncoder();
+
+function byteLength(value: string): number {
+  return encoder.encode(value).byteLength;
+}

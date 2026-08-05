@@ -105,6 +105,73 @@ export class DocumentEngine {
         return BigInt.asUintN(64, ret[0]);
     }
     /**
+     * @param {string} transaction_id
+     * @param {bigint} base_revision
+     * @param {string} page_id
+     * @param {string} node_id
+     * @param {string} kind
+     * @param {string} name
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     * @param {number} rotation
+     * @param {string} fill
+     * @param {string} stroke
+     * @param {number} stroke_width
+     * @param {number} opacity
+     * @param {number} corner_radius
+     * @param {boolean} visible
+     * @param {boolean} locked
+     * @param {string} text
+     * @returns {bigint}
+     */
+    create_node_on_page(transaction_id, base_revision, page_id, node_id, kind, name, x, y, width, height, rotation, fill, stroke, stroke_width, opacity, corner_radius, visible, locked, text) {
+        const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(node_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(fill, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(stroke, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_create_node_on_page(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, x, y, width, height, rotation, ptr5, len5, ptr6, len6, stroke_width, opacity, corner_radius, visible, locked, ptr7, len7);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return BigInt.asUintN(64, ret[0]);
+    }
+    /**
+     * Creates a durable top-level Figma-style Page. The worker decides which Page
+     * is active for the current view; Page order and identity remain canonical.
+     * @param {string} transaction_id
+     * @param {bigint} base_revision
+     * @param {string} page_id
+     * @param {string} name
+     * @returns {bigint}
+     */
+    create_page(transaction_id, base_revision, page_id, name) {
+        const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_create_page(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return BigInt.asUintN(64, ret[0]);
+    }
+    /**
      * `node_ids` is a comma-separated sequence of validated UUIDs. The format is
      * intentionally narrow because this is an internal Worker-to-WASM boundary.
      * @param {string} transaction_id
@@ -124,6 +191,33 @@ export class DocumentEngine {
         return BigInt.asUintN(64, ret[0]);
     }
     /**
+     * Produces the 16-float solid-shape instance layout consumed by the
+     * WebGPU/WGSL executor. It filters to one active Page and intentionally
+     * leaves Image/Text to their own Render Graph passes.
+     * @param {string} page_id
+     * @returns {string}
+     */
+    gpu_scene_instances_json(page_id) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.documentengine_gpu_scene_instances_json(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * Restores a versioned Core snapshot. This deliberately restores no undo history:
      * snapshots represent a confirmed durable state, while a future journal will carry
      * operations that happened after it.
@@ -134,6 +228,19 @@ export class DocumentEngine {
         const ptr0 = passStringToWasm0(value, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.documentengine_load_snapshot_json(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return BigInt.asUintN(64, ret[0]);
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {bigint}
+     */
+    load_snapshot_protobuf(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_load_snapshot_protobuf(this.__wbg_ptr, ptr0, len0);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -189,6 +296,34 @@ export class DocumentEngine {
         return BigInt.asUintN(64, ret[0]);
     }
     /**
+     * Adds only an already-admitted Asset Service record to the Canonical
+     * Resource Index. Bytes remain owned by the resource service.
+     * @param {string} transaction_id
+     * @param {bigint} base_revision
+     * @param {string} asset_id
+     * @param {string} content_hash
+     * @param {string} media_type
+     * @param {bigint} byte_length
+     * @param {number} pixel_width
+     * @param {number} pixel_height
+     * @returns {bigint}
+     */
+    register_asset(transaction_id, base_revision, asset_id, content_hash, media_type, byte_length, pixel_width, pixel_height) {
+        const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(asset_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(content_hash, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(media_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_register_asset(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2, ptr3, len3, byte_length, pixel_width, pixel_height);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return BigInt.asUintN(64, ret[0]);
+    }
+    /**
      * @param {string} transaction_id
      * @param {bigint} base_revision
      * @param {string} node_id
@@ -207,6 +342,59 @@ export class DocumentEngine {
             throw takeFromExternrefTable0(ret[1]);
         }
         return BigInt.asUintN(64, ret[0]);
+    }
+    /**
+     * Equivalent to [`Self::render_graph_plan_json`], scoped to the active
+     * Canonical Page. A renderer must not accidentally schedule hidden pages
+     * merely because their coordinates intersect the current viewport.
+     * @param {string} page_id
+     * @param {number} viewport_x
+     * @param {number} viewport_y
+     * @param {number} viewport_width
+     * @param {number} viewport_height
+     * @returns {string}
+     */
+    render_graph_plan_for_page_json(page_id, viewport_x, viewport_y, viewport_width, viewport_height) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.documentengine_render_graph_plan_for_page_json(this.__wbg_ptr, ptr0, len0, viewport_x, viewport_y, viewport_width, viewport_height);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * Projects the current Canonical Document into the GPU-handle-free Rust
+     * Render Graph plan. The Worker can execute this plan with WebGPU or use
+     * its explicit Canvas fallback; neither path gets ownership of Document.
+     * @param {number} viewport_x
+     * @param {number} viewport_y
+     * @param {number} viewport_width
+     * @param {number} viewport_height
+     * @returns {string}
+     */
+    render_graph_plan_json(viewport_x, viewport_y, viewport_width, viewport_height) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.documentengine_render_graph_plan_json(this.__wbg_ptr, viewport_x, viewport_y, viewport_width, viewport_height);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * @returns {bigint}
@@ -310,6 +498,21 @@ export class DocumentEngine {
         }
     }
     /**
+     * Durable wire snapshot shared with the server-side Document Service. The
+     * JSON projection remains local-storage-only; this payload is the boundary
+     * used to safely bootstrap and recover a remote document.
+     * @returns {Uint8Array}
+     */
+    snapshot_protobuf() {
+        const ret = wasm.documentengine_snapshot_protobuf(this.__wbg_ptr);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
      * @returns {bigint}
      */
     undo() {
@@ -370,6 +573,162 @@ export function engine_semantics_version() {
     const ret = wasm.engine_semantics_version();
     return ret >>> 0;
 }
+
+/**
+ * Returns a deterministic, UTF-8 byte-addressed fallback layout for selection,
+ * caret, and IME clients. This boundary owns neither a canvas nor a font: the
+ * presentation renderer may refine glyph positions without changing the saved
+ * document text or its canonical byte offsets.
+ * @param {string} text
+ * @param {number} max_graphemes_per_line
+ * @returns {string}
+ */
+export function fallback_text_layout_json(text, max_graphemes_per_line) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.fallback_text_layout_json(ptr0, len0, max_graphemes_per_line);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Produces ICU4X line ranges and Rustybuzz advances from explicit font bytes.
+ * The width is measured in em, so viewport zoom never changes the derived
+ * source ranges. Glyph pixels remain a renderer-owned cache.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {string} text
+ * @param {number} max_width_em
+ * @returns {string}
+ */
+export function layout_shaped_text_json(font_bytes, face_index, text, max_width_em) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_shaped_text_json(ptr0, len0, face_index, ptr1, len1, max_width_em);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Produces a transient text-edit/IME preview. It has no DocumentEngine
+ * receiver by design: only a composition commit crosses into Canonical
+ * Document as an atomic text transaction.
+ * @param {string} text
+ * @param {number} anchor
+ * @param {number} focus
+ * @param {string} replacement
+ * @returns {string}
+ */
+export function preview_text_replacement_json(text, anchor, focus, replacement) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(replacement, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.preview_text_replacement_json(ptr0, len0, anchor, focus, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Produces a bounded, deterministic glyph alpha mask from explicit font
+ * bytes. The result is presentation-only input for a renderer-owned atlas;
+ * neither the pixels nor the placement can enter Canonical Document state.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {number} glyph_id
+ * @param {number} pixel_size
+ * @returns {string}
+ */
+export function rasterize_glyph_json(font_bytes, face_index, glyph_id, pixel_size) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rasterize_glyph_json(ptr0, len0, face_index, glyph_id, pixel_size);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Shapes text from explicit font bytes without using browser font metrics.
+ * This is presentation-only data; persisted text and font references remain
+ * owned by Canonical Document and commit through the normal transaction path.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {string} text
+ * @param {string} direction
+ * @returns {string}
+ */
+export function shape_text_json(font_bytes, face_index, text, direction) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(direction, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.shape_text_json(ptr0, len0, face_index, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -401,6 +760,11 @@ const DocumentEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_documentengine_free(ptr, 1));
 
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
@@ -411,6 +775,13 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
