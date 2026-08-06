@@ -1,4 +1,4 @@
-import { NodeKind, ResolvedOperationBatch } from "@makefigma/protocol-types";
+import { ConstraintType, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -13,6 +13,112 @@ describe("protocol operation codec", () => {
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
     expect(batch.operations).toHaveLength(1);
     expect(batch.operations[0].createNode?.node).toMatchObject({ name: node.name, kind: NodeKind.NODE_KIND_RECTANGLE, nodeId: idBytes(id), pageId: idBytes(node.pageId!) });
+  });
+
+  it("serializes a zero-height line with the generated Line node kind", () => {
+    const node = { ...createNode("line", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_LINE, height: 0 });
+  });
+
+  it("serializes a Section and its content visibility state", () => {
+    const node = { ...createNode("section", 10, 20), id, contentsHidden: true };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SECTION, contentsHidden: true });
+  });
+
+  it("serializes four independent radii only for supported closed nodes", () => {
+    const rectangle = { ...createNode("rectangle", 10, 20), id, cornerRadii: [4, 8, 12, 16] as [number, number, number, number], cornerSmoothing: .6 };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: rectangle }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ cornerRadii: [4, 8, 12, 16], cornerSmoothing: .6 });
+
+    const line = { ...createNode("line", 10, 20), id, cornerRadii: [4, 8, 12, 16] as [number, number, number, number], cornerSmoothing: .6 };
+    expect(() => encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: line }])!.batch)).toThrow("Per-corner radii");
+  });
+
+  it("serializes ordered fill and stroke paint stacks while retaining legacy paint fields", () => {
+    const node = {
+      ...createNode("rectangle", 10, 20), id,
+      fills: [{ css: "#e6edff" }, { css: "#0048ff" }],
+      strokes: [{ css: "#000000" }, { css: "#2563eb" }],
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({
+      fill: { solid: expect.anything() }, stroke: { solid: expect.anything() },
+      fills: [{ solid: expect.anything() }, { solid: expect.anything() }],
+      strokes: [{ solid: expect.anything() }, { solid: expect.anything() }],
+    });
+  });
+
+  it("preserves a linear-gradient paint layer with its ordered stops", () => {
+    const gradient = {
+      start: [0, 0] as [number, number], end: [1, 1] as [number, number], stops: [
+        { position: 0, color: { space: "srgb" as const, components: [0.1, 0.2, 0.3] as [number, number, number], alpha: 1 } },
+        { position: .6, color: { space: "display-p3" as const, components: [0.4, 0.7, 0.2] as [number, number, number], alpha: .75 } },
+        { position: 1, color: { space: "srgb" as const, components: [0.9, 0.8, 0.1] as [number, number, number], alpha: .5 } },
+      ],
+    };
+    const node = { ...createNode("rectangle", 10, 20), id, fills: [{ css: "#1a334d", gradient }] };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+
+    const encoded = batch.operations[0].createNode?.node?.fills[0]?.linearGradient;
+    expect(encoded).toMatchObject({ startX: 0, startY: 0, endX: 1, endY: 1 });
+    expect(encoded?.stops).toHaveLength(3);
+    expect(encoded?.stops.map((stop) => stop.color?.space)).toEqual([1, 2, 1]);
+    expect(encoded?.stops.map((stop) => stop.position)).toEqual([0, expect.closeTo(.6, 6), 1]);
+    expect(encoded?.stops[1]?.color).toMatchObject({ red: expect.closeTo(.4, 6), green: expect.closeTo(.7, 6), blue: expect.closeTo(.2, 6), alpha: .75 });
+  });
+
+  it("serializes a Frame clip-content choice while defaulting new Frames to clipping", () => {
+    const clipped = { ...createNode("frame", 10, 20), id };
+    const unclipped = { ...clipped, clipsContent: false };
+    const clippedBatch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: clipped }])!.batch));
+    const unclippedBatch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: unclipped }])!.batch));
+
+    expect(clippedBatch.operations[0].createNode?.node?.clipsContent).toBe(true);
+    expect(unclippedBatch.operations[0].createNode?.node?.clipsContent).toBe(false);
+  });
+
+  it("serializes Figma-compatible Frame constraints with the node appearance", () => {
+    const node = { ...createNode("rectangle", 10, 20), id, constraints: { horizontal: "stretch" as const, vertical: "center" as const } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node?.constraints).toEqual({ horizontal: ConstraintType.CONSTRAINT_TYPE_STRETCH, vertical: ConstraintType.CONSTRAINT_TYPE_CENTER });
+  });
+
+  it("serializes an optional parent-relative transform and rejects singular matrices", () => {
+    const node = {
+      ...createNode("rectangle", 10, 20), id,
+      relativeTransform: { a: 0, b: 1, c: -1, d: 0, e: 20, f: 30 },
+    };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+    expect(batch.operations[0].createNode?.node?.relativeTransform).toEqual(node.relativeTransform);
+
+    const singular = resolveCoreBatch([], [{ type: "create", node: { ...node, relativeTransform: { ...node.relativeTransform, a: 0, b: 0, c: 0, d: 0 } } }]);
+    expect(() => encodeCoreBatchPayload(singular!.batch)).toThrow("Relative transform");
+  });
+
+  it("persists Arrow as a Line with an ArrowLines end cap", () => {
+    const node = { ...createNode("line", 10, 20), id, strokeCapEnd: "arrowLines" as const };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_LINE, strokeCapStart: StrokeCap.STROKE_CAP_NONE, strokeCapEnd: StrokeCap.STROKE_CAP_ARROW_LINES });
+  });
+
+  it("serializes Frame/Rectangle per-side stroke weights and rejects them for Line", () => {
+    const rectangle = { ...createNode("rectangle", 10, 20), id, strokeWeights: [1, 2, 3, 4] as [number, number, number, number], strokeAlign: "outside" as const };
+    const resolved = resolveCoreBatch([], [{ type: "create", node: rectangle }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ strokeWeights: [1, 2, 3, 4], strokeAlign: StrokeAlign.STROKE_ALIGN_OUTSIDE });
+
+    const line = { ...createNode("line", 10, 20), id, strokeWeights: [1, 2, 3, 4] as [number, number, number, number] };
+    const lineBatch = resolveCoreBatch([], [{ type: "create", node: line }]);
+    expect(() => encodeCoreBatchPayload(lineBatch!.batch)).toThrow("Per-side stroke weights");
   });
 
   it("keeps a full inspector update atomic through canonical leaf operations", () => {
@@ -41,6 +147,13 @@ describe("protocol operation codec", () => {
     const resolved = resolveCoreBatch([node], [{ type: "reposition", positionIds: [{ id, positionId }] }]);
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
     expect(batch.operations).toEqual([{ setNodePosition: { nodeId: idBytes(id), positionId: { key: idBytes("ffffffffffffffffffffffffffffffff"), actorId: idBytes("00000000000000000000000000000007") } } }]);
+  });
+
+  it("serializes a resolved parent move without changing geometry", () => {
+    const groupId = "00000000-0000-0000-0000-00000000000a";
+    const positionId = "0000000000000000000000000000000b:00000000000000000000000000000000";
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{ type: "reparent", parentIds: [{ id, parentId: groupId, positionId }] }]));
+    expect(batch.operations).toEqual([{ setNodeParent: { nodeId: idBytes(id), parentId: idBytes(groupId), positionId: { key: idBytes("0000000000000000000000000000000b"), actorId: idBytes("00000000000000000000000000000000") } } }]);
   });
 
   it("creates rich text followed by a separately hashable style operation", () => {

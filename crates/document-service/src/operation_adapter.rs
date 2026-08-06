@@ -2,8 +2,8 @@
 //! This is the only service-side location allowed to know both protocol and core.
 
 use editor_core::{
-    ActorId, Appearance, AssetId, AssetReference, Command, FontReference, Node, NodeId, NodeKind,
-    Page, PageId, ParagraphStyle, PositionId, TextAlign, TextAutoSize, TextProperties,
+    ActorId, Appearance, ArcData, AssetId, AssetReference, Command, ConstraintType, Constraints, FontReference, Node, NodeId, NodeKind,
+    Page, PageId, ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
     TextStyleRun,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
 };
@@ -71,11 +71,27 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             appearance: Appearance {
                 fill: paint_from_proto(value.fill.ok_or(ServiceError::InvalidEnvelope)?)?,
                 stroke: paint_from_proto(value.stroke.ok_or(ServiceError::InvalidEnvelope)?)?,
+                fills: value.fills.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
+                strokes: value.strokes.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
                 stroke_width: value.stroke_width,
+                stroke_cap_start: stroke_cap_from_proto(value.stroke_cap_start)?,
+                stroke_cap_end: stroke_cap_from_proto(value.stroke_cap_end)?,
+                stroke_join: stroke_join_from_proto(value.stroke_join)?,
+                stroke_miter_limit: if value.stroke_miter_limit == 0.0 { 10.0 } else { value.stroke_miter_limit },
+                stroke_dash_pattern: value.stroke_dash_pattern,
+                stroke_weights: value.stroke_weights,
+                stroke_align: stroke_align_from_proto(value.stroke_align)?,
+                arc_data: value.arc_data.map(arc_from_proto).transpose()?,
+                relative_transform: value.relative_transform.map(transform_from_proto).transpose()?,
                 opacity: value.opacity,
                 corner_radius: value.corner_radius,
+                corner_radii: value.corner_radii,
+                corner_smoothing: value.corner_smoothing,
+                constraints: value.constraints.map(constraints_from_proto).transpose()?,
                 visible: value.visible,
                 locked: value.locked,
+                contents_hidden: value.contents_hidden,
+                clips_content: value.clips_content,
             },
         }),
         Kind::SetImageFill(value) => Ok(Command::SetNodeAsset {
@@ -94,6 +110,11 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
         }),
         Kind::SetNodePosition(value) => Ok(Command::SetNodePosition {
             id: node_id(&value.node_id)?,
+            position: position_from_proto(value.position_id.ok_or(ServiceError::InvalidEnvelope)?)?,
+        }),
+        Kind::SetNodeParent(value) => Ok(Command::SetNodeParent {
+            id: node_id(&value.node_id)?,
+            parent_id: value.parent_id.as_deref().map(node_id).transpose()?,
             position: position_from_proto(value.position_id.ok_or(ServiceError::InvalidEnvelope)?)?,
         }),
         Kind::SetDocumentColorProfile(value) => Ok(Command::SetDocumentColorProfile {
@@ -141,8 +162,12 @@ fn restored_node_from_proto(
         v1::NodeKind::Ellipse => NodeKind::Ellipse,
         v1::NodeKind::Text => NodeKind::Text,
         v1::NodeKind::Image => NodeKind::Image,
+        v1::NodeKind::Line => NodeKind::Line,
+        v1::NodeKind::Group => NodeKind::Group,
+        v1::NodeKind::Section => NodeKind::Section,
         v1::NodeKind::Unspecified => return Err(ServiceError::InvalidEnvelope),
     };
+    let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
     let parent_id = node.parent_id.as_deref().map(node_id).transpose()?;
     Ok((
         page_id,
@@ -159,17 +184,77 @@ fn restored_node_from_proto(
             rotation: node.rotation,
             fill: paint_from_proto(node.fill.ok_or(ServiceError::InvalidEnvelope)?)?,
             stroke: paint_from_proto(node.stroke.ok_or(ServiceError::InvalidEnvelope)?)?,
+            fills: node.fills.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
+            strokes: node.strokes.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
             stroke_width: node.stroke_width,
+            stroke_cap_start: stroke_cap_from_proto(node.stroke_cap_start)?,
+            stroke_cap_end: stroke_cap_from_proto(node.stroke_cap_end)?,
+            stroke_join: stroke_join_from_proto(node.stroke_join)?,
+            stroke_miter_limit: if node.stroke_miter_limit == 0.0 { 10.0 } else { node.stroke_miter_limit },
+            stroke_dash_pattern: node.stroke_dash_pattern,
+            stroke_weights: node.stroke_weights,
+            stroke_align: stroke_align_from_proto(node.stroke_align)?,
+            arc_data: node.arc_data.map(arc_from_proto).transpose()?,
+            relative_transform: node.relative_transform.map(transform_from_proto).transpose()?,
             opacity: node.opacity,
             corner_radius: node.corner_radius,
+            corner_radii: node.corner_radii,
+            corner_smoothing: node.corner_smoothing,
+            constraints: node.constraints.map(constraints_from_proto).transpose()?,
             text: node.text,
             visible: node.visible,
             locked: node.locked,
+            contents_hidden: node.contents_hidden,
+            clips_content,
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         text_properties,
     ))
 }
+
+fn stroke_cap_from_proto(value: i32) -> Result<StrokeCap, ServiceError> {
+    Ok(match v1::StrokeCap::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::StrokeCap::Unspecified | v1::StrokeCap::None => StrokeCap::None,
+        v1::StrokeCap::Round => StrokeCap::Round,
+        v1::StrokeCap::Square => StrokeCap::Square,
+        v1::StrokeCap::ArrowLines => StrokeCap::ArrowLines,
+        v1::StrokeCap::ArrowEquilateral => StrokeCap::ArrowEquilateral,
+        v1::StrokeCap::DiamondFilled => StrokeCap::DiamondFilled,
+        v1::StrokeCap::TriangleFilled => StrokeCap::TriangleFilled,
+        v1::StrokeCap::CircleFilled => StrokeCap::CircleFilled,
+    })
+}
+
+fn stroke_join_from_proto(value: i32) -> Result<StrokeJoin, ServiceError> {
+    Ok(match v1::StrokeJoin::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::StrokeJoin::Unspecified | v1::StrokeJoin::Miter => StrokeJoin::Miter,
+        v1::StrokeJoin::Bevel => StrokeJoin::Bevel,
+        v1::StrokeJoin::Round => StrokeJoin::Round,
+    })
+}
+
+fn stroke_align_from_proto(value: i32) -> Result<StrokeAlign, ServiceError> {
+    Ok(match v1::StrokeAlign::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::StrokeAlign::Unspecified | v1::StrokeAlign::Inside => StrokeAlign::Inside,
+        v1::StrokeAlign::Center => StrokeAlign::Center,
+        v1::StrokeAlign::Outside => StrokeAlign::Outside,
+    })
+}
+
+fn constraints_from_proto(value: v1::Constraints) -> Result<Constraints, ServiceError> {
+    let convert = |axis| match v1::ConstraintType::try_from(axis).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::ConstraintType::Min => Ok(ConstraintType::Min),
+        v1::ConstraintType::Center => Ok(ConstraintType::Center),
+        v1::ConstraintType::Max => Ok(ConstraintType::Max),
+        v1::ConstraintType::Stretch => Ok(ConstraintType::Stretch),
+        v1::ConstraintType::Scale => Ok(ConstraintType::Scale),
+        v1::ConstraintType::Unspecified => Err(ServiceError::InvalidEnvelope),
+    };
+    Ok(Constraints { horizontal: convert(value.horizontal)?, vertical: convert(value.vertical)? })
+}
+
+fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> { Ok(ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }) }
+fn transform_from_proto(transform: v1::Transform) -> Result<editor_core::geometry::AffineTransform, ServiceError> { Ok(editor_core::geometry::AffineTransform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f }) }
 
 fn font_from_proto(font: v1::FontReference) -> Result<FontReference, ServiceError> {
     let mut variation_axes = std::collections::BTreeMap::new();
@@ -365,13 +450,29 @@ mod tests {
             rotation: 0.0,
             fill: Some(paint()),
             stroke: Some(paint()),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
             opacity: 1.0,
             corner_radius: 0.0,
+            corner_radii: vec![],
+            corner_smoothing: 0.0,
+                    constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
             text_properties: None,
+            stroke_cap_start: v1::StrokeCap::None as i32,
+            stroke_cap_end: v1::StrokeCap::None as i32,
+            stroke_join: v1::StrokeJoin::Miter as i32,
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: vec![],
+            stroke_weights: vec![],
+            stroke_align: v1::StrokeAlign::Inside as i32,
+            arc_data: None,
+            relative_transform: None,
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {

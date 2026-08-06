@@ -29,6 +29,14 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
       if (index >= 0) planned[index] = { ...planned[index], ...canvasNode(node), id: planned[index].id, kind: planned[index].kind };
       return { type: "update", node };
     }
+    if (command.type === "reparent") {
+      const parentIds = command.parentIds.map((entry) => {
+        const index = planned.findIndex((node) => node.id === entry.id);
+        if (index >= 0) planned[index] = { ...planned[index], parentId: entry.parentId, positionId: entry.positionId };
+        return { ...entry };
+      });
+      return { type: "reparent", parentIds };
+    }
     const moving = new Set(command.positionIds.map((entry) => entry.id));
     const retained = planned.filter((node) => !moving.has(node.id));
     const positionIds = command.positionIds.map((entry) => {
@@ -46,10 +54,10 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
 
 function canvasNode(node: CoreProjectionNode): CanvasNode {
   return {
-    id: node.id, pageId: node.pageId, name: node.name, kind: node.kind, x: node.x, y: node.y,
-    width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor,
-    fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor,
-    strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, radius: node.cornerRadius, opacity: node.opacity,
+    id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y,
+    width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fills: node.fills,
+    fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokes: node.strokes,
+    strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, radius: node.cornerRadius, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity,
     text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked,
   };
 }

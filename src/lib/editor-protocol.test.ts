@@ -24,6 +24,12 @@ describe("editor protocol node presets", () => {
     expect(node.fillColor).toEqual({ space: "srgb", components: [230 / 255, 237 / 255, 1], alpha: 1 });
   });
 
+  it("creates a Section with independently controllable contents visibility", () => {
+    const node = createNode("section", 12, -8);
+    expect(node).toMatchObject({ kind: "section", name: "Section", width: 640, height: 360, visible: true });
+    expect(node.contentsHidden).toBeUndefined();
+  });
+
   it("keeps text content in the command payload instead of UI-only state", () => {
     const node = createNode("text", 0, 0);
 

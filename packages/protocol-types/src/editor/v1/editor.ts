@@ -16,6 +16,65 @@ export enum NodeKind {
   NODE_KIND_ELLIPSE = 3,
   NODE_KIND_TEXT = 4,
   NODE_KIND_IMAGE = 5,
+  NODE_KIND_LINE = 6,
+  /**
+   * NODE_KIND_GROUP - Structural container. Its bounds are derived by Group commands and it
+   * never paints a rectangle of its own.
+   */
+  NODE_KIND_GROUP = 7,
+  /**
+   * NODE_KIND_SECTION - Canvas organization container. Unlike Frame, hiding its contents does not
+   * change the Section's own visibility or geometry.
+   */
+  NODE_KIND_SECTION = 8,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * Open-path endpoint decoration. Unspecified is accepted from historical
+ * payloads and deterministically migrates to NONE at the Core boundary.
+ */
+export enum StrokeCap {
+  STROKE_CAP_UNSPECIFIED = 0,
+  STROKE_CAP_NONE = 1,
+  STROKE_CAP_ROUND = 2,
+  STROKE_CAP_SQUARE = 3,
+  STROKE_CAP_ARROW_LINES = 4,
+  STROKE_CAP_ARROW_EQUILATERAL = 5,
+  STROKE_CAP_DIAMOND_FILLED = 6,
+  STROKE_CAP_TRIANGLE_FILLED = 7,
+  STROKE_CAP_CIRCLE_FILLED = 8,
+  UNRECOGNIZED = -1,
+}
+
+export enum StrokeJoin {
+  STROKE_JOIN_UNSPECIFIED = 0,
+  STROKE_JOIN_MITER = 1,
+  STROKE_JOIN_BEVEL = 2,
+  STROKE_JOIN_ROUND = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum StrokeAlign {
+  STROKE_ALIGN_UNSPECIFIED = 0,
+  STROKE_ALIGN_CENTER = 1,
+  STROKE_ALIGN_INSIDE = 2,
+  STROKE_ALIGN_OUTSIDE = 3,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * Figma's per-axis behavior when the containing Frame is resized. Unspecified
+ * remains a legacy absence at the Canonical boundary rather than silently
+ * becoming an effective constraint.
+ */
+export enum ConstraintType {
+  CONSTRAINT_TYPE_UNSPECIFIED = 0,
+  CONSTRAINT_TYPE_MIN = 1,
+  CONSTRAINT_TYPE_CENTER = 2,
+  CONSTRAINT_TYPE_MAX = 3,
+  CONSTRAINT_TYPE_STRETCH = 4,
+  CONSTRAINT_TYPE_SCALE = 5,
   UNRECOGNIZED = -1,
 }
 
@@ -149,6 +208,11 @@ export interface DocumentSnapshot_ExtensionsEntry {
   value: Uint8Array;
 }
 
+export interface Constraints {
+  horizontal: ConstraintType;
+  vertical: ConstraintType;
+}
+
 export interface Color {
   space: ColorSpace;
   red: number;
@@ -168,6 +232,21 @@ export interface LinearGradient {
   endX: number;
   endY: number;
   stops: GradientStop[];
+}
+
+export interface ArcData {
+  startingAngle: number;
+  endingAngle: number;
+  innerRadius: number;
+}
+
+export interface Transform {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
 }
 
 export interface Paint {
@@ -233,6 +312,40 @@ export interface SceneNode {
   locked: boolean;
   assetId?: Uint8Array | undefined;
   textProperties?: TextProperties | undefined;
+  strokeCapStart: StrokeCap;
+  strokeCapEnd: StrokeCap;
+  contentsHidden: boolean;
+  strokeJoin: StrokeJoin;
+  strokeMiterLimit: number;
+  strokeDashPattern: number[];
+  /**
+   * Empty retains uniform `stroke_width`; exactly four values mean
+   * top/right/bottom/left weights for Frame and Rectangle.
+   */
+  strokeWeights: number[];
+  strokeAlign: StrokeAlign;
+  arcData?: ArcData | undefined;
+  relativeTransform?:
+    | Transform
+    | undefined;
+  /** Omission preserves Figma's historical Frame default: clip descendants. */
+  clipsContent?:
+    | boolean
+    | undefined;
+  /** Empty retains `corner_radius`; four values are TL/TR/BR/BL. */
+  cornerRadii: number[];
+  /**
+   * Frame/Rectangle/Section only. 0 retains circular corners; 1 is the
+   * maximally continuous Figma-compatible corner treatment.
+   */
+  cornerSmoothing: number;
+  /**
+   * Empty keeps the legacy singular paint fields. Non-empty arrays are ordered
+   * paint stacks, composited in array order.
+   */
+  fills: Paint[];
+  strokes: Paint[];
+  constraints?: Constraints | undefined;
 }
 
 export interface GeometryUpdate {
@@ -253,6 +366,22 @@ export interface AppearanceUpdate {
   cornerRadius: number;
   visible: boolean;
   locked: boolean;
+  strokeCapStart: StrokeCap;
+  strokeCapEnd: StrokeCap;
+  contentsHidden: boolean;
+  strokeJoin: StrokeJoin;
+  strokeMiterLimit: number;
+  strokeDashPattern: number[];
+  strokeWeights: number[];
+  strokeAlign: StrokeAlign;
+  arcData?: ArcData | undefined;
+  relativeTransform?: Transform | undefined;
+  clipsContent?: boolean | undefined;
+  cornerRadii: number[];
+  cornerSmoothing: number;
+  fills: Paint[];
+  strokes: Paint[];
+  constraints?: Constraints | undefined;
 }
 
 export interface CreatePage {
@@ -300,6 +429,17 @@ export interface SetNodePosition {
   positionId?: PositionId | undefined;
 }
 
+/**
+ * Resolved structural move. Geometry is intentionally absent: this operation
+ * preserves the child's world-relative visual position while changing only its
+ * canonical parent and sibling order.
+ */
+export interface SetNodeParent {
+  nodeId: Uint8Array;
+  parentId?: Uint8Array | undefined;
+  positionId?: PositionId | undefined;
+}
+
 export interface SetDocumentColorProfile {
   profile: DocumentColorProfile;
 }
@@ -335,6 +475,7 @@ export interface ResolvedOperation {
   setImageFill?: ImageFillUpdate | undefined;
   setNodePosition?: SetNodePosition | undefined;
   restoreNode?: RestoreNode | undefined;
+  setNodeParent?: SetNodeParent | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -1199,6 +1340,64 @@ export const DocumentSnapshot_ExtensionsEntry: MessageFns<DocumentSnapshot_Exten
   },
 };
 
+function createBaseConstraints(): Constraints {
+  return { horizontal: 0, vertical: 0 };
+}
+
+export const Constraints: MessageFns<Constraints> = {
+  encode(message: Constraints, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.horizontal !== 0) {
+      writer.uint32(8).int32(message.horizontal);
+    }
+    if (message.vertical !== 0) {
+      writer.uint32(16).int32(message.vertical);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Constraints {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConstraints();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.horizontal = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.vertical = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<Constraints>, I>>(base?: I): Constraints {
+    return Constraints.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Constraints>, I>>(object: I): Constraints {
+    const message = createBaseConstraints();
+    message.horizontal = object.horizontal ?? 0;
+    message.vertical = object.vertical ?? 0;
+    return message;
+  },
+};
+
 function createBaseColor(): Color {
   return { space: 0, red: 0, green: 0, blue: 0, alpha: 0 };
 }
@@ -1441,6 +1640,182 @@ export const LinearGradient: MessageFns<LinearGradient> = {
     message.endX = object.endX ?? 0;
     message.endY = object.endY ?? 0;
     message.stops = object.stops?.map((e) => GradientStop.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseArcData(): ArcData {
+  return { startingAngle: 0, endingAngle: 0, innerRadius: 0 };
+}
+
+export const ArcData: MessageFns<ArcData> = {
+  encode(message: ArcData, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.startingAngle !== 0) {
+      writer.uint32(9).double(message.startingAngle);
+    }
+    if (message.endingAngle !== 0) {
+      writer.uint32(17).double(message.endingAngle);
+    }
+    if (message.innerRadius !== 0) {
+      writer.uint32(25).double(message.innerRadius);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ArcData {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseArcData();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.startingAngle = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.endingAngle = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.innerRadius = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ArcData>, I>>(base?: I): ArcData {
+    return ArcData.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ArcData>, I>>(object: I): ArcData {
+    const message = createBaseArcData();
+    message.startingAngle = object.startingAngle ?? 0;
+    message.endingAngle = object.endingAngle ?? 0;
+    message.innerRadius = object.innerRadius ?? 0;
+    return message;
+  },
+};
+
+function createBaseTransform(): Transform {
+  return { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 };
+}
+
+export const Transform: MessageFns<Transform> = {
+  encode(message: Transform, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.a !== 0) {
+      writer.uint32(9).double(message.a);
+    }
+    if (message.b !== 0) {
+      writer.uint32(17).double(message.b);
+    }
+    if (message.c !== 0) {
+      writer.uint32(25).double(message.c);
+    }
+    if (message.d !== 0) {
+      writer.uint32(33).double(message.d);
+    }
+    if (message.e !== 0) {
+      writer.uint32(41).double(message.e);
+    }
+    if (message.f !== 0) {
+      writer.uint32(49).double(message.f);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Transform {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTransform();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.a = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.b = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.c = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.d = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.e = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.f = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<Transform>, I>>(base?: I): Transform {
+    return Transform.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Transform>, I>>(object: I): Transform {
+    const message = createBaseTransform();
+    message.a = object.a ?? 0;
+    message.b = object.b ?? 0;
+    message.c = object.c ?? 0;
+    message.d = object.d ?? 0;
+    message.e = object.e ?? 0;
+    message.f = object.f ?? 0;
     return message;
   },
 };
@@ -1930,6 +2305,22 @@ function createBaseSceneNode(): SceneNode {
     locked: false,
     assetId: undefined,
     textProperties: undefined,
+    strokeCapStart: 0,
+    strokeCapEnd: 0,
+    contentsHidden: false,
+    strokeJoin: 0,
+    strokeMiterLimit: 0,
+    strokeDashPattern: [],
+    strokeWeights: [],
+    strokeAlign: 0,
+    arcData: undefined,
+    relativeTransform: undefined,
+    clipsContent: undefined,
+    cornerRadii: [],
+    cornerSmoothing: 0,
+    fills: [],
+    strokes: [],
+    constraints: undefined,
   };
 }
 
@@ -1997,6 +2388,60 @@ export const SceneNode: MessageFns<SceneNode> = {
     }
     if (message.textProperties !== undefined) {
       TextProperties.encode(message.textProperties, writer.uint32(170).fork()).join();
+    }
+    if (message.strokeCapStart !== 0) {
+      writer.uint32(176).int32(message.strokeCapStart);
+    }
+    if (message.strokeCapEnd !== 0) {
+      writer.uint32(184).int32(message.strokeCapEnd);
+    }
+    if (message.contentsHidden !== false) {
+      writer.uint32(192).bool(message.contentsHidden);
+    }
+    if (message.strokeJoin !== 0) {
+      writer.uint32(200).int32(message.strokeJoin);
+    }
+    if (message.strokeMiterLimit !== 0) {
+      writer.uint32(209).double(message.strokeMiterLimit);
+    }
+    writer.uint32(218).fork();
+    for (const v of message.strokeDashPattern) {
+      writer.double(v);
+    }
+    writer.join();
+    writer.uint32(226).fork();
+    for (const v of message.strokeWeights) {
+      writer.double(v);
+    }
+    writer.join();
+    if (message.strokeAlign !== 0) {
+      writer.uint32(232).int32(message.strokeAlign);
+    }
+    if (message.arcData !== undefined) {
+      ArcData.encode(message.arcData, writer.uint32(242).fork()).join();
+    }
+    if (message.relativeTransform !== undefined) {
+      Transform.encode(message.relativeTransform, writer.uint32(250).fork()).join();
+    }
+    if (message.clipsContent !== undefined) {
+      writer.uint32(256).bool(message.clipsContent);
+    }
+    writer.uint32(266).fork();
+    for (const v of message.cornerRadii) {
+      writer.double(v);
+    }
+    writer.join();
+    if (message.cornerSmoothing !== 0) {
+      writer.uint32(273).double(message.cornerSmoothing);
+    }
+    for (const v of message.fills) {
+      Paint.encode(v!, writer.uint32(282).fork()).join();
+    }
+    for (const v of message.strokes) {
+      Paint.encode(v!, writer.uint32(290).fork()).join();
+    }
+    if (message.constraints !== undefined) {
+      Constraints.encode(message.constraints, writer.uint32(298).fork()).join();
     }
     return writer;
   },
@@ -2176,6 +2621,164 @@ export const SceneNode: MessageFns<SceneNode> = {
           message.textProperties = TextProperties.decode(reader, reader.uint32());
           continue;
         }
+        case 22: {
+          if (tag !== 176) {
+            break;
+          }
+
+          message.strokeCapStart = reader.int32() as any;
+          continue;
+        }
+        case 23: {
+          if (tag !== 184) {
+            break;
+          }
+
+          message.strokeCapEnd = reader.int32() as any;
+          continue;
+        }
+        case 24: {
+          if (tag !== 192) {
+            break;
+          }
+
+          message.contentsHidden = reader.bool();
+          continue;
+        }
+        case 25: {
+          if (tag !== 200) {
+            break;
+          }
+
+          message.strokeJoin = reader.int32() as any;
+          continue;
+        }
+        case 26: {
+          if (tag !== 209) {
+            break;
+          }
+
+          message.strokeMiterLimit = reader.double();
+          continue;
+        }
+        case 27: {
+          if (tag === 217) {
+            message.strokeDashPattern.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 218) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.strokeDashPattern.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 28: {
+          if (tag === 225) {
+            message.strokeWeights.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 226) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.strokeWeights.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 29: {
+          if (tag !== 232) {
+            break;
+          }
+
+          message.strokeAlign = reader.int32() as any;
+          continue;
+        }
+        case 30: {
+          if (tag !== 242) {
+            break;
+          }
+
+          message.arcData = ArcData.decode(reader, reader.uint32());
+          continue;
+        }
+        case 31: {
+          if (tag !== 250) {
+            break;
+          }
+
+          message.relativeTransform = Transform.decode(reader, reader.uint32());
+          continue;
+        }
+        case 32: {
+          if (tag !== 256) {
+            break;
+          }
+
+          message.clipsContent = reader.bool();
+          continue;
+        }
+        case 33: {
+          if (tag === 265) {
+            message.cornerRadii.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 266) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.cornerRadii.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 34: {
+          if (tag !== 273) {
+            break;
+          }
+
+          message.cornerSmoothing = reader.double();
+          continue;
+        }
+        case 35: {
+          if (tag !== 282) {
+            break;
+          }
+
+          message.fills.push(Paint.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 36: {
+          if (tag !== 290) {
+            break;
+          }
+
+          message.strokes.push(Paint.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 37: {
+          if (tag !== 298) {
+            break;
+          }
+
+          message.constraints = Constraints.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2216,6 +2819,28 @@ export const SceneNode: MessageFns<SceneNode> = {
     message.assetId = object.assetId ?? undefined;
     message.textProperties = (object.textProperties !== undefined && object.textProperties !== null)
       ? TextProperties.fromPartial(object.textProperties)
+      : undefined;
+    message.strokeCapStart = object.strokeCapStart ?? 0;
+    message.strokeCapEnd = object.strokeCapEnd ?? 0;
+    message.contentsHidden = object.contentsHidden ?? false;
+    message.strokeJoin = object.strokeJoin ?? 0;
+    message.strokeMiterLimit = object.strokeMiterLimit ?? 0;
+    message.strokeDashPattern = object.strokeDashPattern?.map((e) => e) || [];
+    message.strokeWeights = object.strokeWeights?.map((e) => e) || [];
+    message.strokeAlign = object.strokeAlign ?? 0;
+    message.arcData = (object.arcData !== undefined && object.arcData !== null)
+      ? ArcData.fromPartial(object.arcData)
+      : undefined;
+    message.relativeTransform = (object.relativeTransform !== undefined && object.relativeTransform !== null)
+      ? Transform.fromPartial(object.relativeTransform)
+      : undefined;
+    message.clipsContent = object.clipsContent ?? undefined;
+    message.cornerRadii = object.cornerRadii?.map((e) => e) || [];
+    message.cornerSmoothing = object.cornerSmoothing ?? 0;
+    message.fills = object.fills?.map((e) => Paint.fromPartial(e)) || [];
+    message.strokes = object.strokes?.map((e) => Paint.fromPartial(e)) || [];
+    message.constraints = (object.constraints !== undefined && object.constraints !== null)
+      ? Constraints.fromPartial(object.constraints)
       : undefined;
     return message;
   },
@@ -2337,6 +2962,22 @@ function createBaseAppearanceUpdate(): AppearanceUpdate {
     cornerRadius: 0,
     visible: false,
     locked: false,
+    strokeCapStart: 0,
+    strokeCapEnd: 0,
+    contentsHidden: false,
+    strokeJoin: 0,
+    strokeMiterLimit: 0,
+    strokeDashPattern: [],
+    strokeWeights: [],
+    strokeAlign: 0,
+    arcData: undefined,
+    relativeTransform: undefined,
+    clipsContent: undefined,
+    cornerRadii: [],
+    cornerSmoothing: 0,
+    fills: [],
+    strokes: [],
+    constraints: undefined,
   };
 }
 
@@ -2365,6 +3006,60 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
     }
     if (message.locked !== false) {
       writer.uint32(64).bool(message.locked);
+    }
+    if (message.strokeCapStart !== 0) {
+      writer.uint32(72).int32(message.strokeCapStart);
+    }
+    if (message.strokeCapEnd !== 0) {
+      writer.uint32(80).int32(message.strokeCapEnd);
+    }
+    if (message.contentsHidden !== false) {
+      writer.uint32(88).bool(message.contentsHidden);
+    }
+    if (message.strokeJoin !== 0) {
+      writer.uint32(96).int32(message.strokeJoin);
+    }
+    if (message.strokeMiterLimit !== 0) {
+      writer.uint32(105).double(message.strokeMiterLimit);
+    }
+    writer.uint32(114).fork();
+    for (const v of message.strokeDashPattern) {
+      writer.double(v);
+    }
+    writer.join();
+    writer.uint32(122).fork();
+    for (const v of message.strokeWeights) {
+      writer.double(v);
+    }
+    writer.join();
+    if (message.strokeAlign !== 0) {
+      writer.uint32(128).int32(message.strokeAlign);
+    }
+    if (message.arcData !== undefined) {
+      ArcData.encode(message.arcData, writer.uint32(138).fork()).join();
+    }
+    if (message.relativeTransform !== undefined) {
+      Transform.encode(message.relativeTransform, writer.uint32(146).fork()).join();
+    }
+    if (message.clipsContent !== undefined) {
+      writer.uint32(152).bool(message.clipsContent);
+    }
+    writer.uint32(162).fork();
+    for (const v of message.cornerRadii) {
+      writer.double(v);
+    }
+    writer.join();
+    if (message.cornerSmoothing !== 0) {
+      writer.uint32(169).double(message.cornerSmoothing);
+    }
+    for (const v of message.fills) {
+      Paint.encode(v!, writer.uint32(178).fork()).join();
+    }
+    for (const v of message.strokes) {
+      Paint.encode(v!, writer.uint32(186).fork()).join();
+    }
+    if (message.constraints !== undefined) {
+      Constraints.encode(message.constraints, writer.uint32(194).fork()).join();
     }
     return writer;
   },
@@ -2440,6 +3135,164 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
           message.locked = reader.bool();
           continue;
         }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.strokeCapStart = reader.int32() as any;
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.strokeCapEnd = reader.int32() as any;
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.contentsHidden = reader.bool();
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.strokeJoin = reader.int32() as any;
+          continue;
+        }
+        case 13: {
+          if (tag !== 105) {
+            break;
+          }
+
+          message.strokeMiterLimit = reader.double();
+          continue;
+        }
+        case 14: {
+          if (tag === 113) {
+            message.strokeDashPattern.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 114) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.strokeDashPattern.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 15: {
+          if (tag === 121) {
+            message.strokeWeights.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 122) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.strokeWeights.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.strokeAlign = reader.int32() as any;
+          continue;
+        }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.arcData = ArcData.decode(reader, reader.uint32());
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.relativeTransform = Transform.decode(reader, reader.uint32());
+          continue;
+        }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.clipsContent = reader.bool();
+          continue;
+        }
+        case 20: {
+          if (tag === 161) {
+            message.cornerRadii.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 162) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.cornerRadii.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 21: {
+          if (tag !== 169) {
+            break;
+          }
+
+          message.cornerSmoothing = reader.double();
+          continue;
+        }
+        case 22: {
+          if (tag !== 178) {
+            break;
+          }
+
+          message.fills.push(Paint.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 23: {
+          if (tag !== 186) {
+            break;
+          }
+
+          message.strokes.push(Paint.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 24: {
+          if (tag !== 194) {
+            break;
+          }
+
+          message.constraints = Constraints.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2464,6 +3317,28 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
     message.cornerRadius = object.cornerRadius ?? 0;
     message.visible = object.visible ?? false;
     message.locked = object.locked ?? false;
+    message.strokeCapStart = object.strokeCapStart ?? 0;
+    message.strokeCapEnd = object.strokeCapEnd ?? 0;
+    message.contentsHidden = object.contentsHidden ?? false;
+    message.strokeJoin = object.strokeJoin ?? 0;
+    message.strokeMiterLimit = object.strokeMiterLimit ?? 0;
+    message.strokeDashPattern = object.strokeDashPattern?.map((e) => e) || [];
+    message.strokeWeights = object.strokeWeights?.map((e) => e) || [];
+    message.strokeAlign = object.strokeAlign ?? 0;
+    message.arcData = (object.arcData !== undefined && object.arcData !== null)
+      ? ArcData.fromPartial(object.arcData)
+      : undefined;
+    message.relativeTransform = (object.relativeTransform !== undefined && object.relativeTransform !== null)
+      ? Transform.fromPartial(object.relativeTransform)
+      : undefined;
+    message.clipsContent = object.clipsContent ?? undefined;
+    message.cornerRadii = object.cornerRadii?.map((e) => e) || [];
+    message.cornerSmoothing = object.cornerSmoothing ?? 0;
+    message.fills = object.fills?.map((e) => Paint.fromPartial(e)) || [];
+    message.strokes = object.strokes?.map((e) => Paint.fromPartial(e)) || [];
+    message.constraints = (object.constraints !== undefined && object.constraints !== null)
+      ? Constraints.fromPartial(object.constraints)
+      : undefined;
     return message;
   },
 };
@@ -2888,6 +3763,78 @@ export const SetNodePosition: MessageFns<SetNodePosition> = {
   },
 };
 
+function createBaseSetNodeParent(): SetNodeParent {
+  return { nodeId: new Uint8Array(0), parentId: undefined, positionId: undefined };
+}
+
+export const SetNodeParent: MessageFns<SetNodeParent> = {
+  encode(message: SetNodeParent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.parentId !== undefined) {
+      writer.uint32(18).bytes(message.parentId);
+    }
+    if (message.positionId !== undefined) {
+      PositionId.encode(message.positionId, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetNodeParent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetNodeParent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.parentId = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.positionId = PositionId.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetNodeParent>, I>>(base?: I): SetNodeParent {
+    return SetNodeParent.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetNodeParent>, I>>(object: I): SetNodeParent {
+    const message = createBaseSetNodeParent();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.parentId = object.parentId ?? undefined;
+    message.positionId = (object.positionId !== undefined && object.positionId !== null)
+      ? PositionId.fromPartial(object.positionId)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseSetDocumentColorProfile(): SetDocumentColorProfile {
   return { profile: 0 };
 }
@@ -3055,6 +4002,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setImageFill: undefined,
     setNodePosition: undefined,
     restoreNode: undefined,
+    setNodeParent: undefined,
   };
 }
 
@@ -3098,6 +4046,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.restoreNode !== undefined) {
       RestoreNode.encode(message.restoreNode, writer.uint32(106).fork()).join();
+    }
+    if (message.setNodeParent !== undefined) {
+      SetNodeParent.encode(message.setNodeParent, writer.uint32(114).fork()).join();
     }
     return writer;
   },
@@ -3213,6 +4164,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.restoreNode = RestoreNode.decode(reader, reader.uint32());
           continue;
         }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.setNodeParent = SetNodeParent.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3266,6 +4225,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.restoreNode = (object.restoreNode !== undefined && object.restoreNode !== null)
       ? RestoreNode.fromPartial(object.restoreNode)
+      : undefined;
+    message.setNodeParent = (object.setNodeParent !== undefined && object.setNodeParent !== null)
+      ? SetNodeParent.fromPartial(object.setNodeParent)
       : undefined;
     return message;
   },

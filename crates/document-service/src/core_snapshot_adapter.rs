@@ -1,8 +1,8 @@
 //! Protobuf snapshot ↔ canonical editor-core adapter used only by Document Service.
 
 use editor_core::{
-    ActorId, AssetId, AssetReference, Document, DocumentId, FontReference, Node, NodeId, NodeKind,
-    Page, PageId, ParagraphStyle, PositionId, TextAlign, TextAutoSize, TextProperties,
+    ActorId, ArcData, AssetId, AssetReference, ConstraintType, Constraints, Document, DocumentId, FontReference, Node, NodeId, NodeKind,
+    Page, PageId, ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
     TextStyleRun,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
 };
@@ -291,6 +291,9 @@ fn node_to_proto(
             NodeKind::Ellipse => v1::NodeKind::Ellipse,
             NodeKind::Text => v1::NodeKind::Text,
             NodeKind::Image => v1::NodeKind::Image,
+            NodeKind::Line => v1::NodeKind::Line,
+            NodeKind::Group => v1::NodeKind::Group,
+            NodeKind::Section => v1::NodeKind::Section,
         } as i32,
         x: node.x,
         y: node.y,
@@ -299,14 +302,30 @@ fn node_to_proto(
         rotation: node.rotation,
         fill: Some(paint_to_proto(&node.fill)),
         stroke: Some(paint_to_proto(&node.stroke)),
+        fills: node.fills.iter().map(paint_to_proto).collect(),
+        strokes: node.strokes.iter().map(paint_to_proto).collect(),
         stroke_width: node.stroke_width,
         opacity: node.opacity,
         corner_radius: node.corner_radius,
+        corner_radii: node.corner_radii.clone(),
+        corner_smoothing: node.corner_smoothing,
+        constraints: node.constraints.map(constraints_to_proto),
         text: node.text.clone(),
         visible: node.visible,
         locked: node.locked,
         asset_id: asset_id.map(|id| id_to_bytes(id.0)),
         text_properties: text_properties.map(text_properties_to_proto),
+        stroke_cap_start: stroke_cap_to_proto(node.stroke_cap_start) as i32,
+        stroke_cap_end: stroke_cap_to_proto(node.stroke_cap_end) as i32,
+        stroke_join: stroke_join_to_proto(node.stroke_join) as i32,
+        stroke_miter_limit: node.stroke_miter_limit,
+        stroke_dash_pattern: node.stroke_dash_pattern.clone(),
+        stroke_weights: node.stroke_weights.clone(),
+        stroke_align: stroke_align_to_proto(node.stroke_align) as i32,
+        arc_data: node.arc_data.map(arc_to_proto),
+        relative_transform: node.relative_transform.map(transform_to_proto),
+        contents_hidden: node.contents_hidden,
+        clips_content: Some(node.clips_content),
     }
 }
 
@@ -320,8 +339,12 @@ fn node_from_proto(
         v1::NodeKind::Ellipse => NodeKind::Ellipse,
         v1::NodeKind::Text => NodeKind::Text,
         v1::NodeKind::Image => NodeKind::Image,
+        v1::NodeKind::Line => NodeKind::Line,
+        v1::NodeKind::Group => NodeKind::Group,
+        v1::NodeKind::Section => NodeKind::Section,
         v1::NodeKind::Unspecified => return Err(ServiceError::ReducerRejected),
     };
+    let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
     Ok((
         page_id,
         Node {
@@ -337,12 +360,28 @@ fn node_from_proto(
             rotation: node.rotation,
             fill: paint_from_proto(node.fill.ok_or(ServiceError::ReducerRejected)?)?,
             stroke: paint_from_proto(node.stroke.ok_or(ServiceError::ReducerRejected)?)?,
+            fills: node.fills.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
+            strokes: node.strokes.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
             stroke_width: node.stroke_width,
+            stroke_cap_start: stroke_cap_from_proto(node.stroke_cap_start)?,
+            stroke_cap_end: stroke_cap_from_proto(node.stroke_cap_end)?,
+            stroke_join: stroke_join_from_proto(node.stroke_join)?,
+            stroke_miter_limit: if node.stroke_miter_limit == 0.0 { 10.0 } else { node.stroke_miter_limit },
+            stroke_dash_pattern: node.stroke_dash_pattern,
+            stroke_weights: node.stroke_weights,
+            stroke_align: stroke_align_from_proto(node.stroke_align)?,
+            arc_data: node.arc_data.map(arc_from_proto).transpose()?,
+            relative_transform: node.relative_transform.map(transform_from_proto).transpose()?,
             opacity: node.opacity,
             corner_radius: node.corner_radius,
+            corner_radii: node.corner_radii,
+            corner_smoothing: node.corner_smoothing,
+            constraints: node.constraints.map(constraints_from_proto).transpose()?,
             text: node.text,
             visible: node.visible,
             locked: node.locked,
+            contents_hidden: node.contents_hidden,
+            clips_content,
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         node.text_properties
@@ -350,6 +389,92 @@ fn node_from_proto(
             .transpose()?,
     ))
 }
+
+fn stroke_cap_to_proto(cap: StrokeCap) -> v1::StrokeCap {
+    match cap {
+        StrokeCap::None => v1::StrokeCap::None,
+        StrokeCap::Round => v1::StrokeCap::Round,
+        StrokeCap::Square => v1::StrokeCap::Square,
+        StrokeCap::ArrowLines => v1::StrokeCap::ArrowLines,
+        StrokeCap::ArrowEquilateral => v1::StrokeCap::ArrowEquilateral,
+        StrokeCap::DiamondFilled => v1::StrokeCap::DiamondFilled,
+        StrokeCap::TriangleFilled => v1::StrokeCap::TriangleFilled,
+        StrokeCap::CircleFilled => v1::StrokeCap::CircleFilled,
+    }
+}
+
+fn stroke_cap_from_proto(value: i32) -> Result<StrokeCap, ServiceError> {
+    Ok(match v1::StrokeCap::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::StrokeCap::Unspecified | v1::StrokeCap::None => StrokeCap::None,
+        v1::StrokeCap::Round => StrokeCap::Round,
+        v1::StrokeCap::Square => StrokeCap::Square,
+        v1::StrokeCap::ArrowLines => StrokeCap::ArrowLines,
+        v1::StrokeCap::ArrowEquilateral => StrokeCap::ArrowEquilateral,
+        v1::StrokeCap::DiamondFilled => StrokeCap::DiamondFilled,
+        v1::StrokeCap::TriangleFilled => StrokeCap::TriangleFilled,
+        v1::StrokeCap::CircleFilled => StrokeCap::CircleFilled,
+    })
+}
+
+fn stroke_join_to_proto(join: StrokeJoin) -> v1::StrokeJoin {
+    match join {
+        StrokeJoin::Miter => v1::StrokeJoin::Miter,
+        StrokeJoin::Bevel => v1::StrokeJoin::Bevel,
+        StrokeJoin::Round => v1::StrokeJoin::Round,
+    }
+}
+
+fn stroke_join_from_proto(value: i32) -> Result<StrokeJoin, ServiceError> {
+    Ok(match v1::StrokeJoin::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::StrokeJoin::Unspecified | v1::StrokeJoin::Miter => StrokeJoin::Miter,
+        v1::StrokeJoin::Bevel => StrokeJoin::Bevel,
+        v1::StrokeJoin::Round => StrokeJoin::Round,
+    })
+}
+
+fn constraints_to_proto(value: Constraints) -> v1::Constraints {
+    let convert = |axis| match axis {
+        ConstraintType::Min => v1::ConstraintType::Min,
+        ConstraintType::Center => v1::ConstraintType::Center,
+        ConstraintType::Max => v1::ConstraintType::Max,
+        ConstraintType::Stretch => v1::ConstraintType::Stretch,
+        ConstraintType::Scale => v1::ConstraintType::Scale,
+    };
+    v1::Constraints { horizontal: convert(value.horizontal) as i32, vertical: convert(value.vertical) as i32 }
+}
+
+fn constraints_from_proto(value: v1::Constraints) -> Result<Constraints, ServiceError> {
+    let convert = |axis| match v1::ConstraintType::try_from(axis).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::ConstraintType::Min => Ok(ConstraintType::Min),
+        v1::ConstraintType::Center => Ok(ConstraintType::Center),
+        v1::ConstraintType::Max => Ok(ConstraintType::Max),
+        v1::ConstraintType::Stretch => Ok(ConstraintType::Stretch),
+        v1::ConstraintType::Scale => Ok(ConstraintType::Scale),
+        v1::ConstraintType::Unspecified => Err(ServiceError::ReducerRejected),
+    };
+    Ok(Constraints { horizontal: convert(value.horizontal)?, vertical: convert(value.vertical)? })
+}
+
+fn stroke_align_to_proto(align: StrokeAlign) -> v1::StrokeAlign {
+    match align {
+        StrokeAlign::Center => v1::StrokeAlign::Center,
+        StrokeAlign::Inside => v1::StrokeAlign::Inside,
+        StrokeAlign::Outside => v1::StrokeAlign::Outside,
+    }
+}
+
+fn stroke_align_from_proto(value: i32) -> Result<StrokeAlign, ServiceError> {
+    Ok(match v1::StrokeAlign::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::StrokeAlign::Unspecified | v1::StrokeAlign::Inside => StrokeAlign::Inside,
+        v1::StrokeAlign::Center => StrokeAlign::Center,
+        v1::StrokeAlign::Outside => StrokeAlign::Outside,
+    })
+}
+
+fn arc_to_proto(arc: ArcData) -> v1::ArcData { v1::ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius } }
+fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> { Ok(ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }) }
+fn transform_to_proto(transform: editor_core::geometry::AffineTransform) -> v1::Transform { v1::Transform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f } }
+fn transform_from_proto(transform: v1::Transform) -> Result<editor_core::geometry::AffineTransform, ServiceError> { Ok(editor_core::geometry::AffineTransform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f }) }
 
 fn font_to_proto(font: &FontReference) -> v1::FontReference {
     v1::FontReference {
@@ -594,7 +719,7 @@ fn document_id_to_bytes(value: DocumentId) -> Vec<u8> {
 mod tests {
     use editor_core::{
         AssetId, AssetReference, DEFAULT_PAGE_ID, Document, DocumentId, Node, NodeId, NodeKind,
-        PositionId, color::Color,
+        PositionId, color::Color, geometry::AffineTransform,
     };
     use sha2::Sha256;
 
@@ -621,12 +746,28 @@ mod tests {
                     rotation: 0.0,
                     fill: Paint::Solid(Color::from_srgb_u8([20, 30, 40], 255)),
                     stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
                     stroke_width: 0.0,
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                   stroke_weights: Vec::new(),
+                   stroke_align: Default::default(),
+                    arc_data: None,
+                    relative_transform: Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 24.0, f: 12.0 }),
                     opacity: 1.0,
                     corner_radius: 0.0,
+                    corner_radii: vec![4.0, 8.0, 12.0, 16.0],
+                    corner_smoothing: 0.0,
+                    constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
+            contents_hidden: false,
+            clips_content: false,
                 },
             )
             .unwrap();
@@ -645,6 +786,8 @@ mod tests {
             document_from_snapshot(&snapshot, expected_document_id, document.canonical_hash())
                 .unwrap();
         assert_eq!(restored.canonical_hash(), document.canonical_hash());
+        assert_eq!(restored.node(NodeId(7)).unwrap().corner_radii, vec![4.0, 8.0, 12.0, 16.0]);
+        assert_eq!(restored.node(NodeId(7)).unwrap().relative_transform, Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 24.0, f: 12.0 }));
         assert_eq!(restored.asset(AssetId(42)).unwrap().media_type, "image/png");
     }
 

@@ -2,8 +2,16 @@ import type { EditorErrorCode } from "./editor-error";
 
 export type { EditorErrorCode } from "./editor-error";
 
-export type ToolKind = "select" | "frame" | "rectangle" | "ellipse" | "text" | "hand";
-export type NodeKind = "frame" | "rectangle" | "ellipse" | "text" | "image";
+export type ToolKind = "select" | "frame" | "section" | "rectangle" | "ellipse" | "line" | "arrow" | "text" | "hand";
+export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" | "line" | "text" | "image";
+/** Canonical Figma-compatible endpoint decoration for open paths. */
+export type StrokeCap = "none" | "round" | "square" | "arrowLines" | "arrowEquilateral" | "diamondFilled" | "triangleFilled" | "circleFilled";
+/** Figma-compatible corner treatment for stroked paths. */
+export type StrokeJoin = "miter" | "bevel" | "round";
+export type StrokeAlign = "center" | "inside" | "outside";
+/** Per-axis Figma Frame resize behavior; absence retains legacy no-constraint semantics. */
+export type ConstraintType = "min" | "center" | "max" | "stretch" | "scale";
+export interface DocumentConstraints { horizontal: ConstraintType; vertical: ConstraintType; }
 /** Stable line-height for text records that predate an explicit paragraph value. */
 export const DEFAULT_TEXT_LINE_HEIGHT = 20;
 /** A deterministic capture may opt out of the otherwise automatic WebGPU spike. */
@@ -24,6 +32,15 @@ export interface DocumentLinearGradient {
   end: [number, number];
   stops: Array<{ position: number; color: DocumentColor }>;
 }
+/** One ordered paint layer. `css` is the deterministic Canvas fallback while
+ * `color`/`gradient` retain the canonical projection for round-tripping. */
+export interface DocumentPaint {
+  css: string;
+  color?: DocumentColor;
+  gradient?: DocumentLinearGradient;
+}
+export interface EllipseArcData { startingAngle: number; endingAngle: number; innerRadius: number; }
+export interface RelativeTransform { a: number; b: number; c: number; d: number; e: number; f: number; }
 
 /** A content-addressed font face; font bytes are held by the Asset Service. */
 export interface DocumentFontReference {
@@ -58,6 +75,9 @@ export interface CanvasNode {
   /** Canonical Page ownership. Records written before Phase 1 omit this and
    * migrate deterministically to Page 1 in the Rust bridge. */
   pageId?: string;
+  /** Structural parent. World-relative geometry preserves visual placement
+   * during the first Group hierarchy slice. */
+  parentId?: string;
   name: string;
   kind: NodeKind;
   x: number;
@@ -68,13 +88,35 @@ export interface CanvasNode {
   fill: string;
   fillColor?: DocumentColor;
   fillGradient?: DocumentLinearGradient;
+  /** Empty retains the legacy singular fill fields; otherwise composites in order. */
+  fills?: DocumentPaint[];
   /** Canonical sibling-order key, opaque to presentation components. */
   positionId?: string;
   stroke: string;
   /** Canonical stroke Paint projection; `stroke` is only its CSS fallback. */
   strokeColor?: DocumentColor;
   strokeGradient?: DocumentLinearGradient;
+  /** Empty retains the legacy singular stroke fields; otherwise composites in order. */
+  strokes?: DocumentPaint[];
   strokeWidth: number;
+  strokeCapStart?: StrokeCap;
+  strokeCapEnd?: StrokeCap;
+  strokeJoin?: StrokeJoin;
+  /** Default 10 preserves the historical Canvas 2D rendering contract. */
+  strokeMiterLimit?: number;
+  /** Alternating painted/gap lengths in document pixels. */
+  strokeDashPattern?: number[];
+  /** Frame/Rectangle-only top, right, bottom, left stroke widths. */
+  strokeWeights?: [number, number, number, number];
+  strokeAlign?: StrokeAlign;
+  arcData?: EllipseArcData;
+  /** Frame/Rectangle/Section-only TL/TR/BR/BL radii; absence uses `radius`. */
+  cornerRadii?: [number, number, number, number];
+  /** Frame/Rectangle/Section-only continuous-corner factor in [0, 1]. */
+  cornerSmoothing?: number;
+  constraints?: DocumentConstraints;
+  /** Dual-read WP3 migration field. Absence retains legacy world x/y/rotation. */
+  relativeTransform?: RelativeTransform;
   radius: number;
   opacity: number;
   text?: string;
@@ -84,6 +126,10 @@ export interface CanvasNode {
   assetId?: string;
   locked?: boolean;
   visible?: boolean;
+  /** Section-only: hides descendants while preserving the Section itself. */
+  contentsHidden?: boolean;
+  /** Frame-only. Omission retains Figma's default: descendants are clipped. */
+  clipsContent?: boolean;
 }
 
 export interface CanvasPage {
@@ -105,13 +151,14 @@ export interface DocumentAsset {
 /** A fully resolved Core mutation. It is intentionally byte-free so a pending
  * remote operation can be reapplied to a newer canonical snapshot after a
  * rejected base revision. */
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokeWidth" | "opacity" | "visible" | "locked" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "cornerRadii" | "cornerSmoothing" | "constraints" | "relativeTransform" | "opacity" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
   | { type: "update"; node: CoreProjectionNode }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
+  | { type: "reparent"; parentIds: Array<{ id: string; parentId?: string; positionId: string }> }
   | { type: "delete"; ids: string[] };
 
 export interface Viewport {
@@ -144,6 +191,9 @@ export interface RenderPerformanceSummary {
   visibleNodesP95: number;
   gpuUploadBytesP95: number;
   rendersPerInputFrameMax: number;
+  /** Browser input timestamp through completed Worker render. */
+  inputToRenderSamples: number;
+  inputToRenderP95Ms: number;
 }
 
 /** Rust-owned legal caret stops for an active DOM text-edit session. This is
@@ -174,6 +224,9 @@ export type CoreJournalOperation =
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
+  | { type: "reparent"; ids: string[]; parentId?: string }
+  | { type: "group"; ids: string[] }
+  | { type: "ungroup"; id: string }
   | { type: "delete"; ids: string[] }
   | { type: "move"; updates: Array<Pick<CanvasNode, "id" | "x" | "y" | "width" | "height">> }
   | { type: "restore-core"; coreSnapshot: string };
@@ -298,6 +351,10 @@ export type EditorCommand =
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
+  /** Move selected hierarchy roots under a new parent while preserving world space. */
+  | { type: "reparent"; ids: string[]; parentId?: string }
+  | { type: "group"; ids: string[] }
+  | { type: "ungroup"; id: string }
   | { type: "select"; ids: string[] }
   | { type: "delete"; ids: string[] }
   | { type: "duplicate"; ids: string[] }
@@ -317,8 +374,8 @@ export interface EditorTransaction {
 /** High-frequency browser input carried in a transferable binary batch. */
 export type EditorInputEvent =
   /** Read-only followers may point-select and pan, but must never begin a document mutation. */
-  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; button: number; readOnly?: true }
-  | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean };
+  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; altKey: boolean; button: number; readOnly?: true; /** A repeated press selects through a Group instead of its container. */ drillDown?: true; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number }
+  | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number };
 
 export type MainToWorker =
   | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; documentId?: string; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
@@ -397,11 +454,16 @@ export function documentColorFromCssHex(value: string): DocumentColor | undefine
 export function createNode(kind: NodeKind, x: number, y: number): CanvasNode {
   const presets: Record<NodeKind, Pick<CanvasNode, "name" | "width" | "height" | "fill" | "stroke" | "radius" | "text">> = {
     frame: { name: "Frame", width: 320, height: 220, fill: "#fbfbf8", stroke: "#d4d5cb", radius: 10 },
+    // Group is not a drawing tool. This neutral value is only used while an
+    // atomic Group command derives its real bounds from child nodes.
+    group: { name: "Group", width: 1, height: 1, fill: "transparent", stroke: "transparent", radius: 0 },
+    section: { name: "Section", width: 640, height: 360, fill: "#f8fafc", stroke: "#94a3b8", radius: 12 },
     rectangle: { name: "Rectangle", width: 180, height: 120, fill: "#e6edff", stroke: "#0048FF", radius: 12 },
     ellipse: { name: "Ellipse", width: 140, height: 140, fill: "#ffd8b7", stroke: "#bd6332", radius: 0 },
+    line: { name: "Line", width: 160, height: 0, fill: "transparent", stroke: "#0048FF", radius: 0 },
     text: { name: "Text", width: 220, height: 44, fill: "#23251f", stroke: "transparent", radius: 0, text: "Type something" },
     image: { name: "Image", width: 320, height: 220, fill: "#e6edff", stroke: "#0048FF", radius: 10 },
   };
   const preset = presets[kind];
-  return { id: createId(), kind, x, y, rotation: 0, strokeWidth: 1, opacity: 1, visible: true, ...preset, fillColor: documentColorFromCssHex(preset.fill) };
+  return { id: createId(), kind, x, y, rotation: 0, strokeWidth: 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, visible: true, ...preset, fillColor: documentColorFromCssHex(preset.fill) };
 }

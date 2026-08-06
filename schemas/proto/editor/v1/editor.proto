@@ -67,6 +67,58 @@ enum NodeKind {
   NODE_KIND_ELLIPSE = 3;
   NODE_KIND_TEXT = 4;
   NODE_KIND_IMAGE = 5;
+  NODE_KIND_LINE = 6;
+  // Structural container. Its bounds are derived by Group commands and it
+  // never paints a rectangle of its own.
+  NODE_KIND_GROUP = 7;
+  // Canvas organization container. Unlike Frame, hiding its contents does not
+  // change the Section's own visibility or geometry.
+  NODE_KIND_SECTION = 8;
+}
+
+// Open-path endpoint decoration. Unspecified is accepted from historical
+// payloads and deterministically migrates to NONE at the Core boundary.
+enum StrokeCap {
+  STROKE_CAP_UNSPECIFIED = 0;
+  STROKE_CAP_NONE = 1;
+  STROKE_CAP_ROUND = 2;
+  STROKE_CAP_SQUARE = 3;
+  STROKE_CAP_ARROW_LINES = 4;
+  STROKE_CAP_ARROW_EQUILATERAL = 5;
+  STROKE_CAP_DIAMOND_FILLED = 6;
+  STROKE_CAP_TRIANGLE_FILLED = 7;
+  STROKE_CAP_CIRCLE_FILLED = 8;
+}
+
+enum StrokeJoin {
+  STROKE_JOIN_UNSPECIFIED = 0;
+  STROKE_JOIN_MITER = 1;
+  STROKE_JOIN_BEVEL = 2;
+  STROKE_JOIN_ROUND = 3;
+}
+
+enum StrokeAlign {
+  STROKE_ALIGN_UNSPECIFIED = 0;
+  STROKE_ALIGN_CENTER = 1;
+  STROKE_ALIGN_INSIDE = 2;
+  STROKE_ALIGN_OUTSIDE = 3;
+}
+
+// Figma's per-axis behavior when the containing Frame is resized. Unspecified
+// remains a legacy absence at the Canonical boundary rather than silently
+// becoming an effective constraint.
+enum ConstraintType {
+  CONSTRAINT_TYPE_UNSPECIFIED = 0;
+  CONSTRAINT_TYPE_MIN = 1;
+  CONSTRAINT_TYPE_CENTER = 2;
+  CONSTRAINT_TYPE_MAX = 3;
+  CONSTRAINT_TYPE_STRETCH = 4;
+  CONSTRAINT_TYPE_SCALE = 5;
+}
+
+message Constraints {
+  ConstraintType horizontal = 1;
+  ConstraintType vertical = 2;
 }
 
 enum ColorSpace {
@@ -101,6 +153,21 @@ message LinearGradient {
   float end_x = 3;
   float end_y = 4;
   repeated GradientStop stops = 5;
+}
+
+message ArcData {
+  double starting_angle = 1;
+  double ending_angle = 2;
+  double inner_radius = 3;
+}
+
+message Transform {
+  double a = 1;
+  double b = 2;
+  double c = 3;
+  double d = 4;
+  double e = 5;
+  double f = 6;
 }
 
 message Paint {
@@ -181,6 +248,30 @@ message SceneNode {
   bool locked = 19;
   optional bytes asset_id = 20;
   optional TextProperties text_properties = 21;
+  StrokeCap stroke_cap_start = 22;
+  StrokeCap stroke_cap_end = 23;
+  bool contents_hidden = 24;
+  StrokeJoin stroke_join = 25;
+  double stroke_miter_limit = 26;
+  repeated double stroke_dash_pattern = 27;
+  // Empty retains uniform `stroke_width`; exactly four values mean
+  // top/right/bottom/left weights for Frame and Rectangle.
+  repeated double stroke_weights = 28;
+  StrokeAlign stroke_align = 29;
+  optional ArcData arc_data = 30;
+  optional Transform relative_transform = 31;
+  // Omission preserves Figma's historical Frame default: clip descendants.
+  optional bool clips_content = 32;
+  // Empty retains `corner_radius`; four values are TL/TR/BR/BL.
+  repeated double corner_radii = 33;
+  // Frame/Rectangle/Section only. 0 retains circular corners; 1 is the
+  // maximally continuous Figma-compatible corner treatment.
+  double corner_smoothing = 34;
+  // Empty keeps the legacy singular paint fields. Non-empty arrays are ordered
+  // paint stacks, composited in array order.
+  repeated Paint fills = 35;
+  repeated Paint strokes = 36;
+  optional Constraints constraints = 37;
 }
 
 message GeometryUpdate {
@@ -201,6 +292,22 @@ message AppearanceUpdate {
   double corner_radius = 6;
   bool visible = 7;
   bool locked = 8;
+  StrokeCap stroke_cap_start = 9;
+  StrokeCap stroke_cap_end = 10;
+  bool contents_hidden = 11;
+  StrokeJoin stroke_join = 12;
+  double stroke_miter_limit = 13;
+  repeated double stroke_dash_pattern = 14;
+  repeated double stroke_weights = 15;
+  StrokeAlign stroke_align = 16;
+  optional ArcData arc_data = 17;
+  optional Transform relative_transform = 18;
+  optional bool clips_content = 19;
+  repeated double corner_radii = 20;
+  double corner_smoothing = 21;
+  repeated Paint fills = 22;
+  repeated Paint strokes = 23;
+  optional Constraints constraints = 24;
 }
 
 message CreatePage {
@@ -244,6 +351,15 @@ message SetNodePosition {
   PositionId position_id = 2;
 }
 
+// Resolved structural move. Geometry is intentionally absent: this operation
+// preserves the child's world-relative visual position while changing only its
+// canonical parent and sibling order.
+message SetNodeParent {
+  bytes node_id = 1;
+  optional bytes parent_id = 2;
+  PositionId position_id = 3;
+}
+
 message SetDocumentColorProfile {
   DocumentColorProfile profile = 1;
 }
@@ -276,6 +392,7 @@ message ResolvedOperation {
     ImageFillUpdate set_image_fill = 11;
     SetNodePosition set_node_position = 12;
     RestoreNode restore_node = 13;
+    SetNodeParent set_node_parent = 14;
   }
 }
 
