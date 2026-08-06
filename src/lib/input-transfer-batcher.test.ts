@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { EditorInputEvent } from "./editor-protocol";
 import { createInputBatchBacklogSampler, createInputTransferBatcher } from "./input-transfer-batcher";
 
-const move = (x: number): EditorInputEvent => ({ type: "pointer", event: "move", x, y: 1, shiftKey: false, button: 0 });
+const move = (x: number): EditorInputEvent => ({ type: "pointer", event: "move", x, y: 1, shiftKey: false, altKey: false, button: 0 });
 const wheel: EditorInputEvent = { type: "wheel", x: 4, y: 5, deltaX: 0, deltaY: 3, ctrlKey: false };
-const up: EditorInputEvent = { type: "pointer", event: "up", x: 7, y: 8, shiftKey: false, button: 0 };
+const up: EditorInputEvent = { type: "pointer", event: "up", x: 7, y: 8, shiftKey: false, altKey: false, button: 0 };
 
 describe("transferable input batcher", () => {
   it("coalesces adjacent moves and preserves intervening wheel order", () => {

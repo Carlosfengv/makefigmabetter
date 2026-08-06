@@ -1,4 +1,5 @@
 import type { CanvasNode, Viewport } from "./editor-protocol";
+import { closedShapeStrokeLocalBounds } from "./closed-shape-stroke-bounds";
 import { resolveInsideRoundedRect } from "./rounded-rect";
 
 const FLOATS_PER_VERTEX = 16;
@@ -145,11 +146,36 @@ export function buildWebGpuInstances(nodes: readonly CanvasNode[]): { instances:
     const offset = index * GPU_INSTANCE_FLOATS;
     const fill = cssColor(node.fill, node.opacity)!;
     const stroke = cssColor(node.stroke, node.opacity) ?? [0, 0, 0, 0];
-    const geometry = resolveInsideRoundedRect(Math.abs(node.width), Math.abs(node.height), node.radius, node.strokeWidth);
-    instances.set([node.x, node.y, node.width, node.height, node.rotation, node.kind === "ellipse" ? 1 : 0, geometry.outerRadius, stroke[3] > 0 ? geometry.insideStrokeWidth : 0, ...fill, ...stroke], offset);
+    const shape = webGpuShapeGeometry(node, stroke[3] > 0);
+    const geometry = resolveInsideRoundedRect(Math.abs(shape.bounds.width), Math.abs(shape.bounds.height), shape.radius, node.strokeWidth);
+    instances.set([shape.bounds.x, shape.bounds.y, shape.bounds.width, shape.bounds.height, node.rotation, node.kind === "ellipse" ? 1 : 0, geometry.outerRadius, stroke[3] > 0 ? geometry.insideStrokeWidth : 0, ...fill, ...stroke], offset);
     renderedNodeIds.add(node.id);
   });
   return { instances, renderedNodeIds };
+}
+
+/**
+ * The ellipse shader paints a stroke ring inside its submitted quad. Center
+ * and Outside alignment therefore expand that quad around the Canonical fill
+ * ellipse: the shader's inner ellipse remains the visible fill and the
+ * surrounding band becomes the stroke. This is the same two-ellipse model as
+ * Canvas/SVG, while Arc and image-filled ellipses keep their Canvas path.
+ */
+function webGpuShapeGeometry(node: CanvasNode, hasVisibleStroke: boolean) {
+  const bounds = { x: node.x, y: node.y, width: node.width, height: node.height };
+  const alignedClosedShape = node.kind === "ellipse"
+    ? !node.arcData
+    : (node.kind === "frame" || node.kind === "rectangle") && !node.strokeWeights?.length && !node.cornerRadii?.length && !node.cornerSmoothing;
+  const visualBounds = closedShapeStrokeLocalBounds(node);
+  if (!alignedClosedShape || !hasVisibleStroke || !visualBounds) return { bounds, radius: node.radius };
+  const extent = -visualBounds.x;
+  return {
+    bounds: { x: node.x + visualBounds.x, y: node.y + visualBounds.y, width: visualBounds.width, height: visualBounds.height },
+    // A ring expanded by `extent` also expands an ordinary rounded corner by
+    // that amount. The shader then subtracts the full stroke width for the
+    // fill boundary, matching Canvas/SVG Center and Outside rings.
+    radius: node.kind === "ellipse" ? node.radius : node.radius + extent,
+  };
 }
 
 export function cameraUniform(camera: GpuCameraUniform) {
@@ -735,10 +761,11 @@ export function buildWebGpuVertices(input: WebGpuSceneRenderInput): { vertices: 
     const fill = cssColor(node.fill, node.opacity);
     if (!fill) continue;
     const stroke = cssColor(node.stroke, node.opacity) ?? [0, 0, 0, 0];
-    const nodePixelWidth = Math.abs(node.width * input.viewport.zoom);
-    const nodePixelHeight = Math.abs(node.height * input.viewport.zoom);
+    const shape = webGpuShapeGeometry(node, stroke[3] > 0);
+    const nodePixelWidth = Math.abs(shape.bounds.width * input.viewport.zoom);
+    const nodePixelHeight = Math.abs(shape.bounds.height * input.viewport.zoom);
     const size = Math.max(1, Math.min(nodePixelWidth, nodePixelHeight));
-    const geometry = resolveInsideRoundedRect(nodePixelWidth, nodePixelHeight, node.radius * input.viewport.zoom, node.strokeWidth * input.viewport.zoom);
+    const geometry = resolveInsideRoundedRect(nodePixelWidth, nodePixelHeight, shape.radius * input.viewport.zoom, node.strokeWidth * input.viewport.zoom);
     const insideStrokeWidth = stroke[3] > 0 ? geometry.insideStrokeWidth : 0;
     const parameters: [number, number, number, number] = [
       node.kind === "ellipse" ? 1 : 0,
@@ -746,7 +773,7 @@ export function buildWebGpuVertices(input: WebGpuSceneRenderInput): { vertices: 
       insideStrokeWidth / size,
       nodePixelHeight > 0 ? nodePixelWidth / nodePixelHeight : 1,
     ];
-    appendQuad(values, node, input.viewport, pixelWidth, pixelHeight, input.dpr, fill, stroke, parameters);
+    appendQuad(values, { ...node, ...shape.bounds }, input.viewport, pixelWidth, pixelHeight, input.dpr, fill, stroke, parameters);
     renderedNodeIds.add(node.id);
   }
   return { vertices: new Float32Array(values), renderedNodeIds };
@@ -756,7 +783,9 @@ function isGpuRenderable(node: CanvasNode): boolean {
   // Images must enter only the texture-backed Image pass. Rendering their
   // fallback fill in the solid-shape batch would suppress Canvas's placeholder
   // before a trusted bitmap has decoded.
-  return node.visible !== false && node.kind !== "text" && node.kind !== "image" && !node.fillGradient && !node.strokeGradient;
+  return node.visible !== false && node.kind !== "text" && node.kind !== "image" && !node.fillGradient && !node.strokeGradient
+    && !(node.kind === "ellipse" && Boolean(node.arcData))
+    && !((node.kind === "frame" || node.kind === "rectangle") && (Boolean(node.strokeWeights?.length) || Boolean(node.cornerRadii?.length) || Boolean(node.cornerSmoothing)));
 }
 
 function appendQuad(

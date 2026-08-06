@@ -25,6 +25,7 @@ export const canvasDesignTokens = {
   overlay: {
     frameName: { offsetY: 4, height: 13 },
     selectionLabel: { height: 20, horizontalInset: 7, cornerRadius: 3, offsetY: 2 },
+    selectionHandle: { side: 8, hitRadius: 10 },
   },
 } as const;
 

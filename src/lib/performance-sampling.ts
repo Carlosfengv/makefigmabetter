@@ -12,6 +12,9 @@ export interface RenderPerformanceSummary {
   visibleNodesP95: number;
   gpuUploadBytesP95: number;
   rendersPerInputFrameMax: number;
+  /** Main-thread input timestamp through completed Worker render. */
+  inputToRenderSamples: number;
+  inputToRenderP95Ms: number;
 }
 
 export interface RenderBreakdownSample {
@@ -25,6 +28,7 @@ export interface RenderBreakdownSample {
   visibleNodes?: number;
   gpuUploadBytes?: number;
   rendersPerInputFrame?: number;
+  inputToRenderMs?: number;
 }
 
 /** Fixed-size latency reservoir. Snapshot values are rounded only for reporting. */
@@ -40,6 +44,7 @@ export function createRenderPerformanceSampler(maxSamples = 240) {
   const visibleSamples: number[] = [];
   const uploadSamples: number[] = [];
   const renderCounts: number[] = [];
+  const inputLatencySamples: number[] = [];
   let recording = false;
 
   return {
@@ -62,6 +67,9 @@ export function createRenderPerformanceSampler(maxSamples = 240) {
       if (samples.length > capacity) samples.splice(0, samples.length - capacity);
       if (typeof sample !== "number") recordBreakdown(sample);
     },
+    recordInputToRender(durationMs: number) {
+      if (recording) push(inputLatencySamples, durationMs);
+    },
     summary(): RenderPerformanceSummary {
       if (!samples.length) return emptySummary();
       const sorted = [...samples].sort((left, right) => left - right);
@@ -79,6 +87,8 @@ export function createRenderPerformanceSampler(maxSamples = 240) {
         visibleNodesP95: percentileValue(visibleSamples),
         gpuUploadBytesP95: percentileValue(uploadSamples),
         rendersPerInputFrameMax: renderCounts.length ? Math.max(...renderCounts) : 0,
+        inputToRenderSamples: inputLatencySamples.length,
+        inputToRenderP95Ms: percentileValue(inputLatencySamples),
       };
     },
   };
@@ -93,11 +103,12 @@ export function createRenderPerformanceSampler(maxSamples = 240) {
     push(visibleSamples, sample.visibleNodes);
     push(uploadSamples, sample.gpuUploadBytes);
     push(renderCounts, sample.rendersPerInputFrame);
+    push(inputLatencySamples, sample.inputToRenderMs);
   }
-  function clearBreakdown() { [cullingSamples, gpuSamples, overlaySamples, imageBitmapSamples, compositeSamples, candidateSamples, visibleSamples, uploadSamples, renderCounts].forEach((values) => { values.length = 0; }); }
+  function clearBreakdown() { [cullingSamples, gpuSamples, overlaySamples, imageBitmapSamples, compositeSamples, candidateSamples, visibleSamples, uploadSamples, renderCounts, inputLatencySamples].forEach((values) => { values.length = 0; }); }
 }
 
-function emptySummary(): RenderPerformanceSummary { return { samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0, cullingP95Ms: 0, gpuPrepareP95Ms: 0, overlayP95Ms: 0, imageBitmapP95Ms: 0, compositeP95Ms: 0, candidateNodesP95: 0, visibleNodesP95: 0, gpuUploadBytesP95: 0, rendersPerInputFrameMax: 0 }; }
+function emptySummary(): RenderPerformanceSummary { return { samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0, cullingP95Ms: 0, gpuPrepareP95Ms: 0, overlayP95Ms: 0, imageBitmapP95Ms: 0, compositeP95Ms: 0, candidateNodesP95: 0, visibleNodesP95: 0, gpuUploadBytesP95: 0, rendersPerInputFrameMax: 0, inputToRenderSamples: 0, inputToRenderP95Ms: 0 }; }
 const BREAKDOWN_CAPACITY = 240;
 function push(target: number[], value: number | undefined) { if (value === undefined || !Number.isFinite(value)) return; target.push(value); if (target.length > BREAKDOWN_CAPACITY) target.splice(0, target.length - BREAKDOWN_CAPACITY); }
 function percentileValue(values: readonly number[]) { return values.length ? rounded(percentile([...values].sort((left, right) => left - right), .95)) : 0; }

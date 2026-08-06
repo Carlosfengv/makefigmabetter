@@ -1,7 +1,7 @@
 import type { EditorInputEvent } from "./editor-protocol";
 
 const HEADER_BYTES = 4;
-const EVENT_BYTES = 32;
+const EVENT_BYTES = 40;
 const POINTER_KIND = 1;
 const WHEEL_KIND = 2;
 const POINTER_EVENT_CODE = { down: 1, move: 2, up: 3, leave: 4 } as const;
@@ -9,7 +9,7 @@ const POINTER_EVENT_BY_CODE = { 1: "down", 2: "move", 3: "up", 4: "leave" } as c
 
 /** Bounds both message allocation and the Worker decode loop for one input turn. */
 export const MAX_INPUT_EVENTS_PER_BATCH = 256;
-export const INPUT_TRANSFER_VERSION = 1;
+export const INPUT_TRANSFER_VERSION = 3;
 
 /**
  * Encodes ephemeral browser input as a transferable ArrayBuffer. This is the
@@ -27,10 +27,11 @@ export function encodeInputBatch(events: readonly EditorInputEvent[]): ArrayBuff
     if (event.type === "pointer") {
       view.setUint8(offset, POINTER_KIND);
       view.setUint8(offset + 1, POINTER_EVENT_CODE[event.event]);
-      view.setUint8(offset + 2, (event.shiftKey ? 1 : 0) | (event.readOnly ? 2 : 0));
+      view.setUint8(offset + 2, (event.shiftKey ? 1 : 0) | (event.readOnly ? 2 : 0) | (event.altKey ? 4 : 0) | (event.drillDown ? 8 : 0));
       view.setInt8(offset + 3, event.button);
       view.setFloat64(offset + 4, event.x, true);
       view.setFloat64(offset + 12, event.y, true);
+      view.setFloat64(offset + 28, finiteTimestamp(event.occurredAt), true);
       return;
     }
     if (!Number.isFinite(event.deltaX) || !Number.isFinite(event.deltaY)) throw new TypeError("INPUT_DELTA_INVALID");
@@ -40,6 +41,7 @@ export function encodeInputBatch(events: readonly EditorInputEvent[]): ArrayBuff
     view.setFloat64(offset + 12, event.y, true);
     view.setFloat32(offset + 20, event.deltaX, true);
     view.setFloat32(offset + 24, event.deltaY, true);
+    view.setFloat64(offset + 28, finiteTimestamp(event.occurredAt), true);
   });
   return buffer;
 }
@@ -58,21 +60,31 @@ export function decodeInputBatch(buffer: ArrayBuffer): EditorInputEvent[] | unde
     const flags = view.getUint8(offset + 2);
     const x = view.getFloat64(offset + 4, true);
     const y = view.getFloat64(offset + 12, true);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || flags > (type === POINTER_KIND ? 3 : 1)) return undefined;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || flags > (type === POINTER_KIND ? 15 : 1)) return undefined;
     if (type === POINTER_KIND) {
       const event = POINTER_EVENT_BY_CODE[view.getUint8(offset + 1) as keyof typeof POINTER_EVENT_BY_CODE];
       if (!event) return undefined;
-      events.push({ type: "pointer", event, x, y, shiftKey: (flags & 1) === 1, button: view.getInt8(offset + 3), ...(flags & 2 ? { readOnly: true } : {}) });
+      const occurredAt = readTimestamp(view, offset + 28);
+      events.push({ type: "pointer", event, x, y, shiftKey: (flags & 1) === 1, altKey: (flags & 4) === 4, button: view.getInt8(offset + 3), ...(flags & 2 ? { readOnly: true } : {}), ...(flags & 8 ? { drillDown: true } : {}), ...(occurredAt === undefined ? {} : { occurredAt }) });
       continue;
     }
     if (type === WHEEL_KIND) {
       const deltaX = view.getFloat32(offset + 20, true);
       const deltaY = view.getFloat32(offset + 24, true);
       if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return undefined;
-      events.push({ type: "wheel", x, y, deltaX, deltaY, ctrlKey: flags === 1 });
+      const occurredAt = readTimestamp(view, offset + 28);
+      events.push({ type: "wheel", x, y, deltaX, deltaY, ctrlKey: flags === 1, ...(occurredAt === undefined ? {} : { occurredAt }) });
       continue;
     }
     return undefined;
   }
   return events;
+}
+
+// v3 appends an epoch timestamp so a Worker with a different performance time
+// origin can measure browser input-to-render latency without clock skew.
+function finiteTimestamp(value: number | undefined) { return Number.isFinite(value) && value! >= 0 ? value! : Number.NaN; }
+function readTimestamp(view: DataView, offset: number) {
+  const value = view.getFloat64(offset, true);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
 }

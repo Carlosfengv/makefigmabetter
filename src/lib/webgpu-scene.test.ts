@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { admitWebGpuSceneResources, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
+import { admitWebGpuSceneResources, buildWebGpuInstances, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
 
 describe("WebGPU scene vertex projection", () => {
   it("classifies GPU failures without retaining browser error text", () => {
@@ -19,6 +19,22 @@ describe("WebGPU scene vertex projection", () => {
     expect(result.renderedNodeIds).toEqual(new Set([rectangle.id]));
     expect(result.vertices).toHaveLength(6 * 16);
     expect(Array.from(result.vertices.slice(0, 16))).toEqual([0.5, -0.5, 0, 0, 1, 0, 0, 0.250980406999588, 0, 0, 0, 0.5, 0, 0.11999999731779099, 0.03999999910593033, 2]);
+  });
+
+  it("projects Center and Outside Ellipse Strokes as expanded GPU rings", () => {
+    const aligned = { ...createNode("ellipse", 0, 0), width: 100, height: 50, strokeWidth: 8, strokeAlign: "outside" as const };
+    const result = buildWebGpuVertices({ nodes: [aligned], viewport: { x: 0, y: 0, zoom: 1 }, width: 400, height: 300, dpr: 1 });
+    expect(result.renderedNodeIds).toEqual(new Set([aligned.id]));
+    const instances = buildWebGpuInstances([aligned]);
+    // One expanded quad: left/top are -8 and its size is 116×66, exactly one
+    // full Outside stroke width beyond each fill edge.
+    expect(Array.from(instances.instances.slice(0, 4))).toEqual([-8, -8, 116, 66]);
+  });
+
+  it("projects Outside rounded Rectangle Strokes as expanded GPU rings", () => {
+    const aligned = { ...createNode("rectangle", 10, 20), width: 100, height: 50, radius: 12, strokeWidth: 8, strokeAlign: "outside" as const };
+    const instances = buildWebGpuInstances([aligned]);
+    expect(Array.from(instances.instances.slice(0, 8))).toEqual([2, 12, 116, 66, 0, 0, 20, 8]);
   });
 
   it("rejects GPU resource amplification before allocating a vertex array or swap chain", () => {

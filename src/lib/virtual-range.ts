@@ -24,8 +24,3 @@ export function virtualRange(
     end: Math.min(count, Math.ceil((top + visibleHeight) / height) + padding),
   };
 }
-
-/** The layers UI is reversed without copying or reversing the document array. */
-export function reversedIndex(nodeCount: number, virtualIndex: number) {
-  return nodeCount - 1 - virtualIndex;
-}

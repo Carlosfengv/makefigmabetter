@@ -32,4 +32,12 @@ describe("render performance sampler", () => {
     sampler.record({ totalMs: 3, rendersPerInputFrame: 1 });
     expect(sampler.summary().rendersPerInputFrameMax).toBe(1);
   });
+
+  it("reports a bounded input-to-render latency percentile independently of render samples", () => {
+    const sampler = createRenderPerformanceSampler(3);
+    sampler.start();
+    sampler.record(1);
+    [4, 8, 12, 16].forEach((duration) => sampler.recordInputToRender(duration));
+    expect(sampler.summary()).toMatchObject({ inputToRenderSamples: 4, inputToRenderP95Ms: 16 });
+  });
 });
