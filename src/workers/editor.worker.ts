@@ -18,12 +18,17 @@ import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migrati
 import { classifyEditorError, editorError, type EditorErrorCode } from "@/lib/editor-error";
 import { resetDocumentProjection } from "@/lib/document-reset";
 import { resolveInsideRoundedRect } from "@/lib/rounded-rect";
+import { perSideStrokeCenters } from "@/lib/per-side-stroke";
+import { resolveCornerRadii } from "@/lib/corner-radii";
+import { cornerSmoothingExponent, resolveCornerSmoothing } from "@/lib/corner-smoothing";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
 import { gpuLayerPrefix } from "@/lib/gpu-layer-prefix";
-import { exceedsMarqueeDragThreshold, resolveMarqueeSelection, rotatedNodeBounds, selectNodesInMarquee } from "@/lib/marquee-selection";
+import { exceedsMarqueeDragThreshold, lineSelectionBounds, marqueeRect, resolveMarqueeSelection, rotatedNodeBounds } from "@/lib/marquee-selection";
+import { resolveMultiResizeSelection } from "@/lib/multi-selection";
+import { worldLineVisualBounds } from "@/lib/line-world-bounds";
 import { selectionDimensions } from "@/lib/selection-label";
-import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
+import { resolveCanvasObjectSelection, resolveGroupSelectionTarget } from "@/lib/canvas-selection";
 import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
 import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
@@ -41,16 +46,34 @@ import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { orderNodesByRustRenderCommands, parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { hasCommittedMove } from "@/lib/move-commit";
+import { hasCommittedResize, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
+import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
+import { hasCommittedLineEndpointResize, lineEndpoints, resizeLegacyLineEndpoint, type LineEndpoint } from "@/lib/line-endpoint-resize";
+import { resizeRelativeLineEndpointFromWorldGesture } from "@/lib/relative-line-endpoint-resize";
+import { editorKeyCommand } from "@/lib/editor-key-command";
+import { createKeyboardToolNode } from "@/lib/keyboard-node-create";
+import { solidLineStrokeOutline } from "@/lib/line-stroke-outline";
+import { hasCommittedSelectionResize, scaleLegacySelectionGeometry } from "@/lib/selection-resize";
+import { hasCommittedSelectionTransform, scaleSelectionTransforms, type SelectionTransformPatch } from "@/lib/selection-transform-resize";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
 import { orderNewLayerAtFront, sortNodesByLayerOrder } from "@/lib/layer-order";
 import { planPendingOperationReconciliation } from "@/lib/pending-operation-reconciliation";
 import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
+import { fullStateReplayBatch, historyReplayBatch } from "@/lib/history-replay-batch";
+import { visibleNodesOnPage } from "@/lib/hierarchy-visibility";
+import { invertAffine, multiplyAffine, nodePropsForWorldTransform, transformPoint, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode, type AffineMatrix } from "@/lib/scene-transform";
+import { worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
+import { closedShapeStrokeLocalBounds } from "@/lib/closed-shape-stroke-bounds";
+import { ellipseStrokeRing } from "@/lib/ellipse-stroke-ring";
 
 declare const self: DedicatedWorkerGlobalScope;
 
 type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
   | { mode: "move"; startX: number; startY: number; before: CanvasNode[]; initial: Map<string, Pick<CanvasNode, "x" | "y">> }
+  | { mode: "resize"; id: string; handle: CanvasResizeHandle; start: { x: number; y: number }; node: CanvasNode; before: CanvasNode[] }
+  | { mode: "multi-resize"; handle: CanvasResizeHandle; start: { x: number; y: number }; bounds: ResizeGeometry; before: CanvasNode[]; ids: string[]; requiresAffine: boolean }
+  | { mode: "line-resize"; id: string; endpoint: LineEndpoint; node: CanvasNode; before: CanvasNode[] }
   | { mode: "pan"; startX: number; startY: number }
   | { mode: "select"; startX: number; startY: number; currentX: number; currentY: number; startScreenX: number; startScreenY: number; marqueeStarted: boolean; initialSelection: string[]; additive: boolean };
 type WasmProjectionNode = CoreProjectionNode;
@@ -100,8 +123,8 @@ const imageBitmaps = new ImageBitmapCache<ImageBitmap>(MAX_RASTER_DECODED_BYTES)
 const imageLoads = new Set<string>();
 const fontFaces = new FontFaceRegistry();
 let nodeById = new Map(nodes.map((node) => [node.id, node]));
-let nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
-let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
+let nodeBoundsById = new Map(nodes.map((node) => [node.id, boundsForNode(node)]));
+let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
 let selectedIds: string[] = [nodes[0].id];
 let viewport = { x: 0, y: 0, zoom: 1 };
 type LocalHistoryEntry = { nodes: CanvasNode[]; advancesRevision: boolean };
@@ -157,7 +180,13 @@ const MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE = 4_096;
 let renderSurfaceBytes = 0;
 let wasmMemory: WebAssembly.Memory | undefined;
 let wasmRuntimePromise: Promise<typeof import("@/wasm/generated/editor_wasm")> | undefined;
+let wasmRuntime: typeof import("@/wasm/generated/editor_wasm") | undefined;
 let wasmHeapOverBudget = false;
+type StrokeMeshPoint = Readonly<{ x: number; y: number }>;
+type StrokeMeshTriangle = readonly [StrokeMeshPoint, StrokeMeshPoint, StrokeMeshPoint];
+type StrokeMesh = readonly StrokeMeshTriangle[];
+const canonicalStrokeMeshes = new Map<string, StrokeMesh | null>();
+const canonicalPerSideStrokeMeshes = new Map<string, readonly StrokeMesh[] | null>();
 // Drag positions are intentionally not committed to the document revision until
 // pointer-up, but the GPU scene must still redraw them on every pointer move.
 let transientSceneVersion = 0;
@@ -174,11 +203,119 @@ function starterNodes(): CanvasNode[] {
 }
 
 function cloneDocument() { return structuredClone(nodes); }
-function activeNodes() { return sortNodesByLayerOrder(nodes.filter((node) => (node.pageId ?? defaultPageId) === activePageId)); }
+function activeNodes() {
+  const visible = visibleNodesOnPage(nodes, activePageId, defaultPageId);
+  return sortNodesByLayerOrder(visible.map((node) => worldSpaceProjectionNode(nodes, node) ?? node));
+}
+/** A projected legacy node can continue through the fast Canvas/GPU paths.
+ * Skew and reflection intentionally retain their local geometry, so this pass
+ * applies the exact world affine directly to Canvas instead of decomposing it.
+ */
+function nativeAffineForNode(node: CanvasNode): AffineMatrix | undefined {
+  return node.relativeTransform ? worldTransformForNode(nodes, node.id) : undefined;
+}
+function boundsForNode(node: CanvasNode) {
+  if (node.kind === "line") {
+    const visual = worldLineVisualBounds(nodes, node);
+    if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
+  }
+  const alignedClosedShape = (node.kind === "ellipse" && !node.arcData) || node.kind === "frame" || node.kind === "rectangle";
+  if (alignedClosedShape && (node.strokeAlign ?? "inside") !== "inside" && node.strokeWidth > 0) {
+    const visual = worldVisualBoundsForNode(nodes, node);
+    if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
+  }
+  const bounds = nativeAffineForNode(node) ? worldBoundsForNode(nodes, node) : undefined;
+  return bounds ? { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top } : rotatedNodeBounds(node);
+}
+function applyNativeAffine(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const affine = nativeAffineForNode(node);
+  if (!affine) return false;
+  const origin = toScreen(affine.e, affine.f);
+  // Render coordinates below are already scaled by viewport.zoom. Therefore
+  // the linear world matrix is used as-is while only its translation enters
+  // screen space: screen(M * (local * zoom)) + screen(translation).
+  ctx.transform(affine.a, affine.b, affine.c, affine.d, origin.x, origin.y);
+  return true;
+}
+function containsWorldPoint(node: CanvasNode, point: { x: number; y: number }) {
+  const affine = nativeAffineForNode(node);
+  if (!affine) return findTopmostHit([node], point) === node;
+  const inverse = invertAffine(affine);
+  if (!inverse) return false;
+  const local = transformPoint(inverse, point);
+  return findTopmostHit([{ ...node, x: 0, y: 0, rotation: 0, relativeTransform: undefined }], local) !== undefined;
+}
+/** Frame clipping is structural: an object remains a child even when only a
+ * portion of it is visible. Keep this test beside hit testing so no pointer
+ * target can escape a clipped ancestor. Groups and Sections intentionally do
+ * not create a clip. */
+function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number }) {
+  const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set<string>();
+  let parentId = node.parentId;
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return false;
+    if (parent.kind === "frame" && parent.clipsContent !== false && !containsWorldPoint(parent, point)) return false;
+    parentId = parent.parentId;
+  }
+  return true;
+}
+/** Moving a container carries only descendants that do not inherit its
+ * transform. A modern Group owns the translation and its Relative-v1 children
+ * follow it; legacy world-space children still need an explicit move. This
+ * avoids applying the same delta twice to a Group subtree. */
+function movableSelectionIds(selection: readonly string[]) {
+  const movable = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string, parentMoves: boolean) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const node = nodeById.get(id);
+    if (!node) return;
+    if (!(parentMoves && node.relativeTransform)) movable.add(id);
+    nodes.filter((candidate) => candidate.parentId === id).forEach((child) => visit(child.id, true));
+  };
+  selection.forEach((id) => visit(id, false));
+  return movable;
+}
+function refreshTransientGroupBounds(preservedGroupIds: ReadonlySet<string> = new Set()) {
+  const depth = (node: CanvasNode) => {
+    let current = node.parentId;
+    let value = 0;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      value += 1;
+      current = nodeById.get(current)?.parentId;
+    }
+    return value;
+  };
+  const next = [...nodes];
+  next.filter((node) => node.kind === "group" && !preservedGroupIds.has(node.id)).sort((left, right) => depth(right) - depth(left)).forEach((group) => {
+    const children = next.filter((node) => node.parentId === group.id);
+    if (!children.length) return;
+    // A Relative-v1 child already carries its position in the Group's local
+    // transform. Treating its fallback x/y as world geometry would reset an
+    // unrelated Group whenever another Group is dragged. Core recomputes this
+    // modern Group's bounds from world transforms at commit time instead.
+    if (children.some((child) => child.relativeTransform)) return;
+    const bounds = children.map(rotatedNodeBounds);
+    const left = Math.min(...bounds.map((bound) => bound.x));
+    const top = Math.min(...bounds.map((bound) => bound.y));
+    const right = Math.max(...bounds.map((bound) => bound.x + bound.width));
+    const bottom = Math.max(...bounds.map((bound) => bound.y + bound.height));
+    const index = next.findIndex((node) => node.id === group.id);
+    next[index] = { ...next[index], x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top), rotation: 0 };
+  });
+  nodes = next;
+}
 function rebuildNodeIndex() {
-  nodeById = new Map(nodes.map((node) => [node.id, node]));
-  nodeBoundsById = new Map(nodes.map((node) => [node.id, rotatedNodeBounds(node)]));
-  spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node));
+  const projected = nodes.map((node) => worldSpaceProjectionNode(nodes, node) ?? node);
+  nodeById = new Map(projected.map((node) => [node.id, node]));
+  nodeBoundsById = new Map(projected.map((node) => [node.id, boundsForNode(node)]));
+  spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
 }
 function emit(message: WorkerToMain) { self.postMessage(message); }
 function emitError(error: unknown, code?: EditorErrorCode, transactionId?: string) {
@@ -241,37 +378,6 @@ function queueRemoteOperation(transactionId: string, baseRevision: number, batch
   queueRemotePayload(transactionId, baseRevision, encodeCoreBatchPayload(batch), localDocumentHash, { kind: "core-batch", batch: structuredClone([...batch]) });
 }
 
-/** Turns the already-applied Core undo/redo state into resolved Operations.
- * Reappearing nodes use `restore`, never `create`: Core intentionally reserves
- * tombstoned IDs, while a history replay is allowed to revive that exact node. */
-function historyReplayBatch(before: readonly CanvasNode[], after: readonly CanvasNode[]): CoreBatchCommand[] {
-  const beforeById = new Map(before.map((node) => [node.id, node]));
-  const afterById = new Map(after.map((node) => [node.id, node]));
-  const deletedIds = before.filter((node) => !afterById.has(node.id)).map((node) => node.id);
-  const restores = after
-    .filter((node) => !beforeById.has(node.id))
-    .map((node) => ({ type: "restore" as const, node: coreProjectionNode(node) }));
-  const updates: CoreBatchCommand[] = [];
-  const positions: Array<{ id: string; positionId: string }> = [];
-  for (const [id, current] of afterById) {
-    const previous = beforeById.get(id);
-    if (!previous) continue;
-    const previousProjection = coreProjectionNode(previous);
-    const currentProjection = coreProjectionNode(current);
-    const { positionId: previousPosition, ...previousSemantic } = previousProjection;
-    const { positionId: currentPosition, ...currentSemantic } = currentProjection;
-    if (JSON.stringify(previousSemantic) !== JSON.stringify(currentSemantic)) {
-      updates.push({ type: "update", node: currentProjection });
-    }
-    if (previousPosition !== currentPosition && currentPosition) positions.push({ id, positionId: currentPosition });
-  }
-  return [
-    ...(deletedIds.length ? [{ type: "delete" as const, ids: deletedIds }] : []),
-    ...restores,
-    ...updates,
-    ...(positions.length ? [{ type: "reposition" as const, positionIds: positions }] : []),
-  ];
-}
 async function buildPendingRemoteOperation(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string, replay?: PendingOperationReplay): Promise<PendingRemoteOperation> {
   const documentForOperation = documentId;
   const clientSequence = ++remoteClientSequence;
@@ -599,10 +705,10 @@ function rememberProjection(nodesToRemember = nodes) {
 }
 function canvasNodeFromProjection(node: WasmProjectionNode): CanvasNode {
   return {
-    id: node.id, pageId: node.pageId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
-    rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, positionId: node.positionId,
-    stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth,
-    radius: node.cornerRadius, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked,
+    id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
+    rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId,
+    stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, strokeJoin: node.strokeJoin, strokeMiterLimit: node.strokeMiterLimit, strokeDashPattern: node.strokeDashPattern, strokeWeights: node.strokeWeights?.length === 4 ? [node.strokeWeights[0], node.strokeWeights[1], node.strokeWeights[2], node.strokeWeights[3]] : undefined, strokeAlign: node.strokeAlign, arcData: node.arcData, relativeTransform: node.relativeTransform, clipsContent: node.clipsContent,
+    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden,
   };
 }
 function syncProjectionFromWasm(rememberExisting = true) {
@@ -1001,7 +1107,7 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
   try {
     if (entry.baseRevision !== Number(engine.revision)) throw new Error("JOURNAL_REVISION_CONFLICT");
     const operation = entry.operation;
-    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "delete") {
+    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "ungroup" || operation.type === "delete") {
       const currentNodes = (JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot).nodes.map(canvasNodeFromProjection);
       const resolved = resolveCoreBatch(currentNodes, [operation]);
       if (!resolved) throw new Error("INVALID_JOURNAL_OPERATION");
@@ -1073,11 +1179,27 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     renderPerformance.start();
     documentCore = "Rust/WASM bridge ready";
     diagnostics.record({ category: "lifecycle", code: "WASM_BRIDGE_READY", documentRevision: revision });
-  } catch {
+  } catch (error) {
     if (loadSequence !== bridgeLoadSequence) return;
     wasmDocument = undefined;
+    if (localSnapshot) {
+      // A local Core snapshot carries a hash precisely so that we never render a
+      // semantically different document as if it had been validated. Recreate an
+      // empty Rust document instead; the already-requested remote bootstrap then
+      // restores the service-owned Protobuf snapshot through the same Core codec.
+      diagnostics.record({ category: "recovery", code: "LOCAL_CORE_SNAPSHOT_REJECTED", details: { errorKind: localSnapshotFailureKind(error) } });
+      void loadDocumentBridge(undefined, benchmarkProjection);
+      return;
+    }
     documentCore = "TypeScript document prototype";
-    diagnostics.record({ category: "recovery", code: "WASM_BRIDGE_FALLBACK" });
+    // Preserve the failure class for local diagnosis without retaining an error
+    // message, document data, or stack trace in the durable diagnostic stream.
+    const errorKind = error instanceof Error
+      ? error.name
+      : typeof error === "string" && /^(INVALID|UNSUPPORTED|CORRUPT)_[A-Z_]+$/.test(error)
+        ? error
+        : "UNKNOWN";
+    diagnostics.record({ category: "recovery", code: "WASM_BRIDGE_FALLBACK", details: { errorKind } });
     renderPerformance.start();
   }
   emitSnapshot();
@@ -1088,10 +1210,18 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
   }
   if (remoteBootstrapPending) emitRemoteBootstrap();
 }
+
+function localSnapshotFailureKind(error: unknown) {
+  if (error instanceof Error) return error.name;
+  return typeof error === "string" && /^(INVALID|UNSUPPORTED|CORRUPT)_[A-Z_]+$/.test(error)
+    ? error
+    : "UNKNOWN";
+}
 async function loadWasmRuntime(): Promise<typeof import("@/wasm/generated/editor_wasm")> {
   if (!wasmRuntimePromise) {
     wasmRuntimePromise = import("@/wasm/generated/editor_wasm").then(async (wasm) => {
       await wasm.default();
+      wasmRuntime = wasm;
       return wasm;
     });
   }
@@ -1099,6 +1229,7 @@ async function loadWasmRuntime(): Promise<typeof import("@/wasm/generated/editor
     return await wasmRuntimePromise;
   } catch (error) {
     wasmRuntimePromise = undefined;
+    wasmRuntime = undefined;
     throw error;
   }
 }
@@ -1117,11 +1248,10 @@ function admitToWasm(command: EditorCommand) {
       if (!resolved) throw new Error("INVALID_TRANSACTION");
       wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
-    if (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)) {
-      const previous = nodes.find((node) => node.id === command.id);
-      if (!previous) throw new Error("MISSING_NODE");
-      const next = { ...previous, ...command.patch };
-      wasmDocument.update_node(crypto.randomUUID(), wasmDocument.revision, command.id, next.name, next.x, next.y, next.width, next.height, next.rotation, next.fill, next.stroke, next.strokeWidth, next.opacity, next.radius, next.visible !== false, Boolean(next.locked), next.text ?? "");
+    if (command.type === "update") {
+      const resolved = resolveCoreBatch(nodes, [command]);
+      if (!resolved) throw new Error("INVALID_TRANSACTION");
+      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
     if (command.type === "delete") {
       wasmDocument.delete_nodes(crypto.randomUUID(), wasmDocument.revision, command.ids.join(","));
@@ -1136,7 +1266,7 @@ function admitToWasm(command: EditorCommand) {
   }
 }
 function isWasmDocumentCommand(command: EditorCommand) {
-  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || command.type === "reposition" || (command.type === "update" && ("name" in command.patch || "x" in command.patch || "y" in command.patch || "width" in command.patch || "height" in command.patch || "rotation" in command.patch || "fill" in command.patch || "stroke" in command.patch || "strokeWidth" in command.patch || "opacity" in command.patch || "radius" in command.patch || "text" in command.patch || "visible" in command.patch || "locked" in command.patch)));
+  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || command.type === "reposition" || command.type === "update");
 }
 function recordHistory(kind: HistoryKind) {
   undoOrder.push(kind);
@@ -1212,6 +1342,14 @@ function frameNameMetrics(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNo
 }
 function isFrameNameHit(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, screenX: number, screenY: number) {
   const metrics = frameNameMetrics(ctx, node);
+  const affine = nativeAffineForNode(node);
+  if (affine) {
+    const inverse = invertAffine(affine);
+    if (!inverse) return false;
+    const local = transformPoint(inverse, toWorld(screenX, screenY));
+    const baselineY = -canvasDesignTokens.overlay.frameName.offsetY / viewport.zoom;
+    return local.x >= 0 && local.x <= metrics.width / viewport.zoom && local.y >= baselineY - metrics.height / viewport.zoom && local.y <= baselineY;
+  }
   const point = toScreen(node.x, node.y);
   const width = node.width * viewport.zoom;
   const height = node.height * viewport.zoom;
@@ -1226,12 +1364,17 @@ function isFrameNameHit(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode
 function hitFrameName(screenX: number, screenY: number) {
   if (!context) return undefined;
   return [...activeNodes()].reverse().find((node) => {
-    if (node.kind !== "frame" || node.visible === false || node.locked) return false;
+    if ((node.kind !== "frame" && node.kind !== "section") || node.visible === false || node.locked) return false;
     return isFrameNameHit(context!, node, screenX, screenY);
   });
 }
-function hit(worldX: number, worldY: number) {
-  const node = findTopmostHit(activeNodes(), { x: worldX, y: worldY });
+function hit(worldX: number, worldY: number, drillDown = false) {
+  const point = { x: worldX, y: worldY };
+  const candidates = [...activeNodes()].reverse().filter((candidate) => candidate.visible !== false && !candidate.locked && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
+  // Groups are the normal selection boundary; a repeated press drills through
+  // that boundary to the painted child below it.
+  const paintedNode = candidates.find((candidate) => candidate.kind !== "group") ?? candidates[0];
+  const node = paintedNode && resolveGroupSelectionTarget(activeNodes(), paintedNode.id, drillDown);
   if (node) return node;
   const screen = toScreen(worldX, worldY);
   return hitFrameName(screen.x, screen.y);
@@ -1257,32 +1400,385 @@ function paintStyle(ctx: OffscreenCanvasRenderingContext2D, fallback: string, gr
 }
 function fillStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) { return paintStyle(ctx, node.fill, node.fillGradient, width, height); }
 function strokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) { return paintStyle(ctx, node.stroke, node.strokeGradient, width, height); }
+function paintStackStyle(ctx: OffscreenCanvasRenderingContext2D, paint: NonNullable<CanvasNode["fills"]>[number], width: number, height: number) { return paintStyle(ctx, paint.css, paint.gradient, width, height); }
+function activeFills(node: CanvasNode): NonNullable<CanvasNode["fills"]> { return node.fills?.length ? node.fills : [{ css: node.fill, color: node.fillColor, gradient: node.fillGradient }]; }
+function activeStrokes(node: CanvasNode): NonNullable<CanvasNode["strokes"]> { return node.strokes?.length ? node.strokes : [{ css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient }]; }
+function fillPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  activeFills(node).forEach((paint) => { ctx.fillStyle = paintStackStyle(ctx, paint, width, height); ctx.fill(); });
+}
+function strokePaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  activeStrokes(node).forEach((paint) => { ctx.strokeStyle = paintStackStyle(ctx, paint, width, height); ctx.stroke(); });
+}
+function fillCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, mesh: StrokeMesh, width: number, height: number) {
+  ctx.beginPath();
+  mesh.forEach(([a, b, c]) => {
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.closePath();
+  });
+  // Fill the complete path once per layer. The Core mesh deliberately overlaps
+  // join/cap triangles, and one non-zero fill preserves its union without
+  // darkening translucent paint at those overlaps.
+  activeStrokes(node).forEach((paint) => {
+    ctx.fillStyle = paintStackStyle(ctx, paint, width, height);
+    ctx.fill();
+  });
+}
+function canvasStrokeCap(cap: CanvasNode["strokeCapStart"]): "butt" | "round" | "square" | undefined {
+  if (!cap || cap === "none") return "butt";
+  if (cap === "round" || cap === "square") return cap;
+  return undefined;
+}
+function meshPoint(value: unknown): StrokeMeshPoint | undefined {
+  if (!Array.isArray(value) || value.length !== 2 || !value.every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))) return undefined;
+  return { x: value[0], y: value[1] };
+}
+function canonicalLineStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
+  const startCap = canvasStrokeCap(node.strokeCapStart);
+  const endCap = canvasStrokeCap(node.strokeCapEnd);
+  if (!wasmRuntime || !startCap || startCap !== endCap || node.strokeWidth <= 0) return undefined;
+  const width = Math.max(0, node.width * viewport.zoom);
+  const strokeWidth = node.strokeWidth * viewport.zoom;
+  const dash = node.strokeDashPattern?.map((segment) => segment * viewport.zoom) ?? [];
+  const key = `${node.id}:${width}:${strokeWidth}:${startCap}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}:${dash.join(",")}`;
+  const cached = canonicalStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(dash.length
+      ? wasmRuntime.stroke_mesh_for_dashed_line_json(
+        width, strokeWidth, JSON.stringify(dash), startCap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10,
+      )
+      : wasmRuntime.stroke_mesh_for_polyline_json(
+        JSON.stringify([[0, 0], [width, 0]]),
+        strokeWidth, startCap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10, false,
+      ));
+    const triangles = typeof result === "object" && result !== null && "triangles" in result
+      ? (result as { triangles?: unknown }).triangles
+      : undefined;
+    const mesh = Array.isArray(triangles)
+      ? triangles.map((triangle) => {
+        if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
+        const points = triangle.map(meshPoint);
+        return points.every((point): point is StrokeMeshPoint => Boolean(point))
+          ? [points[0], points[1], points[2]] as StrokeMeshTriangle
+          : undefined;
+      })
+      : [];
+    const resolved = mesh.length > 0 && mesh.every((triangle): triangle is StrokeMeshTriangle => Boolean(triangle)) ? mesh : null;
+    if (canonicalStrokeMeshes.size >= 2_048) canonicalStrokeMeshes.clear();
+    canonicalStrokeMeshes.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    // Rendering must retain its Canvas fallback when a future WASM build has
+    // an incompatible presentation boundary or is temporarily unavailable.
+    return undefined;
+  }
+}
+function canonicalRectangleStrokeMesh(node: CanvasNode, width: number, height: number): StrokeMesh | undefined {
+  const resolvedRadii = resolveCornerRadii(node.width, node.height, node.radius, node.cornerRadii);
+  const hasSquareCorners = resolvedRadii.every((radius) => radius === 0);
+  const smoothing = resolveCornerSmoothing(node.cornerSmoothing);
+  const align = node.strokeAlign ?? "inside";
+  if (
+    !wasmRuntime
+    || node.strokeWidth <= 0
+    || (align !== "inside" && align !== "center" && align !== "outside")
+    || node.strokeWeights?.length
+    || width <= 0
+    || height <= 0
+  ) return undefined;
+  const strokeWidth = node.strokeWidth * viewport.zoom;
+  const dash = node.strokeDashPattern?.map((segment) => segment * viewport.zoom) ?? [];
+  // Mesh coordinates describe the centre line. Moving it inward/outward by
+  // half the width produces the same painted boundary as Figma's Inside and
+  // Outside alignments while leaving the Core tessellator untouched.
+  const centerlineOffset = align === "inside" ? strokeWidth / 2 : align === "outside" ? -strokeWidth / 2 : 0;
+  const meshWidth = width - centerlineOffset * 2;
+  const meshHeight = height - centerlineOffset * 2;
+  if (meshWidth <= 0 || meshHeight <= 0) return undefined;
+  const meshRadii = resolvedRadii.map((radius) => Math.max(0, radius * viewport.zoom - centerlineOffset));
+  const hasUniformRoundedCorners = !hasSquareCorners && meshRadii.every((radius) => Math.abs(radius - meshRadii[0]) <= 1e-9);
+  const key = `${node.id}:rect:${align}:${width}:${height}:${strokeWidth}:${meshRadii.join(",")}:${smoothing}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}:${dash.join(",")}`;
+  const cached = canonicalStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(smoothing > 0
+      ? wasmRuntime.stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(
+        meshWidth,
+        meshHeight,
+        JSON.stringify(meshRadii),
+        smoothing,
+        strokeWidth,
+        JSON.stringify(dash),
+        node.strokeJoin ?? "miter",
+        node.strokeMiterLimit ?? 10,
+      )
+      : dash.length
+        ? hasSquareCorners
+        ? wasmRuntime.stroke_mesh_for_dashed_polyline_json(
+          JSON.stringify([[0, 0], [meshWidth, 0], [meshWidth, meshHeight], [0, meshHeight]]),
+          strokeWidth,
+          JSON.stringify(dash),
+          "butt",
+          node.strokeJoin ?? "miter",
+          node.strokeMiterLimit ?? 10,
+          true,
+        )
+        : wasmRuntime.stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(
+          meshWidth,
+          meshHeight,
+          JSON.stringify(meshRadii),
+          strokeWidth,
+          JSON.stringify(dash),
+          node.strokeJoin ?? "miter",
+          node.strokeMiterLimit ?? 10,
+        )
+      : hasUniformRoundedCorners
+        ? wasmRuntime.stroke_mesh_for_rounded_rectangle_json(
+        meshWidth,
+        meshHeight,
+        meshRadii[0],
+        strokeWidth,
+        node.strokeJoin ?? "miter",
+        node.strokeMiterLimit ?? 10,
+      )
+      : !hasSquareCorners
+        ? wasmRuntime.stroke_mesh_for_rounded_rectangle_with_radii_json(
+          meshWidth,
+          meshHeight,
+          JSON.stringify(meshRadii),
+          strokeWidth,
+          node.strokeJoin ?? "miter",
+          node.strokeMiterLimit ?? 10,
+        )
+      : wasmRuntime.stroke_mesh_for_polyline_json(
+        JSON.stringify([[0, 0], [meshWidth, 0], [meshWidth, meshHeight], [0, meshHeight]]),
+        strokeWidth,
+        "butt",
+        node.strokeJoin ?? "miter",
+        node.strokeMiterLimit ?? 10,
+        true,
+      ));
+    const triangles = typeof result === "object" && result !== null && "triangles" in result
+      ? (result as { triangles?: unknown }).triangles
+      : undefined;
+    const mesh = Array.isArray(triangles)
+      ? triangles.map((triangle) => {
+        if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
+        const points = triangle.map(meshPoint);
+        return points.every((point): point is StrokeMeshPoint => Boolean(point))
+          ? [
+            { x: points[0].x + centerlineOffset, y: points[0].y + centerlineOffset },
+            { x: points[1].x + centerlineOffset, y: points[1].y + centerlineOffset },
+            { x: points[2].x + centerlineOffset, y: points[2].y + centerlineOffset },
+          ] as StrokeMeshTriangle
+          : undefined;
+      })
+      : [];
+    const resolved = mesh.length > 0 && mesh.every((triangle): triangle is StrokeMeshTriangle => Boolean(triangle)) ? mesh : null;
+    if (canonicalStrokeMeshes.size >= 2_048) canonicalStrokeMeshes.clear();
+    canonicalStrokeMeshes.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+/**
+ * The existing per-side renderer is four independent butt-capped segments.
+ * Keep that exact paint order, but source each segment's finite outline from
+ * Rust when the contour is rectilinear. Square-corner dashes keep the
+ * established independent-edge phase (Top/Right/Bottom/Left each restart)
+ * and now consume the same Core mesh. Rounded/smoothed corners retain their
+ * Canvas path until Core owns their full outline.
+ */
+function canonicalPerSideRectangleStrokeMeshes(node: CanvasNode, width: number, height: number): readonly StrokeMesh[] | undefined {
+  const weights = node.strokeWeights;
+  const resolvedRadii = resolveCornerRadii(node.width, node.height, node.radius, node.cornerRadii);
+  const align = node.strokeAlign ?? "inside";
+  if (
+    !wasmRuntime
+    || !weights
+    || weights.length !== 4
+    || !resolvedRadii.every((radius) => radius === 0)
+    || node.cornerSmoothing
+    || width <= 0
+    || height <= 0
+  ) return undefined;
+  const runtime = wasmRuntime;
+  const scaledWeights = weights.map((weight) => Math.max(0, weight) * viewport.zoom) as [number, number, number, number];
+  const dash = node.strokeDashPattern?.map((segment) => segment * viewport.zoom) ?? [];
+  const key = `${node.id}:per-side-rect:${align}:${width}:${height}:${scaledWeights.join(",")}:${dash.join(",")}`;
+  const cached = canonicalPerSideStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(dash.length
+      ? runtime.stroke_meshes_for_per_side_rectangle_with_dash_json(width, height, JSON.stringify(scaledWeights), align, JSON.stringify(dash))
+      : runtime.stroke_meshes_for_per_side_rectangle_json(width, height, JSON.stringify(scaledWeights), align));
+    const rawMeshes = typeof result === "object" && result !== null && "meshes" in result
+      ? (result as { meshes?: unknown }).meshes
+      : undefined;
+    const meshes = Array.isArray(rawMeshes) ? rawMeshes.flatMap((rawMesh) => {
+      const triangles = typeof rawMesh === "object" && rawMesh !== null && "triangles" in rawMesh
+        ? (rawMesh as { triangles?: unknown }).triangles
+        : undefined;
+      const mesh = Array.isArray(triangles) ? triangles.map((triangle) => {
+          if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
+          const points = triangle.map(meshPoint);
+          return points.every((point): point is StrokeMeshPoint => Boolean(point))
+            ? [points[0], points[1], points[2]] as StrokeMeshTriangle
+            : undefined;
+        }) : [];
+      return mesh.length > 0 && mesh.every((triangle): triangle is StrokeMeshTriangle => Boolean(triangle)) ? [mesh] : [];
+    }) : [];
+    if (!meshes.length) {
+      canonicalPerSideStrokeMeshes.set(key, null);
+      return undefined;
+    }
+    if (canonicalPerSideStrokeMeshes.size >= 2_048) canonicalPerSideStrokeMeshes.clear();
+    canonicalPerSideStrokeMeshes.set(key, meshes);
+    return meshes;
+  } catch {
+    return undefined;
+  }
+}
 function hasVisibleStroke(node: CanvasNode): boolean {
   if (node.opacity <= 0 || node.strokeWidth <= 0) return false;
-  if (node.strokeGradient) return node.strokeGradient.stops.some((stop) => stop.color.alpha > 0);
-  const alpha = (node.strokeColor ?? documentColorFromCssHex(node.stroke))?.alpha;
-  return alpha === undefined ? node.stroke !== "transparent" : alpha > 0;
+  return activeStrokes(node).some((paint) => paint.gradient?.stops.some((stop) => stop.color.alpha > 0) ?? (paint.color ?? documentColorFromCssHex(paint.css))?.alpha !== 0);
 }
-function roundedRectPath(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+function applyStrokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  ctx.lineJoin = node.strokeJoin ?? "miter";
+  ctx.miterLimit = node.strokeMiterLimit ?? 10;
+  ctx.setLineDash((node.strokeDashPattern ?? []).map((segment) => segment * viewport.zoom));
+}
+function roundedRectPath(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"], cornerSmoothing?: number) {
+  const radii = resolveCornerRadii(width, height, radius, cornerRadii);
+  const smoothing = resolveCornerSmoothing(cornerSmoothing);
   ctx.beginPath();
-  ctx.roundRect(x, y, width, height, radius);
+  if (smoothing === 0) { ctx.roundRect(x, y, width, height, radii); return; }
+  const [topLeft, topRight, bottomRight, bottomLeft] = radii;
+  const exponent = cornerSmoothingExponent(smoothing);
+  const segmentCount = Math.round(8 + smoothing * 8);
+  ctx.moveTo(x + topLeft, y);
+  ctx.lineTo(x + width - topRight, y);
+  continuousCorner(ctx, x + width - topRight, y + topRight, topRight, -Math.PI / 2, 0, exponent, segmentCount);
+  ctx.lineTo(x + width, y + height - bottomRight);
+  continuousCorner(ctx, x + width - bottomRight, y + height - bottomRight, bottomRight, 0, Math.PI / 2, exponent, segmentCount);
+  ctx.lineTo(x + bottomLeft, y + height);
+  continuousCorner(ctx, x + bottomLeft, y + height - bottomLeft, bottomLeft, Math.PI / 2, Math.PI, exponent, segmentCount);
+  ctx.lineTo(x, y + topLeft);
+  continuousCorner(ctx, x + topLeft, y + topLeft, topLeft, Math.PI, Math.PI * 1.5, exponent, segmentCount);
+  ctx.closePath();
+}
+function continuousCorner(ctx: OffscreenCanvasRenderingContext2D, centerX: number, centerY: number, radius: number, start: number, end: number, exponent: number, segments: number) {
+  if (radius <= 0) { ctx.lineTo(centerX, centerY); return; }
+  for (let index = 1; index <= segments; index += 1) {
+    const angle = start + (end - start) * index / segments;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    ctx.lineTo(centerX + Math.sign(cosine) * Math.abs(cosine) ** (2 / exponent) * radius, centerY + Math.sign(sine) * Math.abs(sine) ** (2 / exponent) * radius);
+  }
+}
+function insetCornerRadii(width: number, height: number, radius: number, cornerRadii: CanvasNode["cornerRadii"], inset: number): CanvasNode["cornerRadii"] | undefined {
+  if (!cornerRadii) return undefined;
+  const values = resolveCornerRadii(width, height, radius, cornerRadii).map((value) => Math.max(0, value - inset)) as CanvasNode["cornerRadii"];
+  return resolveCornerRadii(Math.max(0, width - inset * 2), Math.max(0, height - inset * 2), Math.max(0, radius - inset), values) as CanvasNode["cornerRadii"];
+}
+function outsetCornerRadii(width: number, height: number, radius: number, cornerRadii: CanvasNode["cornerRadii"], outset: number): CanvasNode["cornerRadii"] | undefined {
+  if (!cornerRadii) return undefined;
+  const values = resolveCornerRadii(width, height, radius, cornerRadii).map((value) => value + outset) as CanvasNode["cornerRadii"];
+  return resolveCornerRadii(width + outset * 2, height + outset * 2, radius + outset, values) as CanvasNode["cornerRadii"];
 }
 function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (node.visible === false) return;
+  if (node.kind === "group") return;
   const point = toScreen(node.x, node.y);
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
+  if (node.kind === "line") {
+    ctx.save();
+    ctx.globalAlpha = node.opacity;
+    if (!applyNativeAffine(ctx, node)) {
+      ctx.translate(point.x, point.y);
+      ctx.rotate(node.rotation * Math.PI / 180);
+    }
+    applyStrokeStyle(ctx, node);
+    const mesh = canonicalLineStrokeMesh(node);
+    if (mesh) {
+      fillCanonicalStrokeMesh(ctx, node, mesh, w, 1);
+    } else {
+      const strokeWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+      ctx.lineWidth = strokeWidth;
+      // A solid Line can be filled as one union of primitives, which preserves
+      // independent start/end Cap semantics without alpha-darkening overlap.
+      if (!node.strokeDashPattern?.length) {
+        const outline = solidLineStrokeOutline(w, strokeWidth, node.strokeCapStart, node.strokeCapEnd);
+        activeStrokes(node).forEach((layer) => {
+          ctx.beginPath();
+          outline.forEach((piece) => {
+            if (piece.kind === "rect") ctx.rect(piece.x, piece.y, piece.width, piece.height);
+            else ctx.arc(piece.x, piece.y, piece.radius, 0, Math.PI * 2);
+          });
+          ctx.fillStyle = paintStackStyle(ctx, layer, w, 1);
+          ctx.fill();
+          ctx.strokeStyle = ctx.fillStyle;
+          renderLineEndpoint(ctx, node.strokeCapStart, 0, Math.PI, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapEnd, w, 0, strokeWidth);
+        });
+      } else {
+        // Canvas has a single lineCap property. For a dashed Line with
+        // asymmetric caps, Butt is the conservative fallback rather than
+        // applying one endpoint's cap to every dash segment.
+        ctx.lineCap = node.strokeCapStart === node.strokeCapEnd && (node.strokeCapStart === "round" || node.strokeCapStart === "square")
+          ? node.strokeCapStart
+          : "butt";
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(w, 0);
+        strokePaintStack(ctx, node, w, 1);
+        activeStrokes(node).forEach((layer) => {
+          const style = paintStackStyle(ctx, layer, w, 1);
+          ctx.strokeStyle = style;
+          ctx.fillStyle = style;
+          renderLineEndpoint(ctx, node.strokeCapStart, 0, Math.PI, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapEnd, w, 0, strokeWidth);
+        });
+      }
+    }
+    ctx.restore();
+    return;
+  }
   ctx.save();
   ctx.globalAlpha = node.opacity;
-  ctx.translate(point.x + w / 2, point.y + h / 2);
-  ctx.rotate(node.rotation * Math.PI / 180);
-  ctx.translate(-w / 2, -h / 2);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + w / 2, point.y + h / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
+  applyStrokeStyle(ctx, node);
   const paint = fillStyle(ctx, node, w, h);
   if (node.assetId) {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
+    const alignedEllipse = node.kind === "ellipse" && !node.arcData;
+    const align = node.strokeAlign ?? "inside";
+    const strokeWidth = node.strokeWidth * viewport.zoom;
+    const ring = alignedEllipse && hasVisibleStroke(node) ? ellipseStrokeRing(w, h, strokeWidth, align) : undefined;
+    const imageRectangleStrokeMesh = !alignedEllipse
+      && (node.kind === "frame" || node.kind === "rectangle")
+      && hasVisibleStroke(node)
+      ? canonicalRectangleStrokeMesh(node, w, h)
+      : undefined;
+    // Outside paint must sit behind the original image geometry. This uses the
+    // same filled-ring model as a non-image Ellipse instead of clipping a
+    // conventional Canvas stroke to the image mask.
+    if (alignedEllipse && align === "outside" && ring) {
+      ctx.beginPath(); ctx.ellipse(w / 2, h / 2, ring.outerRx, ring.outerRy, 0, 0, Math.PI * 2);
+      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+    }
+    ctx.save();
     if (node.kind === "ellipse") {
       ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
-    } else roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius);
+    } else roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
     ctx.clip();
     const bitmap = imageBitmaps.get(node.assetId);
     if (bitmap) {
@@ -1296,28 +1792,62 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
       ctx.fillStyle = "rgba(0, 72, 255, .16)";
       for (let offset = -h; offset < w; offset += 18) ctx.fillRect(offset, 0, 8, h);
     }
-    if (hasVisibleStroke(node)) {
+    // Rectangle/Frame image Stroke keeps its existing clipped projection. A
+    // full Ellipse restores first because its aligned paint can extend past
+    // the image mask.
+    if (!alignedEllipse && hasVisibleStroke(node) && !imageRectangleStrokeMesh) {
       if (node.kind === "ellipse") {
         ctx.beginPath(); ctx.ellipse(w / 2, h / 2, Math.max(0, w - 1) / 2, Math.max(0, h - 1) / 2, 0, 0, Math.PI * 2);
-      } else roundedRectPath(ctx, 0.5, 0.5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - .5));
-      ctx.strokeStyle = strokeStyle(ctx, node, w, h);
-      ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
-      ctx.stroke();
+      } else roundedRectPath(ctx, 0.5, 0.5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - .5), node.cornerRadii, node.cornerSmoothing);
+      ctx.lineWidth = Math.max(1, strokeWidth);
+      strokePaintStack(ctx, node, w, h);
+    }
+    ctx.restore();
+    // The image clip must end before an Outside mesh is painted, otherwise
+    // the portion that intentionally extends beyond the bitmap is lost. The
+    // mesh itself is a ring, so Inside/Center remain correctly overlaid on
+    // the image while Outside starts exactly at its geometry boundary.
+    if (imageRectangleStrokeMesh) fillCanonicalStrokeMesh(ctx, node, imageRectangleStrokeMesh, w, h);
+    if (alignedEllipse && hasVisibleStroke(node)) {
+      if (align === "inside" && ring) {
+        ctx.beginPath(); ctx.ellipse(w / 2, h / 2, ring.outerRx, ring.outerRy, 0, 0, Math.PI * 2);
+        if (ring.innerRx !== undefined && ring.innerRy !== undefined) ctx.ellipse(w / 2, h / 2, ring.innerRx, ring.innerRy, 0, 0, Math.PI * 2);
+        activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill("evenodd"); });
+      } else if (alignedEllipse && align === "outside") {
+        // Already painted behind the image mask above.
+      } else {
+        ctx.beginPath(); ctx.ellipse(w / 2, h / 2, Math.max(0, w - 1) / 2, Math.max(0, h - 1) / 2, 0, 0, Math.PI * 2);
+        ctx.lineWidth = Math.max(1, strokeWidth);
+        strokePaintStack(ctx, node, w, h);
+      }
     }
   } else if (node.kind === "ellipse") {
+    if (node.arcData) {
+      renderEllipseArc(ctx, node, w, h);
+      ctx.restore();
+      return;
+    }
     const geometry = resolveInsideRoundedRect(w, h, 0, node.strokeWidth * viewport.zoom);
+    const align = node.strokeAlign ?? "inside";
     ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
-    if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
-      ctx.fillStyle = strokeStyle(ctx, node, w, h);
-      ctx.fill();
+    if (hasVisibleStroke(node) && align === "outside") {
+      const outset = node.strokeWidth * viewport.zoom;
+      ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2 + outset, h / 2 + outset, 0, 0, Math.PI * 2);
+      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+      ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      fillPaintStack(ctx, node, w, h);
+    } else if (hasVisibleStroke(node) && align === "center") {
+      fillPaintStack(ctx, node, w, h);
+      ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+      strokePaintStack(ctx, node, w, h);
+    } else if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
+      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
       if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
         ctx.beginPath(); ctx.ellipse(w / 2, h / 2, geometry.innerWidth / 2, geometry.innerHeight / 2, 0, 0, Math.PI * 2);
-        ctx.fillStyle = paint;
-        ctx.fill();
+        fillPaintStack(ctx, node, w, h);
       }
     } else {
-      ctx.fillStyle = paint;
-      ctx.fill();
+      fillPaintStack(ctx, node, w, h);
     }
   } else if (node.kind === "text") {
     const primaryStyle = node.textProperties?.runs[0];
@@ -1390,22 +1920,219 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     ctx.restore();
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, node.strokeWidth * viewport.zoom);
-    if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
-      roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius);
-      ctx.fillStyle = strokeStyle(ctx, node, w, h);
-      ctx.fill();
+    if (hasVisibleStroke(node) && node.strokeWeights?.length === 4 && (node.kind === "frame" || node.kind === "rectangle")) {
+      roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+      fillPaintStack(ctx, node, w, h);
+      const meshes = canonicalPerSideRectangleStrokeMeshes(node, w, h);
+      if (meshes) {
+        const align = node.strokeAlign ?? "inside";
+        if (align === "inside") {
+          ctx.save();
+          roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+          ctx.clip();
+          meshes.forEach((mesh) => fillCanonicalStrokeMesh(ctx, node, mesh, w, h));
+          ctx.restore();
+        } else meshes.forEach((mesh) => fillCanonicalStrokeMesh(ctx, node, mesh, w, h));
+      } else renderPerSideStroke(ctx, node, w, h, geometry.outerRadius);
+    } else if (hasVisibleStroke(node) && (node.kind === "frame" || node.kind === "rectangle")) {
+      const mesh = canonicalRectangleStrokeMesh(node, w, h);
+      if (mesh) {
+        roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+        fillPaintStack(ctx, node, w, h);
+        fillCanonicalStrokeMesh(ctx, node, mesh, w, h);
+      } else if ((node.strokeAlign ?? "inside") !== "inside") {
+        renderAlignedShapeStroke(ctx, node, w, h, geometry.outerRadius);
+      } else if (geometry.insideStrokeWidth > 0) {
+        roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+        activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+        if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
+          roundedRectPath(ctx, geometry.innerX, geometry.innerY, geometry.innerWidth, geometry.innerHeight, geometry.innerRadius, insetCornerRadii(w, h, geometry.outerRadius, node.cornerRadii, geometry.insideStrokeWidth), node.cornerSmoothing);
+          fillPaintStack(ctx, node, w, h);
+        }
+      }
+    } else if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
+      roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
       if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
-        roundedRectPath(ctx, geometry.innerX, geometry.innerY, geometry.innerWidth, geometry.innerHeight, geometry.innerRadius);
-        ctx.fillStyle = paint;
-        ctx.fill();
+        roundedRectPath(ctx, geometry.innerX, geometry.innerY, geometry.innerWidth, geometry.innerHeight, geometry.innerRadius, insetCornerRadii(w, h, geometry.outerRadius, node.cornerRadii, geometry.insideStrokeWidth), node.cornerSmoothing);
+        fillPaintStack(ctx, node, w, h);
       }
     } else {
-      roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius);
-      ctx.fillStyle = paint;
-      ctx.fill();
+      roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
+      fillPaintStack(ctx, node, w, h);
     }
   }
   ctx.restore();
+}
+
+/** Paint in structural order whenever a Frame owns visible descendants. A
+ * single flat Canvas loop cannot retain a Frame's clip while drawing later
+ * child layers. The renderer deliberately falls back from the GPU prefix for
+ * this page shape; that preserves both clip and document z-order. */
+function renderFrameClippedTree(ctx: OffscreenCanvasRenderingContext2D, orderedNodes: readonly CanvasNode[]) {
+  const ids = new Set(orderedNodes.map((node) => node.id));
+  const children = new Map<string, CanvasNode[]>();
+  const roots: CanvasNode[] = [];
+  orderedNodes.forEach((node) => {
+    if (!node.parentId || !ids.has(node.parentId)) roots.push(node);
+    else {
+      const siblings = children.get(node.parentId) ?? [];
+      siblings.push(node);
+      children.set(node.parentId, siblings);
+    }
+  });
+  const renderBranch = (node: CanvasNode) => {
+    renderNode(ctx, node);
+    const descendants = children.get(node.id) ?? [];
+    if (!descendants.length) return;
+    if (node.kind === "frame" && node.clipsContent !== false) {
+      clipFrameContents(ctx, node);
+      descendants.forEach(renderBranch);
+      ctx.restore();
+      return;
+    }
+    descendants.forEach(renderBranch);
+  };
+  roots.forEach(renderBranch);
+}
+
+function clipFrameContents(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const point = toScreen(node.x, node.y);
+  const frameWidth = node.width * viewport.zoom;
+  const frameHeight = node.height * viewport.zoom;
+  ctx.save();
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + frameWidth / 2, point.y + frameHeight / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-frameWidth / 2, -frameHeight / 2);
+  }
+  roundedRectPath(ctx, 0, 0, frameWidth, frameHeight, Math.max(0, node.radius * viewport.zoom), node.cornerRadii, node.cornerSmoothing);
+  ctx.clip();
+  // `clip()` stores the region in device space, but the current transform is
+  // still the Frame transform. Descendants are rendered with their own world
+  // matrices, so leaving it active would apply the Frame matrix twice and make
+  // nested content diverge from its hit/selection bounds. Keep the clip while
+  // returning to the normal screen-space basis for the child render pass.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function renderEllipseArc(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  const arc = node.arcData;
+  if (!arc) return;
+  const start = arc.startingAngle * Math.PI / 180;
+  const end = arc.endingAngle * Math.PI / 180;
+  const outerX = width / 2;
+  const outerY = height / 2;
+  const innerRadius = Math.max(0, Math.min(.999999, arc.innerRadius));
+  ctx.beginPath();
+  ctx.ellipse(outerX, outerY, outerX, outerY, 0, start, end);
+  if (innerRadius > 0) {
+    ctx.ellipse(outerX, outerY, outerX * innerRadius, outerY * innerRadius, 0, end, start, true);
+  } else {
+    ctx.lineTo(outerX, outerY);
+  }
+  ctx.closePath();
+  activeFills(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, width, height); ctx.fill("evenodd"); });
+  if (hasVisibleStroke(node)) {
+    ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+    applyStrokeStyle(ctx, node);
+    strokePaintStack(ctx, node, width, height);
+  }
+}
+
+/** First per-side Stroke projection. The outer rounded path clips each edge,
+ * which keeps the weights inside the shape while preserving rotation, dash and
+ * paint semantics. Corner joins/align are upgraded by the shared outline path
+ * work; no second persistence model is introduced here. */
+function renderPerSideStroke(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number, radius: number) {
+  const weights = node.strokeWeights;
+  if (!weights || weights.length !== 4) return;
+  const align = node.strokeAlign ?? "inside";
+  ctx.save();
+  if (align === "inside") { roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing); ctx.clip(); }
+  applyStrokeStyle(ctx, node);
+  const [top, right, bottom, left] = weights.map((weight) => Math.max(0, weight) * viewport.zoom);
+  const draw = (lineWidth: number, from: [number, number], to: [number, number]) => {
+    if (lineWidth <= 0) return;
+    ctx.lineWidth = Math.max(1, lineWidth);
+    ctx.beginPath();
+    ctx.moveTo(...from);
+    ctx.lineTo(...to);
+    strokePaintStack(ctx, node, width, height);
+  };
+  const { topY, rightX, bottomY, leftX } = perSideStrokeCenters(width, height, [top, right, bottom, left], align);
+  draw(top, [0, topY], [width, topY]);
+  draw(right, [rightX, 0], [rightX, height]);
+  draw(bottom, [width, bottomY], [0, bottomY]);
+  draw(left, [leftX, height], [leftX, 0]);
+  ctx.restore();
+}
+
+function renderAlignedShapeStroke(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number, radius: number) {
+  const strokeWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+  const align = node.strokeAlign ?? "inside";
+  if (align === "outside") {
+    roundedRectPath(ctx, -strokeWidth, -strokeWidth, width + strokeWidth * 2, height + strokeWidth * 2, radius + strokeWidth, outsetCornerRadii(width, height, radius, node.cornerRadii, strokeWidth), node.cornerSmoothing);
+    activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, width, height); ctx.fill(); });
+    roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+    fillPaintStack(ctx, node, width, height);
+    return;
+  }
+  roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+  fillPaintStack(ctx, node, width, height);
+  ctx.lineWidth = strokeWidth;
+  applyStrokeStyle(ctx, node);
+  strokePaintStack(ctx, node, width, height);
+}
+
+function renderLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasNode["strokeCapStart"], x: number, direction: number, strokeWidth: number) {
+  const size = Math.max(8, strokeWidth * 4);
+  if (cap === "arrowLines") {
+    const spread = Math.PI / 6;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x - Math.cos(direction + spread) * size, -Math.sin(direction + spread) * size);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x - Math.cos(direction - spread) * size, -Math.sin(direction - spread) * size);
+    ctx.stroke();
+    return;
+  }
+  if (cap === "arrowEquilateral" || cap === "triangleFilled") {
+    const half = cap === "arrowEquilateral" ? size * Math.sqrt(3) / 4 : size * 0.42;
+    const backX = x - Math.cos(direction) * size;
+    const backY = -Math.sin(direction) * size;
+    const normalX = -Math.sin(direction);
+    const normalY = Math.cos(direction);
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(backX + normalX * half, backY + normalY * half);
+    ctx.lineTo(backX - normalX * half, backY - normalY * half);
+    ctx.closePath();
+    ctx.fill();
+    return;
+  }
+  if (cap === "diamondFilled") {
+    const half = size / 2;
+    const backX = x - Math.cos(direction) * size;
+    const backY = -Math.sin(direction) * size;
+    const middleX = x - Math.cos(direction) * half;
+    const middleY = -Math.sin(direction) * half;
+    const normalX = -Math.sin(direction) * half;
+    const normalY = Math.cos(direction) * half;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(middleX + normalX, middleY + normalY);
+    ctx.lineTo(backX, backY);
+    ctx.lineTo(middleX - normalX, middleY - normalY);
+    ctx.closePath();
+    ctx.fill();
+    return;
+  }
+  if (cap === "circleFilled") {
+    ctx.beginPath();
+    ctx.arc(x, 0, size / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle) {
@@ -1485,16 +2212,268 @@ function withResolvedLayerPosition(command: EditorCommand): EditorCommand {
   const siblings = nodes.filter((node) => (node.pageId ?? defaultPageId) === pageId);
   return { ...command, node: { ...command.node, pageId, positionId: orderNewLayerAtFront(siblings, command.node.id) } };
 }
+/** Resize eligibility is determined from the Canonical record, never its
+ * display projection. Both Legacy and Relative-v1 nodes are supported; Group
+ * bounds remain derived and Line owns a dedicated endpoint interaction. */
+function canResizeOnCanvas(node: CanvasNode) {
+  // `nodeById` can contain a decomposed world-space display projection.
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  if (!canonical) return false;
+  return selectedIds.length === 1
+    && canonical.kind !== "line"
+    && canonical.kind !== "group"
+    && canonical.locked !== true
+    && canonical.visible !== false;
+}
+/** Line's editable geometry is its two endpoints rather than a rectangular
+ * box. Relative-v1 moves rewrite the local origin and basis while retaining
+ * the parent matrix, so both paths share the same visual contract. */
+function canEditLineEndpoints(node: CanvasNode) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  return Boolean(canonical
+    && selectedIds.length === 1
+    && canonical.kind === "line"
+    && canonical.locked !== true
+    && canonical.visible !== false);
+}
+function rotatedLegacyPoint(node: CanvasNode, localX: number, localY: number) {
+  const radians = node.rotation * Math.PI / 180;
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  const deltaX = localX - node.width / 2;
+  const deltaY = localY - node.height / 2;
+  return {
+    x: centerX + Math.cos(radians) * deltaX - Math.sin(radians) * deltaY,
+    y: centerY + Math.sin(radians) * deltaX + Math.cos(radians) * deltaY,
+  };
+}
+function resizeHandleLayoutForSize(width: number, height: number): Array<[CanvasResizeHandle, number, number]> {
+  return [
+    ["nw", 0, 0], ["n", width / 2, 0], ["ne", width, 0], ["e", width, height / 2],
+    ["se", width, height], ["s", width / 2, height], ["sw", 0, height], ["w", 0, height / 2],
+  ];
+}
+/** Local visual envelope for the closed-shape Stroke cases whose paint extends
+ * beyond GeometryProps. This deliberately mirrors worldVisualBoundsForNode
+ * before the affine transform is applied, so selection, hover and resize
+ * handles never disagree with the actual Canvas paint. */
+function resizeHandleLayout(node: CanvasNode) {
+  const bounds = closedShapeStrokeLocalBounds(node);
+  return resizeHandleLayoutForSize(bounds?.width ?? node.width, bounds?.height ?? node.height)
+    .map(([handle, x, y]) => [handle, x + (bounds?.x ?? 0), y + (bounds?.y ?? 0)] as [CanvasResizeHandle, number, number]);
+}
+function resizeHandleWorldPoint(node: CanvasNode, localX: number, localY: number) {
+  const transform = node.relativeTransform ? worldTransformForNode(nodes, node.id) : undefined;
+  return transform ? transformPoint(transform, { x: localX, y: localY }) : rotatedLegacyPoint(node, localX, localY);
+}
+function lineEndpointHandleAtScreen(screenX: number, screenY: number): { node: CanvasNode; endpoint: LineEndpoint } | undefined {
+  const selected = selectedIds.length === 1 ? nodeById.get(selectedIds[0]) : undefined;
+  const canonical = selected ? nodes.find((node) => node.id === selected.id) : undefined;
+  if (!selected || !canonical || !canEditLineEndpoints(selected)) return undefined;
+  const endpoints = lineEndpointWorldPoints(canonical);
+  const radius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = (Object.entries(endpoints) as Array<[LineEndpoint, { x: number; y: number }]>)
+    .map(([endpoint, point]) => ({ endpoint, distance: Math.hypot(screenX - toScreen(point.x, point.y).x, screenY - toScreen(point.x, point.y).y) }))
+    .filter(({ distance }) => distance <= radius)
+    .sort((left, right) => left.distance - right.distance)[0];
+  return hit ? { node: canonical, endpoint: hit.endpoint } : undefined;
+}
+function lineEndpointWorldPoints(node: CanvasNode): Readonly<{ start: { x: number; y: number }; end: { x: number; y: number } }> {
+  const transform = node.relativeTransform ? worldTransformForNode(nodes, node.id) : undefined;
+  return transform
+    ? { start: transformPoint(transform, { x: 0, y: 0 }), end: transformPoint(transform, { x: node.width, y: 0 }) }
+    : lineEndpoints(node);
+}
+function resizeHandleAtScreen(screenX: number, screenY: number): { node: CanvasNode; handle: CanvasResizeHandle } | undefined {
+  const selected = selectedIds.length === 1 ? nodeById.get(selectedIds[0]) : undefined;
+  const canonical = selected ? nodes.find((node) => node.id === selected.id) : undefined;
+  if (!selected || !canonical || !canResizeOnCanvas(selected)) return undefined;
+  const hitRadius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = resizeHandleLayout(canonical).map(([handle, localX, localY]) => {
+    const world = resizeHandleWorldPoint(canonical, localX, localY);
+    const screen = toScreen(world.x, world.y);
+    return { handle, distance: Math.hypot(screenX - screen.x, screenY - screen.y) };
+  }).filter(({ distance }) => distance <= hitRadius).sort((left, right) => left.distance - right.distance)[0];
+  return hit ? { node: canonical, handle: hit.handle } : undefined;
+}
+/** Multi-resize maps complex leaves through an exact affine world scale. A
+ * selected Group expands its complete editable subtree, including Frame and
+ * Section containers. Container patches precede descendant patches so a Frame
+ * can run its Core constraints while the final child transforms still preserve
+ * the exact Group-scale result. Group bounds remain Core-derived. */
+function multiResizeSelection() {
+  return resolveMultiResizeSelection(nodes, selectedIds);
+}
+
+function multiResizeHandleAtScreen(screenX: number, screenY: number): { handle: CanvasResizeHandle; bounds: ResizeGeometry; ids: string[]; requiresAffine: boolean } | undefined {
+  const selection = multiResizeSelection();
+  if (!selection) return undefined;
+  const radius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = resizeHandleLayoutForSize(selection.bounds.width, selection.bounds.height).map(([handle, localX, localY]) => {
+    const screen = toScreen(selection.bounds.x + localX, selection.bounds.y + localY);
+    return { handle, distance: Math.hypot(screenX - screen.x, screenY - screen.y) };
+  }).filter(({ distance }) => distance <= radius).sort((left, right) => left.distance - right.distance)[0];
+  return hit ? { handle: hit.handle, bounds: selection.bounds, ids: selection.ids, requiresAffine: selection.requiresAffine } : undefined;
+}
+function renderResizeHandles(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  if (!canonical || !canResizeOnCanvas(node)) return;
+  const side = canvasDesignTokens.overlay.selectionHandle.side;
+  const half = side / 2;
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  resizeHandleLayout(canonical).forEach(([, localX, localY]) => {
+    const world = resizeHandleWorldPoint(canonical, localX, localY);
+    const screen = toScreen(world.x, world.y);
+    ctx.fillRect(screen.x - half, screen.y - half, side, side);
+    ctx.strokeRect(screen.x - half, screen.y - half, side, side);
+  });
+  ctx.restore();
+}
+function renderMultiResizeSelection(ctx: OffscreenCanvasRenderingContext2D) {
+  const selection = multiResizeSelection();
+  if (!selection) return false;
+  const point = toScreen(selection.bounds.x, selection.bounds.y);
+  const width = selection.bounds.width * viewport.zoom;
+  const height = selection.bounds.height * viewport.zoom;
+  ctx.save();
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  ctx.strokeRect(point.x + canvasDesignTokens.stroke.selection.pixelInset, point.y + canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, width - 1), Math.max(0, height - 1));
+  const side = canvasDesignTokens.overlay.selectionHandle.side;
+  const half = side / 2;
+  ctx.fillStyle = "#ffffff";
+  resizeHandleLayoutForSize(selection.bounds.width, selection.bounds.height).forEach(([, localX, localY]) => {
+    const screen = toScreen(selection.bounds.x + localX, selection.bounds.y + localY);
+    ctx.fillRect(screen.x - half, screen.y - half, side, side);
+    ctx.strokeRect(screen.x - half, screen.y - half, side, side);
+  });
+  ctx.restore();
+  return true;
+}
+function renderLineEndpointHandles(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  if (!canonical || !canEditLineEndpoints(node)) return;
+  const radius = canvasDesignTokens.overlay.selectionHandle.side / 2;
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  Object.values(lineEndpointWorldPoints(canonical)).forEach((point) => {
+    const screen = toScreen(point.x, point.y);
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+function resizeGeometryForCanvasNode(
+  node: CanvasNode,
+  handle: CanvasResizeHandle,
+  startWorld: { x: number; y: number },
+  currentWorld: { x: number; y: number },
+  preserveAspectRatio: boolean,
+  fromCenter: boolean,
+): Pick<CanvasNode, "x" | "y" | "width" | "height" | "rotation" | "relativeTransform"> | undefined {
+  // A crossed resize writes a positive size plus an explicit reflection. For
+  // containers, descendants retain their local coordinates: composition with
+  // the reflected parent matrix mirrors the complete subtree, while Core sees
+  // the new positive Frame dimensions and can apply its normal constraints
+  // transaction before the final world transforms are rendered.
+  if (!preserveAspectRatio && !fromCenter) {
+    const world = worldTransformForNode(nodes, node.id);
+    const inverse = world && invertAffine(world);
+    if (world && inverse) {
+      const start = transformPoint(inverse, startWorld);
+      const current = transformPoint(inverse, currentWorld);
+      const flipped = resizeGeometryFromCornerWithFlip(
+        { x: 0, y: 0, width: node.width, height: node.height },
+        handle,
+        { x: current.x - start.x, y: current.y - start.y },
+      );
+      if (flipped.flipX || flipped.flipY) {
+        const parentWorld = node.parentId ? worldTransformForNode(nodes, node.parentId) : undefined;
+        if (node.parentId && !parentWorld) return undefined;
+        const projected = nodePropsForWorldTransform(multiplyAffine(world, flipped.localTransform), parentWorld, flipped.width, flipped.height);
+        return projected ? { ...projected, width: flipped.width, height: flipped.height } : undefined;
+      }
+    }
+  }
+  if (!node.relativeTransform) {
+    return { ...resizeRotatedLegacyGeometry(node, handle, startWorld, currentWorld, undefined, preserveAspectRatio, fromCenter), rotation: node.rotation, relativeTransform: undefined };
+  }
+  const relativeTransform = node.relativeTransform;
+  const world = worldTransformForNode(nodes, node.id);
+  const resized = world && resizeRelativeTransformFromWorldGesture({ width: node.width, height: node.height, relativeTransform }, world, handle, startWorld, currentWorld, preserveAspectRatio, fromCenter);
+  if (!resized) return undefined;
+  const parentWorld = node.parentId ? worldTransformForNode(nodes, node.parentId) : undefined;
+  if (node.parentId && !parentWorld) return undefined;
+  const nextWorld = parentWorld ? multiplyAffine(parentWorld, resized.relativeTransform) : resized.relativeTransform;
+  const projected = nodePropsForWorldTransform(nextWorld, parentWorld, resized.width, resized.height);
+  if (!projected) return undefined;
+  return { ...projected, width: resized.width, height: resized.height };
+}
+function resizeLineForCanvasNode(
+  node: CanvasNode,
+  endpoint: LineEndpoint,
+  currentWorld: { x: number; y: number },
+): Pick<CanvasNode, "x" | "y" | "width" | "rotation" | "relativeTransform"> | undefined {
+  if (!node.relativeTransform) return { ...resizeLegacyLineEndpoint(node, endpoint, currentWorld), relativeTransform: undefined };
+  const relativeTransform = node.relativeTransform;
+  const world = worldTransformForNode(nodes, node.id);
+  const resized = world && resizeRelativeLineEndpointFromWorldGesture({ width: node.width, relativeTransform }, world, endpoint, currentWorld);
+  if (!resized) return undefined;
+  const parentWorld = node.parentId ? worldTransformForNode(nodes, node.parentId) : undefined;
+  if (node.parentId && !parentWorld) return undefined;
+  const nextWorld = parentWorld ? multiplyAffine(parentWorld, resized.relativeTransform) : resized.relativeTransform;
+  const projected = nodePropsForWorldTransform(nextWorld, parentWorld, resized.width, node.height);
+  return projected ? { ...projected, width: resized.width } : undefined;
+}
 function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (!selectedIds.includes(node.id)) return;
+  if (node.kind === "line") {
+    renderLineOutline(ctx, node, canvasDesignTokens.stroke.selection.width);
+    renderLineEndpointHandles(ctx, node);
+    return;
+  }
   const point = toScreen(node.x, node.y);
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
+  const visualBounds = closedShapeStrokeLocalBounds(node);
+  const outlineX = (visualBounds?.x ?? 0) * viewport.zoom;
+  const outlineY = (visualBounds?.y ?? 0) * viewport.zoom;
+  const outlineWidth = (visualBounds?.width ?? node.width) * viewport.zoom;
+  const outlineHeight = (visualBounds?.height ?? node.height) * viewport.zoom;
   ctx.save();
-  ctx.translate(point.x + w / 2, point.y + h / 2);
-  ctx.rotate(node.rotation * Math.PI / 180);
-  ctx.translate(-w / 2, -h / 2);
-  ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(canvasDesignTokens.stroke.selection.pixelInset, canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1)); ctx.setLineDash([]);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + w / 2, point.y + h / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
+  ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(outlineX + canvasDesignTokens.stroke.selection.pixelInset, outlineY + canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1)); ctx.setLineDash([]);
+  ctx.restore();
+  renderResizeHandles(ctx, node);
+}
+
+/** Figma keeps a Line's selection rectangle centred on its path. A generic
+ * zero-height rectangle is offset by its pixel inset and appears to float
+ * above or below the segment, especially after rotation. */
+function renderLineOutline(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, lineWidth: number) {
+  const point = toScreen(node.x, node.y);
+  const local = lineSelectionBounds(node);
+  ctx.save();
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x, point.y);
+    ctx.rotate(node.rotation * Math.PI / 180);
+  }
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = lineWidth;
+  ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]);
+  ctx.strokeRect(local.x * viewport.zoom, local.y * viewport.zoom, local.width * viewport.zoom, local.height * viewport.zoom);
+  ctx.setLineDash([]);
   ctx.restore();
 }
 
@@ -1508,9 +2487,11 @@ function renderTextCreationHighlight(ctx: OffscreenCanvasRenderingContext2D, nod
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
   ctx.save();
-  ctx.translate(point.x + w / 2, point.y + h / 2);
-  ctx.rotate(node.rotation * Math.PI / 180);
-  ctx.translate(-w / 2, -h / 2);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + w / 2, point.y + h / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
   ctx.strokeStyle = canvasDesignTokens.color.selection;
   ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
   ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]);
@@ -1520,26 +2501,37 @@ function renderTextCreationHighlight(ctx: OffscreenCanvasRenderingContext2D, nod
 }
 function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (hoveredId !== node.id || selectedIds.includes(node.id) || node.visible === false) return;
+  if (node.kind === "line") {
+    renderLineOutline(ctx, node, canvasDesignTokens.stroke.hover.width);
+    return;
+  }
   const point = toScreen(node.x, node.y);
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
+  const visualBounds = closedShapeStrokeLocalBounds(node);
+  const outlineX = (visualBounds?.x ?? 0) * viewport.zoom;
+  const outlineY = (visualBounds?.y ?? 0) * viewport.zoom;
+  const outlineWidth = (visualBounds?.width ?? node.width) * viewport.zoom;
+  const outlineHeight = (visualBounds?.height ?? node.height) * viewport.zoom;
   if (w <= 0 || h <= 0) return;
   ctx.save();
-  ctx.translate(point.x + w / 2, point.y + h / 2);
-  ctx.rotate(node.rotation * Math.PI / 180);
-  ctx.translate(-w / 2, -h / 2);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + w / 2, point.y + h / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
   ctx.strokeStyle = canvasDesignTokens.color.selection;
   ctx.lineWidth = canvasDesignTokens.stroke.hover.width;
   if (node.kind === "ellipse") {
     ctx.beginPath();
-    ctx.ellipse(w / 2, h / 2, Math.max(0, w / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, h / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
+    ctx.ellipse(outlineX + outlineWidth / 2, outlineY + outlineHeight / 2, Math.max(0, outlineWidth / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, outlineHeight / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
     ctx.stroke();
-  } else if (node.kind === "text" || node.kind === "frame") {
-    // Frame hover bounds stay rectilinear even when the frame itself has rounded corners.
-    ctx.strokeRect(canvasDesignTokens.stroke.hover.pixelInset, canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1));
+  } else if (node.kind === "text" || node.kind === "frame" || node.kind === "section") {
+    // Frame/Section hover bounds stay rectilinear even when their paint has rounded corners.
+    ctx.strokeRect(outlineX + canvasDesignTokens.stroke.hover.pixelInset, outlineY + canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1));
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
-    roundedRectPath(ctx, canvasDesignTokens.stroke.hover.pixelInset, canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, geometry.outerRadius - canvasDesignTokens.stroke.hover.pixelInset));
+    roundedRectPath(ctx, outlineX + canvasDesignTokens.stroke.hover.pixelInset, outlineY + canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1), Math.max(0, geometry.outerRadius - canvasDesignTokens.stroke.hover.pixelInset));
     ctx.stroke();
   }
   ctx.restore();
@@ -1549,9 +2541,11 @@ function renderLayerName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   const width = node.width * viewport.zoom;
   const height = node.height * viewport.zoom;
   ctx.save();
-  ctx.translate(point.x + width / 2, point.y + height / 2);
-  ctx.rotate(node.rotation * Math.PI / 180);
-  ctx.translate(-width / 2, -height / 2);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + width / 2, point.y + height / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-width / 2, -height / 2);
+  }
   ctx.font = canvasFont(canvasDesignTokens.typography.layerName);
   ctx.fillStyle = selected ? canvasDesignTokens.color.selection : canvasDesignTokens.color.layerName;
   ctx.textBaseline = "bottom";
@@ -1559,7 +2553,7 @@ function renderLayerName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.restore();
 }
 function renderFrameName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
-  if (node.kind !== "frame" || node.visible === false || selectedIds.includes(node.id)) return;
+  if ((node.kind !== "frame" && node.kind !== "section") || node.visible === false || selectedIds.includes(node.id)) return;
   renderLayerName(ctx, node);
 }
 function renderSelectionDimensions(ctx: OffscreenCanvasRenderingContext2D, dimensions: string, labelX: number, labelY: number, labelWidth: number, labelHeight: number, horizontalInset: number, cornerRadius: number) {
@@ -1575,7 +2569,7 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
   const selectedNodes = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && node.visible !== false));
   if (selectedNodes.length === 0) return;
   const screenBounds = selectedNodes.map((node) => {
-    const bounds = rotatedNodeBounds(node);
+    const bounds = boundsForNode(node);
     const point = toScreen(bounds.x, bounds.y);
     return { left: point.x, top: point.y, right: point.x + bounds.width * viewport.zoom, bottom: point.y + bounds.height * viewport.zoom };
   });
@@ -1589,19 +2583,36 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
   const { height: labelHeight, horizontalInset, cornerRadius, offsetY } = canvasDesignTokens.overlay.selectionLabel;
   ctx.save();
   const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
-  if (selectedNode?.kind === "frame") {
+  if (selectedNode?.kind === "frame" || selectedNode?.kind === "section") {
     renderLayerName(ctx, selectedNode, true);
   }
   ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
   const labelWidth = Math.ceil(ctx.measureText(dimensions).width) + horizontalInset * 2;
   if (selectedNode) {
+    if (selectedNode.kind === "line") {
+      const point = toScreen(selectedNode.x, selectedNode.y);
+      const local = lineSelectionBounds(selectedNode);
+      const localWidth = local.width * viewport.zoom;
+      const localBottom = (local.y + local.height) * viewport.zoom;
+      ctx.save();
+      if (!applyNativeAffine(ctx, selectedNode)) {
+        ctx.translate(point.x, point.y);
+        ctx.rotate(selectedNode.rotation * Math.PI / 180);
+      }
+      renderSelectionDimensions(ctx, dimensions, local.x * viewport.zoom + (localWidth - labelWidth) / 2, localBottom + offsetY, labelWidth, labelHeight, horizontalInset, cornerRadius);
+      ctx.restore();
+      ctx.restore();
+      return;
+    }
     const point = toScreen(selectedNode.x, selectedNode.y);
     const nodeWidth = selectedNode.width * viewport.zoom;
     const nodeHeight = selectedNode.height * viewport.zoom;
     ctx.save();
-    ctx.translate(point.x + nodeWidth / 2, point.y + nodeHeight / 2);
-    ctx.rotate(selectedNode.rotation * Math.PI / 180);
-    ctx.translate(-nodeWidth / 2, -nodeHeight / 2);
+    if (!applyNativeAffine(ctx, selectedNode)) {
+      ctx.translate(point.x + nodeWidth / 2, point.y + nodeHeight / 2);
+      ctx.rotate(selectedNode.rotation * Math.PI / 180);
+      ctx.translate(-nodeWidth / 2, -nodeHeight / 2);
+    }
     renderSelectionDimensions(ctx, dimensions, (nodeWidth - labelWidth) / 2, nodeHeight + offsetY, labelWidth, labelHeight, horizontalInset, cornerRadius);
     ctx.restore();
   } else {
@@ -1614,7 +2625,10 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
 function updateMarqueeSelection(activeDrag: Extract<Drag, { mode: "select" }>, endX: number, endY: number) {
   activeDrag.currentX = endX;
   activeDrag.currentY = endY;
-  const marqueeIds = selectNodesInMarquee(activeNodes(), { x: activeDrag.startX, y: activeDrag.startY }, { x: endX, y: endY });
+  const selection = marqueeRect({ x: activeDrag.startX, y: activeDrag.startY }, { x: endX, y: endY });
+  const marqueeIds = selection.width === 0 && selection.height === 0
+    ? []
+    : activeNodes().filter((node) => node.visible !== false && boundsIntersect(boundsForNode(node), selection)).map((node) => node.id);
   selectedIds = resolveMarqueeSelection(activeDrag.initialSelection, marqueeIds, activeDrag.additive);
 }
 function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
@@ -1647,7 +2661,16 @@ function render(rendersPerInputFrame?: number) {
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
   const candidateNodes = spatialGrid.query(viewportBounds);
-  const visibleNodes = candidateNodes.filter((node) => node.visible !== false && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  // The spatial index intentionally contains every canonical node. Intersect
+  // it with hierarchy visibility here so a hidden Section's descendants cannot
+  // reappear merely because this render path bypasses `activeNodes()`.
+  const hierarchyVisibleIds = new Set(visibleNodesOnPage(nodes, activePageId, defaultPageId).map((node) => node.id));
+  const visibleNodes = candidateNodes.filter((node) => hierarchyVisibleIds.has(node.id) && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  // `nodeById` and the spatial grid intentionally build their own projected
+  // copies. Object identity therefore cannot decide whether an overlay node is
+  // visible; compare the durable NodeId so Line selection/hover is not skipped
+  // after a Relative-v1 projection.
+  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
   // Rust supplies the committed command order. Canvas keeps interleaved layer
   // order for nodes that cannot safely enter the GPU pass prefix.
   const rustRenderGraph = rustRenderGraphForVisibleNodes(viewportBounds, visibleNodes);
@@ -1662,11 +2685,15 @@ function render(rendersPerInputFrame?: number) {
   let imageBitmapMs = 0;
   let compositeMs = 0;
   const gpuStartedAt = performance.now();
+  const pageHasFrameChildren = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+    .some((node) => node.parentId && nodes.some((parent) => parent.id === node.parentId && parent.kind === "frame" && parent.clipsContent !== false));
   if (gpuRenderer) {
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
       const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId);
+      const pageHasRelativeTransform = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+        .some((node) => Boolean(node.relativeTransform));
       const decodedImageAssetIds = new Set(pageNodes
         .filter((node) => node.kind === "image" && Boolean(node.assetId) && Boolean(imageBitmaps.get(node.assetId!)))
         .map((node) => node.assetId!));
@@ -1674,11 +2701,12 @@ function render(rendersPerInputFrame?: number) {
       const gpuTextNodeIds = new Set([...rustGpuTextGlyphs]
         .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
         .map(([nodeId]) => nodeId));
-      const gpuNodes = gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds);
+      const gpuNodes = pageHasFrameChildren ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node));
       const currentRustGpuScene = gpuNodes.length === pageNodes.length && rustGpuScene
         && rustGpuScene.revision === revision
         && rustGpuScene.pageId === activePageId
         && rustGpuScene.transientSceneVersion === transientSceneVersion
+        && !pageHasRelativeTransform
         ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
         : undefined;
       const gpuImageBitmaps = new Map<string, ImageBitmap>();
@@ -1731,10 +2759,11 @@ function render(rendersPerInputFrame?: number) {
   }
   const gpuPrepareMs = performance.now() - gpuStartedAt;
   const overlayStartedAt = performance.now();
-  renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
+  if (pageHasFrameChildren) renderFrameClippedTree(context!, renderOrderedNodes);
+  else renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
   visibleNodes.forEach((node) => renderFrameName(context!, node));
   const hovered = hoveredId ? nodeById.get(hoveredId) : undefined;
-  if (hovered && visibleNodes.includes(hovered)) renderHover(context!, hovered);
+  if (hovered && visibleNodeIds.has(hovered.id)) renderHover(context!, hovered);
   // The editing DOM layer intentionally replaces only glyph painting. Keep the
   // Canvas selection geometry visible beneath it, so the edit outline remains
   // identical to the hover/selected document bounds rather than using a browser
@@ -1743,9 +2772,10 @@ function render(rendersPerInputFrame?: number) {
     node
     && node.visible !== false
     && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds)
-    && (visibleNodes.includes(node) || node.id === editingTextNodeId),
+    && (visibleNodeIds.has(node.id) || node.id === editingTextNodeId),
   ));
-  visibleSelected.forEach((node) => renderSelection(context!, node));
+  const renderedMultiSelection = renderMultiResizeSelection(context!);
+  if (!renderedMultiSelection) visibleSelected.forEach((node) => renderSelection(context!, node));
   if (visibleSelected.length) renderSelectionLabel(context);
   renderMarquee(context);
   renderGrid(context);
@@ -1755,6 +2785,27 @@ function render(rendersPerInputFrame?: number) {
 function dispatch(command: EditorCommand) {
   command = withResolvedTextAutoSize(command);
   command = withResolvedLayerPosition(command);
+  if (command.type === "group" || command.type === "ungroup" || command.type === "reparent" || (command.type === "delete" && wasmDocument)) {
+    if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
+    const resolved = resolveCoreBatch(nodes, [command]);
+    if (!resolved) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const structuralBaseRevision = Number(wasmDocument.revision);
+    const structuralTransactionId = crypto.randomUUID();
+    try {
+      wasmDocument.apply_transaction_json(structuralTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = command.type === "group" ? resolved.createdIds : command.type === "reparent" ? [...command.ids] : [];
+      // Ungroup selects the former children; selection must not invent a root
+      // layer from unrelated siblings.
+      if (command.type === "ungroup") selectedIds = resolved.batch[0]?.type === "reparent" ? resolved.batch[0].parentIds.map((entry) => entry.id) : [];
+      rebuildNodeIndex();
+      render();
+      emitSnapshot(journalEntry(command, structuralBaseRevision, structuralTransactionId));
+      queueRemoteOperation(structuralTransactionId, structuralBaseRevision, resolved.batch, wasmDocument.canonical_hash());
+    } catch (error) { emitError(error); }
+    return;
+  }
   const baseRevision = wasmDocument ? Number(wasmDocument.revision) : undefined;
   if (!admitToWasm(command)) return;
   const appliedByWasm = isWasmDocumentCommand(command);
@@ -1805,7 +2856,9 @@ function dispatch(command: EditorCommand) {
     case "delete": commit(() => { nodes = nodes.filter((node) => !command.ids.includes(node.id)); selectedIds = []; }, appliedByWasm, appliedByWasm ? { type: "delete", ids: command.ids } : undefined, baseRevision, true, command); break;
     case "duplicate": {
       if (!wasmDocument) {
-        commit(() => { const copies = nodes.filter((node) => command.ids.includes(node.id)).map((node, index) => ({ ...node, id: crypto.randomUUID(), name: `${node.name} copy`, x: node.x + 24 + index * 8, y: node.y + 24 + index * 8 })); nodes.push(...copies); selectedIds = copies.map((node) => node.id); });
+        const resolved = resolveCoreBatch(nodes, [command]);
+        if (!resolved) { emitError(undefined, "INVALID_COMMAND"); break; }
+        commit(() => { nodes = resolved.nextNodes; selectedIds = resolved.createdIds; });
         break;
       }
       const resolved = resolveCoreBatch(nodes, [command]);
@@ -1838,10 +2891,15 @@ function dispatch(command: EditorCommand) {
       }
       if (!wasmDocument?.can_undo) { undoOrder.push(kind); break; }
       const undoBaseRevision = Number(wasmDocument.revision);
+      const undoBeforeHash = wasmDocument.canonical_hash();
       const before = cloneDocument();
       wasmDocument.undo(); redoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
-      const batch = historyReplayBatch(before, nodes);
-      if (!batch.length) { emitError(undefined, "TRANSIENT"); break; }
+      let batch = historyReplayBatch(before, nodes);
+      if (!batch.length && undoBeforeHash !== wasmDocument.canonical_hash()) {
+        diagnostics.record({ category: "recovery", code: "HISTORY_REPLAY_DIFF_FALLBACK", documentRevision: revision, details: { direction: "undo", nodeCount: nodes.length } });
+        batch = fullStateReplayBatch(nodes);
+      }
+      if (!batch.length) { emitSnapshot(); break; }
       const undoTransactionId = crypto.randomUUID();
       emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, undoBaseRevision, undoTransactionId));
       queueRemoteOperation(undoTransactionId, undoBaseRevision, batch, wasmDocument.canonical_hash());
@@ -1862,10 +2920,15 @@ function dispatch(command: EditorCommand) {
       }
       if (!wasmDocument?.can_redo) { redoOrder.push(kind); break; }
       const redoBaseRevision = Number(wasmDocument.revision);
+      const redoBeforeHash = wasmDocument.canonical_hash();
       const before = cloneDocument();
       wasmDocument.redo(); undoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
-      const batch = historyReplayBatch(before, nodes);
-      if (!batch.length) { emitError(undefined, "TRANSIENT"); break; }
+      let batch = historyReplayBatch(before, nodes);
+      if (!batch.length && redoBeforeHash !== wasmDocument.canonical_hash()) {
+        diagnostics.record({ category: "recovery", code: "HISTORY_REPLAY_DIFF_FALLBACK", documentRevision: revision, details: { direction: "redo", nodeCount: nodes.length } });
+        batch = fullStateReplayBatch(nodes);
+      }
+      if (!batch.length) { emitSnapshot(); break; }
       const redoTransactionId = crypto.randomUUID();
       emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, redoBaseRevision, redoTransactionId));
       queueRemoteOperation(redoTransactionId, redoBaseRevision, batch, wasmDocument.canonical_hash());
@@ -1950,13 +3013,32 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     if (tool !== "select") {
       if (event.readOnly) { render(); emitViewState(); return; }
       const snapped = snapCanvasPoint(world);
-      const node = createNode(tool, snapped.x, snapped.y);
+      const node = createNode(tool === "arrow" ? "line" : tool, snapped.x, snapped.y);
+      if (tool === "arrow") {
+        node.name = "Arrow";
+        node.strokeCapEnd = "arrowLines";
+      }
       node.width = 4;
-      node.height = 4;
+      node.height = node.kind === "line" ? 0 : 4;
       drag = { mode: "draw", startX: snapped.x, startY: snapped.y, node };
       return;
     }
-    const target = hit(world.x, world.y);
+    const resize = !event.readOnly && resizeHandleAtScreen(event.x, event.y);
+    if (resize) {
+      drag = { mode: "resize", id: resize.node.id, handle: resize.handle, start: world, node: structuredClone(resize.node), before: cloneDocument() };
+      return;
+    }
+    const lineResize = !event.readOnly && lineEndpointHandleAtScreen(event.x, event.y);
+    if (lineResize) {
+      drag = { mode: "line-resize", id: lineResize.node.id, endpoint: lineResize.endpoint, node: structuredClone(lineResize.node), before: cloneDocument() };
+      return;
+    }
+    const multiResize = !event.readOnly && multiResizeHandleAtScreen(event.x, event.y);
+    if (multiResize) {
+      drag = { mode: "multi-resize", handle: multiResize.handle, start: world, bounds: multiResize.bounds, before: cloneDocument(), ids: multiResize.ids, requiresAffine: multiResize.requiresAffine };
+      return;
+    }
+    const target = hit(world.x, world.y, Boolean(event.drillDown));
     if (!target) {
       drag = { mode: "select", startX: world.x, startY: world.y, currentX: world.x, currentY: world.y, startScreenX: event.x, startScreenY: event.y, marqueeStarted: false, initialSelection: event.shiftKey ? [...selectedIds] : [], additive: event.shiftKey };
       if (!event.shiftKey) selectedIds = [];
@@ -1965,7 +3047,10 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       return;
     }
     selectedIds = resolveCanvasObjectSelection(selectedIds, target.id, event.shiftKey);
-    if (target && !event.readOnly) drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Map(nodes.filter((node) => selectedIds.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y }])) };
+    if (target && !event.readOnly) {
+      const movable = movableSelectionIds(selectedIds);
+      drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Map(nodes.filter((node) => movable.has(node.id)).map((node) => [node.id, { x: node.x, y: node.y }])) };
+    }
     render(); emitViewState(); return;
   }
   if (!drag) {
@@ -1982,7 +3067,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   if (event.readOnly && activeDrag.mode !== "pan" && activeDrag.mode !== "select") {
     // A lease can expire mid-drag. Restore the pre-drag projection instead of
     // leaving an uncommitted visual move in a follower tab.
-    if (activeDrag.mode === "move" && activeDrag.before) {
+    if ((activeDrag.mode === "move" || activeDrag.mode === "resize" || activeDrag.mode === "line-resize" || activeDrag.mode === "multi-resize") && activeDrag.before) {
       nodes = activeDrag.before;
       transientSceneVersion += 1;
       rebuildNodeIndex();
@@ -2008,10 +3093,20 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     if (activeDrag.mode === "draw" && activeDrag.node) {
       const end = snapCanvasPoint(world);
-      activeDrag.node.x = Math.min(activeDrag.startX, end.x);
-      activeDrag.node.y = Math.min(activeDrag.startY, end.y);
-      activeDrag.node.width = Math.max(4, Math.abs(end.x - activeDrag.startX));
-      activeDrag.node.height = Math.max(4, Math.abs(end.y - activeDrag.startY));
+      if (activeDrag.node.kind === "line") {
+        const dx = end.x - activeDrag.startX;
+        const dy = end.y - activeDrag.startY;
+        activeDrag.node.x = activeDrag.startX;
+        activeDrag.node.y = activeDrag.startY;
+        activeDrag.node.width = Math.max(4, Math.hypot(dx, dy));
+        activeDrag.node.height = 0;
+        activeDrag.node.rotation = Math.atan2(dy, dx) * 180 / Math.PI;
+      } else {
+        activeDrag.node.x = Math.min(activeDrag.startX, end.x);
+        activeDrag.node.y = Math.min(activeDrag.startY, end.y);
+        activeDrag.node.width = Math.max(4, Math.abs(end.x - activeDrag.startX));
+        activeDrag.node.height = Math.max(4, Math.abs(end.y - activeDrag.startY));
+      }
       render();
       renderNode(context!, activeDrag.node);
       renderTextCreationHighlight(context!, activeDrag.node);
@@ -2023,9 +3118,45 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         const start = activeDrag.initial?.get(node.id);
         return start ? { ...node, ...snapCanvasPoint({ x: start.x + dx, y: start.y + dy }) } : node;
       });
+      const directlyMovedGroups = new Set(activeDrag.before.filter((node) => node.kind === "group" && activeDrag.initial?.has(node.id)).map((node) => node.id));
+      refreshTransientGroupBounds(directlyMovedGroups);
       transientSceneVersion += 1;
       rebuildNodeIndex();
       render();
+    }
+    if (activeDrag.mode === "resize") {
+      const geometry = resizeGeometryForCanvasNode(activeDrag.node, activeDrag.handle, activeDrag.start, world, event.shiftKey, event.altKey);
+      if (geometry) {
+        nodes = nodes.map((node) => node.id === activeDrag.id ? { ...node, ...geometry } : node);
+        transientSceneVersion += 1;
+        rebuildNodeIndex();
+        render();
+      }
+    }
+    if (activeDrag.mode === "line-resize") {
+      const geometry = resizeLineForCanvasNode(activeDrag.node, activeDrag.endpoint, world);
+      if (geometry) {
+        nodes = nodes.map((node) => node.id === activeDrag.id ? { ...node, ...geometry } : node);
+        transientSceneVersion += 1;
+        rebuildNodeIndex();
+        render();
+      }
+    }
+    if (activeDrag.mode === "multi-resize") {
+      const delta = { x: world.x - activeDrag.start.x, y: world.y - activeDrag.start.y };
+      const bounds = !event.shiftKey && !event.altKey
+        ? resizeGeometryFromCornerWithFlip(activeDrag.bounds, activeDrag.handle, delta)
+        : (event.altKey ? resizeGeometryFromCenter : resizeGeometryFromCorner)(activeDrag.bounds, activeDrag.handle, delta, undefined, event.shiftKey);
+      const sourceNodes = activeDrag.before.filter((node) => activeDrag.ids.includes(node.id));
+      const patches = activeDrag.requiresAffine
+        ? scaleSelectionTransforms(activeDrag.before, activeDrag.ids, activeDrag.bounds, bounds)
+        : scaleLegacySelectionGeometry(sourceNodes, activeDrag.bounds, bounds);
+      if (patches) {
+        nodes = activeDrag.before.map((node) => patches.has(node.id) ? { ...node, ...patches.get(node.id)! } : node);
+        transientSceneVersion += 1;
+        rebuildNodeIndex();
+        render();
+      }
     }
   }
   if (event.event === "up") {
@@ -2069,6 +3200,54 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         }
       } else { history.push({ nodes: activeDrag.before, advancesRevision: true }); recordHistory("local"); revision += 1; render(); emitSnapshot(); }
     }
+    if (activeDrag.mode === "resize") {
+      const resized = nodes.find((node) => node.id === activeDrag.id);
+      const geometry = resized && { x: resized.x, y: resized.y, width: resized.width, height: resized.height, rotation: resized.rotation, relativeTransform: resized.relativeTransform };
+      const before = { x: activeDrag.node.x, y: activeDrag.node.y, width: activeDrag.node.width, height: activeDrag.node.height };
+      // While dragging we only project temporary geometry. Restore the exact
+      // pre-gesture state before dispatching so Rust receives one UpdateGeometry
+      // transaction and can atomically propagate Frame constraints.
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (geometry && (hasCommittedResize(before, geometry) || activeDrag.node.rotation !== geometry.rotation || JSON.stringify(activeDrag.node.relativeTransform) !== JSON.stringify(geometry.relativeTransform))) dispatch({ type: "update", id: activeDrag.id, patch: geometry });
+      else { render(); emitViewState(); }
+    }
+    if (activeDrag.mode === "line-resize") {
+      const resized = nodes.find((node) => node.id === activeDrag.id);
+      const geometry = resized && { x: resized.x, y: resized.y, width: resized.width, rotation: resized.rotation, relativeTransform: resized.relativeTransform };
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (geometry && (hasCommittedLineEndpointResize(activeDrag.node, geometry) || JSON.stringify(activeDrag.node.relativeTransform) !== JSON.stringify(geometry.relativeTransform))) dispatch({ type: "update", id: activeDrag.id, patch: geometry });
+      else { render(); emitViewState(); }
+    }
+    if (activeDrag.mode === "multi-resize") {
+      const nextNodes = nodes;
+      const beforeById = new Map(activeDrag.before.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y, width: node.width, height: node.height }]));
+      const afterById = new Map(nextNodes.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y, width: node.width, height: node.height }]));
+      const affinePatches = new Map(nextNodes.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, ({ x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, relativeTransform: node.relativeTransform }) satisfies SelectionTransformPatch]));
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (!(activeDrag.requiresAffine ? hasCommittedSelectionTransform(activeDrag.before, affinePatches) : hasCommittedSelectionResize(beforeById, afterById))) { render(); emitViewState(); }
+      else if (wasmDocument) {
+        dispatchTransaction({
+          id: crypto.randomUUID(),
+          baseRevision: Number(wasmDocument.revision),
+          commands: activeDrag.ids.map((id) => ({ type: "update" as const, id, patch: activeDrag.requiresAffine ? affinePatches.get(id)! : afterById.get(id)! })),
+        });
+      } else {
+        nodes = nextNodes;
+        refreshTransientGroupBounds();
+        history.push({ nodes: activeDrag.before, advancesRevision: true });
+        recordHistory("local");
+        revision += 1;
+        rebuildNodeIndex();
+        render();
+        emitSnapshot();
+      }
+    }
     drag = undefined;
   }
 }
@@ -2082,14 +3261,25 @@ function wheel(event: Extract<MainToWorker, { type: "wheel" }>) {
   render(); emitViewState(true);
 }
 function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "pointer" | "wheel" }>[]) {
+  const occurredAt = events.reduce<number | undefined>((latest, event) => Number.isFinite(event.occurredAt) && event.occurredAt! >= 0 && (latest === undefined || event.occurredAt! > latest) ? event.occurredAt : latest, undefined);
   if (events.length && events.every((event) => event.type === "wheel")) {
     events.forEach(applyWheel);
     activateInteractiveRenderQuality();
     render(1);
     emitViewState(true);
+    recordInputToRenderLatency(occurredAt);
     return;
   }
   events.forEach((event) => { if (event.type === "pointer") pointer(event); else wheel(event); });
+  recordInputToRenderLatency(occurredAt);
+}
+
+/** Epoch milliseconds work across Window/Worker performance time origins.
+ * Reject impossible values so malformed transfer data cannot poison evidence. */
+function recordInputToRenderLatency(occurredAt: number | undefined) {
+  if (occurredAt === undefined) return;
+  const elapsed = Date.now() - occurredAt;
+  if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 10_000) renderPerformance.recordInputToRender(elapsed);
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
@@ -2122,9 +3312,15 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
     else if (data.type === "pointer") pointer(data);
     else if (data.type === "wheel") wheel(data);
     else if (data.type === "key") {
-      if (data.metaKey && data.key.toLowerCase() === "z") dispatch({ type: data.shiftKey ? "redo" : "undo" });
-      else if (data.metaKey && data.key.toLowerCase() === "d") dispatch({ type: "duplicate", ids: selectedIds });
-      else if (data.key === "Backspace") dispatch({ type: "delete", ids: selectedIds });
+      if (data.key === "Enter" && !data.metaKey && !data.shiftKey) {
+        const node = createKeyboardToolNode({ tool, viewport, surface: { width, height } });
+        if (node) {
+          dispatch({ type: "create", node });
+          return;
+        }
+      }
+      const command = editorKeyCommand({ ...data, selectedIds, selectedKinds: selectedIds.map((id) => nodes.find((node) => node.id === id)?.kind) });
+      if (command) dispatch(command);
     }
   } catch (error) { emitError(error); }
 };

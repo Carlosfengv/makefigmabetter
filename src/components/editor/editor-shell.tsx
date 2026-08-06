@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/icon-button";
 import { appendLocalJournalEntry, appendPendingRemoteOperation, loadLocalDocument, loadPendingRemoteOperations, pendingOperationIsCoveredBySnapshot, prepareLocalStorage, removePendingRemoteOperation, removePendingRemoteOperationsCoveredBySnapshot, replacePendingRemoteOperation, replacePendingRemoteOperations, saveLocalDocument, saveViewportRecord } from "@/lib/local-document";
-import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasNode, type CoreLocalSnapshot, type DocumentAsset, type DocumentColor, type DocumentFontReference, type DocumentLinearGradient, type DocumentTextProperties, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type SimulatedGpuFault, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
+import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasNode, type ConstraintType, type CoreLocalSnapshot, type DocumentAsset, type DocumentColor, type DocumentFontReference, type DocumentLinearGradient, type DocumentPaint, type DocumentTextProperties, type EditorCommand, type EditorInputEvent, type EditorSnapshot, type MainToWorker, type NodeKind, type RendererPreference, type SimulatedGpuFault, type ToolKind, type WorkerToMain } from "@/lib/editor-protocol";
 import { FontFaceRegistry, fontFamilyForAsset } from "@/lib/font-face-registry";
 import { canvasDesignTokens } from "@/lib/canvas-design-tokens";
 import { layoutTextRanges, segmentGraphemes, textParagraphRanges } from "@/lib/text-layout";
@@ -30,15 +30,33 @@ import phase0BasicCardFixture from "../../../fixtures/documents/phase0-basic-car
 import phase1TextMultilingualFixture from "../../../fixtures/documents/phase1-text-multilingual.fixture.json";
 import phase1Text10kFixture from "../../../fixtures/documents/phase1-text-10k.fixture.json";
 import phase1RenderCompositeFixture from "../../../fixtures/documents/phase1-render-composite.fixture.json";
+import phase2CommonNodesFixture from "../../../fixtures/documents/phase2-common-nodes.fixture.json";
 import { createPhase1Shape100kFixture } from "@/lib/phase1-shape-100k-fixture";
 import { resolveLayerDrop, resolveLayerOrder, type LayerOrderAction } from "@/lib/layer-order";
+import { exportPageToSvg } from "@/lib/svg-export";
+import { mixedSelectionValue, type MixedSelectionValue } from "@/lib/mixed-selection";
+import { lineSelectionAppearance, parseLineDashPattern, strokeSelectionAppearance } from "@/lib/line-selection-appearance";
+import { resolvedStrokeWeights, strokeWeightSelection } from "@/lib/stroke-weight-selection";
+import { cornerRadiusSelection, resolvedCornerRadii } from "@/lib/corner-radius-selection";
+import { cornerSmoothingSelection } from "@/lib/corner-smoothing-selection";
+import { constraintSelection, type ConstraintSelectionValue } from "@/lib/constraint-selection";
+import { hasFrameConstraintScope } from "@/lib/frame-constraint-scope";
+import { mixedInspectorCapabilities, supportsCornerRadiusInspector, supportsGenericAppearanceInspector, supportsPaintStackInspector, supportsPerSideStrokeInspector, supportsStrokeAlignInspector, supportsStrokeDetailsInspector } from "@/lib/inspector-capabilities";
+import { layerKeyboardNestingTarget, type LayerNestingIntent } from "@/lib/layer-keyboard-nesting";
+import { resolveMultiResizeSelection } from "@/lib/multi-selection";
+import { selectionGeometryPatches } from "@/lib/selection-geometry-edit";
+import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
+import { ellipseArcUpdatePatch } from "@/lib/ellipse-arc";
 
 const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> = [
   { id: "select", label: "Move", glyph: "↖", key: "V" },
   { id: "hand", label: "Pan", glyph: "✋", key: "H" },
   { id: "frame", label: "Frame", glyph: "#", key: "F" },
+  { id: "section", label: "Section", glyph: "§", key: "S" },
   { id: "rectangle", label: "Rectangle", glyph: "□", key: "R" },
   { id: "ellipse", label: "Ellipse", glyph: "○", key: "O" },
+  { id: "line", label: "Line", glyph: "／", key: "L" },
+  { id: "arrow", label: "Arrow", glyph: "→", key: "A" },
   { id: "text", label: "Text", glyph: "T", key: "T" },
 ];
 
@@ -377,6 +395,8 @@ function requestedFixtureSnapshot(): Extract<EditorCommand, { type: "hydrate" }>
         ? phase1Text10kFixture
         : fixture === "phase1-render-composite"
           ? { ...phase1RenderCompositeFixture, nodes: phase1RenderCompositeFixture.nodes.filter((node) => node.kind !== "image") }
+          : fixture === "phase2-common-nodes"
+            ? phase2CommonNodesFixture
       : undefined;
   if (!requestedDocumentFixture) return undefined;
   return {
@@ -415,6 +435,7 @@ function requestedFixtureStatus() {
   if (fixture === "phase1-text-10k") return "fixed Phase 1 F-TEXT-10K fixture loaded";
   if (fixture === "phase1-text-multilingual") return "fixed Phase 1 text fixture loaded";
   if (fixture === "phase1-render-composite") return "fixed Phase 1 render composite fixture loaded";
+  if (fixture === "phase2-common-nodes") return "fixed Phase 2 common-nodes fixture loaded";
   return "fixed Phase 0 fixture loaded";
 }
 
@@ -1274,7 +1295,7 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       const rect = canvas.getBoundingClientRect();
-      const input: EditorInputEvent = { type: "wheel", x: event.clientX - rect.left, y: event.clientY - rect.top, deltaX: event.deltaX, deltaY: event.deltaY, ctrlKey: event.ctrlKey || event.metaKey };
+      const input: EditorInputEvent = { type: "wheel", x: event.clientX - rect.left, y: event.clientY - rect.top, deltaX: event.deltaX, deltaY: event.deltaY, ctrlKey: event.ctrlKey || event.metaKey, occurredAt: Date.now() };
       const batcher = inputBatcherRef.current;
       if (batcher) batcher.enqueue(input);
       else postInput([input]);
@@ -1295,7 +1316,7 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
           post({ type: "tool", tool: match.id });
         } else setStatus("Engine worker online · read-only tab");
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") event.preventDefault();
+      if ((event.metaKey || event.ctrlKey) && ["d", "g"].includes(event.key.toLowerCase())) event.preventDefault();
       if ((event.metaKey || event.ctrlKey) && ["[", "]"].includes(event.key) && writerRef.current) {
         event.preventDefault();
         const direction: LayerOrderAction = event.key === "]" ? (event.shiftKey ? "front" : "forward") : (event.shiftKey ? "back" : "backward");
@@ -1311,10 +1332,11 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
   // Viewport updates replace `snapshot`, but keep the document and selection
   // references stable. Depending on the whole snapshot made every zoom frame
   // linearly scan all 50K nodes just to rediscover that nothing is selected.
-  const selected = useMemo(() => {
-    const selectedId = snapshot.selectedIds[0];
-    return selectedId ? snapshot.nodes.find((node) => node.id === selectedId) : undefined;
+  const selectedNodes = useMemo(() => {
+    const ids = new Set(snapshot.selectedIds);
+    return snapshot.nodes.filter((node) => ids.has(node.id));
   }, [snapshot.nodes, snapshot.selectedIds]);
+  const selected = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
   const canEdit = accessPreference === "edit" && writerMode === "owner" && !safeMode;
   const accessLabel = safeMode
     ? "安全模式"
@@ -1333,7 +1355,9 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
       ? `main ${mainThreadLongTasks.count} long tasks · worst ${mainThreadLongTasks.maxDurationMs.toFixed(0)}ms`
       : "main 0 long tasks";
   const frameEvidence = frameIntervals.samples ? `frame P95 ${frameIntervals.p95Ms.toFixed(1)}ms` : "collecting frame intervals";
-  const inputBacklogEvidence = inputBacklog.samples ? `input backlog P95 ${inputBacklog.p95Ms.toFixed(1)}ms` : "collecting input backlog";
+  const inputBacklogEvidence = snapshot.performance?.inputToRenderSamples
+    ? `input→render P95 ${snapshot.performance.inputToRenderP95Ms.toFixed(1)}ms · backlog P95 ${inputBacklog.p95Ms.toFixed(1)}ms`
+    : inputBacklog.samples ? `collecting input→render · backlog P95 ${inputBacklog.p95Ms.toFixed(1)}ms` : "collecting input latency";
   const viewportCheckpointEvidence = viewportCheckpoints.samples ? `viewport checkpoint P95 ${viewportCheckpoints.p95Ms.toFixed(1)}ms` : "collecting viewport checkpoints";
   const resourceEvidence = snapshot.resources ? `${snapshot.assets?.length ?? 0} assets · ${snapshot.resources.documentNodes}/${snapshot.resources.maxDocumentNodes} nodes · ${(snapshot.resources.documentBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxDocumentBytes / 1024 / 1024).toFixed(0)} MB document · ${(snapshot.resources.wasmHeapBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxWasmHeapBytes / 1024 / 1024).toFixed(0)} MB WASM · ${(snapshot.resources.renderSurfaceBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxRenderSurfaceBytes / 1024 / 1024).toFixed(0)} MB surface · ${(snapshot.resources.gpuSceneBytes / 1024 / 1024).toFixed(1)}/${(snapshot.resources.maxGpuSceneBytes / 1024 / 1024).toFixed(0)} MB GPU scene${snapshot.resources.gpuSceneWithinBudget ? "" : " (Canvas fallback)"}` : "collecting resource evidence";
   const setActiveTool = useCallback((next: ToolKind) => {
@@ -1353,7 +1377,7 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
       return;
     }
     const rect = event.currentTarget.getBoundingClientRect();
-    const packet: EditorInputEvent = { type: "pointer", event: type, x: event.clientX - rect.left, y: event.clientY - rect.top, shiftKey: event.shiftKey, button: event.button, ...(readOnly ? { readOnly: true } : {}) };
+    const packet: EditorInputEvent = { type: "pointer", event: type, x: event.clientX - rect.left, y: event.clientY - rect.top, shiftKey: event.shiftKey, altKey: event.altKey, button: event.button, occurredAt: Date.now(), ...(readOnly ? { readOnly: true } : {}) };
     if (type === "move") {
       const batcher = inputBatcherRef.current;
       if (batcher) batcher.enqueue(packet);
@@ -1363,6 +1387,15 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
     const batcher = inputBatcherRef.current;
     if (batcher) batcher.flushWith(packet);
     else postInput([packet]);
+  };
+  const drillDownAtCanvasPoint = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const readOnly = !writerRef.current;
+    const base = { type: "pointer" as const, x: event.clientX - rect.left, y: event.clientY - rect.top, shiftKey: event.shiftKey, altKey: event.altKey, button: event.button, occurredAt: Date.now(), ...(readOnly ? { readOnly: true as const } : {}) };
+    // PointerEvent does not reliably carry a click count. The browser's native
+    // double-click event is the authoritative boundary, so replay a no-motion
+    // press/release pair with the explicit Group drill-down intent.
+    postInput([{ ...base, event: "down", drillDown: true }, { ...base, event: "up" }]);
   };
   const startCanvasTextEdit = async (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canEdit) return;
@@ -1485,18 +1518,102 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
     if (patch.rotation !== undefined && !Number.isFinite(patch.rotation)) return;
     if (selected) command({ type: "update", id: selected.id, patch: resolveTextAutoSizePatch(selected, patch) });
   };
-  const selectCreationTool = useCallback((kind: Exclude<NodeKind, "image">) => setActiveTool(kind), [setActiveTool]);
-  const selectLayer = useCallback((id: string) => command({ type: "select", ids: [id] }), [command]);
-  const dropLayerBefore = useCallback((draggedId: string, beforeId?: string) => {
+  const updateSelection = (patch: Partial<CanvasNode>) => {
+    if (patch.strokeWidth !== undefined && (!Number.isFinite(patch.strokeWidth) || patch.strokeWidth < 0)) return;
+    if (patch.rotation !== undefined && !Number.isFinite(patch.rotation)) return;
+    if (selectedNodes.length === 1) { update(patch); return; }
+    if (safeMode || !writerRef.current || selectedNodes.length < 2) return;
+    // The queue resolves this array as one Core batch, so a multi-select edit
+    // has one revision and one Undo item. Each node gets its own text-safe
+    // projection rather than borrowing a value from the first selected node.
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => ({
+      type: "update" as const,
+      id: node.id,
+      patch: resolveTextAutoSizePatch(node, patch),
+    })));
+  };
+  const updateSelectionGeometry = (patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height">>) => {
+    if (safeMode || !writerRef.current || selectedNodes.length < 2) return;
+    const current = snapshotRef.current;
+    const resolved = selectionGeometryPatches(current.nodes, current.selectedIds, patch);
+    if (!resolved) return;
+    transactionQueueRef.current?.enqueue(resolved.selection.ids.map((id) => ({
+      type: "update" as const,
+      id,
+      patch: resolved.patches.get(id)!,
+    })));
+  };
+  const updateSelectionStrokeWeight = (index: number, value: number) => {
+    if (!Number.isFinite(value) || value < 0 || safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => node.kind === "frame" || node.kind === "rectangle")) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => {
+      const weights = [...resolvedStrokeWeights(node)] as [number, number, number, number];
+      weights[index] = value;
+      return { type: "update" as const, id: node.id, patch: { strokeWeights: weights } };
+    }));
+  };
+  const useSelectionUniformStrokeWeights = () => {
+    if (safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => node.kind === "frame" || node.kind === "rectangle")) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => ({ type: "update" as const, id: node.id, patch: { strokeWeights: undefined } })));
+  };
+  const updateSelectionCornerRadius = (index: number, value: number) => {
+    if (!Number.isFinite(value) || value < 0 || safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => node.kind === "frame" || node.kind === "rectangle" || node.kind === "section")) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => {
+      const radii = [...resolvedCornerRadii(node)] as [number, number, number, number];
+      radii[index] = value;
+      return { type: "update" as const, id: node.id, patch: { cornerRadii: radii } };
+    }));
+  };
+  const useSelectionUniformCornerRadius = () => {
+    if (safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => node.kind === "frame" || node.kind === "rectangle" || node.kind === "section")) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => ({ type: "update" as const, id: node.id, patch: { cornerRadii: undefined } })));
+  };
+  const updateSelectionConstraint = (axis: "horizontal" | "vertical", value: ConstraintType) => {
+    if (safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => hasFrameConstraintScope(snapshotRef.current.nodes, node))) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => ({
+      type: "update" as const,
+      id: node.id,
+      patch: { constraints: { ...(node.constraints ?? { horizontal: "min" as const, vertical: "min" as const }), [axis]: value } },
+    })));
+  };
+  const removeSelectionConstraints = () => {
+    if (safeMode || !writerRef.current || selectedNodes.length < 2 || !selectedNodes.every((node) => hasFrameConstraintScope(snapshotRef.current.nodes, node))) return;
+    transactionQueueRef.current?.enqueue(selectedNodes.map((node) => ({ type: "update" as const, id: node.id, patch: { constraints: undefined } })));
+  };
+  const selectCreationTool = useCallback((kind: Exclude<NodeKind, "image" | "group">) => setActiveTool(kind), [setActiveTool]);
+  const selectLayer = useCallback((id: string, options?: { additive?: boolean }) => {
+    const selected = snapshotRef.current.selectedIds;
+    command({ type: "select", ids: resolveCanvasObjectSelection(selected, id, Boolean(options?.additive)) });
+  }, [command]);
+  const dropLayer = useCallback((draggedId: string, target?: { beforeId?: string; parentId?: string }) => {
     const current = snapshotRef.current;
     const pageNodes = current.nodes.filter((node) => (node.pageId ?? defaultPageId) === current.activePageId);
     const moving = current.selectedIds.includes(draggedId) ? current.selectedIds : [draggedId];
-    const resolved = resolveLayerDrop(pageNodes, moving, beforeId);
+    if (target?.parentId) {
+      command({ type: "reparent", ids: moving, parentId: target.parentId });
+      return;
+    }
+    const resolved = resolveLayerDrop(pageNodes, moving, target?.beforeId);
     if (resolved) command({ type: "reposition", positionIds: [...resolved.positionIds].map(([id, positionId]) => ({ id, positionId })) });
+  }, [command]);
+  const nestLayer = useCallback((id: string, intent: LayerNestingIntent) => {
+    const current = snapshotRef.current;
+    const pageNodes = current.nodes.filter((node) => (node.pageId ?? defaultPageId) === current.activePageId);
+    const target = layerKeyboardNestingTarget(pageNodes, id, intent);
+    if (target) command({ type: "reparent", ids: [target.id], parentId: target.parentId });
+  }, [command]);
+  const renameLayer = useCallback((id: string, name: string) => {
+    const next = name.trim();
+    if (next) command({ type: "update", id, patch: { name: next } });
   }, [command]);
   const createFrame = useCallback(() => selectCreationTool("frame"), [selectCreationTool]);
   const createRectangle = useCallback(() => selectCreationTool("rectangle"), [selectCreationTool]);
   const createText = useCallback(() => selectCreationTool("text"), [selectCreationTool]);
+  const groupSelected = useCallback(() => command({ type: "group", ids: snapshotRef.current.selectedIds }), [command]);
+  const ungroupSelected = useCallback(() => {
+    const current = snapshotRef.current;
+    const group = current.selectedIds.length === 1 ? current.nodes.find((node) => node.id === current.selectedIds[0]) : undefined;
+    if (group?.kind === "group") command({ type: "ungroup", id: group.id });
+  }, [command]);
   const openAssetPicker = useCallback(() => {
     const input = assetInputRef.current;
     if (!input) return;
@@ -1523,6 +1640,20 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
     command({ type: "select-page", id });
   }, [command, post]);
   const createPage = useCallback(() => command({ type: "create-page", id: createId(), name: `Page ${snapshot.pages.length + 1}` }), [command, snapshot.pages.length]);
+  const exportActivePageAsSvg = useCallback(() => {
+    const current = snapshotRef.current;
+    const result = exportPageToSvg(current.nodes, { pageId: current.activePageId, defaultPageId });
+    const page = current.pages.find((candidate) => candidate.id === current.activePageId);
+    const anchor = document.createElement("a");
+    const url = URL.createObjectURL(new Blob([result.svg], { type: "image/svg+xml;charset=utf-8" }));
+    anchor.href = url;
+    anchor.download = `${svgFileStem(page?.name ?? "page")}.svg`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setStatus(result.warnings.length ? "SVG exported · image fallback retained" : "SVG exported");
+  }, []);
   const importAsset = useCallback(async (file: File) => {
     if (!canEdit) return;
     assetUploadAbortRef.current?.abort();
@@ -1639,21 +1770,22 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
           <input ref={assetInputRef} className="asset-file-input" type="file" accept="image/png,image/jpeg,image/webp,font/woff2,font/woff,font/ttf,font/otf,.woff2,.woff,.ttf,.otf" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void importAsset(file); }} />
           <button className="quiet-button" disabled={!canEdit} title={assetStatus ?? "Import image or font"} onClick={() => assetImporting ? assetUploadAbortRef.current?.abort() : openAssetPicker()}>{assetImporting ? "Cancel import" : "Import"}</button>
           {assetStatus && <span className={`asset-import-status ${assetStatus.startsWith("Import failed") ? "is-error" : ""}`} role="status" aria-live="polite">{assetStatus}</span>}
+          <button className="quiet-button" title="Export active page as SVG" onClick={exportActivePageAsSvg}>Export SVG</button>
           <button className="quiet-button" disabled={!canEdit} onClick={() => command({ type: "reset" })}>Reset demo</button>
           <button className="publish-button">Share <span>↗</span></button>
         </div>
       </header>
 
       <aside className="tool-rail" aria-label="Canvas tools">
-        {tools.map((item) => <IconButton key={item.id} label={`${item.label} (${item.key})`} active={tool === item.id} disabled={safeMode || (!canEdit && item.id !== "select" && item.id !== "hand")} onClick={() => setActiveTool(item.id)}><span>{item.glyph}</span><i>{item.key}</i></IconButton>)}
+        {tools.map((item) => <IconButton key={item.id} label={`${item.label} (${item.key})${item.id !== "select" && item.id !== "hand" ? " · Enter creates at centre" : ""}`} active={tool === item.id} disabled={safeMode || (!canEdit && item.id !== "select" && item.id !== "hand")} onClick={() => setActiveTool(item.id)}><span>{item.glyph}</span><i>{item.key}</i></IconButton>)}
         <div className="rail-spacer" />
-        <IconButton label="Zoom in" disabled={safeMode} onClick={() => { const input: EditorInputEvent = { type: "wheel", x: window.innerWidth / 2, y: window.innerHeight / 2, deltaX: 0, deltaY: -100, ctrlKey: true }; const batcher = inputBatcherRef.current; if (batcher) batcher.enqueue(input); else postInput([input]); }}>+</IconButton>
+        <IconButton label="Zoom in" disabled={safeMode} onClick={() => { const input: EditorInputEvent = { type: "wheel", x: window.innerWidth / 2, y: window.innerHeight / 2, deltaX: 0, deltaY: -100, ctrlKey: true, occurredAt: Date.now() }; const batcher = inputBatcherRef.current; if (batcher) batcher.enqueue(input); else postInput([input]); }}>+</IconButton>
       </aside>
 
-      <LayerPanel nodes={snapshot.nodes.filter((node) => (node.pageId ?? defaultPageId) === snapshot.activePageId)} pages={snapshot.pages} activePageId={snapshot.activePageId} selectedIds={snapshot.selectedIds} canEdit={canEdit} onSelect={selectLayer} onDropBefore={dropLayerBefore} onReorder={reorderSelectedLayers} onSelectPage={selectPage} onCreatePage={createPage} onCreateFrame={createFrame} onCreateRectangle={createRectangle} onCreateText={createText} />
+      <LayerPanel nodes={snapshot.nodes.filter((node) => (node.pageId ?? defaultPageId) === snapshot.activePageId)} pages={snapshot.pages} activePageId={snapshot.activePageId} selectedIds={snapshot.selectedIds} canEdit={canEdit} onSelect={selectLayer} onDrop={dropLayer} onNest={nestLayer} onRename={renameLayer} onReorder={reorderSelectedLayers} onSelectPage={selectPage} onCreatePage={createPage} onCreateFrame={createFrame} onCreateRectangle={createRectangle} onCreateText={createText} onGroup={groupSelected} onUngroup={ungroupSelected} />
 
       <section className="canvas-wrap" aria-label="Design canvas">
-        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onDoubleClick={startCanvasTextEdit} />
+        <canvas key={`editor-canvas-${canvasGeneration}`} ref={canvasRef} className="design-canvas" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointer(event, "down"); }} onPointerMove={(event) => pointer(event, "move")} onPointerLeave={(event) => pointer(event, "leave")} onPointerUp={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={(event) => { pointer(event, "up"); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onDoubleClick={(event) => { drillDownAtCanvasPoint(event); void startCanvasTextEdit(event); }} />
         {canvasTextEdit && canvasTextNode && canvasTextStyle && <div ref={canvasTextEditorRef} className="canvas-text-editor" role="textbox" aria-label="Canvas text content" aria-multiline="true" data-rust-caret={canvasTextEdit.rustCaretReady ? "ready" : "pending"} autoFocus contentEditable suppressContentEditableWarning spellCheck={false} style={canvasTextStyle} onCompositionStart={() => { canvasTextIsComposingRef.current = true; pendingCanvasCaretLayoutsRef.current.clear(); setCanvasTextEdit((current) => current ? { ...current, rustCaretReady: false, rustCaretLayout: undefined } : current); }} onCompositionEnd={(event) => { canvasTextIsComposingRef.current = false; const text = event.currentTarget.innerText; const caret = contentEditableCaretOffset(event.currentTarget); setCanvasTextEdit((current) => current ? { ...current, draft: text, caret, selectionAnchor: caret, rustCaretReady: false, rustCaretLayout: undefined } : current); requestCanvasCaretLayout(canvasTextNode.id, text, caret); }} onInput={(event) => { const text = event.currentTarget.innerText; const caret = contentEditableCaretOffset(event.currentTarget); setCanvasTextEdit((current) => current ? { ...current, draft: text, caret, selectionAnchor: caret, rustCaretReady: false, rustCaretLayout: undefined } : current); if (!canvasTextIsComposingRef.current) requestCanvasCaretLayout(canvasTextNode.id, text, caret); }} onBlur={commitCanvasTextEdit} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); cancelCanvasTextEdit(); } else if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); commitCanvasTextEdit(); } else if (!canvasTextIsComposingRef.current && !event.altKey && !event.metaKey && !event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight") && canvasTextEdit.rustCaretLayout) { const selection = contentEditableSelectionOffsets(event.currentTarget); if (!selection) return; event.preventDefault(); const direction = event.key === "ArrowLeft" ? -1 : 1; const anchor = snapUtf16CaretToRustLayout(canvasTextEdit.draft, selection.anchor, canvasTextEdit.rustCaretLayout); const focus = snapUtf16CaretToRustLayout(canvasTextEdit.draft, selection.focus, canvasTextEdit.rustCaretLayout); const nextCaret = !event.shiftKey && anchor !== focus ? direction < 0 ? Math.min(anchor, focus) : Math.max(anchor, focus) : moveUtf16CaretInRustLayout(canvasTextEdit.draft, focus, direction, canvasTextEdit.rustCaretLayout); const nextAnchor = event.shiftKey ? anchor : nextCaret; placeContentEditableSelection(event.currentTarget, nextAnchor, nextCaret); setCanvasTextEdit((current) => current ? { ...current, caret: nextCaret, selectionAnchor: nextAnchor } : current); } }}>{canvasTextEditParagraphs.map((paragraph, index) => <div key={`${paragraph.start}-${paragraph.end}`} className="canvas-text-paragraph" dir={paragraph.direction} style={{ marginBottom: index < canvasTextEditParagraphs.length - 1 ? `${(canvasTextNode.textProperties?.paragraph.paragraphSpacing ?? 0) * snapshot.viewport.zoom}px` : 0, textAlign: paragraph.direction === "rtl" ? "right" : canvasTextNode.textProperties?.paragraph.alignment === "justify" ? "left" : canvasTextNode.textProperties?.paragraph.alignment ?? "left" }}>{paragraph.spans.length ? paragraph.spans.map((span) => {
           const family = span.style.font ? `"${fontFamilyForAsset(span.style.font.assetId)}", ` : "";
           return <span key={`${span.start}-${span.end}`} style={{ fontFamily: `${family}${canvasDesignTokens.typography.canvasText.family}`, fontSize: `${span.style.fontSize * snapshot.viewport.zoom}px`, fontWeight: span.style.fontWeight, fontStyle: span.style.italic ? "italic" : "normal", fontSynthesis: "none", letterSpacing: `${span.style.letterSpacing * snapshot.viewport.zoom}px` }}>{span.text}</span>;
@@ -1664,16 +1796,106 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
 
       <aside className="inspector panel" aria-label="Properties">
         <div className="panel-heading"><span>Inspect</span><span className="revision">r{snapshot.revision}</span></div>
-        {selected ? <Inspector node={selected} assets={snapshot.assets ?? []} fontAvailability={snapshot.fontAvailability} onUpdate={update} readOnly={!canEdit} /> : <div className="empty-inspector">Select an object to reveal its geometry, fill and layer settings.</div>}
-        <div className="history-actions"><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={() => command({ type: "duplicate", ids: snapshot.selectedIds })}>Duplicate ⌘D</button><button disabled={!canEdit || !snapshot.canUndo} onClick={() => command({ type: "undo" })}>↶ Undo</button><button disabled={!canEdit || !snapshot.canRedo} onClick={() => command({ type: "redo" })}>Redo ↷</button></div>
+        {selected ? <Inspector node={selected} sceneNodes={snapshot.nodes} assets={snapshot.assets ?? []} fontAvailability={snapshot.fontAvailability} onUpdate={update} readOnly={!canEdit} /> : selectedNodes.length > 1 ? <MultiInspector nodes={selectedNodes} sceneNodes={snapshot.nodes} onUpdate={updateSelection} onUpdateGeometry={updateSelectionGeometry} onUpdateStrokeWeight={updateSelectionStrokeWeight} onUseUniformStrokeWeights={useSelectionUniformStrokeWeights} onUpdateCornerRadius={updateSelectionCornerRadius} onUseUniformCornerRadius={useSelectionUniformCornerRadius} onUpdateConstraint={updateSelectionConstraint} onRemoveConstraints={removeSelectionConstraints} readOnly={!canEdit} /> : <div className="empty-inspector">Select an object to reveal its geometry, fill and layer settings.</div>}
+        <div className="history-actions"><button disabled={!canEdit || snapshot.selectedIds.length < 2} onClick={groupSelected}>Group ⌘G</button><button disabled={!canEdit || selected?.kind !== "group"} onClick={ungroupSelected}>Ungroup ⇧⌘G</button><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={() => command({ type: "duplicate", ids: snapshot.selectedIds })}>Duplicate ⌘D</button><button disabled={!canEdit || !snapshot.canUndo} onClick={() => command({ type: "undo" })}>↶ Undo</button><button disabled={!canEdit || !snapshot.canRedo} onClick={() => command({ type: "redo" })}>Redo ↷</button></div>
       </aside>
     </main>
   );
 }
 
-function Inspector({ node, assets, fontAvailability, onUpdate, readOnly }: { node: CanvasNode; assets: DocumentAsset[]; fontAvailability?: EditorSnapshot["fontAvailability"]; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+function MultiInspector({ nodes, sceneNodes, onUpdate, onUpdateGeometry, onUpdateStrokeWeight, onUseUniformStrokeWeights, onUpdateCornerRadius, onUseUniformCornerRadius, onUpdateConstraint, onRemoveConstraints, readOnly }: { nodes: readonly CanvasNode[]; sceneNodes: readonly CanvasNode[]; onUpdate: (patch: Partial<CanvasNode>) => void; onUpdateGeometry: (patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height">>) => void; onUpdateStrokeWeight: (index: number, value: number) => void; onUseUniformStrokeWeights: () => void; onUpdateCornerRadius: (index: number, value: number) => void; onUseUniformCornerRadius: () => void; onUpdateConstraint: (axis: "horizontal" | "vertical", value: ConstraintType) => void; onRemoveConstraints: () => void; readOnly: boolean }) {
+  const rotation = mixedSelectionValue(nodes.map((node) => node.rotation));
+  const opacity = mixedSelectionValue(nodes.map((node) => node.opacity));
+  const visible = mixedSelectionValue(nodes.map((node) => node.visible !== false));
+  const locked = mixedSelectionValue(nodes.map((node) => Boolean(node.locked)));
+  const capabilities = mixedInspectorCapabilities(nodes);
+  const supportsStrokeWidth = capabilities.strokeWidth;
+  const strokeWidth = mixedSelectionValue(nodes.map((node) => node.strokeWidth));
+  const supportsStrokeAlign = capabilities.strokeAlign;
+  const strokeAlign = mixedSelectionValue(nodes.map((node) => node.strokeAlign ?? "inside"));
+  const strokeWeights = capabilities.perSideStroke ? strokeWeightSelection(nodes) : undefined;
+  const cornerRadii = capabilities.corners ? cornerRadiusSelection(nodes) : undefined;
+  const cornerSmoothing = capabilities.corners ? cornerSmoothingSelection(nodes) : undefined;
+  const constraints = nodes.every((node) => hasFrameConstraintScope(sceneNodes, node)) ? constraintSelection(nodes) : undefined;
+  const lineAppearance = capabilities.lineStroke ? lineSelectionAppearance(nodes) : undefined;
+  const strokeAppearance = capabilities.strokeDetails ? strokeSelectionAppearance(nodes) : undefined;
+  const sectionContentsHidden = capabilities.sectionContents
+    ? mixedSelectionValue(nodes.map((node) => Boolean(node.contentsHidden)))
+    : undefined;
+  const frameClipsContent = capabilities.frameClip
+    ? mixedSelectionValue(nodes.map((node) => node.clipsContent !== false))
+    : undefined;
+  const selectionGeometry = resolveMultiResizeSelection(sceneNodes, nodes.map((node) => node.id));
+  const supportsFill = capabilities.fill;
+  const simpleFill = supportsFill && nodes.every((node) => !node.fills?.length && !node.fillGradient);
+  const simpleStroke = supportsStrokeWidth && nodes.every((node) => !node.strokes?.length && !node.strokeGradient);
+  const fill = mixedSelectionValue(nodes.map((node) => node.fill));
+  const stroke = mixedSelectionValue(nodes.map((node) => node.stroke));
+  const selectionField = (value: number): MixedSelectionValue<number> => ({ kind: "same", value: Math.round(value * 100) / 100 });
+  const numericField = (label: string, value: MixedSelectionValue<number>, unit: string, apply: (value: number) => void, minimum?: number) => <label className="field"><span>{label}</span><div><input aria-label={`Selection ${label.toLowerCase()}`} disabled={readOnly} inputMode="decimal" value={value.kind === "same" ? value.value : ""} placeholder={value.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => {
+    const raw = event.target.value.trim();
+    const next = Number(raw);
+    if (raw && Number.isFinite(next) && (minimum === undefined || next >= minimum)) apply(next);
+  }} /><em>{unit}</em></div></label>;
+  return <div className="inspector-content multi-inspector">
+    <div className="selection-title" role="status" aria-live="polite"><span className="node-icon">◫</span><strong>{nodes.length} layers selected</strong></div>
+    {selectionGeometry && <section><h2>Geometry</h2><div className="field-grid">{numericField("X", selectionField(selectionGeometry.bounds.x), "px", (value) => onUpdateGeometry({ x: value }))}{numericField("Y", selectionField(selectionGeometry.bounds.y), "px", (value) => onUpdateGeometry({ y: value }))}{numericField("W", selectionField(selectionGeometry.bounds.width), "px", (value) => onUpdateGeometry({ width: value }), .001)}{numericField("H", selectionField(selectionGeometry.bounds.height), "px", (value) => onUpdateGeometry({ height: value }), .001)}</div></section>}
+    <section><h2>Selection</h2><div className="field-grid">{numericField("Rotation", rotation, "°", (value) => onUpdate({ rotation: value }))}<label className="field"><span>Opacity</span><div><input aria-label="Selection opacity" disabled={readOnly} inputMode="decimal" value={opacity.kind === "same" ? Math.round(opacity.value * 100) : ""} placeholder={opacity.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => {
+      const raw = event.target.value.trim();
+      const value = Number(raw);
+      if (raw && Number.isFinite(value) && value >= 0 && value <= 100) onUpdate({ opacity: value / 100 });
+    }} /><em>%</em></div></label>{supportsStrokeWidth && numericField("Stroke width", strokeWidth, "px", (value) => onUpdate({ strokeWidth: value }), 0)}{supportsStrokeAlign && <label className="field"><span>Stroke align</span><div><select aria-label="Selection stroke align" disabled={readOnly} value={strokeAlign.kind === "same" ? strokeAlign.value : ""} onChange={(event) => { const value = event.target.value; if (value === "inside" || value === "center" || value === "outside") onUpdate({ strokeAlign: value }); }}><option value="" disabled>Mixed</option><option value="inside">Inside</option><option value="center">Center</option><option value="outside">Outside</option></select></div></label>}</div></section>
+    {strokeWeights && <section><h2>Stroke weights</h2><div className="field-grid">{numericField("Top weight", strokeWeights.top, "px", (value) => onUpdateStrokeWeight(0, value), 0)}{numericField("Right weight", strokeWeights.right, "px", (value) => onUpdateStrokeWeight(1, value), 0)}{numericField("Bottom weight", strokeWeights.bottom, "px", (value) => onUpdateStrokeWeight(2, value), 0)}{numericField("Left weight", strokeWeights.left, "px", (value) => onUpdateStrokeWeight(3, value), 0)}</div><button type="button" disabled={readOnly || !strokeWeights.hasExplicitWeights} onClick={onUseUniformStrokeWeights}>Use uniform width</button></section>}
+    {cornerRadii && <section><h2>Corner radii</h2><div className="field-grid">{numericField("Top left radius", cornerRadii.topLeft, "px", (value) => onUpdateCornerRadius(0, value), 0)}{numericField("Top right radius", cornerRadii.topRight, "px", (value) => onUpdateCornerRadius(1, value), 0)}{numericField("Bottom right radius", cornerRadii.bottomRight, "px", (value) => onUpdateCornerRadius(2, value), 0)}{numericField("Bottom left radius", cornerRadii.bottomLeft, "px", (value) => onUpdateCornerRadius(3, value), 0)}</div><button type="button" disabled={readOnly || !cornerRadii.hasExplicitRadii} onClick={onUseUniformCornerRadius}>Use uniform radius</button></section>}
+    {cornerSmoothing && <section><h2>Corner smoothing</h2><label className="field"><span>Amount</span><div><input aria-label="Selection corner smoothing" disabled={readOnly} inputMode="decimal" value={cornerSmoothing.kind === "same" ? Math.round(cornerSmoothing.value * 100) : ""} placeholder={cornerSmoothing.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => { const raw = event.target.value.trim(); const value = Number(raw); if (raw && Number.isFinite(value) && value >= 0 && value <= 100) onUpdate({ cornerSmoothing: value / 100 }); }} /><em>%</em></div></label><button type="button" disabled={readOnly || (cornerSmoothing.kind === "same" && cornerSmoothing.value === 0)} onClick={() => onUpdate({ cornerSmoothing: undefined })}>Use circular corners</button></section>}
+    {constraints && <section><h2>Constraints</h2><div className="field-grid"><SelectionConstraintField label="Selection horizontal constraint" value={constraints.horizontal} readOnly={readOnly} onChange={(value) => onUpdateConstraint("horizontal", value)} /><SelectionConstraintField label="Selection vertical constraint" value={constraints.vertical} readOnly={readOnly} onChange={(value) => onUpdateConstraint("vertical", value)} /></div><button type="button" disabled={readOnly || !constraints.hasExplicitConstraints} onClick={onRemoveConstraints}>Remove constraints</button></section>}
+    {strokeAppearance && <section><h2>{lineAppearance ? "Line stroke" : "Stroke details"}</h2><div className="field-grid">{lineAppearance && <><LineSelectionCap label="Selection start cap" value={lineAppearance.strokeCapStart} readOnly={readOnly} onChange={(value) => onUpdate({ strokeCapStart: value })} /><LineSelectionCap label="Selection end cap" value={lineAppearance.strokeCapEnd} readOnly={readOnly} onChange={(value) => onUpdate({ strokeCapEnd: value })} /></>}<label className="field"><span>Join</span><div><select aria-label="Selection stroke join" disabled={readOnly} value={strokeAppearance.strokeJoin.kind === "same" ? strokeAppearance.strokeJoin.value : ""} onChange={(event) => { const value = event.target.value; if (value === "miter" || value === "bevel" || value === "round") onUpdate({ strokeJoin: value }); }}><option value="" disabled>Mixed</option><option value="miter">Miter</option><option value="bevel">Bevel</option><option value="round">Round</option></select></div></label>{numericField("Miter limit", strokeAppearance.strokeMiterLimit, "", (value) => onUpdate({ strokeMiterLimit: value }), 1)}<LineSelectionDash value={strokeAppearance.strokeDashPattern} readOnly={readOnly} onChange={(value) => onUpdate({ strokeDashPattern: value })} /></div></section>}
+    <section><h2>Paint</h2><div className="field-grid">{simpleFill ? <label className="field"><span>Fill</span><div><input aria-label="Selection fill" disabled={readOnly} value={fill.kind === "same" ? fill.value : ""} placeholder={fill.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => { const color = documentColorFromCssHex(event.target.value); if (color) onUpdate({ fill: event.target.value, fills: undefined, fillGradient: undefined }); }} /></div></label> : <p className="mixed-not-applicable">Fill layers: select one compatible layer to edit gradients or Paint Stack.</p>}{simpleStroke ? <label className="field"><span>Stroke</span><div><input aria-label="Selection stroke" disabled={readOnly} value={stroke.kind === "same" ? stroke.value : ""} placeholder={stroke.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => { const color = documentColorFromCssHex(event.target.value); if (color) onUpdate({ stroke: event.target.value, strokes: undefined, strokeGradient: undefined }); }} /></div></label> : <p className="mixed-not-applicable">Stroke layers: select one compatible layer to edit gradients or Paint Stack.</p>}</div></section>
+    <section><h2>Layer</h2>{frameClipsContent && <MixedToggle label="Clip content" value={frameClipsContent} readOnly={readOnly} onChange={(value) => onUpdate({ clipsContent: value })} />}{sectionContentsHidden && <MixedToggle label="Hide contents" value={sectionContentsHidden} readOnly={readOnly} onChange={(value) => onUpdate({ contentsHidden: value })} />}<MixedToggle label="Visible" value={visible} readOnly={readOnly} onChange={(value) => onUpdate({ visible: value })} /><MixedToggle label="Lock editing" value={locked} readOnly={readOnly} onChange={(value) => onUpdate({ locked: value })} /></section>
+  </div>;
+}
+
+function LineSelectionCap({ label, value, readOnly, onChange }: { label: string; value: MixedSelectionValue<NonNullable<CanvasNode["strokeCapStart"]>>; readOnly: boolean; onChange: (value: NonNullable<CanvasNode["strokeCapStart"]>) => void }) {
+  return <label className="field"><span>{label.replace("Selection ", "")}</span><div><select aria-label={label} disabled={readOnly} value={value.kind === "same" ? value.value : ""} onChange={(event) => {
+    const next = event.target.value;
+    if (["none", "round", "square", "arrowLines", "arrowEquilateral", "triangleFilled", "diamondFilled", "circleFilled"].includes(next)) onChange(next as NonNullable<CanvasNode["strokeCapStart"]>);
+  }}><option value="" disabled>Mixed</option><option value="none">None</option><option value="round">Round</option><option value="square">Square</option><option value="arrowLines">Arrow lines</option><option value="arrowEquilateral">Arrow</option><option value="triangleFilled">Triangle</option><option value="diamondFilled">Diamond</option><option value="circleFilled">Circle</option></select></div></label>;
+}
+
+function LineSelectionDash({ value, readOnly, onChange }: { value: MixedSelectionValue<string>; readOnly: boolean; onChange: (value: number[]) => void }) {
+  const canonical = value.kind === "same" ? value.value : "";
+  const [draft, setDraft] = useState(canonical);
+  useEffect(() => setDraft(canonical), [canonical]);
+  const commit = () => {
+    const pattern = parseLineDashPattern(draft);
+    if (pattern) onChange(pattern);
+    else setDraft(canonical);
+  };
+  return <label className="field"><span>Dash</span><div><input aria-label="Selection stroke dash pattern" disabled={readOnly} placeholder={value.kind === "mixed" ? "Mixed" : "8, 4"} value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></div></label>;
+}
+
+function SelectionConstraintField({ label, value, readOnly, onChange }: { label: string; value: MixedSelectionValue<ConstraintSelectionValue>; readOnly: boolean; onChange: (value: ConstraintType) => void }) {
+  return <label className="field"><span>{label.replace("Selection ", "")}</span><div><select aria-label={label} disabled={readOnly} value={value.kind === "same" ? value.value : ""} onChange={(event) => {
+    const next = event.target.value;
+    if (next === "min" || next === "center" || next === "max" || next === "stretch" || next === "scale") onChange(next);
+  }}><option value="" disabled>Mixed</option><option value="none" disabled>No constraints</option><option value="min">Left / Top</option><option value="center">Center</option><option value="max">Right / Bottom</option><option value="stretch">Left &amp; right / Top &amp; bottom</option><option value="scale">Scale</option></select></div></label>;
+}
+
+function MixedToggle({ label, value, readOnly, onChange }: { label: string; value: MixedSelectionValue<boolean>; readOnly: boolean; onChange: (value: boolean) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = value.kind === "mixed";
+  }, [value]);
+  return <label className="toggle"><input ref={inputRef} aria-label={value.kind === "mixed" ? `${label} mixed` : label} disabled={readOnly} type="checkbox" checked={value.kind === "same" && value.value} onChange={(event) => onChange(event.target.checked)} />{label}{value.kind === "mixed" && <em>Mixed</em>}</label>;
+}
+
+function Inspector({ node, sceneNodes, assets, fontAvailability, onUpdate, readOnly }: { node: CanvasNode; sceneNodes: readonly CanvasNode[]; assets: DocumentAsset[]; fontAvailability?: EditorSnapshot["fontAvailability"]; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
   const field = (label: string, key: keyof CanvasNode, value: string | number, unit = "") => <label className="field"><span>{label}</span><div><input aria-label={label} readOnly={readOnly} inputMode={typeof value === "number" ? "decimal" : undefined} value={value} onChange={(event) => {
-    if (typeof value !== "number") { onUpdate({ [key]: event.target.value }); return; }
+    if (typeof value !== "number") {
+      const resetStack = key === "fill" ? { fills: undefined } : key === "stroke" ? { strokes: undefined } : {};
+      onUpdate({ [key]: event.target.value, ...resetStack });
+      return;
+    }
     const raw = event.target.value.trim();
     const parsed = Number(raw);
     if (!raw || !Number.isFinite(parsed)) return;
@@ -1717,12 +1939,149 @@ function Inspector({ node, assets, fontAvailability, onUpdate, readOnly }: { nod
   };
   const setGradientDirection = (start: [number, number], end: [number, number]) => node.fillGradient && updateGradient({ ...node.fillGradient, start, end });
   return <div className="inspector-content">
-    <div className="selection-title"><span className={`node-icon ${node.kind}`}>{node.kind === "ellipse" ? "○" : node.kind === "text" ? "T" : node.kind === "frame" ? "#" : node.kind === "image" ? "▧" : "□"}</span><input readOnly={readOnly} value={node.name} aria-label="Layer name" onChange={(event) => onUpdate({ name: event.target.value })} /></div>
-    <section><h2>Geometry</h2><div className="field-grid">{field("X", "x", node.x)}{field("Y", "y", node.y)}{field("W", "width", Math.round(node.width))}{field("H", "height", Math.round(node.height))}{field("Rotation", "rotation", Math.round(node.rotation), "°")}</div></section>
-    {node.kind !== "text" && <section><h2>Appearance</h2>{node.assetId && <div className="image-fill-summary"><div className="image-fill-preview" /><div><strong>Image fill</strong><span>{imageAsset?.pixelWidth && imageAsset?.pixelHeight ? `${imageAsset.pixelWidth} × ${imageAsset.pixelHeight}` : node.assetId.slice(0, 8)}</span></div><button type="button" aria-label="Remove image fill" disabled={readOnly} onClick={() => onUpdate({ assetId: undefined })}>Remove</button></div>}{node.fillGradient ? <div className="gradient-summary"><div className="gradient-preview" style={{ background: gradientCss }} /><div><strong>Linear gradient</strong><span>{node.fillGradient.stops.length} color stops</span></div><div className="gradient-directions" aria-label="Gradient direction"><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 0])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 0])}>Horizontal</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [0, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [0, 1])}>Vertical</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 1])}>Diagonal</button></div><div className="gradient-stops">{node.fillGradient.stops.map((stop, index) => <label key={`${stop.position}-${index}`} className="gradient-stop"><span>Stop {index + 1}</span><input aria-label={`Gradient stop ${index + 1} color`} disabled={readOnly} type="color" value={opaqueColorCss(stop.color)} onChange={(event) => updateGradientColor(index, event.target.value)} /><input aria-label={`Gradient stop ${index + 1} position`} disabled={readOnly} type="range" min={index === 0 ? 0 : node.fillGradient!.stops[index - 1].position} max={index === node.fillGradient!.stops.length - 1 ? 1 : node.fillGradient!.stops[index + 1].position} step="0.01" value={stop.position} onChange={(event) => updateGradientPosition(index, Number(event.target.value))} /><em>{Math.round(stop.position * 100)}%</em><button type="button" aria-label={`Remove gradient stop ${index + 1}`} disabled={readOnly || node.fillGradient!.stops.length <= 2} onClick={() => removeGradientStop(index)}>−</button></label>)}</div><button type="button" aria-label="Add gradient stop" disabled={readOnly || node.fillGradient.stops.length >= 16} onClick={addGradientStop}>Add stop</button><button type="button" disabled={readOnly} onClick={() => onUpdate({ fill: node.fill })}>Replace with solid</button></div> : <>{field("Fill", "fill", node.fill)}<div className="color-preview" style={{ background: node.fill }} /><button className="add-gradient-button" type="button" disabled={readOnly} onClick={createGradient}>Add linear gradient</button></>}{field("Stroke", "stroke", node.stroke)}{field("Stroke width", "strokeWidth", node.strokeWidth, "px")}{field("Radius", "radius", node.radius, "px")}{field("Opacity", "opacity", Math.round(node.opacity * 100), "%")}</section>}
+    <div className="selection-title" role="status" aria-live="polite"><span className={`node-icon ${node.kind}`}>{node.kind === "ellipse" ? "○" : node.kind === "line" ? "／" : node.kind === "text" ? "T" : node.kind === "frame" ? "#" : node.kind === "group" ? "◇" : node.kind === "section" ? "§" : node.kind === "image" ? "▧" : "□"}</span><input readOnly={readOnly} value={node.name} aria-label="Layer name" onChange={(event) => onUpdate({ name: event.target.value })} /></div>
+    <section><h2>Geometry</h2><div className="field-grid">{field("X", "x", node.x)}{field("Y", "y", node.y)}{field("W", "width", Math.round(node.width))}{node.kind !== "line" && field("H", "height", Math.round(node.height))}{field("Rotation", "rotation", Math.round(node.rotation), "°")}</div></section>
+        {node.kind === "line" ? <section><h2>Appearance</h2>{field("Stroke", "stroke", node.stroke)}{field("Stroke width", "strokeWidth", node.strokeWidth, "px")}<label className="field"><span>Start cap</span><div><select aria-label="Start cap" disabled={readOnly} value={node.strokeCapStart ?? "none"} onChange={(event) => onUpdate({ strokeCapStart: event.target.value as NonNullable<CanvasNode["strokeCapStart"]> })}><option value="none">None</option><option value="round">Round</option><option value="square">Square</option><option value="arrowLines">Arrow lines</option><option value="arrowEquilateral">Arrow</option><option value="triangleFilled">Triangle</option><option value="diamondFilled">Diamond</option><option value="circleFilled">Circle</option></select></div></label><label className="field"><span>End cap</span><div><select aria-label="End cap" disabled={readOnly} value={node.strokeCapEnd ?? "none"} onChange={(event) => onUpdate({ strokeCapEnd: event.target.value as NonNullable<CanvasNode["strokeCapEnd"]> })}><option value="none">None</option><option value="round">Round</option><option value="square">Square</option><option value="arrowLines">Arrow lines</option><option value="arrowEquilateral">Arrow</option><option value="triangleFilled">Triangle</option><option value="diamondFilled">Diamond</option><option value="circleFilled">Circle</option></select></div></label>{field("Opacity", "opacity", Math.round(node.opacity * 100), "%")}</section> : supportsGenericAppearanceInspector(node.kind) && <section><h2>Appearance</h2>{node.assetId && <div className="image-fill-summary"><div className="image-fill-preview" /><div><strong>Image fill</strong><span>{imageAsset?.pixelWidth && imageAsset?.pixelHeight ? `${imageAsset.pixelWidth} × ${imageAsset.pixelHeight}` : node.assetId.slice(0, 8)}</span></div><button type="button" aria-label="Remove image fill" disabled={readOnly} onClick={() => onUpdate({ assetId: undefined })}>Remove</button></div>}{node.fillGradient ? <div className="gradient-summary"><div className="gradient-preview" style={{ background: gradientCss }} /><div><strong>Linear gradient</strong><span>{node.fillGradient.stops.length} color stops</span></div><div className="gradient-directions" aria-label="Gradient direction"><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 0])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 0])}>Horizontal</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [0, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [0, 1])}>Vertical</button><button type="button" aria-pressed={sameDirection(node.fillGradient, [0, 0], [1, 1])} disabled={readOnly} onClick={() => setGradientDirection([0, 0], [1, 1])}>Diagonal</button></div><div className="gradient-stops">{node.fillGradient.stops.map((stop, index) => <label key={`${stop.position}-${index}`} className="gradient-stop"><span>Stop {index + 1}</span><input aria-label={`Gradient stop ${index + 1} color`} disabled={readOnly} type="color" value={opaqueColorCss(stop.color)} onChange={(event) => updateGradientColor(index, event.target.value)} /><input aria-label={`Gradient stop ${index + 1} position`} disabled={readOnly} type="range" min={index === 0 ? 0 : node.fillGradient!.stops[index - 1].position} max={index === node.fillGradient!.stops.length - 1 ? 1 : node.fillGradient!.stops[index + 1].position} step="0.01" value={stop.position} onChange={(event) => updateGradientPosition(index, Number(event.target.value))} /><em>{Math.round(stop.position * 100)}%</em><button type="button" aria-label={`Remove gradient stop ${index + 1}`} disabled={readOnly || node.fillGradient!.stops.length <= 2} onClick={() => removeGradientStop(index)}>−</button></label>)}</div><button type="button" aria-label="Add gradient stop" disabled={readOnly || node.fillGradient.stops.length >= 16} onClick={addGradientStop}>Add stop</button><button type="button" disabled={readOnly} onClick={() => onUpdate({ fill: node.fill })}>Replace with solid</button></div> : <>{field("Fill", "fill", node.fill)}<div className="color-preview" style={{ background: node.fill }} /><button className="add-gradient-button" type="button" disabled={readOnly} onClick={createGradient}>Add linear gradient</button></>}{node.kind !== "text" && <>{field("Stroke", "stroke", node.stroke)}{field("Stroke width", "strokeWidth", node.strokeWidth, "px")}</>}{supportsCornerRadiusInspector(node.kind) && field("Radius", "radius", node.radius ?? 0, "px")}{field("Opacity", "opacity", Math.round(node.opacity * 100), "%")}</section>}
+    {supportsStrokeDetailsInspector(node.kind) && <StrokeDetailsInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {supportsPaintStackInspector(node.kind) && <PaintStackInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {hasFrameConstraintScope(sceneNodes, node) && <FrameConstraintsInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {supportsPerSideStrokeInspector(node.kind) && <PerSideStrokeInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {supportsStrokeAlignInspector(node) && <StrokeAlignInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {(node.kind === "frame" || node.kind === "rectangle" || node.kind === "section") && <CornerRadiiInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {(node.kind === "frame" || node.kind === "rectangle" || node.kind === "section") && <CornerSmoothingInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
+    {node.kind === "ellipse" && <EllipseArcInspector node={node} onUpdate={onUpdate} readOnly={readOnly} />}
     {node.kind === "text" && <TextInspector node={node} assets={assets} fontAvailability={fontAvailability} onUpdate={onUpdate} readOnly={readOnly} />}
-    <section><h2>Layer</h2><label className="toggle"><input disabled={readOnly} type="checkbox" checked={node.visible !== false} onChange={(event) => onUpdate({ visible: event.target.checked })} />Visible</label><label className="toggle"><input disabled={readOnly} type="checkbox" checked={Boolean(node.locked)} onChange={(event) => onUpdate({ locked: event.target.checked })} />Lock editing</label></section>
+    <section><h2>Layer</h2>{node.kind === "frame" && <label className="toggle"><input disabled={readOnly} type="checkbox" checked={node.clipsContent !== false} onChange={(event) => onUpdate({ clipsContent: event.target.checked })} />Clip content</label>}{node.kind === "section" && <label className="toggle"><input disabled={readOnly} type="checkbox" checked={Boolean(node.contentsHidden)} onChange={(event) => onUpdate({ contentsHidden: event.target.checked })} />Hide contents</label>}<label className="toggle"><input disabled={readOnly} type="checkbox" checked={node.visible !== false} onChange={(event) => onUpdate({ visible: event.target.checked })} />Visible</label><label className="toggle"><input disabled={readOnly} type="checkbox" checked={Boolean(node.locked)} onChange={(event) => onUpdate({ locked: event.target.checked })} />Lock editing</label></section>
   </div>;
+}
+
+function StrokeDetailsInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const [dash, setDash] = useState((node.strokeDashPattern ?? []).join(", "));
+  useEffect(() => setDash((node.strokeDashPattern ?? []).join(", ")), [node.id, node.strokeDashPattern]);
+  const commitDash = () => {
+    const pattern = parseLineDashPattern(dash);
+    if (!pattern) {
+      setDash((node.strokeDashPattern ?? []).join(", "));
+      return;
+    }
+    onUpdate({ strokeDashPattern: pattern });
+  };
+  return <section><h2>Stroke details</h2>
+    <label className="field"><span>Join</span><div><select aria-label="Stroke join" disabled={readOnly} value={node.strokeJoin ?? "miter"} onChange={(event) => onUpdate({ strokeJoin: event.target.value as NonNullable<CanvasNode["strokeJoin"]> })}><option value="miter">Miter</option><option value="bevel">Bevel</option><option value="round">Round</option></select></div></label>
+    <label className="field"><span>Miter limit</span><div><input aria-label="Miter limit" disabled={readOnly} inputMode="decimal" value={node.strokeMiterLimit ?? 10} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value) && value >= 1) onUpdate({ strokeMiterLimit: value }); }} /></div></label>
+    <label className="field"><span>Dash</span><div><input aria-label="Stroke dash pattern" disabled={readOnly} placeholder="8, 4" value={dash} onChange={(event) => setDash(event.target.value)} onBlur={commitDash} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></div></label>
+  </section>;
+}
+
+function FrameConstraintsInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const constraints = node.constraints ?? { horizontal: "min" as const, vertical: "min" as const };
+  const update = (axis: "horizontal" | "vertical", value: typeof constraints.horizontal) => onUpdate({ constraints: { ...constraints, [axis]: value } });
+  return <section><h2>Constraints</h2><div className="field-grid"><label className="field"><span>Horizontal</span><div><select aria-label="Horizontal constraint" disabled={readOnly} value={constraints.horizontal} onChange={(event) => update("horizontal", event.target.value as typeof constraints.horizontal)}><option value="min">Left</option><option value="center">Center</option><option value="max">Right</option><option value="stretch">Left &amp; right</option><option value="scale">Scale</option></select></div></label><label className="field"><span>Vertical</span><div><select aria-label="Vertical constraint" disabled={readOnly} value={constraints.vertical} onChange={(event) => update("vertical", event.target.value as typeof constraints.vertical)}><option value="min">Top</option><option value="center">Center</option><option value="max">Bottom</option><option value="stretch">Top &amp; bottom</option><option value="scale">Scale</option></select></div></label></div>{node.constraints && <button type="button" disabled={readOnly} onClick={() => onUpdate({ constraints: undefined })}>Remove constraints</button>}</section>;
+}
+
+function PaintStackInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const paintStack = (key: "fills" | "strokes") => node[key] ?? [];
+  const updateStack = (key: "fills" | "strokes", paints: DocumentPaint[] | undefined) => onUpdate({ [key]: paints } as Partial<CanvasNode>);
+  const renderStack = (kind: "fill" | "stroke") => {
+    const key = kind === "fill" ? "fills" : "strokes";
+    const legacy = kind === "fill" ? node.fill : node.stroke;
+    const paints = paintStack(key);
+    const title = kind === "fill" ? "Fill layers" : "Stroke layers";
+    const singular = kind === "fill" ? "fill" : "stroke";
+    const updatePaint = (index: number, next: DocumentPaint) => updateStack(key, paints.map((paint, paintIndex) => paintIndex === index ? next : paint));
+    const paintColor = (paint: DocumentPaint): DocumentColor => paint.color ?? documentColorFromCssHex(paint.css) ?? { space: "srgb", components: [0, 0, 0], alpha: 1 };
+    const updateSolid = (index: number, paint: DocumentPaint, css: string) => {
+      const color = documentColorFromCssHex(css);
+      if (!color) return;
+      updatePaint(index, { ...paint, css, color, gradient: undefined });
+    };
+    const updateGradient = (index: number, paint: DocumentPaint, gradient: DocumentLinearGradient) => updatePaint(index, {
+      ...paint,
+      css: colorCss(gradient.stops[0].color),
+      color: gradient.stops[0].color,
+      gradient,
+    });
+    const addGradientStop = (index: number, paint: DocumentPaint) => {
+      const gradient = paint.gradient;
+      if (!gradient || gradient.stops.length >= 16) return;
+      let insertion = 0;
+      let largestGap = -1;
+      for (let stopIndex = 0; stopIndex < gradient.stops.length - 1; stopIndex += 1) {
+        const gap = gradient.stops[stopIndex + 1].position - gradient.stops[stopIndex].position;
+        if (gap > largestGap) { largestGap = gap; insertion = stopIndex; }
+      }
+      if (largestGap <= 0) return;
+      const left = gradient.stops[insertion];
+      const nextStop = { position: left.position + largestGap / 2, color: structuredClone(left.color) };
+      updateGradient(index, paint, { ...gradient, stops: [...gradient.stops.slice(0, insertion + 1), nextStop, ...gradient.stops.slice(insertion + 1)] });
+    };
+    return <div className="paint-stack" key={key}>
+      <div className="paint-stack-heading"><strong>{title}</strong><span>{paints.length ? `${paints.length} layers` : "Single value"}</span></div>
+      {paints.length > 0 && <div className="paint-stack-layers">{paints.map((paint, index) => {
+        const gradient = paint.gradient;
+        const layerLabel = `${title} ${index + 1}`;
+        return <div className="paint-stack-layer" key={`${index}-${paint.css}`}>
+          <div className="paint-layer-heading"><span>{index + 1}</span><select aria-label={`${layerLabel} type`} disabled={readOnly} value={gradient ? "gradient" : "solid"} onChange={(event) => {
+            if (event.target.value === "gradient") {
+              const color = paintColor(paint);
+              updateGradient(index, paint, createDefaultLinearGradient(color));
+            } else if (gradient) {
+              const color = gradient.stops[0].color;
+              updatePaint(index, { ...paint, css: colorCss(color), color, gradient: undefined });
+            }
+          }}><option value="solid">Solid</option><option value="gradient">Linear gradient</option></select><button type="button" aria-label={`Remove ${singular} layer ${index + 1}`} disabled={readOnly || paints.length <= 1} onClick={() => updateStack(key, paints.filter((_, paintIndex) => paintIndex !== index))}>−</button></div>
+          {gradient ? <div className="paint-layer-gradient"><div className="paint-layer-gradient-preview" style={{ background: gradientCss(gradient) }} /><div className="gradient-directions" aria-label={`${layerLabel} direction`}><button type="button" aria-pressed={sameDirection(gradient, [0, 0], [1, 0])} disabled={readOnly} onClick={() => updateGradient(index, paint, { ...gradient, start: [0, 0], end: [1, 0] })}>Horizontal</button><button type="button" aria-pressed={sameDirection(gradient, [0, 0], [0, 1])} disabled={readOnly} onClick={() => updateGradient(index, paint, { ...gradient, start: [0, 0], end: [0, 1] })}>Vertical</button><button type="button" aria-pressed={sameDirection(gradient, [0, 0], [1, 1])} disabled={readOnly} onClick={() => updateGradient(index, paint, { ...gradient, start: [0, 0], end: [1, 1] })}>Diagonal</button></div><div className="gradient-stops">{gradient.stops.map((stop, stopIndex) => <label key={`${stop.position}-${stopIndex}`} className="gradient-stop"><span>Stop {stopIndex + 1}</span><input aria-label={`${layerLabel} gradient stop ${stopIndex + 1} color`} disabled={readOnly} type="color" value={opaqueColorCss(stop.color)} onChange={(event) => { const color = documentColorFromCssHex(event.target.value); if (color) updateGradient(index, paint, { ...gradient, stops: gradient.stops.map((current, currentIndex) => currentIndex === stopIndex ? { ...current, color: { ...color, alpha: current.color.alpha } } : current) }); }} /><input aria-label={`${layerLabel} gradient stop ${stopIndex + 1} position`} disabled={readOnly} type="range" min={stopIndex === 0 ? 0 : gradient.stops[stopIndex - 1].position} max={stopIndex === gradient.stops.length - 1 ? 1 : gradient.stops[stopIndex + 1].position} step="0.01" value={stop.position} onChange={(event) => { const lower = stopIndex === 0 ? 0 : gradient.stops[stopIndex - 1].position; const upper = stopIndex === gradient.stops.length - 1 ? 1 : gradient.stops[stopIndex + 1].position; const position = Math.max(lower, Math.min(upper, Number(event.target.value))); updateGradient(index, paint, { ...gradient, stops: gradient.stops.map((current, currentIndex) => currentIndex === stopIndex ? { ...current, position } : current) }); }} /><em>{Math.round(stop.position * 100)}%</em><button type="button" aria-label={`Remove ${layerLabel} gradient stop ${stopIndex + 1}`} disabled={readOnly || gradient.stops.length <= 2} onClick={() => updateGradient(index, paint, { ...gradient, stops: gradient.stops.filter((_, currentIndex) => currentIndex !== stopIndex) })}>−</button></label>)}</div><button type="button" className="paint-layer-add-stop" aria-label={`Add ${layerLabel} gradient stop`} disabled={readOnly || gradient.stops.length >= 16} onClick={() => addGradientStop(index, paint)}>Add stop</button></div> : <label className="paint-layer-solid"><span>Color</span><input aria-label={layerLabel} disabled={readOnly} value={paint.css} onChange={(event) => updateSolid(index, paint, event.target.value)} /><input aria-label={`${layerLabel} color`} disabled={readOnly} type="color" value={opaqueColorCss(paintColor(paint))} onChange={(event) => updateSolid(index, paint, event.target.value)} /></label>}
+        </div>;
+      })}</div>}
+      <div className="paint-stack-actions">{paints.length === 0 ? <button type="button" disabled={readOnly} onClick={() => updateStack(key, [{ css: legacy, color: documentColorFromCssHex(legacy) }])}>Create {singular} stack</button> : <><button type="button" disabled={readOnly || paints.length >= 16} onClick={() => updateStack(key, [...paints, structuredClone(paints[paints.length - 1])])}>Add layer</button><button type="button" disabled={readOnly} onClick={() => updateStack(key, undefined)}>Use single {singular}</button></>}</div>
+    </div>;
+  };
+  return <section className="paint-stacks"><h2>Paint layers</h2>{node.kind !== "line" && renderStack("fill")}{renderStack("stroke")}</section>;
+}
+
+function PerSideStrokeInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const weights = node.strokeWeights ?? [node.strokeWidth, node.strokeWidth, node.strokeWidth, node.strokeWidth] as [number, number, number, number];
+  const updateWeight = (index: number, value: string) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return;
+    const next = [...weights] as [number, number, number, number];
+    next[index] = parsed;
+    onUpdate({ strokeWeights: next });
+  };
+  return <section><h2>Stroke weights</h2>
+    <div className="field-grid">{(["Top", "Right", "Bottom", "Left"] as const).map((label, index) => <label className="field" key={label}><span>{label}</span><div><input aria-label={`${label} stroke weight`} disabled={readOnly} inputMode="decimal" value={weights[index]} onChange={(event) => updateWeight(index, event.target.value)} /><em>px</em></div></label>)}</div>
+    <button type="button" disabled={readOnly || !node.strokeWeights} onClick={() => onUpdate({ strokeWeights: undefined })}>Use uniform width</button>
+  </section>;
+}
+
+function StrokeAlignInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  return <section><h2>Stroke align</h2><label className="field"><span>Align</span><div><select aria-label="Stroke align" disabled={readOnly} value={node.strokeAlign ?? "inside"} onChange={(event) => onUpdate({ strokeAlign: event.target.value as NonNullable<CanvasNode["strokeAlign"]> })}><option value="inside">Inside</option><option value="center">Center</option><option value="outside">Outside</option></select></div></label></section>;
+}
+
+function CornerRadiiInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const radii = node.cornerRadii ?? [node.radius, node.radius, node.radius, node.radius] as [number, number, number, number];
+  const updateRadius = (index: number, raw: string) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) return;
+    const next = [...radii] as [number, number, number, number];
+    next[index] = value;
+    onUpdate({ cornerRadii: next });
+  };
+  return <section><h2>Independent corners</h2>
+    <div className="field-grid">{(["Top left", "Top right", "Bottom right", "Bottom left"] as const).map((label, index) => <label className="field" key={label}><span>{label}</span><div><input aria-label={`${label} corner radius`} disabled={readOnly} inputMode="decimal" value={radii[index]} onChange={(event) => updateRadius(index, event.target.value)} /><em>px</em></div></label>)}</div>
+    <button type="button" disabled={readOnly || !node.cornerRadii} onClick={() => onUpdate({ cornerRadii: undefined })}>Use uniform radius</button>
+  </section>;
+}
+
+function CornerSmoothingInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const smoothing = node.cornerSmoothing ?? 0;
+  return <section><h2>Corner smoothing</h2><label className="field"><span>Amount</span><div><input aria-label="Corner smoothing" disabled={readOnly} type="range" min="0" max="1" step="0.01" value={smoothing} onChange={(event) => onUpdate({ cornerSmoothing: Number(event.target.value) })} /><em>{Math.round(smoothing * 100)}%</em></div></label><button type="button" disabled={readOnly || smoothing === 0} onClick={() => onUpdate({ cornerSmoothing: undefined })}>Use circular corners</button></section>;
+}
+
+function EllipseArcInspector({ node, onUpdate, readOnly }: { node: CanvasNode; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
+  const arc = node.arcData ?? { startingAngle: 0, endingAngle: 360, innerRadius: 0 };
+  const update = (key: keyof typeof arc, raw: string) => { const value = Number(raw); if (!Number.isFinite(value) || (key === "innerRadius" && (value < 0 || value >= 1))) return; onUpdate(ellipseArcUpdatePatch(node, { [key]: value })); };
+  return <section><h2>Arc</h2><div className="field-grid"><label className="field"><span>Start</span><div><input aria-label="Arc start angle" disabled={readOnly} inputMode="decimal" value={arc.startingAngle} onChange={(event) => update("startingAngle", event.target.value)} /><em>°</em></div></label><label className="field"><span>End</span><div><input aria-label="Arc end angle" disabled={readOnly} inputMode="decimal" value={arc.endingAngle} onChange={(event) => update("endingAngle", event.target.value)} /><em>°</em></div></label><label className="field"><span>Inner</span><div><input aria-label="Arc inner radius" disabled={readOnly} inputMode="decimal" value={arc.innerRadius} onChange={(event) => update("innerRadius", event.target.value)} /></div></label></div><button type="button" disabled={readOnly || !node.arcData} onClick={() => onUpdate({ arcData: undefined })}>Reset ellipse</button></section>;
 }
 
 function TextInspector({ node, assets, fontAvailability, onUpdate, readOnly }: { node: CanvasNode; assets: DocumentAsset[]; fontAvailability?: EditorSnapshot["fontAvailability"]; onUpdate: (patch: Partial<CanvasNode>) => void; readOnly: boolean }) {
@@ -1820,6 +2179,15 @@ function opaqueColorCss(color: DocumentColor): string {
   return colorToOpaqueSrgbCss(color);
 }
 
+function gradientCss(gradient: DocumentLinearGradient): string {
+  return `linear-gradient(${gradient.stops.map((stop) => `${colorCss(stop.color)} ${Math.round(stop.position * 100)}%`).join(", ")})`;
+}
+
 function sameDirection(gradient: DocumentLinearGradient, start: [number, number], end: [number, number]) {
   return gradient.start[0] === start[0] && gradient.start[1] === start[1] && gradient.end[0] === end[0] && gradient.end[1] === end[1];
+}
+
+function svgFileStem(value: string) {
+  const stem = value.trim().replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "");
+  return stem || "makefigma-page";
 }
