@@ -37,6 +37,15 @@ export const preview_text_replacement_json: (a: number, b: number, c: number, d:
 export const rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const shape_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const stroke_mesh_for_continuous_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+export const stroke_mesh_for_dashed_line_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const stroke_mesh_for_dashed_polyline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+export const stroke_mesh_for_dashed_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+export const stroke_mesh_for_polyline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const stroke_mesh_for_rounded_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const stroke_mesh_for_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+export const stroke_meshes_for_per_side_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const stroke_meshes_for_per_side_rectangle_with_dash_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

@@ -4,11 +4,12 @@
 //! canvas/GPU resources while this adapter owns only durable document semantics.
 
 use editor_core::{
-    ActorId, Appearance, AssetId, AssetReference, Command, DEFAULT_PAGE_ID, Document, DocumentId,
+    ActorId, Appearance, ArcData, AssetId, AssetReference, Command, ConstraintType, Constraints, DEFAULT_PAGE_ID, Document, DocumentId,
     FontReference, Node, NodeId, NodeKind, OperationEnvelope, OperationId, Origin, Page, PageId,
-    ParagraphStyle, PositionId, TextAlign, TextAutoSize, TextProperties, TextStyleRun, Transaction,
-    TransactionId,
+    ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun,
+    Transaction, TransactionId,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
+    geometry::{PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle, StrokeStyle, stroke_mesh_for_continuous_rounded_rectangle_with_radii, stroke_mesh_for_dashed_line, stroke_mesh_for_dashed_polyline, stroke_mesh_for_dashed_rounded_rectangle_with_radii, stroke_mesh_for_polyline, stroke_mesh_for_rounded_rectangle, stroke_mesh_for_rounded_rectangle_with_radii, stroke_meshes_for_per_side_rectangle, stroke_meshes_for_per_side_rectangle_with_dash},
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -312,11 +313,27 @@ impl DocumentEngine {
                     let appearance = Appearance {
                         fill: node.fill,
                         stroke: node.stroke,
+                        fills: node.fills,
+                        strokes: node.strokes,
                         stroke_width: node.stroke_width,
+                        stroke_cap_start: node.stroke_cap_start,
+                        stroke_cap_end: node.stroke_cap_end,
+                        stroke_join: node.stroke_join,
+                        stroke_miter_limit: node.stroke_miter_limit,
+                        stroke_dash_pattern: node.stroke_dash_pattern,
+                        stroke_weights: node.stroke_weights,
+                        stroke_align: node.stroke_align,
+                        arc_data: node.arc_data,
+                        relative_transform: node.relative_transform,
                         opacity: node.opacity,
                         corner_radius: node.corner_radius,
+                        corner_radii: node.corner_radii,
+                        corner_smoothing: node.corner_smoothing,
+                        constraints: node.constraints,
                         visible: node.visible,
                         locked: node.locked,
+                        contents_hidden: node.contents_hidden,
+                        clips_content: Some(node.clips_content),
                     };
                     commands.extend([
                         Command::UpdateGeometry {
@@ -336,13 +353,13 @@ impl DocumentEngine {
                             appearance,
                         },
                     ]);
-                    if node.kind != NodeKind::Text
-                        && self.document.asset_for_node(node.id) != asset_id
-                    {
-                        commands.push(Command::SetNodeAsset {
-                            id: node.id,
-                            asset_id,
-                        });
+                    if node.kind != NodeKind::Text {
+                        if self.document.asset_for_node(node.id) != asset_id {
+                            commands.push(Command::SetNodeAsset {
+                                id: node.id,
+                                asset_id,
+                            });
+                        }
                     } else if asset_id.is_some() {
                         return Err(JsValue::from_str("INVALID_ASSET_REFERENCE"));
                     }
@@ -366,6 +383,18 @@ impl DocumentEngine {
                     for update in position_ids {
                         commands.push(Command::SetNodePosition {
                             id: parse_id(&update.id)?,
+                            position: parse_position_id(&update.position_id)?,
+                        });
+                    }
+                }
+                BatchCommand::Reparent { parent_ids } => {
+                    if parent_ids.is_empty() {
+                        return Err(JsValue::from_str("INVALID_TRANSACTION"));
+                    }
+                    for update in parent_ids {
+                        commands.push(Command::SetNodeParent {
+                            id: parse_id(&update.id)?,
+                            parent_id: update.parent_id.as_deref().map(parse_id).transpose()?,
                             position: parse_position_id(&update.position_id)?,
                         });
                     }
@@ -411,6 +440,14 @@ struct GeometryUpdate {
 #[serde(rename_all = "camelCase")]
 struct PositionUpdate {
     id: String,
+    position_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParentUpdate {
+    id: String,
+    parent_id: Option<String>,
     position_id: String,
 }
 
@@ -480,6 +517,22 @@ fn default_transparent_css() -> String {
     "#00000000".into()
 }
 
+fn default_stroke_cap() -> String {
+    "none".into()
+}
+
+fn default_stroke_join() -> String {
+    "miter".into()
+}
+
+fn default_stroke_miter_limit() -> f64 {
+    10.0
+}
+
+fn default_stroke_align() -> String {
+    "inside".into()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectionNode {
@@ -504,6 +557,8 @@ struct ProjectionNode {
     /// legacy CSS fallback for consumers that cannot render gradients.
     #[serde(default)]
     fill_gradient: Option<ProjectionLinearGradient>,
+    #[serde(default)]
+    fills: Vec<ProjectionPaint>,
     /// v9 persists Canonical stroke paint and width. The CSS value is only the
     /// deterministic Canvas/Inspector projection fallback.
     #[serde(default = "default_transparent_css")]
@@ -513,7 +568,31 @@ struct ProjectionNode {
     #[serde(default)]
     stroke_gradient: Option<ProjectionLinearGradient>,
     #[serde(default)]
+    strokes: Vec<ProjectionPaint>,
+    #[serde(default)]
     stroke_width: f64,
+    /// v16 persists Figma-compatible open-path endpoint styles, v17 adds
+    /// independent closed-shape corner radii, v18 adds continuous corner
+    /// smoothing, and v19 adds ordered fill/stroke stacks. Earlier snapshots
+    /// migrate to their singular-paint defaults.
+    #[serde(default = "default_stroke_cap")]
+    stroke_cap_start: String,
+    #[serde(default = "default_stroke_cap")]
+    stroke_cap_end: String,
+    #[serde(default = "default_stroke_join")]
+    stroke_join: String,
+    #[serde(default = "default_stroke_miter_limit")]
+    stroke_miter_limit: f64,
+    #[serde(default)]
+    stroke_dash_pattern: Vec<f64>,
+    #[serde(default)]
+    stroke_weights: Vec<f64>,
+    #[serde(default = "default_stroke_align")]
+    stroke_align: String,
+    #[serde(default)]
+    arc_data: Option<ProjectionArcData>,
+    #[serde(default)]
+    relative_transform: Option<ProjectionTransform>,
     #[serde(default)]
     position_id: Option<String>,
     /// Absent in v1–v9 records; those nodes migrate deterministically to Page 1.
@@ -529,9 +608,19 @@ struct ProjectionNode {
     opacity: f64,
     corner_radius: f64,
     #[serde(default)]
+    corner_radii: Vec<f64>,
+    #[serde(default)]
+    corner_smoothing: f64,
+    #[serde(default)]
+    constraints: Option<ProjectionConstraints>,
+    #[serde(default)]
     text: String,
     visible: bool,
     locked: bool,
+    #[serde(default)]
+    contents_hidden: bool,
+    #[serde(default)]
+    clips_content: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -543,6 +632,21 @@ struct ProjectionFontReference {
     #[serde(default)]
     variation_axes: Vec<ProjectionFontVariation>,
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionArcData {
+    starting_angle: f64,
+    ending_angle: f64,
+    inner_radius: f64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProjectionTransform { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64 }
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionConstraints { horizontal: String, vertical: String }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -602,6 +706,16 @@ struct ProjectionLinearGradient {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionPaint {
+    css: String,
+    #[serde(default)]
+    color: Option<ProjectionColor>,
+    #[serde(default)]
+    gradient: Option<ProjectionLinearGradient>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionGradientStop {
     position: f32,
     color: ProjectionColor,
@@ -622,6 +736,10 @@ enum BatchCommand {
     Reposition {
         #[serde(rename = "positionIds")]
         position_ids: Vec<PositionUpdate>,
+    },
+    Reparent {
+        #[serde(rename = "parentIds")]
+        parent_ids: Vec<ParentUpdate>,
     },
     Delete {
         ids: Vec<String>,
@@ -695,7 +813,7 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let snapshot = CoreSnapshot {
-            schema_version: 15,
+            schema_version: 19,
             document_id: format_document_id(self.document.id()),
             revision: self.document.revision,
             can_undo: self.document.can_undo(),
@@ -794,6 +912,9 @@ impl DocumentEngine {
                         NodeKind::Ellipse => makefigma_renderer_wgpu::SceneNodeKind::Ellipse,
                         NodeKind::Image => makefigma_renderer_wgpu::SceneNodeKind::Image,
                         NodeKind::Text => makefigma_renderer_wgpu::SceneNodeKind::Text,
+                        NodeKind::Line => makefigma_renderer_wgpu::SceneNodeKind::Line,
+                        NodeKind::Group => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Section => makefigma_renderer_wgpu::SceneNodeKind::Section,
                     },
                     bounds: makefigma_renderer_wgpu::Rect {
                         x: node.x as f32,
@@ -845,6 +966,19 @@ impl DocumentEngine {
                 let (Paint::Solid(fill), Paint::Solid(stroke)) = (&node.fill, &node.stroke) else {
                     return None;
                 };
+                let stroke_rgba = css_executor_rgba(*stroke, node.opacity);
+                if matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle)
+                    && (!node.stroke_weights.is_empty() || !node.corner_radii.is_empty() || node.corner_smoothing != 0.0)
+                {
+                    return None;
+                }
+                let shape_stroke_outset = shape_gpu_stroke_outset(
+                    node.kind.clone(),
+                    node.arc_data.is_some(),
+                    node.stroke_align,
+                    node.stroke_width,
+                    stroke_rgba[3],
+                );
                 Some(makefigma_renderer_wgpu::GpuPrimitive {
                     node_id: node.id.0,
                     kind: match node.kind {
@@ -853,6 +987,9 @@ impl DocumentEngine {
                         NodeKind::Ellipse => makefigma_renderer_wgpu::SceneNodeKind::Ellipse,
                         NodeKind::Image => makefigma_renderer_wgpu::SceneNodeKind::Image,
                         NodeKind::Text => makefigma_renderer_wgpu::SceneNodeKind::Text,
+                        NodeKind::Line => makefigma_renderer_wgpu::SceneNodeKind::Line,
+                        NodeKind::Group => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Section => makefigma_renderer_wgpu::SceneNodeKind::Section,
                     },
                     bounds: makefigma_renderer_wgpu::Rect {
                         x: node.x as f32,
@@ -863,13 +1000,14 @@ impl DocumentEngine {
                     rotation_degrees: node.rotation as f32,
                     corner_radius: node.corner_radius as f32,
                     stroke_width: node.stroke_width as f32,
+                    shape_stroke_outset,
                     // The current WGSL executor uses conventional
                     // non-premultiplied source-alpha blending. Keep this
                     // Canonical-derived batch byte-for-byte compatible with
                     // its TypeScript fallback while the executor itself is
                     // migrated to a linear-premultiplied pipeline.
                     fill_rgba: css_executor_rgba(*fill, node.opacity),
-                    stroke_rgba: css_executor_rgba(*stroke, node.opacity),
+                    stroke_rgba,
                 })
             });
         let batch = makefigma_renderer_wgpu::build_gpu_instance_batch(primitives);
@@ -918,7 +1056,7 @@ impl DocumentEngine {
     pub fn load_snapshot_json(&mut self, value: &str) -> Result<u64, JsValue> {
         let snapshot = serde_json::from_str::<CoreSnapshot>(value)
             .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))?;
-        if !(1..=15).contains(&snapshot.schema_version) {
+        if !(1..=19).contains(&snapshot.schema_version) {
             return Err(JsValue::from_str("UNSUPPORTED_CORE_SNAPSHOT"));
         }
         let mut document = Document::with_id(parse_document_id(&snapshot.document_id)?);
@@ -972,11 +1110,14 @@ impl DocumentEngine {
         // Canonical sibling positions, v6 DocumentColorProfile, v7 Paint, v8
         // rotation, v9 stroke, v10 Document/Page ownership, v11 stable
         // DocumentId, v12 Resource Index, v13 node-level AssetId references, and
-        // v14 canonical rich text properties and v15 image fills on regular
+        // v14 canonical rich text properties, v15 image fills on regular
         // shape nodes (both use the existing node-level AssetId field).
+        // v16 adds StrokeCap endpoint semantics to open paths, v17 adds
+        // independent TL/TR/BR/BL corner radii, v18 adds continuous corner
+        // smoothing, and v19 adds ordered fill/stroke stacks.
         // v10 snapshots verify against the deterministic legacy DocumentId(0); v14
         // persists every current field.
-        if snapshot.schema_version >= 10
+        if snapshot.schema_version >= 16
             && !snapshot.canonical_hash.is_empty()
             && snapshot.canonical_hash != document.canonical_hash_hex()
         {
@@ -1010,6 +1151,7 @@ impl DocumentEngine {
                 BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::Reposition { .. }
+                | BatchCommand::Reparent { .. }
                 | BatchCommand::Delete { .. } => {
                     return Err(JsValue::from_str("INVALID_SEED_BATCH"));
                 }
@@ -1107,12 +1249,28 @@ impl DocumentEngine {
             rotation,
             fill: Paint::Solid(parse_css_color(fill)?),
             stroke: Paint::Solid(parse_css_color(stroke)?),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            relative_transform: None,
             opacity,
             corner_radius,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: text.into(),
             visible,
             locked,
+            contents_hidden: false,
+            clips_content: false,
         };
         self.submit_create(
             parse_id(transaction_id)?,
@@ -1160,12 +1318,28 @@ impl DocumentEngine {
             rotation,
             fill: Paint::Solid(parse_css_color(fill)?),
             stroke: Paint::Solid(parse_css_color(stroke)?),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            relative_transform: None,
             opacity,
             corner_radius,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: text.into(),
             visible,
             locked,
+            contents_hidden: false,
+            clips_content: false,
         };
         self.submit_create_on_page(
             parse_id(transaction_id)?,
@@ -1214,12 +1388,28 @@ impl DocumentEngine {
             rotation,
             fill: Paint::Solid(parse_css_color(fill)?),
             stroke: Paint::Solid(parse_css_color(stroke)?),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            relative_transform: None,
             opacity,
             corner_radius,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: text.into(),
             visible,
             locked,
+            contents_hidden: false,
+            clips_content: false,
         };
         let _ = parse_id(transaction_id)?;
         if base_revision != self.document.revision {
@@ -1287,11 +1477,27 @@ impl DocumentEngine {
             Appearance {
                 fill: Paint::Solid(parse_css_color(fill)?),
                 stroke: Paint::Solid(parse_css_color(stroke)?),
+                fills: Vec::new(),
+                strokes: Vec::new(),
                 stroke_width,
+                stroke_cap_start: StrokeCap::None,
+                stroke_cap_end: StrokeCap::None,
+                stroke_join: StrokeJoin::Miter,
+                stroke_miter_limit: 10.0,
+                stroke_dash_pattern: Vec::new(),
+                stroke_weights: Vec::new(),
+                stroke_align: StrokeAlign::Inside,
+                arc_data: None,
+                relative_transform: None,
                 opacity,
                 corner_radius,
+                corner_radii: Vec::new(),
+                corner_smoothing: 0.0,
+            constraints: None,
                 visible,
                 locked,
+                contents_hidden: false,
+            clips_content: Some(false),
             },
             text.into(),
         )
@@ -1380,6 +1586,361 @@ fn css_executor_rgba(color: Color, opacity: f64) -> [f32; 4] {
 #[wasm_bindgen]
 pub fn engine_semantics_version() -> u32 {
     3
+}
+
+/// Projects the canonical Rust stroke tessellation through the WASM boundary.
+/// The returned triangles are presentation data only: neither a mesh nor its
+/// cache can become durable document state. Keeping this conversion here gives
+/// Canvas, WebGPU and export callers one finite, validated geometry source.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_polyline_json(
+    points_json: &str,
+    width: f64,
+    cap: &str,
+    join: &str,
+    miter_limit: f64,
+    closed: bool,
+) -> Result<String, JsValue> {
+    let raw_points = serde_json::from_str::<Vec<[f64; 2]>>(points_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS"))?;
+    let points = raw_points
+        .into_iter()
+        .map(|[x, y]| Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let cap = match cap {
+        "butt" => StrokeCapStyle::Butt,
+        "round" => StrokeCapStyle::Round,
+        "square" => StrokeCapStyle::Square,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_CAP")),
+    };
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_polyline(
+        &points,
+        StrokeStyle {
+            width,
+            cap,
+            join,
+            miter_limit,
+        },
+        closed,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| {
+            serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })
+        }),
+    })
+    .to_string())
+}
+
+/// Projects the visible dashes of a straight Line from the same Core mesh
+/// source used by hit testing and selection bounds.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_dashed_line_json(
+    width: f64,
+    stroke_width: f64,
+    dash_json: &str,
+    cap: &str,
+    join: &str,
+    miter_limit: f64,
+) -> Result<String, JsValue> {
+    let dash_pattern = serde_json::from_str::<Vec<f64>>(dash_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
+    let cap = match cap {
+        "butt" => StrokeCapStyle::Butt,
+        "round" => StrokeCapStyle::Round,
+        "square" => StrokeCapStyle::Square,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_CAP")),
+    };
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_dashed_line(width, StrokeStyle { width: stroke_width, cap, join, miter_limit }, &dash_pattern)
+        .map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+            "min": [bounds.min.x, bounds.min.y], "max": [bounds.max.x, bounds.max.y],
+        })),
+    }).to_string())
+}
+
+/// Projects visible dashes of an arbitrary open or closed polyline. A dashed
+/// Frame/Rectangle uses this boundary so its corner joins are not re-derived
+/// by Canvas.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_dashed_polyline_json(
+    points_json: &str,
+    stroke_width: f64,
+    dash_json: &str,
+    cap: &str,
+    join: &str,
+    miter_limit: f64,
+    closed: bool,
+) -> Result<String, JsValue> {
+    let raw_points = serde_json::from_str::<Vec<[f64; 2]>>(points_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS"))?;
+    let points = raw_points.into_iter()
+        .map(|[x, y]| Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let dash_pattern = serde_json::from_str::<Vec<f64>>(dash_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
+    let cap = match cap {
+        "butt" => StrokeCapStyle::Butt,
+        "round" => StrokeCapStyle::Round,
+        "square" => StrokeCapStyle::Square,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_CAP")),
+    };
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_dashed_polyline(&points, StrokeStyle { width: stroke_width, cap, join, miter_limit }, &dash_pattern, closed)
+        .map_err(|_| JsValue::from_str("INVALID_DASHED_POLYLINE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+            "min": [bounds.min.x, bounds.min.y], "max": [bounds.max.x, bounds.max.y],
+        })),
+    }).to_string())
+}
+
+/// Projects the four independently weighted square-corner rectangle edges
+/// from Core. The ordered meshes retain their separate paint-stack passes.
+#[wasm_bindgen]
+pub fn stroke_meshes_for_per_side_rectangle_json(
+    width: f64,
+    height: f64,
+    weights_json: &str,
+    align: &str,
+) -> Result<String, JsValue> {
+    let weights = serde_json::from_str::<[f64; 4]>(weights_json)
+        .map_err(|_| JsValue::from_str("INVALID_PER_SIDE_STROKE_WEIGHTS"))?;
+    let align = match align {
+        "inside" => PerSideStrokeAlign::Inside,
+        "center" => PerSideStrokeAlign::Center,
+        "outside" => PerSideStrokeAlign::Outside,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_ALIGN")),
+    };
+    let meshes = stroke_meshes_for_per_side_rectangle(width, height, weights, align)
+        .map_err(|_| JsValue::from_str("INVALID_PER_SIDE_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "meshes": meshes.into_iter().map(|mesh| serde_json::json!({
+            "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+            "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })),
+        })).collect::<Vec<_>>(),
+    }).to_string())
+}
+
+/// Projects independently weighted square-corner rectangle dashes from Core.
+/// The dash phase intentionally restarts on each independent edge, matching
+/// the existing per-side rendering contract.
+#[wasm_bindgen]
+pub fn stroke_meshes_for_per_side_rectangle_with_dash_json(
+    width: f64,
+    height: f64,
+    weights_json: &str,
+    align: &str,
+    dash_json: &str,
+) -> Result<String, JsValue> {
+    let weights = serde_json::from_str::<[f64; 4]>(weights_json)
+        .map_err(|_| JsValue::from_str("INVALID_PER_SIDE_STROKE_WEIGHTS"))?;
+    let dash = serde_json::from_str::<Vec<f64>>(dash_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
+    let align = match align {
+        "inside" => PerSideStrokeAlign::Inside,
+        "center" => PerSideStrokeAlign::Center,
+        "outside" => PerSideStrokeAlign::Outside,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_ALIGN")),
+    };
+    let meshes = stroke_meshes_for_per_side_rectangle_with_dash(width, height, weights, align, Some(&dash))
+        .map_err(|_| JsValue::from_str("INVALID_DASHED_PER_SIDE_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "meshes": meshes.into_iter().map(|mesh| serde_json::json!({
+            "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+            "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })),
+        })).collect::<Vec<_>>(),
+    }).to_string())
+}
+
+/// Projects the canonical uniform rounded-rectangle stroke outline. This is a
+/// presentation-only mesh; it cannot become document state and therefore
+/// keeps the same finite validation boundary as polyline tessellation.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_rounded_rectangle_json(
+    width: f64,
+    height: f64,
+    radius: f64,
+    stroke_width: f64,
+    join: &str,
+    miter_limit: f64,
+) -> Result<String, JsValue> {
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_rounded_rectangle(
+        width,
+        height,
+        radius,
+        StrokeStyle {
+            width: stroke_width,
+            cap: StrokeCapStyle::Butt,
+            join,
+            miter_limit,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| {
+            serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })
+        }),
+    })
+    .to_string())
+}
+
+/// Projects a canonical four-corner rounded-rectangle stroke outline. Radii
+/// are TL/TR/BR/BL and are normalized by Core before tessellation.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_rounded_rectangle_with_radii_json(
+    width: f64,
+    height: f64,
+    radii_json: &str,
+    stroke_width: f64,
+    join: &str,
+    miter_limit: f64,
+) -> Result<String, JsValue> {
+    let radii = serde_json::from_str::<[f64; 4]>(radii_json)
+        .map_err(|_| JsValue::from_str("INVALID_ROUNDED_RECTANGLE_RADII"))?;
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_rounded_rectangle_with_radii(
+        width,
+        height,
+        radii,
+        StrokeStyle {
+            width: stroke_width,
+            cap: StrokeCapStyle::Butt,
+            join,
+            miter_limit,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| {
+            serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })
+        }),
+    })
+    .to_string())
+}
+
+/// Projects the canonical dashed independent-radius rounded-rectangle outline.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(
+    width: f64,
+    height: f64,
+    radii_json: &str,
+    stroke_width: f64,
+    dash_json: &str,
+    join: &str,
+    miter_limit: f64,
+) -> Result<String, JsValue> {
+    let radii = serde_json::from_str::<[f64; 4]>(radii_json)
+        .map_err(|_| JsValue::from_str("INVALID_ROUNDED_RECTANGLE_RADII"))?;
+    let dash_pattern = serde_json::from_str::<Vec<f64>>(dash_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_dashed_rounded_rectangle_with_radii(
+        width,
+        height,
+        radii,
+        StrokeStyle { width: stroke_width, cap: StrokeCapStyle::Butt, join, miter_limit },
+        &dash_pattern,
+    ).map_err(|_| JsValue::from_str("INVALID_DASHED_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+            "min": [bounds.min.x, bounds.min.y], "max": [bounds.max.x, bounds.max.y],
+        })),
+    }).to_string())
+}
+
+/// Projects the shared Figma-style Corner Smoothing approximation. An empty
+/// Dash array means solid; otherwise Core emits only the visible dash runs.
+#[wasm_bindgen]
+pub fn stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(
+    width: f64,
+    height: f64,
+    radii_json: &str,
+    smoothing: f64,
+    stroke_width: f64,
+    dash_json: &str,
+    join: &str,
+    miter_limit: f64,
+) -> Result<String, JsValue> {
+    let radii = serde_json::from_str::<[f64; 4]>(radii_json)
+        .map_err(|_| JsValue::from_str("INVALID_ROUNDED_RECTANGLE_RADII"))?;
+    let dash_pattern = serde_json::from_str::<Vec<f64>>(dash_json)
+        .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
+    let join = match join {
+        "miter" => StrokeJoinStyle::Miter,
+        "bevel" => StrokeJoinStyle::Bevel,
+        "round" => StrokeJoinStyle::Round,
+        _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    };
+    let mesh = stroke_mesh_for_continuous_rounded_rectangle_with_radii(
+        width,
+        height,
+        radii,
+        smoothing,
+        StrokeStyle { width: stroke_width, cap: StrokeCapStyle::Butt, join, miter_limit },
+        (!dash_pattern.is_empty()).then_some(dash_pattern.as_slice()),
+    ).map_err(|_| JsValue::from_str("INVALID_CONTINUOUS_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| serde_json::json!({
+            "min": [bounds.min.x, bounds.min.y], "max": [bounds.max.x, bounds.max.y],
+        })),
+    }).to_string())
 }
 
 /// Returns a deterministic, UTF-8 byte-addressed fallback layout for selection,
@@ -1685,8 +2246,117 @@ fn parse_kind(value: &str) -> Result<NodeKind, JsValue> {
         "ellipse" => Ok(NodeKind::Ellipse),
         "text" => Ok(NodeKind::Text),
         "image" => Ok(NodeKind::Image),
+        "line" => Ok(NodeKind::Line),
+        "group" => Ok(NodeKind::Group),
+        "section" => Ok(NodeKind::Section),
         _ => Err(JsValue::from_str("UNSUPPORTED_NODE_KIND")),
     }
+}
+
+fn parse_stroke_cap(value: &str) -> Result<StrokeCap, JsValue> {
+    match value {
+        "" | "none" => Ok(StrokeCap::None),
+        "round" => Ok(StrokeCap::Round),
+        "square" => Ok(StrokeCap::Square),
+        "arrowLines" => Ok(StrokeCap::ArrowLines),
+        "arrowEquilateral" => Ok(StrokeCap::ArrowEquilateral),
+        "diamondFilled" => Ok(StrokeCap::DiamondFilled),
+        "triangleFilled" => Ok(StrokeCap::TriangleFilled),
+        "circleFilled" => Ok(StrokeCap::CircleFilled),
+        _ => Err(JsValue::from_str("INVALID_STROKE_CAP")),
+    }
+}
+
+fn format_stroke_cap(cap: StrokeCap) -> String {
+    match cap {
+        StrokeCap::None => "none",
+        StrokeCap::Round => "round",
+        StrokeCap::Square => "square",
+        StrokeCap::ArrowLines => "arrowLines",
+        StrokeCap::ArrowEquilateral => "arrowEquilateral",
+        StrokeCap::DiamondFilled => "diamondFilled",
+        StrokeCap::TriangleFilled => "triangleFilled",
+        StrokeCap::CircleFilled => "circleFilled",
+    }
+    .into()
+}
+
+fn parse_stroke_join(value: &str) -> Result<StrokeJoin, JsValue> {
+    match value {
+        "" | "miter" => Ok(StrokeJoin::Miter),
+        "bevel" => Ok(StrokeJoin::Bevel),
+        "round" => Ok(StrokeJoin::Round),
+        _ => Err(JsValue::from_str("INVALID_STROKE_JOIN")),
+    }
+}
+
+fn format_stroke_join(join: StrokeJoin) -> String {
+    match join {
+        StrokeJoin::Miter => "miter",
+        StrokeJoin::Bevel => "bevel",
+        StrokeJoin::Round => "round",
+    }
+    .into()
+}
+
+fn parse_stroke_align(value: &str) -> Result<StrokeAlign, JsValue> {
+    match value {
+        "" | "inside" => Ok(StrokeAlign::Inside),
+        "center" => Ok(StrokeAlign::Center),
+        "outside" => Ok(StrokeAlign::Outside),
+        _ => Err(JsValue::from_str("INVALID_STROKE_ALIGN")),
+    }
+}
+
+fn shape_gpu_stroke_outset(
+    kind: NodeKind,
+    has_arc_data: bool,
+    align: StrokeAlign,
+    stroke_width: f64,
+    stroke_alpha: f32,
+) -> f32 {
+    if !matches!(kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
+        || (kind == NodeKind::Ellipse && has_arc_data)
+        || stroke_width <= 0.0
+        || stroke_alpha <= 0.0
+    {
+        return 0.0;
+    }
+    match align {
+        StrokeAlign::Center => stroke_width as f32 / 2.0,
+        StrokeAlign::Outside => stroke_width as f32,
+        StrokeAlign::Inside => 0.0,
+    }
+}
+
+fn format_constraint_type(value: ConstraintType) -> &'static str {
+    match value {
+        ConstraintType::Min => "min",
+        ConstraintType::Center => "center",
+        ConstraintType::Max => "max",
+        ConstraintType::Stretch => "stretch",
+        ConstraintType::Scale => "scale",
+    }
+}
+
+fn parse_constraint_type(value: &str) -> Result<ConstraintType, JsValue> {
+    match value {
+        "min" => Ok(ConstraintType::Min),
+        "center" => Ok(ConstraintType::Center),
+        "max" => Ok(ConstraintType::Max),
+        "stretch" => Ok(ConstraintType::Stretch),
+        "scale" => Ok(ConstraintType::Scale),
+        _ => Err(JsValue::from_str("INVALID_CONSTRAINTS")),
+    }
+}
+
+fn format_stroke_align(align: StrokeAlign) -> String {
+    match align {
+        StrokeAlign::Center => "center",
+        StrokeAlign::Inside => "inside",
+        StrokeAlign::Outside => "outside",
+    }
+    .into()
 }
 
 fn parse_css_color(value: &str) -> Result<Color, JsValue> {
@@ -1863,6 +2533,9 @@ fn projection_node(
             NodeKind::Ellipse => "ellipse",
             NodeKind::Text => "text",
             NodeKind::Image => "image",
+            NodeKind::Line => "line",
+            NodeKind::Group => "group",
+            NodeKind::Section => "section",
         }
         .into(),
         x: node.x,
@@ -1873,19 +2546,41 @@ fn projection_node(
         fill,
         fill_color,
         fill_gradient,
+        fills: node.fills.iter().map(|paint| {
+            let (css, color, gradient) = project_paint(paint);
+            ProjectionPaint { css, color, gradient }
+        }).collect(),
         stroke,
         stroke_color,
         stroke_gradient,
+        strokes: node.strokes.iter().map(|paint| {
+            let (css, color, gradient) = project_paint(paint);
+            ProjectionPaint { css, color, gradient }
+        }).collect(),
         stroke_width: node.stroke_width,
+        stroke_cap_start: format_stroke_cap(node.stroke_cap_start),
+        stroke_cap_end: format_stroke_cap(node.stroke_cap_end),
+        stroke_join: format_stroke_join(node.stroke_join),
+        stroke_miter_limit: node.stroke_miter_limit,
+        stroke_dash_pattern: node.stroke_dash_pattern.clone(),
+        stroke_weights: node.stroke_weights.clone(),
+        stroke_align: format_stroke_align(node.stroke_align),
+        arc_data: node.arc_data.map(|arc| ProjectionArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }),
+        relative_transform: node.relative_transform.map(|matrix| ProjectionTransform { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }),
         position_id: Some(format_position_id(node.position)),
         page_id: Some(format_page_id(page_id)),
         asset_id: asset_id.map(|id| format_uuid(NodeId(id.0))),
         text_properties: text_properties.map(projection_text_properties),
         opacity: node.opacity,
         corner_radius: node.corner_radius,
+        corner_radii: node.corner_radii.clone(),
+        corner_smoothing: node.corner_smoothing,
+        constraints: node.constraints.map(|value| ProjectionConstraints { horizontal: format_constraint_type(value.horizontal).into(), vertical: format_constraint_type(value.vertical).into() }),
         text: node.text.clone(),
         visible: node.visible,
         locked: node.locked,
+        contents_hidden: node.contents_hidden,
+        clips_content: Some(node.clips_content),
     }
 }
 
@@ -2015,6 +2710,8 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         node.stroke_color.as_ref(),
         node.stroke_gradient.as_ref(),
     )?;
+    let fills = node.fills.iter().map(|paint| paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())).collect::<Result<Vec<_>, _>>()?;
+    let strokes = node.strokes.iter().map(|paint| paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())).collect::<Result<Vec<_>, _>>()?;
     let id = parse_id(&node.id)?;
     let position = node
         .position_id
@@ -2022,12 +2719,14 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         .map(parse_position_id)
         .transpose()?
         .unwrap_or_else(|| PositionId::for_node(id));
+    let kind = parse_kind(&node.kind)?;
+    let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
     Ok(Node {
         id,
         parent_id: node.parent_id.as_deref().map(parse_id).transpose()?,
         position,
         name: node.name,
-        kind: parse_kind(&node.kind)?,
+        kind,
         x: node.x,
         y: node.y,
         width: node.width,
@@ -2035,12 +2734,28 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         rotation: node.rotation,
         fill,
         stroke,
+        fills,
+        strokes,
         stroke_width: node.stroke_width,
+        stroke_cap_start: parse_stroke_cap(&node.stroke_cap_start)?,
+        stroke_cap_end: parse_stroke_cap(&node.stroke_cap_end)?,
+        stroke_join: parse_stroke_join(&node.stroke_join)?,
+        stroke_miter_limit: node.stroke_miter_limit,
+        stroke_dash_pattern: node.stroke_dash_pattern,
+        stroke_weights: node.stroke_weights,
+        stroke_align: parse_stroke_align(&node.stroke_align)?,
+        arc_data: node.arc_data.map(|arc| ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }),
+        relative_transform: node.relative_transform.map(|matrix| editor_core::geometry::AffineTransform { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }),
         opacity: node.opacity,
         corner_radius: node.corner_radius,
+        corner_radii: node.corner_radii,
+        corner_smoothing: node.corner_smoothing,
+        constraints: node.constraints.map(|value| Ok::<Constraints, JsValue>(Constraints { horizontal: parse_constraint_type(&value.horizontal)?, vertical: parse_constraint_type(&value.vertical)? })).transpose()?,
         text: node.text,
         visible: node.visible,
         locked: node.locked,
+        contents_hidden: node.contents_hidden,
+        clips_content,
     })
 }
 
@@ -2104,6 +2819,91 @@ fn core_error(error: editor_core::CommandError) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposes_canonical_stroke_mesh_at_the_wasm_boundary() {
+        let mesh = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_polyline_json("[[0,0],[10,0]]", 4.0, "round", "round", 4.0, false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mesh["bounds"]["min"], serde_json::json!([-2.0, -2.0]));
+        assert_eq!(mesh["bounds"]["max"], serde_json::json!([12.0, 2.0]));
+        assert!(mesh["triangles"].as_array().is_some_and(|triangles| triangles.len() > 2));
+
+        let closed = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_polyline_json(
+                "[[0,0],[10,0],[10,6],[0,6]]",
+                2.0,
+                "butt",
+                "miter",
+                4.0,
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(closed["bounds"]["min"], serde_json::json!([-1.0, -1.0]));
+        assert_eq!(closed["bounds"]["max"], serde_json::json!([11.0, 7.0]));
+
+        let rounded = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_rounded_rectangle_json(100.0, 60.0, 12.0, 8.0, "round", 4.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rounded["bounds"]["min"], serde_json::json!([-4.0, -4.0]));
+        assert_eq!(rounded["bounds"]["max"], serde_json::json!([104.0, 64.0]));
+
+        let independent = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 8.0, "round", 4.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(independent["bounds"]["min"], serde_json::json!([-4.0, -4.0]));
+        assert_eq!(independent["bounds"]["max"], serde_json::json!([104.0, 64.0]));
+
+        let dashed_independent = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 8.0, "[18,8]", "round", 4.0)
+                .unwrap(),
+        ).unwrap();
+        assert!(dashed_independent["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+
+        let continuous = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 0.5, 8.0, "[18,8]", "round", 4.0)
+                .unwrap(),
+        ).unwrap();
+        assert!(continuous["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+
+        let dashed = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_dashed_line_json(94.0, 10.0, "[8,4]", "square", "miter", 4.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dashed["bounds"]["min"], serde_json::json!([-5.0, -5.0]));
+        assert_eq!(dashed["bounds"]["max"], serde_json::json!([97.0, 5.0]));
+
+        let per_side = serde_json::from_str::<serde_json::Value>(
+            &stroke_meshes_for_per_side_rectangle_json(100.0, 80.0, "[6,2,4,8]", "outside")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(per_side["meshes"].as_array().map(Vec::len), Some(4));
+        assert_eq!(per_side["meshes"][0]["bounds"]["min"], serde_json::json!([0.0, -6.0]));
+
+        let dashed_per_side = serde_json::from_str::<serde_json::Value>(
+            &stroke_meshes_for_per_side_rectangle_with_dash_json(100.0, 80.0, "[6,2,4,8]", "outside", "[12,8]")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dashed_per_side["meshes"][0]["bounds"]["max"], serde_json::json!([92.0, 0.0]));
+
+        let dashed_closed = serde_json::from_str::<serde_json::Value>(
+            &stroke_mesh_for_dashed_polyline_json(
+                "[[0,0],[100,0],[100,60],[0,60]]", 4.0, "[120,20]", "butt", "miter", 4.0, true,
+            ).unwrap(),
+        ).unwrap();
+        assert!(dashed_closed["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+    }
 
     #[test]
     fn exposes_graphics_core_caret_map_without_utf8_splitting() {
@@ -2392,6 +3192,15 @@ mod tests {
     }
 
     #[test]
+    fn maps_uniform_closed_shape_alignments_to_gpu_outsets() {
+        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Outside, 8.0, 1.0), 8.0);
+        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Center, 8.0, 1.0), 4.0);
+        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Inside, 8.0, 1.0), 0.0);
+        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, true, StrokeAlign::Outside, 8.0, 1.0), 0.0);
+        assert_eq!(shape_gpu_stroke_outset(NodeKind::Rectangle, false, StrokeAlign::Outside, 8.0, 1.0), 8.0);
+    }
+
+    #[test]
     fn snapshot_v14_preserves_document_identity_and_resource_index() {
         let mut source = DocumentEngine::new();
         source.document = Document::with_id(DocumentId(42));
@@ -2406,7 +3215,7 @@ mod tests {
             })
             .unwrap();
         let snapshot = source.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":15"));
+        assert!(snapshot.contains("\"schemaVersion\":19"));
         assert!(snapshot.contains("\"documentId\":\"00000000-0000-0000-0000-00000000002a\""));
         let mut restored = DocumentEngine::new();
         restored.load_snapshot_json(&snapshot).unwrap();
@@ -2485,6 +3294,77 @@ mod tests {
     }
 
     #[test]
+    fn line_survives_service_wire_and_local_json_snapshot_round_trip() {
+        let mut source = DocumentEngine::new();
+        source
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-0000-0000-000000000002",
+                "line",
+                "Line",
+                84.0,
+                201.0,
+                130.0,
+                0.0,
+                22.619_865,
+                "#000000",
+                "#0048ff",
+                1.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+
+        let wire = source.snapshot_protobuf().unwrap();
+        let mut service_rehydrated = DocumentEngine::new();
+        service_rehydrated.load_snapshot_protobuf(&wire).unwrap();
+        let local_snapshot = service_rehydrated.snapshot_json();
+
+        let mut browser_rehydrated = DocumentEngine::new();
+        browser_rehydrated.load_snapshot_json(&local_snapshot).unwrap();
+        assert_eq!(browser_rehydrated.canonical_hash(), source.canonical_hash());
+    }
+
+    #[test]
+    fn phase2_common_nodes_fixture_survives_service_wire_and_local_snapshot_round_trip() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/documents/phase2-common-nodes.fixture.json")).unwrap();
+        let nodes = fixture["nodes"].as_array().unwrap();
+        let batch = nodes
+            .iter()
+            .map(|source| {
+                // The fixture is a browser presentation document. Match the
+                // transaction adapter at the durable boundary: `radius` is
+                // projected to the Canonical `cornerRadius`, and absent
+                // editable flags receive their deterministic defaults.
+                let mut node = source.clone();
+                node["cornerRadius"] = node.get("radius").cloned().unwrap_or_else(|| serde_json::json!(0));
+                node["locked"] = node.get("locked").cloned().unwrap_or_else(|| serde_json::json!(false));
+                serde_json::json!({ "type": "create", "node": node })
+            })
+            .collect::<Vec<_>>();
+
+        let mut source = DocumentEngine::new();
+        source.seed_batch_json(&serde_json::to_string(&batch).unwrap()).unwrap();
+        let source_hash = source.canonical_hash();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&source.snapshot_json()).unwrap()["nodes"].as_array().map(Vec::len), Some(nodes.len()));
+
+        // The Protobuf payload is the durable service boundary; the JSON
+        // projection is the browser-local recovery boundary.
+        let service_wire = source.snapshot_protobuf().unwrap();
+        let mut service_rehydrated = DocumentEngine::new();
+        service_rehydrated.load_snapshot_protobuf(&service_wire).unwrap();
+        assert_eq!(service_rehydrated.canonical_hash(), source_hash);
+
+        let mut browser_rehydrated = DocumentEngine::new();
+        browser_rehydrated.load_snapshot_json(&service_rehydrated.snapshot_json()).unwrap();
+        assert_eq!(browser_rehydrated.canonical_hash(), source_hash);
+    }
+
+    #[test]
     fn bridge_uses_core_revision_checks() {
         let mut engine = DocumentEngine::new();
         let id = NodeId(1);
@@ -2501,12 +3381,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         assert_eq!(
             engine
@@ -2537,12 +3433,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         let second = Node {
             id: NodeId(2),
@@ -2570,11 +3482,27 @@ mod tests {
                     Appearance {
                         fill: "#e6edff".into(),
                         stroke: "#00000000".into(),
+                        fills: Vec::new(),
+                        strokes: Vec::new(),
                         stroke_width: 0.0,
-                        opacity: 1.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
                         corner_radius: 12.0,
+                        corner_radii: Vec::new(),
+                        corner_smoothing: 0.0,
+            constraints: None,
                         visible: true,
-                        locked: false
+                        locked: false,
+                        contents_hidden: false,
+            clips_content: Some(false),
                     },
                     String::new(),
                 )
@@ -2607,12 +3535,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         engine
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -2641,12 +3585,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 0.75,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         source
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -2678,12 +3638,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         source
             .document
@@ -2742,17 +3718,17 @@ mod tests {
             (
                 "v13",
                 include_str!("../../../fixtures/documents/phase1-snapshot-v13.fixture.json"),
-                "cb588c3ca07162fa024dc0f0f3cf514384ef4d828869f0b9bfff7b6d806285b7",
+                "f003936ef1fef23ac2722be779191c9f7f02fb1507eaf2b2bff1ed43195cf3b2",
             ),
             (
                 "v14",
                 include_str!("../../../fixtures/documents/phase1-snapshot-v14.fixture.json"),
-                "9491e6b70382099a15ac37ba861ab8c25e7a2c95b984d15b961d489f2b3c147c",
+                "0899e19b4cc9e839c298d40b9a1c5bc404f000d4a45daf060012bf8e9d6a3b9d",
             ),
             (
                 "v15",
                 include_str!("../../../fixtures/documents/phase1-snapshot-v15.fixture.json"),
-                "eb71386a777c71c0382a15d57f4198fcc414e8131f61a00671152c2a08ae7268",
+                "68ceba49708c64f32db79c561f85e0b778709154ebe22cf8f02feda51ff3a013",
             ),
         ];
         for (version, fixture, expected_hash) in fixtures {
@@ -2781,7 +3757,7 @@ mod tests {
                 "{version}"
             );
             let projection = migrated.snapshot_json();
-            assert!(projection.contains(r#""schemaVersion":15"#), "{version}");
+            assert!(projection.contains(r#""schemaVersion":19"#), "{version}");
 
             let mut round_trip = DocumentEngine::new();
             round_trip.load_snapshot_json(&projection).unwrap();
@@ -2810,12 +3786,28 @@ mod tests {
             rotation: 0.0,
             fill: "#e6edff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         };
         source
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -2847,12 +3839,28 @@ mod tests {
                         rotation: 0.0,
                         fill: "#e6edff".into(),
                         stroke: "#00000000".into(),
+                        fills: Vec::new(),
+                        strokes: Vec::new(),
                         stroke_width: 0.0,
-                        opacity: 1.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
                         corner_radius: 12.0,
+                        corner_radii: Vec::new(),
+                        corner_smoothing: 0.0,
+            constraints: None,
                         text: String::new(),
                         visible: true,
                         locked: false,
+            contents_hidden: false,
+            clips_content: false,
                     },
                     Origin::LocalUser,
                 )
@@ -2880,12 +3888,28 @@ mod tests {
                     rotation: 0.0,
                     fill: "#e6edff".into(),
                     stroke: "#00000000".into(),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
                     stroke_width: 0.0,
-                    opacity: 1.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
                     corner_radius: 12.0,
+                    corner_radii: Vec::new(),
+                    corner_smoothing: 0.0,
+            constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
+            contents_hidden: false,
+            clips_content: false,
                 },
                 Origin::LocalUser,
             )
@@ -2923,16 +3947,32 @@ mod tests {
             fill_color: None,
             fill_gradient: None,
             stroke: "transparent".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_color: None,
             stroke_gradient: None,
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
             position_id: None,
             page_id: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
         };
 
         let revision = engine
@@ -2953,7 +3993,148 @@ mod tests {
         assert_eq!(revision, 1);
         assert_eq!(engine.document.revision, 1);
         assert_eq!(engine.document.nodes().count(), 2);
+        let first_id = parse_id("00000000-0000-4000-8000-000000000001").unwrap();
+        assert!(engine.document.node(first_id).is_some());
         assert!(engine.document.can_undo());
+
+        let group_id = "00000000-0000-0000-0000-000000000003";
+        let group_core_id = parse_id(group_id).unwrap();
+        let mut group = node(group_id, "Group");
+        group.kind = "group".into();
+        group.x = 10.0;
+        group.y = 20.0;
+        let mut first_as_group_child = node("00000000-0000-4000-8000-000000000001", "First");
+        first_as_group_child.x = 0.0;
+        first_as_group_child.y = 0.0;
+        first_as_group_child.relative_transform = Some(ProjectionTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        });
+        engine
+            .submit_batch(
+                NodeId(17),
+                1,
+                vec![
+                    BatchCommand::Create { node: group },
+                    BatchCommand::Update { node: first_as_group_child },
+                    BatchCommand::Reparent {
+                        parent_ids: vec![ParentUpdate {
+                            id: "00000000-0000-4000-8000-000000000001".into(),
+                            parent_id: Some(group_id.into()),
+                            position_id: "00000000000000000000000000000001:00000000000000000000000000000000".into(),
+                        }],
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(engine.document.node(first_id).unwrap().parent_id, Some(group_core_id));
+        assert_eq!(engine.document.node(first_id).unwrap().relative_transform, Some(editor_core::geometry::AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }));
+        engine.document.undo().unwrap();
+        assert_eq!(engine.document.node(first_id).unwrap().parent_id, None);
+        assert_eq!(engine.document.node(first_id).unwrap().relative_transform, None);
+        engine.document.redo().unwrap();
+        assert_eq!(engine.document.node(first_id).unwrap().parent_id, Some(group_core_id));
+    }
+
+    #[test]
+    fn image_filled_frame_can_update_stroke_alignment_after_asset_binding() {
+        let mut engine = DocumentEngine::new();
+        let frame_id = "00000000-0000-4000-8000-000000000011";
+        let asset_id = "00000000-0000-4000-8000-000000000022";
+        engine
+            .document
+            .seed_asset(AssetReference {
+                asset_id: AssetId(parse_id(asset_id).unwrap().0),
+                content_hash: [7; 32],
+                media_type: "image/png".into(),
+                byte_length: 128,
+                dimensions: Some([16, 8]),
+            })
+            .unwrap();
+        let frame = ProjectionNode {
+            id: frame_id.into(),
+            parent_id: None,
+            name: "Image frame".into(),
+            kind: "frame".into(),
+            asset_id: None,
+            text_properties: None,
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 180.0,
+            rotation: 0.0,
+            fill: "#ffffff".into(),
+            fill_color: None,
+            fill_gradient: None,
+            fills: Vec::new(),
+            stroke: "#000000".into(),
+            stroke_color: None,
+            stroke_gradient: None,
+            strokes: Vec::new(),
+            stroke_width: 4.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
+            position_id: None,
+            page_id: None,
+            opacity: 1.0,
+            corner_radius: 24.0,
+            corner_radii: vec![24.0, 32.0, 24.0, 18.0],
+            corner_smoothing: 0.25,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: Some(true),
+        };
+        engine
+            .submit_batch(
+                NodeId(101),
+                0,
+                vec![BatchCommand::Create { node: frame.clone() }],
+            )
+            .unwrap();
+        let mut image_filled = frame.clone();
+        image_filled.asset_id = Some(asset_id.into());
+        engine
+            .submit_batch(
+                NodeId(102),
+                1,
+                vec![BatchCommand::Update { node: image_filled.clone() }],
+            )
+            .unwrap();
+        let mut circular = image_filled;
+        circular.corner_smoothing = 0.0;
+        engine
+            .submit_batch(
+                NodeId(103),
+                2,
+                vec![BatchCommand::Update { node: circular.clone() }],
+            )
+            .unwrap();
+        let mut outside = circular;
+        outside.stroke_align = "outside".into();
+        assert_eq!(
+            engine
+                .submit_batch(NodeId(104), 3, vec![BatchCommand::Update { node: outside }])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.document.node(parse_id(frame_id).unwrap()).unwrap().stroke_align,
+            StrokeAlign::Outside
+        );
     }
 
     #[test]
@@ -2975,16 +4156,32 @@ mod tests {
             fill_color: None,
             fill_gradient: None,
             stroke: "transparent".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_color: None,
             stroke_gradient: None,
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
             position_id: None,
             page_id: None,
             opacity: 1.0,
             corner_radius: 12.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
         };
         let first = "00000000-0000-4000-8000-000000000001";
         let second = "00000000-0000-4000-8000-000000000002";
@@ -3075,16 +4272,32 @@ mod tests {
             fill_color: None,
             fill_gradient: None,
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_color: None,
             stroke_gradient: None,
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
             position_id: None,
             page_id: None,
             opacity: 1.0,
             corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: value.into(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
         };
         engine
             .submit_batch(
@@ -3119,7 +4332,7 @@ mod tests {
         assert_eq!(engine.redo().unwrap(), 4);
 
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":15"));
+        assert!(snapshot.contains("\"schemaVersion\":19"));
         assert!(snapshot.contains("\"textProperties\":{\"runs\":[{\"start\":0,\"end\":5"));
         assert!(snapshot.contains("\"stroke\":\"#00000000\""));
         let mut restored = DocumentEngine::new();
@@ -3172,18 +4385,34 @@ mod tests {
             }),
             fill_gradient: None,
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_color: None,
             stroke_gradient: None,
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
             position_id: Some(
                 "00000000000000000000000000000010:00000000000000000000000000000007".into(),
             ),
             page_id: None,
             opacity: 1.0,
             corner_radius: 8.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
         };
         engine
             .submit_batch(NodeId(16), 0, vec![BatchCommand::Create { node }])
@@ -3253,7 +4482,7 @@ mod tests {
             .set_document_color_profile("00000000-0000-4000-8000-000000000099", 0, "display-p3")
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":15"));
+        assert!(snapshot.contains("\"schemaVersion\":19"));
         assert!(snapshot.contains("\"colorProfile\":\"display-p3\""));
 
         let mut restored = DocumentEngine::new();
@@ -3323,22 +4552,38 @@ mod tests {
                         fill_color: None,
                         fill_gradient: Some(gradient.clone()),
                         stroke: "#1a334d".into(),
+                        fills: Vec::new(),
+                        strokes: Vec::new(),
                         stroke_color: None,
                         stroke_gradient: Some(gradient.clone()),
                         stroke_width: 3.0,
-                        position_id: None,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
+            position_id: None,
                         page_id: None,
                         opacity: 1.0,
                         corner_radius: 8.0,
+                        corner_radii: Vec::new(),
+                        corner_smoothing: 0.0,
+            constraints: None,
                         text: String::new(),
                         visible: true,
                         locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
                     },
                 }],
             )
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":15"));
+        assert!(snapshot.contains("\"schemaVersion\":19"));
         assert!(snapshot.contains("\"fillGradient\""));
         assert!(snapshot.contains("\"strokeGradient\""));
         assert!(snapshot.contains("\"strokeWidth\":3.0"));
@@ -3439,7 +4684,7 @@ mod tests {
             Some(parse_page_id(design_page).unwrap())
         );
         let round_trip = restored.snapshot_json();
-        assert!(round_trip.contains("\"schemaVersion\":15"));
+        assert!(round_trip.contains("\"schemaVersion\":19"));
         assert!(round_trip.contains("\"pageId\":\"00000000-0000-4000-8000-000000000002\""));
 
         let mut v9 = current;
@@ -3494,12 +4739,28 @@ mod tests {
                     rotation: 0.0,
                     fill: "#e6edff".into(),
                     stroke: "#00000000".into(),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
                     stroke_width: 0.0,
-                    opacity: 1.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
                     corner_radius: 12.0,
+                    corner_radii: Vec::new(),
+                    corner_smoothing: 0.0,
+            constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
+            contents_hidden: false,
+            clips_content: false,
                 })
                 .unwrap();
             updates.push(BatchCommand::Update {
@@ -3519,16 +4780,32 @@ mod tests {
                     fill_color: None,
                     fill_gradient: None,
                     stroke: "#00000000".into(),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
                     stroke_color: None,
                     stroke_gradient: None,
                     stroke_width: 0.0,
-                    position_id: None,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+           stroke_weights: Vec::new(),
+           stroke_align: "inside".into(),
+            arc_data: None,
+            relative_transform: None,
+            position_id: None,
                     page_id: None,
                     opacity: 1.0,
                     corner_radius: 12.0,
+                    corner_radii: Vec::new(),
+                    corner_smoothing: 0.0,
+            constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
                 },
             });
         }

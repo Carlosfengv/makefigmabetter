@@ -149,6 +149,64 @@ export function rasterize_glyph_with_variations_json(font_bytes: Uint8Array, fac
  */
 export function shape_text_json(font_bytes: Uint8Array, face_index: number, text: string, direction: string): string;
 
+/**
+ * Projects the shared Figma-style Corner Smoothing approximation. An empty
+ * Dash array means solid; otherwise Core emits only the visible dash runs.
+ */
+export function stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(width: number, height: number, radii_json: string, smoothing: number, stroke_width: number, dash_json: string, join: string, miter_limit: number): string;
+
+/**
+ * Projects the visible dashes of a straight Line from the same Core mesh
+ * source used by hit testing and selection bounds.
+ */
+export function stroke_mesh_for_dashed_line_json(width: number, stroke_width: number, dash_json: string, cap: string, join: string, miter_limit: number): string;
+
+/**
+ * Projects visible dashes of an arbitrary open or closed polyline. A dashed
+ * Frame/Rectangle uses this boundary so its corner joins are not re-derived
+ * by Canvas.
+ */
+export function stroke_mesh_for_dashed_polyline_json(points_json: string, stroke_width: number, dash_json: string, cap: string, join: string, miter_limit: number, closed: boolean): string;
+
+/**
+ * Projects the canonical dashed independent-radius rounded-rectangle outline.
+ */
+export function stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(width: number, height: number, radii_json: string, stroke_width: number, dash_json: string, join: string, miter_limit: number): string;
+
+/**
+ * Projects the canonical Rust stroke tessellation through the WASM boundary.
+ * The returned triangles are presentation data only: neither a mesh nor its
+ * cache can become durable document state. Keeping this conversion here gives
+ * Canvas, WebGPU and export callers one finite, validated geometry source.
+ */
+export function stroke_mesh_for_polyline_json(points_json: string, width: number, cap: string, join: string, miter_limit: number, closed: boolean): string;
+
+/**
+ * Projects the canonical uniform rounded-rectangle stroke outline. This is a
+ * presentation-only mesh; it cannot become document state and therefore
+ * keeps the same finite validation boundary as polyline tessellation.
+ */
+export function stroke_mesh_for_rounded_rectangle_json(width: number, height: number, radius: number, stroke_width: number, join: string, miter_limit: number): string;
+
+/**
+ * Projects a canonical four-corner rounded-rectangle stroke outline. Radii
+ * are TL/TR/BR/BL and are normalized by Core before tessellation.
+ */
+export function stroke_mesh_for_rounded_rectangle_with_radii_json(width: number, height: number, radii_json: string, stroke_width: number, join: string, miter_limit: number): string;
+
+/**
+ * Projects the four independently weighted square-corner rectangle edges
+ * from Core. The ordered meshes retain their separate paint-stack passes.
+ */
+export function stroke_meshes_for_per_side_rectangle_json(width: number, height: number, weights_json: string, align: string): string;
+
+/**
+ * Projects independently weighted square-corner rectangle dashes from Core.
+ * The dash phase intentionally restarts on each independent edge, matching
+ * the existing per-side rendering contract.
+ */
+export function stroke_meshes_for_per_side_rectangle_with_dash_json(width: number, height: number, weights_json: string, align: string, dash_json: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -189,6 +247,15 @@ export interface InitOutput {
     readonly rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly shape_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly stroke_mesh_for_continuous_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly stroke_mesh_for_dashed_line_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly stroke_mesh_for_dashed_polyline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly stroke_mesh_for_dashed_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly stroke_mesh_for_polyline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly stroke_mesh_for_rounded_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly stroke_mesh_for_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly stroke_meshes_for_per_side_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly stroke_meshes_for_per_side_rectangle_with_dash_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

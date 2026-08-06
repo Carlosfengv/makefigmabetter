@@ -797,6 +797,329 @@ export function shape_text_json(font_bytes, face_index, text, direction) {
         wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
+
+/**
+ * Projects the shared Figma-style Corner Smoothing approximation. An empty
+ * Dash array means solid; otherwise Core emits only the visible dash runs.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} radii_json
+ * @param {number} smoothing
+ * @param {number} stroke_width
+ * @param {string} dash_json
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(width, height, radii_json, smoothing, stroke_width, dash_json, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(radii_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(width, height, ptr0, len0, smoothing, stroke_width, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Projects the visible dashes of a straight Line from the same Core mesh
+ * source used by hit testing and selection bounds.
+ * @param {number} width
+ * @param {number} stroke_width
+ * @param {string} dash_json
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function stroke_mesh_for_dashed_line_json(width, stroke_width, dash_json, cap, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_dashed_line_json(width, stroke_width, ptr0, len0, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Projects visible dashes of an arbitrary open or closed polyline. A dashed
+ * Frame/Rectangle uses this boundary so its corner joins are not re-derived
+ * by Canvas.
+ * @param {string} points_json
+ * @param {number} stroke_width
+ * @param {string} dash_json
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @param {boolean} closed
+ * @returns {string}
+ */
+export function stroke_mesh_for_dashed_polyline_json(points_json, stroke_width, dash_json, cap, join, miter_limit, closed) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(points_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_dashed_polyline_json(ptr0, len0, stroke_width, ptr1, len1, ptr2, len2, ptr3, len3, miter_limit, closed);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Projects the canonical dashed independent-radius rounded-rectangle outline.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} radii_json
+ * @param {number} stroke_width
+ * @param {string} dash_json
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(width, height, radii_json, stroke_width, dash_json, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(radii_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(width, height, ptr0, len0, stroke_width, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Projects the canonical Rust stroke tessellation through the WASM boundary.
+ * The returned triangles are presentation data only: neither a mesh nor its
+ * cache can become durable document state. Keeping this conversion here gives
+ * Canvas, WebGPU and export callers one finite, validated geometry source.
+ * @param {string} points_json
+ * @param {number} width
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @param {boolean} closed
+ * @returns {string}
+ */
+export function stroke_mesh_for_polyline_json(points_json, width, cap, join, miter_limit, closed) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(points_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_polyline_json(ptr0, len0, width, ptr1, len1, ptr2, len2, miter_limit, closed);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Projects the canonical uniform rounded-rectangle stroke outline. This is a
+ * presentation-only mesh; it cannot become document state and therefore
+ * keeps the same finite validation boundary as polyline tessellation.
+ * @param {number} width
+ * @param {number} height
+ * @param {number} radius
+ * @param {number} stroke_width
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function stroke_mesh_for_rounded_rectangle_json(width, height, radius, stroke_width, join, miter_limit) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_rounded_rectangle_json(width, height, radius, stroke_width, ptr0, len0, miter_limit);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Projects a canonical four-corner rounded-rectangle stroke outline. Radii
+ * are TL/TR/BR/BL and are normalized by Core before tessellation.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} radii_json
+ * @param {number} stroke_width
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function stroke_mesh_for_rounded_rectangle_with_radii_json(width, height, radii_json, stroke_width, join, miter_limit) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(radii_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_mesh_for_rounded_rectangle_with_radii_json(width, height, ptr0, len0, stroke_width, ptr1, len1, miter_limit);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Projects the four independently weighted square-corner rectangle edges
+ * from Core. The ordered meshes retain their separate paint-stack passes.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} weights_json
+ * @param {string} align
+ * @returns {string}
+ */
+export function stroke_meshes_for_per_side_rectangle_json(width, height, weights_json, align) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(weights_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(align, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_meshes_for_per_side_rectangle_json(width, height, ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Projects independently weighted square-corner rectangle dashes from Core.
+ * The dash phase intentionally restarts on each independent edge, matching
+ * the existing per-side rendering contract.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} weights_json
+ * @param {string} align
+ * @param {string} dash_json
+ * @returns {string}
+ */
+export function stroke_meshes_for_per_side_rectangle_with_dash_json(width, height, weights_json, align, dash_json) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(weights_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(align, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.stroke_meshes_for_per_side_rectangle_with_dash_json(width, height, ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

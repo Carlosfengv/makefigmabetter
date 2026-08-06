@@ -28,10 +28,17 @@ impl Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneNodeKind {
     Frame,
+    Section,
     Rectangle,
     Ellipse,
     Image,
     Text,
+    /// A stroked open segment. It is currently routed through the main scene
+    /// plan; the executor receives its exact stroke geometry in Phase 2.
+    Line,
+    /// Structural only: child nodes paint in document order; a Group never
+    /// contributes a primitive by itself.
+    Group,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +120,10 @@ pub struct GpuPrimitive {
     pub rotation_degrees: f32,
     pub corner_radius: f32,
     pub stroke_width: f32,
+    /// Uniform closed-shape Center/Outside strokes submit an expanded quad to
+    /// the shared WGSL ring shader. Arc/Donut and detailed outlines never set
+    /// this value.
+    pub shape_stroke_outset: f32,
     pub fill_rgba: [f32; 4],
     pub stroke_rgba: [f32; 4],
 }
@@ -141,11 +152,27 @@ pub fn build_gpu_instance_batch(
         {
             continue;
         }
-        let width = primitive.bounds.width.abs();
-        let height = primitive.bounds.height.abs();
+        let closed_shape = matches!(primitive.kind, SceneNodeKind::Frame | SceneNodeKind::Rectangle | SceneNodeKind::Ellipse);
+        let outset = if closed_shape { primitive.shape_stroke_outset.max(0.0) } else { 0.0 };
+        let bounds = if outset > 0.0 {
+            Rect {
+                x: primitive.bounds.x - outset,
+                y: primitive.bounds.y - outset,
+                width: primitive.bounds.width + outset * 2.0,
+                height: primitive.bounds.height + outset * 2.0,
+            }
+        } else {
+            primitive.bounds
+        };
+        let width = bounds.width.abs();
+        let height = bounds.height.abs();
         let limiting_dimension = width.min(height);
-        let outer_radius = primitive
-            .corner_radius
+        let outer_radius = (primitive.corner_radius
+            + if primitive.kind == SceneNodeKind::Ellipse {
+                0.0
+            } else {
+                outset
+            })
             .max(0.0)
             .min(limiting_dimension / 2.0);
         let inside_stroke_width = if primitive.stroke_rgba[3] > 0.0 {
@@ -157,10 +184,10 @@ pub fn build_gpu_instance_batch(
             0.0
         };
         instance_floats.extend_from_slice(&[
-            primitive.bounds.x,
-            primitive.bounds.y,
-            primitive.bounds.width,
-            primitive.bounds.height,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
             primitive.rotation_degrees,
             if primitive.kind == SceneNodeKind::Ellipse {
                 1.0
@@ -331,9 +358,14 @@ pub fn compile_render_graph(scene: &Scene, dirty: DirtySet, viewport: Rect) -> R
             pass: match node.kind {
                 SceneNodeKind::Image => RenderPass::Images,
                 SceneNodeKind::Text => RenderPass::Text,
-                SceneNodeKind::Frame | SceneNodeKind::Rectangle | SceneNodeKind::Ellipse => {
+                SceneNodeKind::Frame
+                | SceneNodeKind::Section
+                | SceneNodeKind::Rectangle
+                | SceneNodeKind::Ellipse
+                | SceneNodeKind::Line => {
                     RenderPass::MainScene
                 }
+                SceneNodeKind::Group => RenderPass::Overlay,
             },
         })
         .collect();
@@ -2089,6 +2121,7 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
+                shape_stroke_outset: 0.0,
                 fill_rgba: [1.0, 0.0, 0.0, 1.0],
                 stroke_rgba: [0.0; 4],
             }]);
@@ -2216,6 +2249,7 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
+                shape_stroke_outset: 0.0,
                 fill_rgba: [1.0, 1.0, 0.0, 1.0],
                 stroke_rgba: [0.0; 4],
             }]);
@@ -2469,6 +2503,7 @@ mod tests {
                 rotation_degrees: 15.0,
                 corner_radius: 99.0,
                 stroke_width: 3.0,
+                shape_stroke_outset: 0.0,
                 fill_rgba: [0.1, 0.2, 0.3, 1.0],
                 stroke_rgba: [0.4, 0.5, 0.6, 1.0],
             },
@@ -2484,6 +2519,7 @@ mod tests {
                 rotation_degrees: 0.0,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
+                shape_stroke_outset: 0.0,
                 fill_rgba: [1.0; 4],
                 stroke_rgba: [0.0; 4],
             },
@@ -2492,5 +2528,41 @@ mod tests {
         assert_eq!(batch.instance_floats.len(), GPU_INSTANCE_FLOATS);
         assert_eq!(batch.instance_floats[6], 10.0);
         assert_eq!(batch.instance_floats[7], 3.0);
+    }
+
+    #[test]
+    fn aligned_full_ellipse_expands_the_shared_wgsl_quad() {
+        let batch = build_gpu_instance_batch([GpuPrimitive {
+            node_id: 7,
+            kind: SceneNodeKind::Ellipse,
+            bounds: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
+            rotation_degrees: 0.0,
+            corner_radius: 0.0,
+            stroke_width: 8.0,
+            shape_stroke_outset: 8.0,
+            fill_rgba: [1.0, 0.0, 0.0, 1.0],
+            stroke_rgba: [0.0, 0.0, 0.0, 1.0],
+        }]);
+        assert_eq!(batch.rendered_node_ids, vec![7]);
+        assert_eq!(&batch.instance_floats[..4], &[2.0, 12.0, 116.0, 66.0]);
+        assert_eq!(batch.instance_floats[7], 8.0);
+    }
+
+    #[test]
+    fn aligned_rounded_rectangle_expands_bounds_and_corner_radius() {
+        let batch = build_gpu_instance_batch([GpuPrimitive {
+            node_id: 8,
+            kind: SceneNodeKind::Rectangle,
+            bounds: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
+            rotation_degrees: 0.0,
+            corner_radius: 12.0,
+            stroke_width: 8.0,
+            shape_stroke_outset: 8.0,
+            fill_rgba: [1.0, 0.0, 0.0, 1.0],
+            stroke_rgba: [0.0, 0.0, 0.0, 1.0],
+        }]);
+        assert_eq!(&batch.instance_floats[..4], &[2.0, 12.0, 116.0, 66.0]);
+        assert_eq!(batch.instance_floats[6], 20.0);
+        assert_eq!(batch.instance_floats[7], 8.0);
     }
 }

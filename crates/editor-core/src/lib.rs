@@ -11,6 +11,7 @@ pub mod geometry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::color::{Color, ColorSpace, DocumentColorProfile, Paint};
+use crate::geometry::{AffineTransform, Point};
 use sha2::{Digest, Sha256};
 
 pub const MAX_TRANSACTION_COMMANDS: usize = 10_000;
@@ -99,6 +100,77 @@ pub enum NodeKind {
     Ellipse,
     Text,
     Image,
+    /// Figma-compatible open segment. Its height is canonically zero; visual
+    /// extent comes from its stroke and endpoint decorations in Phase 2.
+    Line,
+    /// Structural container. Unlike Frame, Group has no paint, clip, or
+    /// layout semantics; its bounds are derived from its children.
+    Group,
+    /// Canvas organization container. It can hide descendants without
+    /// becoming invisible itself, matching Figma's Section semantics.
+    Section,
+}
+
+/// Endpoint decorations shared by Figma-compatible open paths. Arrow is a
+/// Line preset, never a separate document node kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StrokeCap {
+    #[default]
+    None,
+    Round,
+    Square,
+    ArrowLines,
+    ArrowEquilateral,
+    DiamondFilled,
+    TriangleFilled,
+    CircleFilled,
+}
+
+/// Corner treatment for stroked paths. `Miter` and a limit of `10.0` retain
+/// the browser canvas defaults used by historical documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StrokeJoin {
+    #[default]
+    Miter,
+    Bevel,
+    Round,
+}
+
+/// Alignment for closed-shape strokes. Open paths retain center geometry in
+/// rendering while preserving the value for future import/export reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StrokeAlign {
+    Center,
+    #[default]
+    Inside,
+    Outside,
+}
+
+/// Figma-compatible per-axis response to a containing Frame resize. `None` on
+/// a node remains a deliberate legacy/no-constraint state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintType {
+    Min,
+    Center,
+    Max,
+    Stretch,
+    Scale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Constraints {
+    pub horizontal: ConstraintType,
+    pub vertical: ConstraintType,
+}
+
+/// Figma-compatible Ellipse arc/donut parameters. Angles are degrees in the
+/// local clockwise Canvas coordinate space; the full ellipse is represented
+/// by `None` to retain historical snapshots and hashes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArcData {
+    pub starting_angle: f64,
+    pub ending_angle: f64,
+    pub inner_radius: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,13 +192,45 @@ pub struct Node {
     /// Canonical stroke paint. Rendering projections may choose a CSS fallback,
     /// but stroke semantics belong to the document just like fill semantics.
     pub stroke: Paint,
+    /// Empty retains the legacy singular `fill`; otherwise paints composite in
+    /// order and become the authoritative Figma-compatible fill stack.
+    pub fills: Vec<Paint>,
+    /// Empty retains the legacy singular `stroke`; otherwise paints composite
+    /// in order and become the authoritative stroke stack.
+    pub strokes: Vec<Paint>,
     pub stroke_width: f64,
+    pub stroke_cap_start: StrokeCap,
+    pub stroke_cap_end: StrokeCap,
+    pub stroke_join: StrokeJoin,
+    pub stroke_miter_limit: f64,
+    /// Alternating painted/gap lengths in document pixels. Odd-length arrays
+    /// are normalized to an even cycle at the Core boundary.
+    pub stroke_dash_pattern: Vec<f64>,
+    /// Empty retains `stroke_width` as a uniform weight. Four entries are the
+    /// Frame/Rectangle top, right, bottom and left weights respectively.
+    pub stroke_weights: Vec<f64>,
+    pub stroke_align: StrokeAlign,
+    pub arc_data: Option<ArcData>,
+    /// Optional during Dual-read migration. A present value is an authoritative
+    /// parent-relative 2×3 matrix; absent records retain legacy world x/y/rotation.
+    pub relative_transform: Option<AffineTransform>,
     pub opacity: f64,
     pub corner_radius: f64,
+    /// Empty retains `corner_radius`; four values are TL/TR/BR/BL.
+    pub corner_radii: Vec<f64>,
+    /// 0 retains circular arcs; 1 is the maximally continuous corner curve.
+    pub corner_smoothing: f64,
+    /// Optional while the Phase 2 constraints migration is introduced. A
+    /// present value controls this layer when its containing Frame resizes.
+    pub constraints: Option<Constraints>,
     /// Canonical plain text. Rich style runs and shaping belong to the future text engine.
     pub text: String,
     pub visible: bool,
     pub locked: bool,
+    pub contents_hidden: bool,
+    /// Frame-only. A decoded legacy Frame defaults this to true; false is an
+    /// explicit user choice to let descendants paint outside its bounds.
+    pub clips_content: bool,
 }
 
 /// A top-level canvas container. Scene nodes belong to exactly one Page while
@@ -333,6 +437,14 @@ pub enum Command {
         id: NodeId,
         position: PositionId,
     },
+    /// Atomically moves a node into or out of a structural container while
+    /// preserving world-relative geometry. The caller supplies a resolved
+    /// sibling key so collaboration replay cannot depend on UI array order.
+    SetNodeParent {
+        id: NodeId,
+        parent_id: Option<NodeId>,
+        position: PositionId,
+    },
     SetDocumentColorProfile {
         profile: DocumentColorProfile,
     },
@@ -376,6 +488,12 @@ pub enum Origin {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppliedChange {
+    /// A single canonical command may update a structural relation and the
+    /// Group bounds derived from that relation. Keeping those leaf changes in
+    /// one history entry preserves transaction atomicity and exact undo.
+    Composite {
+        changes: Vec<AppliedChange>,
+    },
     PageCreated {
         page: Page,
     },
@@ -419,6 +537,13 @@ pub enum AppliedChange {
         before: PositionId,
         after: PositionId,
     },
+    NodeParentChanged {
+        id: NodeId,
+        before_parent_id: Option<NodeId>,
+        before_position: PositionId,
+        after_parent_id: Option<NodeId>,
+        after_position: PositionId,
+    },
     DocumentColorProfileChanged {
         before: DocumentColorProfile,
         after: DocumentColorProfile,
@@ -443,15 +568,39 @@ pub struct Geometry {
     pub rotation: f64,
 }
 
+#[derive(Clone, Copy)]
+struct Bounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Appearance {
     pub fill: Paint,
     pub stroke: Paint,
+    pub fills: Vec<Paint>,
+    pub strokes: Vec<Paint>,
     pub stroke_width: f64,
+    pub stroke_cap_start: StrokeCap,
+    pub stroke_cap_end: StrokeCap,
+    pub stroke_join: StrokeJoin,
+    pub stroke_miter_limit: f64,
+    pub stroke_dash_pattern: Vec<f64>,
+    pub stroke_weights: Vec<f64>,
+    pub stroke_align: StrokeAlign,
+    pub arc_data: Option<ArcData>,
+    pub relative_transform: Option<AffineTransform>,
     pub opacity: f64,
     pub corner_radius: f64,
+    pub corner_radii: Vec<f64>,
+    pub corner_smoothing: f64,
+    pub constraints: Option<Constraints>,
     pub visible: bool,
     pub locked: bool,
+    pub contents_hidden: bool,
+    pub clips_content: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -517,6 +666,9 @@ pub enum CommandError {
     InvalidText,
     InvalidTextProperties,
     MissingParent {
+        id: NodeId,
+    },
+    InvalidParent {
         id: NodeId,
     },
     DuplicatePosition {
@@ -1129,9 +1281,118 @@ impl Document {
                     height: *height,
                     rotation: *rotation,
                 };
-                if !valid_geometry(after) {
+                let kind = self
+                    .nodes
+                    .get(id)
+                    .map(|node| node.kind.clone())
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                // A Group's dimensions remain derived from its children, but a
+                // direct translation is the canonical way to move a modern
+                // Relative-v1 Group subtree. Resizing or rotating a Group is
+                // still invalid: it would turn derived bounds into authored
+                // geometry.
+                let group_translation = if kind == NodeKind::Group {
+                    self.geometry_for(*id).is_some_and(|before| {
+                        after.x.is_finite()
+                            && after.y.is_finite()
+                            && after.width == before.width
+                            && after.height == before.height
+                            && after.rotation == 0.0
+                    })
+                } else {
+                    false
+                };
+                if !(group_translation || valid_geometry(&kind, after)) {
                     return Err(CommandError::InvalidGeometry);
                 }
+                let frame_before = self.geometry_for(*id);
+                let constrained_children = if kind == NodeKind::Frame
+                    && after.rotation == 0.0
+                    && self.nodes.get(id).is_some_and(|node| node.relative_transform.is_none() && node.rotation == 0.0)
+                {
+                    let before = frame_before.expect("existing node has geometry");
+                    self.nodes.values().filter(|child| {
+                        if child.relative_transform.is_some() { return false; }
+                        let mut parent_id = child.parent_id;
+                        while let Some(ancestor_id) = parent_id {
+                            if ancestor_id == *id { return true; }
+                            let Some(ancestor) = self.nodes.get(&ancestor_id) else { return false; };
+                            if ancestor.kind != NodeKind::Group { return false; }
+                            parent_id = ancestor.parent_id;
+                        }
+                        false
+                    }).filter_map(|child| {
+                        child.constraints.map(|constraints| geometry_for_constraints(before, after, Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation }, constraints, &child.kind).map(|geometry| (child.id, geometry)))
+                    }).collect::<Result<Vec<_>, _>>()?
+                } else { Vec::new() };
+                // Relative-v1 nodes already live in their Frame's local space,
+                // including below one or more transformed Groups. Unlike legacy
+                // world-space coordinates, their constraints remain correct when
+                // the Frame itself is rotated or has an arbitrary affine matrix.
+                let matrix_constrained_children = if kind == NodeKind::Frame {
+                    let frame_before_local = Geometry {
+                        x: 0.0,
+                        y: 0.0,
+                        width: frame_before.expect("existing node has geometry").width,
+                        height: frame_before.expect("existing node has geometry").height,
+                        rotation: 0.0,
+                    };
+                    let frame_after_local = Geometry {
+                        x: 0.0,
+                        y: 0.0,
+                        width: after.width,
+                        height: after.height,
+                        rotation: 0.0,
+                    };
+                    self.nodes.values().filter_map(|child| {
+                        let constraints = child.constraints?;
+                        let (child_to_frame, parent_to_frame) = self.relative_transform_to_frame(child.id, *id)?;
+                        let child_before = Geometry {
+                            x: child_to_frame.e,
+                            y: child_to_frame.f,
+                            width: child.width,
+                            height: child.height,
+                            rotation: child.rotation,
+                        };
+                        Some(geometry_for_constraints(
+                            frame_before_local,
+                            frame_after_local,
+                            child_before,
+                            constraints,
+                            &child.kind,
+                        ).and_then(|child_after_local| {
+                            let child_to_frame_after = AffineTransform {
+                                e: child_after_local.x,
+                                f: child_after_local.y,
+                                ..child_to_frame
+                            };
+                            let child_after_transform = child_to_frame_after
+                                .then(parent_to_frame.inverse().map_err(|_| CommandError::InvalidGeometry)?);
+                            let child_after_geometry = geometry_for_relative_transform(
+                                child_after_transform,
+                                child_after_local.width,
+                                child_after_local.height,
+                                &child.kind,
+                            )?;
+                            Ok((child.id, child_after_geometry, child_after_transform))
+                        }))
+                    }).collect::<Result<Vec<_>, _>>()?
+                } else { Vec::new() };
+                let parent_id = self.nodes.get(id).and_then(|node| node.parent_id);
+                let mut affected_groups = self.group_ancestor_ids([parent_id]);
+                if kind == NodeKind::Group {
+                    affected_groups.insert(0, *id);
+                }
+                for group_id in self.group_ancestor_ids(constrained_children.iter().map(|(child_id, _)| self.nodes.get(child_id).and_then(|child| child.parent_id))) {
+                    if !affected_groups.contains(&group_id) { affected_groups.push(group_id); }
+                }
+                for group_id in self.group_ancestor_ids(matrix_constrained_children.iter().map(|(child_id, _, _)| self.nodes.get(child_id).and_then(|child| child.parent_id))) {
+                    if !affected_groups.contains(&group_id) { affected_groups.push(group_id); }
+                }
+                let before_bounds = affected_groups
+                    .iter()
+                    .filter_map(|group_id| self.geometry_for(*group_id).map(|geometry| (*group_id, geometry)))
+                    .collect::<Vec<_>>();
                 let node = self
                     .nodes
                     .get_mut(id)
@@ -1145,10 +1406,68 @@ impl Document {
                 };
                 (node.x, node.y, node.width, node.height, node.rotation) =
                     (after.x, after.y, after.width, after.height, after.rotation);
-                Ok(AppliedChange::GeometryChanged {
+                let mut changes = vec![AppliedChange::GeometryChanged {
                     id: *id,
                     before,
                     after,
+                }];
+                for (child_id, child_after) in constrained_children {
+                    let child = self.nodes.get_mut(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
+                    let child_before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                    if child_before != child_after {
+                        (child.x, child.y, child.width, child.height, child.rotation) = (child_after.x, child_after.y, child_after.width, child_after.height, child_after.rotation);
+                        changes.push(AppliedChange::GeometryChanged { id: child_id, before: child_before, after: child_after });
+                    }
+                }
+                for (child_id, child_after_geometry, child_after_transform) in matrix_constrained_children {
+                    let child = self.nodes.get_mut(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
+                    let child_before_geometry = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                    let before_appearance = appearance_for_node(child);
+                    let after_appearance = Appearance {
+                        relative_transform: Some(child_after_transform),
+                        ..before_appearance.clone()
+                    };
+                    if child_before_geometry != child_after_geometry {
+                        (child.x, child.y, child.width, child.height, child.rotation) = (
+                            child_after_geometry.x,
+                            child_after_geometry.y,
+                            child_after_geometry.width,
+                            child_after_geometry.height,
+                            child_after_geometry.rotation,
+                        );
+                        changes.push(AppliedChange::GeometryChanged {
+                            id: child_id,
+                            before: child_before_geometry,
+                            after: child_after_geometry,
+                        });
+                    }
+                    if before_appearance != after_appearance {
+                        child.relative_transform = after_appearance.relative_transform;
+                        changes.push(AppliedChange::AppearanceChanged {
+                            id: child_id,
+                            before: before_appearance,
+                            after: after_appearance,
+                        });
+                    }
+                }
+                self.refresh_group_bounds(parent_id);
+                for group_id in affected_groups.iter().copied() {
+                    if Some(group_id) != parent_id {
+                        self.refresh_group_bounds(Some(group_id));
+                    }
+                }
+                changes.extend(before_bounds.into_iter().filter_map(|(group_id, before)| {
+                    let after = self.geometry_for(group_id)?;
+                    (before != after).then_some(AppliedChange::GeometryChanged {
+                        id: group_id,
+                        before,
+                        after,
+                    })
+                }));
+                Ok(if changes.len() == 1 {
+                    changes.remove(0)
+                } else {
+                    AppliedChange::Composite { changes }
                 })
             }
             Command::Rename { id, name } => {
@@ -1184,16 +1503,64 @@ impl Document {
                 if !valid_appearance(appearance) {
                     return Err(CommandError::InvalidAppearance);
                 }
+                let mut after = appearance.clone();
+                after.stroke_dash_pattern = canonical_dash_pattern(&after.stroke_dash_pattern);
+                if !valid_stroke_weights(&after.stroke_weights) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if !valid_paint_stack(&after.fills) || !valid_paint_stack(&after.strokes) {
+                    return Err(CommandError::InvalidAppearance);
+                }
                 let node = self
                     .nodes
                     .get_mut(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
+                if after.contents_hidden && node.kind != NodeKind::Section {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if after.clips_content == Some(true) && node.kind != NodeKind::Frame {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if !after.corner_radii.is_empty() && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if after.corner_smoothing != 0.0 && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if after.constraints.is_some() && matches!(node.kind, NodeKind::Group | NodeKind::Section) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if !after.stroke_weights.is_empty()
+                    && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle)
+                {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if after.stroke_align != StrokeAlign::Inside
+                    && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
+                        || after.arc_data.is_some())
+                {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if after.arc_data.is_some() && node.kind != NodeKind::Ellipse {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if !valid_relative_transform(after.relative_transform) {
+                    return Err(CommandError::InvalidAppearance);
+                }
                 let before_bytes = node.estimated_bytes();
                 let after_bytes = before_bytes
                     .saturating_sub(node.fill.estimated_bytes())
                     .saturating_sub(node.stroke.estimated_bytes())
-                    .saturating_add(appearance.fill.estimated_bytes())
-                    .saturating_add(appearance.stroke.estimated_bytes());
+                    .saturating_sub(paint_stack_bytes(&node.fills))
+                    .saturating_sub(paint_stack_bytes(&node.strokes))
+                    .saturating_add(after.fill.estimated_bytes())
+                    .saturating_add(after.stroke.estimated_bytes())
+                    .saturating_add(paint_stack_bytes(&after.fills))
+                    .saturating_add(paint_stack_bytes(&after.strokes))
+                    .saturating_sub(node.stroke_dash_pattern.len() * std::mem::size_of::<f64>())
+                    .saturating_add(after.stroke_dash_pattern.len() * std::mem::size_of::<f64>())
+                    .saturating_sub(node.stroke_weights.len() * std::mem::size_of::<f64>())
+                    .saturating_add(after.stroke_weights.len() * std::mem::size_of::<f64>());
                 if self
                     .node_bytes
                     .saturating_sub(before_bytes)
@@ -1205,19 +1572,51 @@ impl Document {
                 let before = Appearance {
                     fill: node.fill.clone(),
                     stroke: node.stroke.clone(),
+                    fills: node.fills.clone(),
+                    strokes: node.strokes.clone(),
                     stroke_width: node.stroke_width,
+                    stroke_cap_start: node.stroke_cap_start,
+                    stroke_cap_end: node.stroke_cap_end,
+                    stroke_join: node.stroke_join,
+                    stroke_miter_limit: node.stroke_miter_limit,
+                    stroke_dash_pattern: node.stroke_dash_pattern.clone(),
+                    stroke_weights: node.stroke_weights.clone(),
+                    stroke_align: node.stroke_align,
+                    arc_data: node.arc_data,
+                    relative_transform: node.relative_transform,
                     opacity: node.opacity,
                     corner_radius: node.corner_radius,
+                    corner_radii: node.corner_radii.clone(),
+                    corner_smoothing: node.corner_smoothing,
+                    constraints: node.constraints,
                     visible: node.visible,
                     locked: node.locked,
+                    contents_hidden: node.contents_hidden,
+                    clips_content: Some(node.clips_content),
                 };
-                node.fill = appearance.fill.clone();
-                node.stroke = appearance.stroke.clone();
-                node.stroke_width = appearance.stroke_width;
-                node.opacity = appearance.opacity;
-                node.corner_radius = appearance.corner_radius;
-                node.visible = appearance.visible;
-                node.locked = appearance.locked;
+                node.fill = after.fill.clone();
+                node.stroke = after.stroke.clone();
+                node.fills = after.fills.clone();
+                node.strokes = after.strokes.clone();
+                node.stroke_width = after.stroke_width;
+                node.stroke_cap_start = after.stroke_cap_start;
+                node.stroke_cap_end = after.stroke_cap_end;
+                node.stroke_join = after.stroke_join;
+                node.stroke_miter_limit = after.stroke_miter_limit;
+                node.stroke_dash_pattern = after.stroke_dash_pattern.clone();
+                node.stroke_weights = after.stroke_weights.clone();
+                node.stroke_align = after.stroke_align;
+                node.arc_data = after.arc_data;
+                node.relative_transform = after.relative_transform;
+                node.opacity = after.opacity;
+                node.corner_radius = after.corner_radius;
+                node.corner_radii = after.corner_radii.clone();
+                node.corner_smoothing = after.corner_smoothing;
+                node.constraints = after.constraints;
+                node.visible = after.visible;
+                node.locked = after.locked;
+                node.contents_hidden = after.contents_hidden;
+                node.clips_content = after.clips_content.unwrap_or(node.kind == NodeKind::Frame);
                 self.node_bytes = self
                     .node_bytes
                     .saturating_sub(before_bytes)
@@ -1225,7 +1624,7 @@ impl Document {
                 Ok(AppliedChange::AppearanceChanged {
                     id: *id,
                     before,
-                    after: appearance.clone(),
+                    after,
                 })
             }
             Command::SetNodeAsset { id, asset_id } => {
@@ -1356,14 +1755,87 @@ impl Document {
                     after: *position,
                 })
             }
+            Command::SetNodeParent {
+                id,
+                parent_id,
+                position,
+            } => {
+                let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
+                let page_id = self.node_pages.get(id).copied().unwrap_or(DEFAULT_PAGE_ID);
+                let before_parent_id = node.parent_id;
+                let before_position = node.position;
+                if *parent_id == Some(*id) {
+                    return Err(CommandError::InvalidParent { id: *id });
+                }
+                if let Some(next_parent_id) = parent_id {
+                    let parent = self
+                        .nodes
+                        .get(next_parent_id)
+                        .ok_or(CommandError::MissingParent { id: *next_parent_id })?;
+                    if self.node_pages.get(next_parent_id).copied().unwrap_or(DEFAULT_PAGE_ID) != page_id
+                        || !matches!(parent.kind, NodeKind::Frame | NodeKind::Group | NodeKind::Section)
+                    {
+                        return Err(CommandError::InvalidParent { id: *next_parent_id });
+                    }
+                    let mut ancestor = parent.parent_id;
+                    while let Some(ancestor_id) = ancestor {
+                        if ancestor_id == *id {
+                            return Err(CommandError::InvalidParent { id: *next_parent_id });
+                        }
+                        ancestor = self.nodes.get(&ancestor_id).and_then(|candidate| candidate.parent_id);
+                    }
+                }
+                if (*parent_id != before_parent_id || *position != before_position)
+                    && self.sibling_positions.contains(&(page_id, *parent_id, *position))
+                {
+                    return Err(CommandError::DuplicatePosition {
+                        parent_id: *parent_id,
+                        position: *position,
+                    });
+                }
+                let affected_groups = self.group_ancestor_ids([before_parent_id, *parent_id]);
+                let before_bounds = affected_groups
+                    .iter()
+                    .filter_map(|id| self.geometry_for(*id).map(|geometry| (*id, geometry)))
+                    .collect::<Vec<_>>();
+                self.sibling_positions
+                    .remove(&(page_id, before_parent_id, before_position));
+                self.sibling_positions.insert((page_id, *parent_id, *position));
+                let node = self.nodes.get_mut(id).ok_or(CommandError::MissingNode { id: *id })?;
+                node.parent_id = *parent_id;
+                node.position = *position;
+                self.refresh_group_bounds(before_parent_id);
+                self.refresh_group_bounds(*parent_id);
+                let dissolved_groups = self.dissolve_empty_groups_from(before_parent_id);
+                let mut changes = vec![AppliedChange::NodeParentChanged {
+                    id: *id,
+                    before_parent_id,
+                    before_position,
+                    after_parent_id: *parent_id,
+                    after_position: *position,
+                }];
+                changes.extend(before_bounds.into_iter().filter_map(|(id, before)| {
+                    let after = self.geometry_for(id)?;
+                    (before != after).then_some(AppliedChange::GeometryChanged { id, before, after })
+                }));
+                changes.extend(
+                    dissolved_groups
+                        .into_iter()
+                        .map(|node| AppliedChange::NodeDeleted { node }),
+                );
+                Ok(if changes.len() == 1 { changes.remove(0) } else { AppliedChange::Composite { changes } })
+            }
             Command::Delete { id } => {
                 if self.nodes.values().any(|node| node.parent_id == Some(*id)) {
                     return Err(CommandError::NodeHasChildren { id: *id });
                 }
-                let node = self
-                    .nodes
-                    .remove(id)
-                    .ok_or(CommandError::MissingNode { id: *id })?;
+                let node = self.nodes.get(id).cloned().ok_or(CommandError::MissingNode { id: *id })?;
+                let affected_groups = self.group_ancestor_ids([node.parent_id]);
+                let before_bounds = affected_groups
+                    .iter()
+                    .filter_map(|group_id| self.geometry_for(*group_id).map(|geometry| (*group_id, geometry)))
+                    .collect::<Vec<_>>();
+                self.nodes.remove(id);
                 self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
                 if let Some(properties) = self.node_text_properties.remove(id) {
                     self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
@@ -1377,7 +1849,27 @@ impl Document {
                     self.retired_node_assets.insert(*id, asset_id);
                 }
                 self.retired_ids.insert(*id);
-                Ok(AppliedChange::NodeDeleted { node })
+                self.refresh_group_bounds(node.parent_id);
+                let dissolved_groups = self.dissolve_empty_groups_from(node.parent_id);
+                let mut changes = vec![AppliedChange::NodeDeleted { node }];
+                changes.extend(before_bounds.into_iter().filter_map(|(group_id, before)| {
+                    let after = self.geometry_for(group_id)?;
+                    (before != after).then_some(AppliedChange::GeometryChanged {
+                        id: group_id,
+                        before,
+                        after,
+                    })
+                }));
+                changes.extend(
+                    dissolved_groups
+                        .into_iter()
+                        .map(|node| AppliedChange::NodeDeleted { node }),
+                );
+                Ok(if changes.len() == 1 {
+                    changes.remove(0)
+                } else {
+                    AppliedChange::Composite { changes }
+                })
             }
             Command::SetDocumentColorProfile { profile } => {
                 let before = self.color_profile;
@@ -1398,6 +1890,11 @@ impl Document {
 
     fn apply_inverse(&mut self, change: &AppliedChange) {
         match change {
+            AppliedChange::Composite { changes } => {
+                for change in changes.iter().rev() {
+                    self.apply_inverse(change);
+                }
+            }
             AppliedChange::PageCreated { page } => {
                 self.pages.remove(&page.id);
             }
@@ -1431,6 +1928,12 @@ impl Document {
             AppliedChange::NodePositionChanged { id, before, .. } => {
                 self.set_node_position(*id, *before)
             }
+            AppliedChange::NodeParentChanged {
+                id,
+                before_parent_id,
+                before_position,
+                ..
+            } => self.set_node_parent(*id, *before_parent_id, *before_position),
             AppliedChange::DocumentColorProfileChanged { before, .. } => {
                 self.color_profile = *before
             }
@@ -1444,6 +1947,11 @@ impl Document {
 
     fn apply_forward(&mut self, change: &AppliedChange) {
         match change {
+            AppliedChange::Composite { changes } => {
+                for change in changes {
+                    self.apply_forward(change);
+                }
+            }
             AppliedChange::PageCreated { page } => {
                 self.pages.insert(page.id, page.clone());
             }
@@ -1472,6 +1980,12 @@ impl Document {
             AppliedChange::NodePositionChanged { id, after, .. } => {
                 self.set_node_position(*id, *after)
             }
+            AppliedChange::NodeParentChanged {
+                id,
+                after_parent_id,
+                after_position,
+                ..
+            } => self.set_node_parent(*id, *after_parent_id, *after_position),
             AppliedChange::DocumentColorProfileChanged { after, .. } => self.color_profile = *after,
             AppliedChange::AssetRegistered { asset } => {
                 self.assets.insert(asset.asset_id, asset.clone());
@@ -1487,15 +2001,35 @@ impl Document {
             let after_bytes = before_bytes
                 .saturating_sub(node.fill.estimated_bytes())
                 .saturating_sub(node.stroke.estimated_bytes())
+                .saturating_sub(paint_stack_bytes(&node.fills))
+                .saturating_sub(paint_stack_bytes(&node.strokes))
                 .saturating_add(appearance.fill.estimated_bytes())
-                .saturating_add(appearance.stroke.estimated_bytes());
+                .saturating_add(appearance.stroke.estimated_bytes())
+                .saturating_add(paint_stack_bytes(&appearance.fills))
+                .saturating_add(paint_stack_bytes(&appearance.strokes));
             node.fill = appearance.fill.clone();
             node.stroke = appearance.stroke.clone();
+            node.fills = appearance.fills.clone();
+            node.strokes = appearance.strokes.clone();
             node.stroke_width = appearance.stroke_width;
+            node.stroke_cap_start = appearance.stroke_cap_start;
+            node.stroke_cap_end = appearance.stroke_cap_end;
+            node.stroke_join = appearance.stroke_join;
+            node.stroke_miter_limit = appearance.stroke_miter_limit;
+            node.stroke_dash_pattern = appearance.stroke_dash_pattern.clone();
+            node.stroke_weights = appearance.stroke_weights.clone();
+            node.stroke_align = appearance.stroke_align;
+            node.arc_data = appearance.arc_data;
+            node.relative_transform = appearance.relative_transform;
             node.opacity = appearance.opacity;
             node.corner_radius = appearance.corner_radius;
+            node.corner_radii = appearance.corner_radii.clone();
+            node.corner_smoothing = appearance.corner_smoothing;
+            node.constraints = appearance.constraints;
             node.visible = appearance.visible;
             node.locked = appearance.locked;
+            node.contents_hidden = appearance.contents_hidden;
+            node.clips_content = appearance.clips_content.unwrap_or(node.kind == NodeKind::Frame);
             self.node_bytes = self
                 .node_bytes
                 .saturating_sub(before_bytes)
@@ -1514,6 +2048,164 @@ impl Document {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.position = position;
         }
+    }
+
+    fn set_node_parent(&mut self, id: NodeId, parent_id: Option<NodeId>, position: PositionId) {
+        if let Some(node) = self.nodes.get(&id) {
+            let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
+            self.sibling_positions
+                .remove(&(page_id, node.parent_id, node.position));
+            self.sibling_positions.insert((page_id, parent_id, position));
+        }
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.parent_id = parent_id;
+            node.position = position;
+        }
+    }
+
+    fn geometry_for(&self, id: NodeId) -> Option<Geometry> {
+        self.nodes.get(&id).map(|node| Geometry {
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+            rotation: node.rotation,
+        })
+    }
+
+    fn group_ancestor_ids(&self, parents: impl IntoIterator<Item = Option<NodeId>>) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        for mut current in parents.into_iter().flatten() {
+            loop {
+                let Some(node) = self.nodes.get(&current) else { break };
+                if node.kind == NodeKind::Group && !ids.contains(&current) {
+                    ids.push(current);
+                }
+                let Some(parent_id) = node.parent_id else { break };
+                current = parent_id;
+            }
+        }
+        ids
+    }
+
+    /// Groups are structural only: their rectangle is always the world-space
+    /// bounding union of direct children. The Dual-read transform rule is
+    /// deliberately applied here as well as in the Worker: legacy children use
+    /// their historical world x/y/rotation while a child with
+    /// `relative_transform` inherits its parent's world matrix.
+    fn refresh_group_bounds(&mut self, mut group_id: Option<NodeId>) {
+        while let Some(id) = group_id {
+            let Some(group) = self.nodes.get(&id).cloned() else { break };
+            if group.kind != NodeKind::Group { break; }
+            let children = self
+                .nodes
+                .values()
+                .filter(|node| node.parent_id == Some(id))
+                .map(|node| node.id)
+                .collect::<Vec<_>>();
+            if children.is_empty() { break; }
+            let bounds = children.into_iter().filter_map(|child_id| self.node_world_visual_bounds(child_id)).reduce(|left, right| Bounds {
+                left: left.left.min(right.left),
+                top: left.top.min(right.top),
+                right: left.right.max(right.right),
+                bottom: left.bottom.max(right.bottom),
+            });
+            if let Some(bounds) = bounds {
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.x = bounds.left;
+                    node.y = bounds.top;
+                    node.width = (bounds.right - bounds.left).max(1.0);
+                    node.height = (bounds.bottom - bounds.top).max(1.0);
+                    node.rotation = 0.0;
+                }
+            }
+            group_id = group.parent_id;
+        }
+    }
+
+    fn node_world_transform(&self, id: NodeId) -> Option<AffineTransform> {
+        self.node_world_transform_inner(id, &mut BTreeSet::new())
+    }
+
+    /// Resolves a Relative-v1 node and its immediate parent into the local
+    /// coordinate space of an enclosing Frame. Constraints intentionally stop
+    /// at a non-Group ancestor: Section and nested Frame ownership defines a
+    /// new layout context, while Group is transparent in Figma's constraint
+    /// model. Every link must be relative-matrix based; a legacy world-space
+    /// link cannot be mixed into this local calculation without guessing.
+    fn relative_transform_to_frame(
+        &self,
+        id: NodeId,
+        frame_id: NodeId,
+    ) -> Option<(AffineTransform, AffineTransform)> {
+        let node = self.nodes.get(&id)?;
+        let local = node.relative_transform?;
+        let parent_to_frame = match node.parent_id {
+            Some(parent_id) if parent_id == frame_id => AffineTransform::IDENTITY,
+            Some(parent_id) => {
+                let parent = self.nodes.get(&parent_id)?;
+                if parent.kind != NodeKind::Group || parent.relative_transform.is_none() {
+                    return None;
+                }
+                self.relative_transform_to_frame(parent_id, frame_id)?.0
+            }
+            None => return None,
+        };
+        Some((local.then(parent_to_frame), parent_to_frame))
+    }
+
+    fn node_world_transform_inner(
+        &self,
+        id: NodeId,
+        visiting: &mut BTreeSet<NodeId>,
+    ) -> Option<AffineTransform> {
+        if !visiting.insert(id) { return None; }
+        let node = self.nodes.get(&id)?;
+        let local = node.relative_transform.unwrap_or(node_legacy_transform(node)?);
+        let world = if node.relative_transform.is_some() {
+            match node.parent_id {
+                Some(parent_id) => local.then(self.node_world_transform_inner(parent_id, visiting)?),
+                None => local,
+            }
+        } else {
+            local
+        };
+        visiting.remove(&id);
+        Some(world)
+    }
+
+    fn node_world_visual_bounds(&self, id: NodeId) -> Option<Bounds> {
+        let node = self.nodes.get(&id)?;
+        let transform = self.node_world_transform(id)?;
+        let corners = [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: node.width, y: 0.0 },
+            Point { x: node.width, y: node.height },
+            Point { x: 0.0, y: node.height },
+        ].map(|point| transform.transform_point(point));
+        Some(Bounds {
+            left: corners.iter().map(|point| point.x).fold(f64::INFINITY, f64::min),
+            top: corners.iter().map(|point| point.y).fold(f64::INFINITY, f64::min),
+            right: corners.iter().map(|point| point.x).fold(f64::NEG_INFINITY, f64::max),
+            bottom: corners.iter().map(|point| point.y).fold(f64::NEG_INFINITY, f64::max),
+        })
+    }
+
+    fn dissolve_empty_groups_from(&mut self, mut group_id: Option<NodeId>) -> Vec<Node> {
+        let mut dissolved = Vec::new();
+        while let Some(id) = group_id {
+            let Some(group) = self.nodes.get(&id).cloned() else { break };
+            if group.kind != NodeKind::Group
+                || self.nodes.values().any(|node| node.parent_id == Some(id))
+            {
+                break;
+            }
+            group_id = group.parent_id;
+            self.retire_node(id);
+            self.refresh_group_bounds(group_id);
+            dissolved.push(group);
+        }
+        dissolved
     }
 
     fn set_node_asset(&mut self, id: NodeId, asset_id: Option<AssetId>) {
@@ -1678,12 +2370,31 @@ impl Document {
     fn create_node_in_page_with_asset(
         &mut self,
         page_id: PageId,
-        node: Node,
+        mut node: Node,
         asset_id: Option<AssetId>,
     ) -> Result<AppliedChange, CommandError> {
         if self.nodes.len() >= MAX_DOCUMENT_NODES {
             return Err(CommandError::ResourceLimit);
         }
+        if !valid_dash_pattern(&node.stroke_dash_pattern) || !valid_stroke_weights(&node.stroke_weights) {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if !node.stroke_weights.is_empty() && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle) {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if node.stroke_align != StrokeAlign::Inside
+            && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
+                || node.arc_data.is_some())
+        {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if node.arc_data.is_some() && node.kind != NodeKind::Ellipse {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if !valid_relative_transform(node.relative_transform) {
+            return Err(CommandError::InvalidAppearance);
+        }
+        node.stroke_dash_pattern = canonical_dash_pattern(&node.stroke_dash_pattern);
         self.validate_node_page(page_id, &node)?;
         if self.node_bytes.saturating_add(node.estimated_bytes()) > MAX_DOCUMENT_BYTES {
             return Err(CommandError::ResourceLimit);
@@ -1816,7 +2527,7 @@ impl Document {
         if node.name.trim().is_empty() {
             return Err(CommandError::InvalidName);
         }
-        if !valid_geometry(Geometry {
+        if !valid_geometry(&node.kind, Geometry {
             x: node.x,
             y: node.y,
             width: node.width,
@@ -1828,12 +2539,34 @@ impl Document {
         if !valid_appearance(&Appearance {
             fill: node.fill.clone(),
             stroke: node.stroke.clone(),
+            fills: node.fills.clone(),
+            strokes: node.strokes.clone(),
             stroke_width: node.stroke_width,
+            stroke_cap_start: node.stroke_cap_start,
+            stroke_cap_end: node.stroke_cap_end,
+            stroke_join: node.stroke_join,
+            stroke_miter_limit: node.stroke_miter_limit,
+            stroke_dash_pattern: node.stroke_dash_pattern.clone(),
+            stroke_weights: node.stroke_weights.clone(),
+            stroke_align: node.stroke_align,
+            arc_data: node.arc_data,
+            relative_transform: node.relative_transform,
             opacity: node.opacity,
             corner_radius: node.corner_radius,
+            corner_radii: node.corner_radii.clone(),
+            corner_smoothing: node.corner_smoothing,
+            constraints: node.constraints,
             visible: node.visible,
             locked: node.locked,
+            contents_hidden: node.contents_hidden,
+            clips_content: Some(node.clips_content),
         }) {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if node.contents_hidden && node.kind != NodeKind::Section {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if node.clips_content && node.kind != NodeKind::Frame {
             return Err(CommandError::InvalidAppearance);
         }
         if node.text.len() > MAX_TEXT_BYTES
@@ -2011,6 +2744,11 @@ impl Command {
             Command::SetNodePosition { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>()
             }
+            Command::SetNodeParent { .. } => {
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<Option<NodeId>>()
+                    + std::mem::size_of::<PositionId>()
+            }
             Command::SetDocumentColorProfile { .. } => std::mem::size_of::<DocumentColorProfile>(),
             Command::RegisterAsset { asset } => {
                 std::mem::size_of::<AssetReference>() + asset.media_type.len()
@@ -2027,6 +2765,10 @@ impl Node {
             + self.text.len()
             + self.fill.estimated_bytes()
             + self.stroke.estimated_bytes()
+            + paint_stack_bytes(&self.fills)
+            + paint_stack_bytes(&self.strokes)
+            + self.stroke_dash_pattern.len() * std::mem::size_of::<f64>()
+            + self.stroke_weights.len() * std::mem::size_of::<f64>()
     }
 }
 
@@ -2035,6 +2777,10 @@ impl Appearance {
         std::mem::size_of::<Appearance>()
             + self.fill.estimated_bytes()
             + self.stroke.estimated_bytes()
+            + paint_stack_bytes(&self.fills)
+            + paint_stack_bytes(&self.strokes)
+            + self.stroke_dash_pattern.len() * std::mem::size_of::<f64>()
+            + self.stroke_weights.len() * std::mem::size_of::<f64>()
     }
 }
 
@@ -2075,6 +2821,7 @@ impl FontReference {
 impl AppliedChange {
     fn estimated_bytes(&self) -> usize {
         match self {
+            AppliedChange::Composite { changes } => changes.iter().map(AppliedChange::estimated_bytes).sum(),
             AppliedChange::PageCreated { page } => std::mem::size_of::<Page>() + page.name.len(),
             AppliedChange::NodeCreated { node }
             | AppliedChange::NodeDeleted { node }
@@ -2125,6 +2872,11 @@ impl AppliedChange {
             }
             AppliedChange::NodePositionChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>() * 2
+            }
+            AppliedChange::NodeParentChanged { .. } => {
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<Option<NodeId>>() * 2
+                    + std::mem::size_of::<PositionId>() * 2
             }
             AppliedChange::DocumentColorProfileChanged { .. } => {
                 std::mem::size_of::<DocumentColorProfile>() * 2
@@ -2224,6 +2976,30 @@ fn hash_paint(hasher: &mut Sha256, paint: &Paint) {
     }
 }
 
+fn hash_paint_stack(hasher: &mut Sha256, paints: &[Paint], marker: u8) {
+    if paints.is_empty() {
+        return;
+    }
+    hasher.update([marker]);
+    hash_len(hasher, paints.len());
+    for paint in paints {
+        hash_paint(hasher, paint);
+    }
+}
+
+fn hash_stroke_cap(hasher: &mut Sha256, cap: StrokeCap) {
+    hasher.update([match cap {
+        StrokeCap::None => 0,
+        StrokeCap::Round => 1,
+        StrokeCap::Square => 2,
+        StrokeCap::ArrowLines => 3,
+        StrokeCap::ArrowEquilateral => 4,
+        StrokeCap::DiamondFilled => 5,
+        StrokeCap::TriangleFilled => 6,
+        StrokeCap::CircleFilled => 7,
+    }]);
+}
+
 fn hash_document_color_profile(hasher: &mut Sha256, profile: DocumentColorProfile) {
     hasher.update([match profile {
         DocumentColorProfile::Srgb => 0,
@@ -2305,6 +3081,9 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
         NodeKind::Ellipse => 2,
         NodeKind::Text => 3,
         NodeKind::Image => 4,
+        NodeKind::Line => 5,
+        NodeKind::Group => 6,
+        NodeKind::Section => 7,
     }]);
     for value in [
         node.x,
@@ -2318,10 +3097,44 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
     ] {
         hash_number(hasher, value);
     }
+    if !node.corner_radii.is_empty() {
+        hasher.update([3]);
+        hash_len(hasher, node.corner_radii.len());
+        for radius in &node.corner_radii {
+            hash_number(hasher, *radius);
+        }
+    }
+    if node.corner_smoothing != 0.0 {
+        hasher.update([4]);
+        hash_number(hasher, node.corner_smoothing);
+    }
+    hash_constraints(hasher, node.constraints);
     hash_paint(hasher, &node.fill);
     hash_paint(hasher, &node.stroke);
+    hash_paint_stack(hasher, &node.fills, 5);
+    hash_paint_stack(hasher, &node.strokes, 6);
+    hash_stroke_cap(hasher, node.stroke_cap_start);
+    hash_stroke_cap(hasher, node.stroke_cap_end);
+    hash_stroke_style(
+        hasher,
+        node.stroke_join,
+        node.stroke_miter_limit,
+        &node.stroke_dash_pattern,
+        &node.stroke_weights,
+        node.stroke_align,
+        node.arc_data,
+        node.relative_transform,
+    );
     hash_text(hasher, &node.text);
     hasher.update([u8::from(node.visible), u8::from(node.locked)]);
+    if node.contents_hidden {
+        // Keep hashes of historical false-by-default snapshots stable while
+        // still making the newly meaningful Section state canonical.
+        hasher.update([1]);
+    }
+    if node.kind == NodeKind::Frame && !node.clips_content {
+        hasher.update([2]);
+    }
 }
 
 fn hash_command(hasher: &mut Sha256, command: &Command) {
@@ -2400,10 +3213,42 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(id.0.to_be_bytes());
             hash_paint(hasher, &appearance.fill);
             hash_paint(hasher, &appearance.stroke);
+            hash_paint_stack(hasher, &appearance.fills, 5);
+            hash_paint_stack(hasher, &appearance.strokes, 6);
             hash_number(hasher, appearance.stroke_width);
+            hash_stroke_cap(hasher, appearance.stroke_cap_start);
+            hash_stroke_cap(hasher, appearance.stroke_cap_end);
+            hash_stroke_style(
+                hasher,
+                appearance.stroke_join,
+                appearance.stroke_miter_limit,
+                &canonical_dash_pattern(&appearance.stroke_dash_pattern),
+                &appearance.stroke_weights,
+                appearance.stroke_align,
+                appearance.arc_data,
+                appearance.relative_transform,
+            );
             hash_number(hasher, appearance.opacity);
             hash_number(hasher, appearance.corner_radius);
+            if !appearance.corner_radii.is_empty() {
+                hasher.update([3]);
+                hash_len(hasher, appearance.corner_radii.len());
+                for radius in &appearance.corner_radii {
+                    hash_number(hasher, *radius);
+                }
+            }
+            if appearance.corner_smoothing != 0.0 {
+                hasher.update([4]);
+                hash_number(hasher, appearance.corner_smoothing);
+            }
+            hash_constraints(hasher, appearance.constraints);
             hasher.update([u8::from(appearance.visible), u8::from(appearance.locked)]);
+            if appearance.contents_hidden {
+                hasher.update([1]);
+            }
+            if appearance.clips_content == Some(false) {
+                hasher.update([2]);
+            }
         }
         Command::SetNodeAsset { id, asset_id } => {
             hasher.update([12]);
@@ -2429,6 +3274,23 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
         Command::SetNodePosition { id, position } => {
             hasher.update([13]);
             hasher.update(id.0.to_be_bytes());
+            hasher.update(position.key.to_be_bytes());
+            hasher.update(position.actor.0.to_be_bytes());
+        }
+        Command::SetNodeParent {
+            id,
+            parent_id,
+            position,
+        } => {
+            hasher.update([15]);
+            hasher.update(id.0.to_be_bytes());
+            match parent_id {
+                Some(parent_id) => {
+                    hasher.update([1]);
+                    hasher.update(parent_id.0.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
             hasher.update(position.key.to_be_bytes());
             hasher.update(position.actor.0.to_be_bytes());
         }
@@ -2461,29 +3323,264 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
 fn image_fill_supported(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image
+        NodeKind::Frame | NodeKind::Section | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image
     )
 }
 
-fn valid_geometry(geometry: Geometry) -> bool {
+fn node_legacy_transform(node: &Node) -> Option<AffineTransform> {
+    if !valid_geometry(&node.kind, Geometry {
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        rotation: node.rotation,
+    }) {
+        return None;
+    }
+    let radians = node.rotation.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let center_x = node.width / 2.0;
+    let center_y = node.height / 2.0;
+    Some(AffineTransform {
+        a: cos,
+        b: sin,
+        c: -sin,
+        d: cos,
+        e: node.x + center_x - cos * center_x + sin * center_y,
+        f: node.y + center_y - sin * center_x - cos * center_y,
+    })
+}
+
+fn valid_geometry(kind: &NodeKind, geometry: Geometry) -> bool {
     geometry.x.is_finite()
         && geometry.y.is_finite()
         && geometry.width.is_finite()
         && geometry.height.is_finite()
         && geometry.rotation.is_finite()
         && geometry.width > 0.0
-        && geometry.height > 0.0
+        && match kind {
+            NodeKind::Line => geometry.height == 0.0,
+            _ => geometry.height > 0.0,
+        }
+}
+
+fn geometry_for_constraints(parent_before: Geometry, parent_after: Geometry, child: Geometry, constraints: Constraints, kind: &NodeKind) -> Result<Geometry, CommandError> {
+    fn axis(position: f64, size: f64, old_parent: f64, new_parent: f64, constraint: ConstraintType, preserve_zero: bool) -> Result<(f64, f64), CommandError> {
+        let delta = new_parent - old_parent;
+        Ok(match constraint {
+            ConstraintType::Min => (position, size),
+            ConstraintType::Center => (position + delta / 2.0, size),
+            ConstraintType::Max => (position + delta, size),
+            ConstraintType::Stretch => (position, if preserve_zero { 0.0 } else { size + delta }),
+            ConstraintType::Scale => {
+                if old_parent == 0.0 { return Err(CommandError::InvalidGeometry); }
+                let ratio = new_parent / old_parent;
+                (position * ratio, if preserve_zero { 0.0 } else { size * ratio })
+            }
+        })
+    }
+    let (x, width) = axis(child.x - parent_before.x, child.width, parent_before.width, parent_after.width, constraints.horizontal, false)?;
+    let (y, height) = axis(child.y - parent_before.y, child.height, parent_before.height, parent_after.height, constraints.vertical, *kind == NodeKind::Line)?;
+    let after = Geometry { x: parent_after.x + x, y: parent_after.y + y, width, height, rotation: child.rotation };
+    if valid_geometry(kind, after) { Ok(after) } else { Err(CommandError::InvalidGeometry) }
+}
+
+/// Keeps the historical x/y/rotation projection populated for a Relative-v1
+/// node. The matrix is authoritative for painting and hit testing; this
+/// projection deliberately only represents the translation/rotation subset,
+/// matching the Web worker's dual-read fallback for skewed or reflected nodes.
+fn geometry_for_relative_transform(
+    transform: AffineTransform,
+    width: f64,
+    height: f64,
+    kind: &NodeKind,
+) -> Result<Geometry, CommandError> {
+    if !valid_relative_transform(Some(transform)) {
+        return Err(CommandError::InvalidGeometry);
+    }
+    let rotation = transform.b.atan2(transform.a).to_degrees();
+    let radians = rotation.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+    let geometry = Geometry {
+        x: transform.e - center_x + cos * center_x - sin * center_y,
+        y: transform.f - center_y + sin * center_x + cos * center_y,
+        width,
+        height,
+        rotation,
+    };
+    valid_geometry(kind, geometry)
+        .then_some(geometry)
+        .ok_or(CommandError::InvalidGeometry)
+}
+
+fn appearance_for_node(node: &Node) -> Appearance {
+    Appearance {
+        fill: node.fill.clone(),
+        stroke: node.stroke.clone(),
+        fills: node.fills.clone(),
+        strokes: node.strokes.clone(),
+        stroke_width: node.stroke_width,
+        stroke_cap_start: node.stroke_cap_start,
+        stroke_cap_end: node.stroke_cap_end,
+        stroke_join: node.stroke_join,
+        stroke_miter_limit: node.stroke_miter_limit,
+        stroke_dash_pattern: node.stroke_dash_pattern.clone(),
+        stroke_weights: node.stroke_weights.clone(),
+        stroke_align: node.stroke_align,
+        arc_data: node.arc_data,
+        relative_transform: node.relative_transform,
+        opacity: node.opacity,
+        corner_radius: node.corner_radius,
+        corner_radii: node.corner_radii.clone(),
+        corner_smoothing: node.corner_smoothing,
+        constraints: node.constraints,
+        visible: node.visible,
+        locked: node.locked,
+        contents_hidden: node.contents_hidden,
+        clips_content: Some(node.clips_content),
+    }
 }
 
 fn valid_appearance(appearance: &Appearance) -> bool {
     appearance.fill.is_valid()
         && appearance.stroke.is_valid()
+        && valid_paint_stack(&appearance.fills)
+        && valid_paint_stack(&appearance.strokes)
         && appearance.stroke_width.is_finite()
         && appearance.stroke_width >= 0.0
+        && appearance.stroke_miter_limit.is_finite()
+        && appearance.stroke_miter_limit >= 1.0
+        && valid_dash_pattern(&appearance.stroke_dash_pattern)
+        && valid_stroke_weights(&appearance.stroke_weights)
+        && appearance.arc_data.is_none_or(valid_arc_data)
+        && valid_relative_transform(appearance.relative_transform)
         && appearance.opacity.is_finite()
         && (0.0..=1.0).contains(&appearance.opacity)
         && appearance.corner_radius.is_finite()
         && appearance.corner_radius >= 0.0
+        && valid_corner_radii(&appearance.corner_radii)
+        && appearance.corner_smoothing.is_finite()
+        && (0.0..=1.0).contains(&appearance.corner_smoothing)
+}
+
+fn hash_constraints(hasher: &mut Sha256, constraints: Option<Constraints>) {
+    let Some(constraints) = constraints else { return; };
+    let encode = |value| match value {
+        ConstraintType::Min => 0,
+        ConstraintType::Center => 1,
+        ConstraintType::Max => 2,
+        ConstraintType::Stretch => 3,
+        ConstraintType::Scale => 4,
+    };
+    // Legacy nodes do not write this marker and therefore retain their hashes.
+    hasher.update([7, encode(constraints.horizontal), encode(constraints.vertical)]);
+}
+
+const MAX_PAINT_LAYERS: usize = 16;
+
+fn valid_paint_stack(paints: &[Paint]) -> bool {
+    paints.len() <= MAX_PAINT_LAYERS && paints.iter().all(Paint::is_valid)
+}
+
+fn paint_stack_bytes(paints: &[Paint]) -> usize {
+    paints.iter().map(Paint::estimated_bytes).sum()
+}
+
+fn valid_corner_radii(radii: &[f64]) -> bool {
+    (radii.is_empty() || radii.len() == 4) && radii.iter().all(|radius| radius.is_finite() && *radius >= 0.0)
+}
+
+const DEFAULT_STROKE_MITER_LIMIT: f64 = 10.0;
+const MAX_STROKE_DASH_SEGMENTS: usize = 32;
+
+fn valid_dash_pattern(pattern: &[f64]) -> bool {
+    pattern.len() <= MAX_STROKE_DASH_SEGMENTS
+        && pattern.iter().all(|segment| segment.is_finite() && *segment >= 0.0)
+        && (pattern.is_empty() || pattern.iter().any(|segment| *segment > 0.0))
+}
+
+/// Canvas and Figma repeat odd-length patterns to form a full on/off cycle.
+/// Persisting the expanded result makes equivalent inputs hash identically.
+fn canonical_dash_pattern(pattern: &[f64]) -> Vec<f64> {
+    if pattern.len() % 2 == 0 {
+        return pattern.to_vec();
+    }
+    pattern.iter().copied().chain(pattern.iter().copied()).collect()
+}
+
+fn valid_stroke_weights(weights: &[f64]) -> bool {
+    (weights.is_empty() || weights.len() == 4)
+        && weights.iter().all(|weight| weight.is_finite() && *weight >= 0.0)
+}
+
+fn valid_arc_data(arc: ArcData) -> bool {
+    arc.starting_angle.is_finite()
+        && arc.ending_angle.is_finite()
+        && arc.inner_radius.is_finite()
+        && (0.0..1.0).contains(&arc.inner_radius)
+}
+
+fn valid_relative_transform(transform: Option<AffineTransform>) -> bool {
+    transform.is_none_or(|matrix| {
+        [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f]
+            .iter()
+            .all(|value| value.is_finite())
+            && matrix.inverse().is_ok()
+    })
+}
+
+fn hash_stroke_style(
+    hasher: &mut Sha256,
+    join: StrokeJoin,
+    miter_limit: f64,
+    dash_pattern: &[f64],
+    stroke_weights: &[f64],
+    stroke_align: StrokeAlign,
+    arc_data: Option<ArcData>,
+    relative_transform: Option<AffineTransform>,
+) {
+    // Preserve every historical hash while making non-default stroke metadata
+    // part of the durable semantic state.
+    if join != StrokeJoin::Miter
+        || miter_limit != DEFAULT_STROKE_MITER_LIMIT
+        || !dash_pattern.is_empty()
+        || !stroke_weights.is_empty()
+        || stroke_align != StrokeAlign::Inside
+        || arc_data.is_some()
+        || relative_transform.is_some()
+    {
+        hasher.update([match join {
+            StrokeJoin::Miter => 0,
+            StrokeJoin::Bevel => 1,
+            StrokeJoin::Round => 2,
+        }]);
+        hash_number(hasher, miter_limit);
+        hash_len(hasher, dash_pattern.len());
+        for segment in dash_pattern {
+            hash_number(hasher, *segment);
+        }
+        hash_len(hasher, stroke_weights.len());
+        for weight in stroke_weights {
+            hash_number(hasher, *weight);
+        }
+        hasher.update([match stroke_align {
+            StrokeAlign::Center => 0,
+            StrokeAlign::Inside => 1,
+            StrokeAlign::Outside => 2,
+        }]);
+        if let Some(arc) = arc_data {
+            hash_number(hasher, arc.starting_angle);
+            hash_number(hasher, arc.ending_angle);
+            hash_number(hasher, arc.inner_radius);
+        }
+        if let Some(transform) = relative_transform {
+            for value in [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f] {
+                hash_number(hasher, value);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2504,12 +3601,28 @@ mod tests {
             rotation: 0.0,
             fill: "#fff".into(),
             stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
             stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
             opacity: 1.0,
             corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
+            contents_hidden: false,
+            clips_content: false,
         }
     }
 
@@ -2534,6 +3647,33 @@ mod tests {
         assert_eq!(result, Err(CommandError::MissingNode { id: NodeId(2) }));
         assert_eq!(document.nodes().count(), 0);
         assert_eq!(document.revision, 0);
+    }
+
+    #[test]
+    fn line_accepts_zero_height_but_other_nodes_do_not() {
+        let mut document = Document::empty();
+        let mut line = node(1);
+        line.kind = NodeKind::Line;
+        line.name = "Line".into();
+        line.width = 120.0;
+        line.height = 0.0;
+        line.fill = "#00000000".into();
+        line.stroke = "#000".into();
+        line.stroke_width = 1.0;
+
+        document
+            .submit(transaction(0, vec![Command::Create(line)]), Origin::LocalUser)
+            .unwrap();
+
+        let mut rectangle = node(2);
+        rectangle.height = 0.0;
+        assert_eq!(
+            document.submit(
+                transaction(1, vec![Command::Create(rectangle)]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
@@ -2697,11 +3837,27 @@ mod tests {
                         appearance: Appearance {
                             fill: "".into(),
                             stroke: "#00000000".into(),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
                             stroke_width: 0.0,
+                            stroke_cap_start: StrokeCap::None,
+                            stroke_cap_end: StrokeCap::ArrowLines,
+                            stroke_join: Default::default(),
+                            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+                            stroke_dash_pattern: Vec::new(),
+                            stroke_weights: Vec::new(),
+                            stroke_align: Default::default(),
+                            arc_data: None,
+                            relative_transform: None,
                             opacity: 1.0,
                             corner_radius: 0.0,
+            corner_radii: Vec::new(),
+                            corner_smoothing: 0.0,
+            constraints: None,
                             visible: true,
                             locked: false,
+                            contents_hidden: false,
+            clips_content: Some(false),
                         },
                     },
                 ],
@@ -2916,11 +4072,27 @@ mod tests {
                         appearance: Appearance {
                             fill: "#fff".into(),
                             stroke: "#2563eb".into(),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
                             stroke_width: 3.0,
+                            stroke_cap_start: Default::default(),
+                            stroke_cap_end: StrokeCap::ArrowLines,
+                            stroke_join: Default::default(),
+                            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+                            stroke_dash_pattern: Vec::new(),
+                            stroke_weights: Vec::new(),
+                            stroke_align: Default::default(),
+                            arc_data: None,
+                            relative_transform: None,
                             opacity: 1.0,
                             corner_radius: 0.0,
+            corner_radii: Vec::new(),
+                            corner_smoothing: 0.0,
+            constraints: None,
                             visible: true,
                             locked: false,
+                            contents_hidden: false,
+            clips_content: Some(false),
                         },
                     }],
                 ),
@@ -2932,13 +4104,16 @@ mod tests {
             Paint::Solid(Color::from_srgb_u8([37, 99, 235], 255))
         );
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 3.0);
+        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::ArrowLines);
         assert_ne!(document.canonical_hash_hex(), baseline_hash);
 
         document.undo().unwrap();
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 0.0);
+        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::None);
         assert_eq!(document.canonical_hash_hex(), baseline_hash);
         document.redo().unwrap();
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 3.0);
+        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::ArrowLines);
     }
 
     #[test]
@@ -3009,11 +4184,27 @@ mod tests {
                         appearance: Appearance {
                             fill: "#ffffff".into(),
                             stroke: "#00000000".into(),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
                             stroke_width: 0.0,
+                            stroke_cap_start: Default::default(),
+                            stroke_cap_end: Default::default(),
+                            stroke_join: Default::default(),
+                            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+                            stroke_dash_pattern: Vec::new(),
+                            stroke_weights: Vec::new(),
+                            stroke_align: Default::default(),
+                            arc_data: None,
+                            relative_transform: None,
                             opacity: 1.0,
                             corner_radius: 0.0,
+            corner_radii: Vec::new(),
+                            corner_smoothing: 0.0,
+            constraints: None,
                             visible: true,
                             locked: false,
+                            contents_hidden: false,
+            clips_content: Some(false),
                         },
                     }],
                 ),
@@ -3137,6 +4328,691 @@ mod tests {
             })
         );
         assert_eq!(document.canonical_hash(), hash_before_rejected_reorder);
+    }
+
+    #[test]
+    fn reparent_is_atomic_hashable_and_undoable_without_moving_world_geometry() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        let mut child = node(2);
+        child.x = 48.0;
+        child.y = 72.0;
+        document
+            .submit(
+                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let position = PositionId { key: 7, actor: ActorId(9) };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(2),
+                        parent_id: Some(NodeId(1)),
+                        position,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!(child.parent_id, Some(NodeId(1)));
+        assert_eq!(child.position, position);
+        assert_eq!((child.x, child.y), (48.0, 72.0));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, None);
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
+    }
+
+    #[test]
+    fn group_bounds_follow_child_geometry_and_undo_redo_exactly() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        let child = node(2);
+        document
+            .submit(
+                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(2),
+                        parent_id: Some(NodeId(1)),
+                        position: PositionId { key: 2, actor: ActorId(1) },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let grouped_hash = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(2),
+                        x: 10.0,
+                        y: 20.0,
+                        width: 30.0,
+                        height: 40.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let group = document.node(NodeId(1)).unwrap();
+        assert_eq!((group.x, group.y, group.width, group.height, group.rotation), (10.0, 20.0, 30.0, 40.0, 0.0));
+        let updated_hash = document.canonical_hash_hex();
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), grouped_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), updated_hash);
+    }
+
+    #[test]
+    fn moving_one_relative_group_keeps_other_groups_independent() {
+        let mut document = Document::empty();
+        let mut first_group = node(1);
+        first_group.kind = NodeKind::Group;
+        first_group.name = "First group".into();
+        first_group.x = 10.0;
+        first_group.y = 20.0;
+        first_group.width = 30.0;
+        first_group.height = 20.0;
+        let mut first_child = node(2);
+        first_child.parent_id = Some(NodeId(1));
+        first_child.width = 30.0;
+        first_child.height = 20.0;
+        first_child.relative_transform = Some(AffineTransform::IDENTITY);
+
+        let mut second_group = node(3);
+        second_group.kind = NodeKind::Group;
+        second_group.name = "Second group".into();
+        second_group.x = 200.0;
+        second_group.y = 220.0;
+        second_group.width = 40.0;
+        second_group.height = 20.0;
+        let mut second_child = node(4);
+        second_child.parent_id = Some(NodeId(3));
+        second_child.width = 40.0;
+        second_child.height = 20.0;
+        second_child.relative_transform = Some(AffineTransform::IDENTITY);
+
+        document.submit(transaction(0, vec![Command::Create(first_group), Command::Create(first_child), Command::Create(second_group), Command::Create(second_child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 50.0, y: 60.0, width: 30.0, height: 20.0, rotation: 0.0,
+        }]), Origin::LocalUser).unwrap();
+
+        assert_eq!((document.node(NodeId(1)).unwrap().x, document.node(NodeId(1)).unwrap().y), (50.0, 60.0));
+        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (200.0, 220.0));
+        assert_eq!(document.node_world_transform(NodeId(2)).unwrap().e, 50.0);
+        assert_eq!(document.node_world_transform(NodeId(2)).unwrap().f, 60.0);
+        assert_eq!(document.node_world_transform(NodeId(4)).unwrap().e, 200.0);
+        assert_eq!(document.node_world_transform(NodeId(4)).unwrap().f, 220.0);
+    }
+
+    #[test]
+    fn group_bounds_use_a_child_relative_transform_during_dual_read() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
+        child.x = 0.0;
+        child.y = 0.0;
+        child.width = 30.0;
+        child.height = 40.0;
+        child.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 100.0, f: 50.0 });
+        document.submit(transaction(0, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(2), x: 0.0, y: 0.0, width: 30.0, height: 40.0, rotation: 0.0,
+        }]), Origin::LocalUser).unwrap();
+        let group = document.node(NodeId(1)).unwrap();
+        assert_eq!((group.x, group.y, group.width, group.height), (60.0, 50.0, 40.0, 30.0));
+    }
+
+    #[test]
+    fn moving_the_last_child_out_dissolves_its_group_and_is_undoable() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        let child = node(2);
+        document
+            .submit(
+                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(2),
+                        parent_id: Some(NodeId(1)),
+                        position: PositionId { key: 2, actor: ActorId(1) },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let grouped_hash = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(2),
+                        parent_id: None,
+                        position: PositionId { key: 3, actor: ActorId(1) },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.node(NodeId(1)).is_none());
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, None);
+        let dissolved_hash = document.canonical_hash_hex();
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), grouped_hash);
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), dissolved_hash);
+    }
+
+    #[test]
+    fn section_contents_hidden_is_hashed_and_undoable() {
+        let mut document = Document::empty();
+        let mut section = node(1);
+        section.kind = NodeKind::Section;
+        section.name = "Section".into();
+        document
+            .submit(transaction(0, vec![Command::Create(section)]), Origin::LocalUser)
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: Appearance {
+                            fill: "#fff".into(),
+                            stroke: "#000".into(),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
+                            stroke_width: 1.0,
+                            stroke_cap_start: StrokeCap::None,
+                            stroke_cap_end: StrokeCap::None,
+                            stroke_join: Default::default(),
+                            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+                            stroke_dash_pattern: Vec::new(),
+                            stroke_weights: Vec::new(),
+                            stroke_align: Default::default(),
+                            arc_data: None,
+                            relative_transform: None,
+                            opacity: 1.0,
+                            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+                            corner_smoothing: 0.0,
+            constraints: None,
+                            visible: true,
+                            locked: false,
+                            contents_hidden: true,
+                            clips_content: None,
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.node(NodeId(1)).unwrap().contents_hidden);
+        let hidden_hash = document.canonical_hash_hex();
+        assert_ne!(hidden_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), hidden_hash);
+    }
+
+    #[test]
+    fn frame_clip_content_is_hashed_undoable_and_frame_only() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.kind = NodeKind::Frame;
+        frame.name = "Frame".into();
+        frame.clips_content = true;
+        document.submit(transaction(0, vec![Command::Create(frame)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#000".into(), fills: vec!["#e6edff".into(), "#0048ff".into()], strokes: vec!["#000".into(), "#2563eb".into()], stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            visible: true, locked: false, contents_hidden: false, clips_content: Some(false),
+        };
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        assert!(!document.node(NodeId(1)).unwrap().clips_content);
+        assert_eq!(document.node(NodeId(1)).unwrap().fills, appearance.fills);
+        assert_eq!(document.node(NodeId(1)).unwrap().strokes, appearance.strokes);
+        let unclipped = document.canonical_hash_hex();
+        assert_ne!(unclipped, baseline);
+        document.undo().unwrap();
+        assert!(document.node(NodeId(1)).unwrap().clips_content);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), unclipped);
+
+        let mut rectangle = node(2);
+        rectangle.kind = NodeKind::Rectangle;
+        rectangle.name = "Rectangle".into();
+        document.submit(transaction(4, vec![Command::Create(rectangle)]), Origin::LocalUser).unwrap();
+        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: Appearance { clips_content: Some(true), ..appearance } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+    }
+
+    #[test]
+    fn corner_geometry_is_hashed_undoable_and_limited_to_closed_nodes() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.name = "Frame".into();
+        frame.clips_content = true;
+        document.submit(transaction(0, vec![Command::Create(frame)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0,
+            corner_radii: vec![4.0, 8.0, 12.0, 16.0],
+            corner_smoothing: 0.65,
+            constraints: None,
+            visible: true, locked: false, contents_hidden: false, clips_content: Some(true),
+        };
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().corner_radii, appearance.corner_radii);
+        assert_eq!(document.node(NodeId(1)).unwrap().corner_smoothing, 0.65);
+        assert_eq!(document.node(NodeId(1)).unwrap().fills, appearance.fills);
+        assert_eq!(document.node(NodeId(1)).unwrap().strokes, appearance.strokes);
+        let rounded_hash = document.canonical_hash_hex();
+        assert_ne!(rounded_hash, baseline);
+        document.undo().unwrap();
+        assert!(document.node(NodeId(1)).unwrap().corner_radii.is_empty());
+        assert_eq!(document.node(NodeId(1)).unwrap().corner_smoothing, 0.0);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), rounded_hash);
+
+        let mut line = node(2);
+        line.kind = NodeKind::Line;
+        line.name = "Line".into();
+        line.height = 0.0;
+        document.submit(transaction(4, vec![Command::Create(line)]), Origin::LocalUser).unwrap();
+        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: appearance.clone() }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { corner_radii: vec![1.0, 2.0], ..appearance.clone() } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { corner_smoothing: 1.1, ..appearance } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+    }
+
+    #[test]
+    fn constraints_are_hashed_undoable_and_reject_structural_nodes() {
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#00000000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 0.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None, stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT, stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0, corner_radii: Vec::new(), corner_smoothing: 0.0,
+            constraints: Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Center }), visible: true, locked: false, contents_hidden: false, clips_content: Some(true),
+        };
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().constraints, appearance.constraints);
+        let constrained = document.canonical_hash_hex();
+        assert_ne!(constrained, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), constrained);
+
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        document.submit(transaction(4, vec![Command::Create(group)]), Origin::LocalUser).unwrap();
+        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+    }
+
+    #[test]
+    fn frame_resize_applies_direct_child_constraints_atomically() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Child".into();
+        child.parent_id = Some(NodeId(1));
+        child.x = 20.0;
+        child.y = 20.0;
+        child.width = 100.0;
+        child.height = 30.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Center });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!((child.x, child.y, child.width, child.height), (20.0, 70.0, 200.0, 30.0));
+        document.undo().unwrap();
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!((child.x, child.y, child.width, child.height), (20.0, 20.0, 100.0, 30.0));
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(2)).unwrap().width, 200.0);
+    }
+
+    #[test]
+    fn frame_resize_resolves_min_max_and_scale_axes() {
+        let mut document = Document::empty();
+        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
+        let child = |id, constraints| { let mut value = node(id); value.kind = NodeKind::Rectangle; value.name = format!("Child {id}"); value.parent_id = Some(NodeId(1)); value.x = 20.0; value.y = 10.0; value.width = 40.0; value.height = 20.0; value.constraints = Some(constraints); value };
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child(2, Constraints { horizontal: ConstraintType::Min, vertical: ConstraintType::Min })), Command::Create(child(3, Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max })), Command::Create(child(4, Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Scale }))]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 400.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        assert_eq!((document.node(NodeId(2)).unwrap().x, document.node(NodeId(2)).unwrap().y), (20.0, 10.0));
+        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (220.0, 110.0));
+        assert_eq!((document.node(NodeId(4)).unwrap().x, document.node(NodeId(4)).unwrap().y, document.node(NodeId(4)).unwrap().width, document.node(NodeId(4)).unwrap().height), (40.0, 20.0, 80.0, 40.0));
+    }
+
+    #[test]
+    fn rotated_frame_resize_defers_constraints_until_local_matrix_support_exists() {
+        let mut document = Document::empty();
+        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
+        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 20.0; child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0 }]), Origin::LocalUser).unwrap();
+        assert_eq!((document.node(NodeId(2)).unwrap().x, document.node(NodeId(2)).unwrap().y), (20.0, 20.0));
+    }
+
+    #[test]
+    fn frame_resize_applies_constraints_to_relative_matrix_subtrees_in_local_space() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        // A rotated Frame proves that the constraint calculation is independent
+        // of the canvas/world axes.
+        frame.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 300.0, f: 200.0 });
+
+        let mut direct = node(2);
+        direct.kind = NodeKind::Rectangle;
+        direct.name = "Direct matrix child".into();
+        direct.parent_id = Some(NodeId(1));
+        direct.width = 40.0;
+        direct.height = 20.0;
+        direct.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 20.0, f: 10.0 });
+        direct.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center });
+
+        let mut group = node(3);
+        group.kind = NodeKind::Group;
+        group.name = "Rotated group".into();
+        group.parent_id = Some(NodeId(1));
+        group.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 50.0, f: 20.0 });
+        let mut nested = node(4);
+        nested.kind = NodeKind::Rectangle;
+        nested.name = "Nested matrix child".into();
+        nested.parent_id = Some(NodeId(3));
+        nested.width = 40.0;
+        nested.height = 20.0;
+        nested.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 10.0, f: 5.0 });
+        nested.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Max });
+
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(direct), Command::Create(group), Command::Create(nested)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+
+        let direct = document.node(NodeId(2)).unwrap();
+        assert_eq!(direct.relative_transform.unwrap().e, 120.0);
+        assert_eq!(direct.relative_transform.unwrap().f, 60.0);
+        assert_eq!((direct.width, direct.height), (40.0, 20.0));
+        let nested = document.node(NodeId(4)).unwrap();
+        // Frame-local (45, 30) becomes (45, 130). The inverse rotated Group
+        // converts that back to the child's immediate local translation.
+        assert_eq!(nested.relative_transform.unwrap().e, 110.0);
+        assert_eq!(nested.relative_transform.unwrap().f, 5.0);
+        assert_eq!((nested.width, nested.height), (140.0, 20.0));
+
+        document.undo().unwrap();
+        let direct = document.node(NodeId(2)).unwrap();
+        assert_eq!((direct.relative_transform.unwrap().e, direct.relative_transform.unwrap().f), (20.0, 10.0));
+        let nested = document.node(NodeId(4)).unwrap();
+        assert_eq!((nested.relative_transform.unwrap().e, nested.relative_transform.unwrap().f, nested.width), (10.0, 5.0, 40.0));
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(4)).unwrap().relative_transform.unwrap().e, 110.0);
+    }
+
+    #[test]
+    fn frame_resize_propagates_through_groups_and_refreshes_group_bounds() {
+        let mut document = Document::empty();
+        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
+        let mut group = node(2); group.kind = NodeKind::Group; group.name = "Group".into(); group.parent_id = Some(NodeId(1)); group.x = 20.0; group.y = 10.0; group.width = 40.0; group.height = 20.0;
+        let mut child = node(3); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(2)); child.x = 20.0; child.y = 10.0; child.width = 40.0; child.height = 20.0; child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Min });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 100.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(3)).unwrap().x, 120.0);
+        assert_eq!(document.node(NodeId(2)).unwrap().x, 120.0);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(3)).unwrap().x, 20.0);
+        assert_eq!(document.node(NodeId(2)).unwrap().x, 20.0);
+    }
+
+    #[test]
+    fn frame_resize_rejects_scale_from_a_zero_sized_axis() {
+        let mut document = Document::empty();
+        let mut frame = node(1); frame.width = 1.0; frame.height = 100.0;
+        let constraints = Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Min };
+        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.constraints = Some(constraints);
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        // Canonical geometry disallows a zero Frame, so the scale guard is exercised
+        // directly through the shared pure geometry rule.
+        assert_eq!(geometry_for_constraints(Geometry { x: 0.0, y: 0.0, width: 0.0, height: 100.0, rotation: 0.0 }, Geometry { x: 0.0, y: 0.0, width: 10.0, height: 100.0, rotation: 0.0 }, Geometry { x: 1.0, y: 1.0, width: 10.0, height: 10.0, rotation: 0.0 }, constraints, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
+    }
+
+    #[test]
+    fn stroke_style_is_canonicalized_hashed_and_undoable() {
+        let mut document = Document::empty();
+        let mut line = node(1);
+        line.kind = NodeKind::Line;
+        line.name = "Divider".into();
+        line.width = 120.0;
+        line.height = 0.0;
+        document
+            .submit(transaction(0, vec![Command::Create(line)]), Origin::LocalUser)
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: Appearance {
+                            fill: "#fff".into(),
+                            stroke: "#2563eb".into(),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
+                            stroke_width: 2.0,
+                            stroke_cap_start: StrokeCap::None,
+                            stroke_cap_end: StrokeCap::None,
+                            stroke_join: StrokeJoin::Round,
+                            stroke_miter_limit: 6.0,
+                            stroke_dash_pattern: vec![8.0, 4.0, 2.0],
+                            stroke_weights: Vec::new(),
+                            stroke_align: Default::default(),
+                            arc_data: None,
+                            relative_transform: None,
+                            opacity: 1.0,
+                            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+                            corner_smoothing: 0.0,
+            constraints: None,
+                            visible: true,
+                            locked: false,
+                            contents_hidden: false,
+            clips_content: Some(false),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let styled = document.node(NodeId(1)).unwrap();
+        assert_eq!(styled.stroke_join, StrokeJoin::Round);
+        assert_eq!(styled.stroke_dash_pattern, vec![8.0, 4.0, 2.0, 8.0, 4.0, 2.0]);
+        let styled_hash = document.canonical_hash_hex();
+        assert_ne!(styled_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), styled_hash);
+    }
+
+    #[test]
+    fn rectangle_per_side_stroke_weights_and_ellipse_stroke_align_are_hashed_and_reject_unsupported_nodes() {
+        let mut document = Document::empty();
+        document
+            .submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser)
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#2563eb".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(), stroke_weights: vec![1.0, 2.0, 3.0, 4.0], stroke_align: StrokeAlign::Outside, arc_data: None, relative_transform: None,
+            opacity: 1.0, corner_radius: 0.0,
+            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            clips_content: Some(false),
+        };
+        document
+            .submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser)
+            .unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().stroke_weights, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(document.node(NodeId(1)).unwrap().stroke_align, StrokeAlign::Outside);
+        let weighted = document.canonical_hash_hex();
+        assert_ne!(weighted, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), weighted);
+
+        let mut line = node(2);
+        line.kind = NodeKind::Line;
+        line.name = "Line".into();
+        line.width = 20.0;
+        line.height = 0.0;
+        document
+            .submit(transaction(4, vec![Command::Create(line)]), Origin::LocalUser)
+            .unwrap();
+        assert_eq!(
+            document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: appearance.clone() }]), Origin::LocalUser),
+            Err(CommandError::InvalidAppearance),
+        );
+
+        let mut ellipse = node(3);
+        ellipse.kind = NodeKind::Ellipse;
+        ellipse.name = "Ellipse".into();
+        document
+            .submit(transaction(5, vec![Command::Create(ellipse)]), Origin::LocalUser)
+            .unwrap();
+        let ellipse_appearance = Appearance {
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Outside,
+            ..appearance.clone()
+        };
+        document
+            .submit(transaction(6, vec![Command::SetAppearance { id: NodeId(3), appearance: ellipse_appearance.clone() }]), Origin::LocalUser)
+            .unwrap();
+        assert_eq!(document.node(NodeId(3)).unwrap().stroke_align, StrokeAlign::Outside);
+        let arc_appearance = Appearance {
+            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 90.0, inner_radius: 0.0 }),
+            ..ellipse_appearance
+        };
+        assert_eq!(
+            document.submit(transaction(7, vec![Command::SetAppearance { id: NodeId(3), appearance: arc_appearance }]), Origin::LocalUser),
+            Err(CommandError::InvalidAppearance),
+        );
+    }
+
+    #[test]
+    fn ellipse_arc_is_hashed_undoable_and_rejected_for_non_ellipse() {
+        let mut document = Document::empty();
+        let mut ellipse = node(1);
+        ellipse.kind = NodeKind::Ellipse;
+        ellipse.name = "Arc".into();
+        document.submit(transaction(0, vec![Command::Create(ellipse)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 180.0, inner_radius: 0.4 }), relative_transform: None,
+            opacity: 1.0, corner_radius: 0.0,
+            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            clips_content: Some(false),
+        };
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().arc_data, appearance.arc_data);
+        let arc_hash = document.canonical_hash_hex();
+        assert_ne!(arc_hash, baseline);
+        document.undo().unwrap(); assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap(); assert_eq!(document.canonical_hash_hex(), arc_hash);
+        assert_eq!(document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { arc_data: None, ..appearance } }]), Origin::LocalUser).unwrap().accepted_revision, 5);
+    }
+
+    #[test]
+    fn relative_transform_is_hashed_undoable_and_rejects_singular_matrices() {
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let appearance = Appearance {
+            fill: "#fff".into(), stroke: "#00000000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 0.0,
+            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            relative_transform: Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 40.0, f: 20.0 }),
+            opacity: 1.0, corner_radius: 0.0,
+            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            clips_content: Some(false),
+        };
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().relative_transform, appearance.relative_transform);
+        let transformed = document.canonical_hash_hex();
+        assert_ne!(transformed, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().relative_transform, None);
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), transformed);
+
+        let singular = Appearance { relative_transform: Some(AffineTransform { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 }), ..appearance };
+        assert_eq!(
+            document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: singular }]), Origin::LocalUser),
+            Err(CommandError::InvalidAppearance),
+        );
     }
 
     #[test]
