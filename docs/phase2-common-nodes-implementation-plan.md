@@ -430,7 +430,11 @@ Line 的普通 Bounds 可以是零高度，但 Render Bounds 和 Hit Bounds 必�
 
 ### 7.1 Append-only 扩展
 
-既有 Protobuf 字段号不得修改或复用。建议在现有 `SceneNode` 后追加：
+既有 Protobuf 字段号不得修改或复用。
+
+> **实现现状（2026-08-07 校准，权威以 `schemas/proto/editor/v1/editor.proto` 为准）**：下方原始提案的字段号（fills=22、strokes=23 等）**未被采用**——字段号 22–34 在更早的切片里已被 Phase 2 的 stroke/几何字段占用（`stroke_cap_start=22`、`stroke_cap_end=23`、`contents_hidden=24`、`stroke_join=25`、`stroke_miter_limit=26`、`stroke_dash_pattern=27`、`stroke_weights=28`、`stroke_align=29`、`arc_data=30`、`relative_transform=31`、`clips_content=32`、`corner_radii=33`、`corner_smoothing=34`）。Paint 数组与扩展字段因此落在其后：`fills=35`、`strokes=36`、`constraints=37`、`extensions=38`。此为**最终持久化契约**，不得回退到 22/23。此外，聚合子消息 `StrokeProperties`/`NodeProperties` 与具名命令 `MoveNode`/`DeleteSubtree` **均未落地**——所有 stroke/节点属性平铺进 `SceneNode` 与 `AppearanceUpdate`，跨父级移动用 `SetNodeParent`，子树删除在 TS 层展开为子节点优先的多条 `DeleteNode`（见下方 §7.1 末与 [ADR 0025](adr/0025-flattened-appearance-and-structural-operations.md)、§8.1、§8.3）。
+
+原始提案（保留作历史记录，字段号以上文现状为准）——在现有 `SceneNode` 后追加：
 
 ```proto
 message SceneNode {
@@ -463,6 +467,36 @@ message DeleteSubtree { ... }
 
 不得使用一个无类型的 `map<string, any>` 替代正式属性，因为它会削弱校验、Hash、迁移和生成类型的可靠性。`extensions` 只用于未知或尚未支持的 namespaced 数据。
 
+**实际落地的等价契约**（append-only，字段号见 `editor.proto`）：
+
+```proto
+message SceneNode {
+  // fields 1..21 unchanged; 22..34 已被 stroke/几何字段占用（见上文现状）
+  repeated Paint fills = 35;
+  repeated Paint strokes = 36;
+  optional Constraints constraints = 37;
+  map<string, bytes> extensions = 38;
+}
+
+// 平铺的属性更新（无 StrokeProperties/NodeProperties 聚合子消息）
+message AppearanceUpdate {
+  bytes node_id = 1;
+  // fill/stroke/stroke_width/opacity/corner_radius/visible/locked/cap/join/miter/
+  // dash/weights/align/arc_data/relative_transform/clips_content/corner_radii/
+  // corner_smoothing 平铺其中；Paint 数组为 fills=22、strokes=23、constraints=24
+  repeated Paint fills = 22;
+  repeated Paint strokes = 23;
+  optional Constraints constraints = 24;
+}
+
+// 跨父级移动：几何有意省略，reducer 保持世界视觉位置（见 §8.1）
+message SetNodeParent {
+  bytes node_id = 1;
+  optional bytes parent_id = 2;
+  PositionId position_id = 3;
+}
+```
+
 ### 7.2 旧字段迁移
 
 Snapshot 新版本读取规则：
@@ -491,6 +525,8 @@ Snapshot 新版本读取规则：
 ## 8. Command、Transaction 与历史
 
 ### 8.1 跨父级移动
+
+> **实现现状（2026-08-07 校准）**：落地的解析后命令是 `SetNodeParent`（`editor.proto:361`），**不是** `MoveNodes`/`MoveNode`，且**有意不携带** `page_id` 与 `relative_transform`。理由：解析后的结构移动只改变节点的 canonical parent 与兄弟顺序，child 的世界视觉位置由 reducer 用「保持视觉位置」的矩阵换算（下方公式）在提交前重算保留，无需操作显式携带几何——携带几何反而会与 reducer 结果产生双源真相风险。proto 注释（`editor.proto` 的 `SetNodeParent` 前）已记录此约定。下方原始提案（携带 `new_page_id` / `new_relative_transform` 的 `MoveNodes`）保留作历史需求描述；校验清单（存在性、允许 children、禁止移到自身/后代、PositionId 唯一、可逆有限 Transform、不产生非法空 Group、整批合法才提交）仍全部适用，由 reducer 承担。
 
 新增原子 `MoveNodes` Command。每个移动至少携带：
 
@@ -543,6 +579,8 @@ new relative transform
 - 该自动行为必须进入同一个 HistoryItem，不能产生隐藏的第二次 revision。
 
 ### 8.3 子树删除
+
+> **实现现状（2026-08-07 校准）**：**未新增 Core 级 `DeleteSubtree` 具名命令**。子树删除在 TS 层（`src/lib/transaction-batch.ts`）展开为「子节点优先」的多条 `DeleteNode`，在同一 Transaction 提交；Core `Delete` 仍要求目标无子节点。原子性由两道防线保证：TS 层的确定性排序，以及 document-service 在提交 Core 前执行的 `validate_delete_subtree_completeness`（「批次后有效父节点」判定，漏删任一后代的批次在任何变更前整体被拒）。此决策与服务端校验记录于 [ADR 0024](adr/0024-delete-subtree-atomicity.md)（对应 remediation P1-4）。下方原始 `DeleteSubtree` 需求点仍是语义验收标准，只是由「TS 展开 + 服务端校验」而非单条具名命令实现。
 
 新增 `DeleteSubtree`：
 
