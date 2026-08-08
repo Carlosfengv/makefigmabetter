@@ -231,6 +231,11 @@ pub struct Node {
     /// Frame-only. A decoded legacy Frame defaults this to true; false is an
     /// explicit user choice to let descendants paint outside its bounds.
     pub clips_content: bool,
+    /// Forward-compatibility payloads owned by newer engine versions. Keys are
+    /// preserved byte-for-byte across load/save and operation replay so a node
+    /// authored by a future client round-trips through this one unrewritten. A
+    /// `BTreeMap` keeps ordering (and therefore the canonical hash) deterministic.
+    pub extensions: BTreeMap<String, Vec<u8>>,
 }
 
 /// A top-level canvas container. Scene nodes belong to exactly one Page while
@@ -671,6 +676,9 @@ pub enum CommandError {
     InvalidParent {
         id: NodeId,
     },
+    EffectivelyLocked {
+        id: NodeId,
+    },
     DuplicatePosition {
         parent_id: Option<NodeId>,
         position: PositionId,
@@ -839,6 +847,26 @@ impl Document {
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(&id)
+    }
+
+    /// A lock on any ancestor makes a descendant read-only. The visited set
+    /// also makes this safe while inspecting malformed, legacy hierarchy data.
+    pub fn is_effectively_locked(&self, id: NodeId) -> bool {
+        let mut current = Some(id);
+        let mut visited = BTreeSet::new();
+        while let Some(node_id) = current {
+            if !visited.insert(node_id) {
+                return true;
+            }
+            let Some(node) = self.nodes.get(&node_id) else {
+                return false;
+            };
+            if node.locked {
+                return true;
+            }
+            current = node.parent_id;
+        }
+        false
     }
 
     pub fn assets(&self) -> impl Iterator<Item = &AssetReference> {
@@ -1252,20 +1280,30 @@ impl Document {
                 Ok(AppliedChange::PageCreated { page: page.clone() })
             }
             Command::CreateInPage { page_id, node } => {
+                self.assert_parent_mutable(node.parent_id)?;
                 self.create_node_in_page(*page_id, node.clone())
             }
             Command::CreateImageInPage {
                 page_id,
                 node,
                 asset_id,
-            } => self.create_image_node_in_page(*page_id, node.clone(), *asset_id),
+            } => {
+                self.assert_parent_mutable(node.parent_id)?;
+                self.create_image_node_in_page(*page_id, node.clone(), *asset_id)
+            }
             Command::RestoreNode {
                 page_id,
                 node,
                 asset_id,
                 text_properties,
-            } => self.restore_tombstoned_node(*page_id, node.clone(), *asset_id, text_properties.clone()),
-            Command::Create(node) => self.create_node_in_page(DEFAULT_PAGE_ID, node.clone()),
+            } => {
+                self.assert_parent_mutable(node.parent_id)?;
+                self.restore_tombstoned_node(*page_id, node.clone(), *asset_id, text_properties.clone())
+            }
+            Command::Create(node) => {
+                self.assert_parent_mutable(node.parent_id)?;
+                self.create_node_in_page(DEFAULT_PAGE_ID, node.clone())
+            }
             Command::UpdateGeometry {
                 id,
                 x,
@@ -1274,6 +1312,7 @@ impl Document {
                 height,
                 rotation,
             } => {
+                self.assert_mutable(*id)?;
                 let after = Geometry {
                     x: *x,
                     y: *y,
@@ -1292,12 +1331,26 @@ impl Document {
                 // still invalid: it would turn derived bounds into authored
                 // geometry.
                 let group_translation = if kind == NodeKind::Group {
-                    self.geometry_for(*id).is_some_and(|before| {
-                        after.x.is_finite()
-                            && after.y.is_finite()
-                            && after.width == before.width
-                            && after.height == before.height
-                            && after.rotation == 0.0
+                    // Relative-v1 Groups receive their content-derived bounds
+                    // together with their authoritative matrix in one complete
+                    // worker payload. Their scalar geometry is the compatibility
+                    // projection of that matrix, so width/height may legitimately
+                    // change while a child is moved. Legacy Groups retain the
+                    // historical translation-only gate until they are migrated.
+                    let relative_group_bounds = self.nodes.get(id).is_some_and(|node| node.relative_transform.is_some())
+                        && after.x.is_finite()
+                        && after.y.is_finite()
+                        && after.width.is_finite()
+                        && after.height.is_finite()
+                        && after.width > 0.0
+                        && after.height > 0.0
+                        && after.rotation.is_finite();
+                    relative_group_bounds || self.geometry_for(*id).is_some_and(|before| {
+                            after.x.is_finite()
+                                && after.y.is_finite()
+                                && after.width == before.width
+                                && after.height == before.height
+                                && after.rotation == 0.0
                     })
                 } else {
                     false
@@ -1471,6 +1524,7 @@ impl Document {
                 })
             }
             Command::Rename { id, name } => {
+                self.assert_mutable(*id)?;
                 if name.trim().is_empty() {
                     return Err(CommandError::InvalidName);
                 }
@@ -1510,6 +1564,17 @@ impl Document {
                 }
                 if !valid_paint_stack(&after.fills) || !valid_paint_stack(&after.strokes) {
                     return Err(CommandError::InvalidAppearance);
+                }
+                let existing = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                if self.is_effectively_locked(*id) {
+                    let mut unlock_only = appearance_for_node(existing);
+                    unlock_only.locked = false;
+                    if !existing.locked || after != unlock_only {
+                        return Err(CommandError::EffectivelyLocked { id: *id });
+                    }
                 }
                 let node = self
                     .nodes
@@ -1621,13 +1686,26 @@ impl Document {
                     .node_bytes
                     .saturating_sub(before_bytes)
                     .saturating_add(after_bytes);
-                Ok(AppliedChange::AppearanceChanged {
+                let appearance_change = AppliedChange::AppearanceChanged {
                     id: *id,
-                    before,
-                    after,
-                })
+                    before: before.clone(),
+                    after: after.clone(),
+                };
+                // A moved Relative-v1 child reaches Core through SetAppearance
+                // (its transform is part of its appearance), and storing the new
+                // relative_transform is all that is required to move it. Its
+                // ancestor Group's box is intentionally NOT recomputed here: a
+                // Group's legacy x/y is the parent frame origin every relative
+                // child is anchored to (see `moving_one_relative_group`), so
+                // shifting that origin to the child's new bounds would drag the
+                // child a second time. Keeping the box in sync with children that
+                // have moved away from the anchor requires rebasing every sibling
+                // and is handled where that structural math already lives (the
+                // group/ungroup batch), not on an appearance edit.
+                Ok(appearance_change)
             }
             Command::SetNodeAsset { id, asset_id } => {
+                self.assert_mutable(*id)?;
                 let node = self
                     .nodes
                     .get(id)
@@ -1658,6 +1736,7 @@ impl Document {
                 })
             }
             Command::SetText { id, text } => {
+                self.assert_mutable(*id)?;
                 if text.len() > MAX_TEXT_BYTES {
                     return Err(CommandError::InvalidText);
                 }
@@ -1699,6 +1778,7 @@ impl Document {
                 })
             }
             Command::SetTextProperties { id, properties } => {
+                self.assert_mutable(*id)?;
                 let node = self
                     .nodes
                     .get(id)
@@ -1719,6 +1799,7 @@ impl Document {
                 })
             }
             Command::SetNodePosition { id, position } => {
+                self.assert_mutable(*id)?;
                 let (parent_id, page_id, before) = self
                     .nodes
                     .get(id)
@@ -1760,6 +1841,7 @@ impl Document {
                 parent_id,
                 position,
             } => {
+                self.assert_mutable(*id)?;
                 let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
                 let page_id = self.node_pages.get(id).copied().unwrap_or(DEFAULT_PAGE_ID);
                 let before_parent_id = node.parent_id;
@@ -1772,8 +1854,13 @@ impl Document {
                         .nodes
                         .get(next_parent_id)
                         .ok_or(CommandError::MissingParent { id: *next_parent_id })?;
+                    if self.is_effectively_locked(*next_parent_id) {
+                        return Err(CommandError::EffectivelyLocked {
+                            id: *next_parent_id,
+                        });
+                    }
                     if self.node_pages.get(next_parent_id).copied().unwrap_or(DEFAULT_PAGE_ID) != page_id
-                        || !matches!(parent.kind, NodeKind::Frame | NodeKind::Group | NodeKind::Section)
+                        || !can_contain_children(&parent.kind)
                     {
                         return Err(CommandError::InvalidParent { id: *next_parent_id });
                     }
@@ -1826,6 +1913,7 @@ impl Document {
                 Ok(if changes.len() == 1 { changes.remove(0) } else { AppliedChange::Composite { changes } })
             }
             Command::Delete { id } => {
+                self.assert_mutable(*id)?;
                 if self.nodes.values().any(|node| node.parent_id == Some(*id)) {
                     return Err(CommandError::NodeHasChildren { id: *id });
                 }
@@ -2097,6 +2185,15 @@ impl Document {
         while let Some(id) = group_id {
             let Some(group) = self.nodes.get(&id).cloned() else { break };
             if group.kind != NodeKind::Group { break; }
+            // A Relative-v1 Group has already been normalized by the shared
+            // matrix resolver before its complete batch crosses into Core.
+            // Recomputing it from world AABBs here would overwrite its local
+            // transform and move every relative child a second time. Legacy
+            // Groups continue through the historical path during migration.
+            if group.relative_transform.is_some() {
+                group_id = group.parent_id;
+                continue;
+            }
             let children = self
                 .nodes
                 .values()
@@ -2350,6 +2447,25 @@ impl Document {
         self.create_node_in_page_with_asset(page_id, node, None)
     }
 
+    fn assert_mutable(&self, id: NodeId) -> Result<(), CommandError> {
+        if !self.nodes.contains_key(&id) {
+            return Err(CommandError::MissingNode { id });
+        }
+        if self.is_effectively_locked(id) {
+            return Err(CommandError::EffectivelyLocked { id });
+        }
+        Ok(())
+    }
+
+    fn assert_parent_mutable(&self, parent_id: Option<NodeId>) -> Result<(), CommandError> {
+        if parent_id.is_some_and(|id| self.is_effectively_locked(id)) {
+            return Err(CommandError::EffectivelyLocked {
+                id: parent_id.expect("checked above"),
+            });
+        }
+        Ok(())
+    }
+
     fn create_image_node_in_page(
         &mut self,
         page_id: PageId,
@@ -2575,8 +2691,12 @@ impl Document {
             return Err(CommandError::InvalidText);
         }
         if let Some(parent_id) = node.parent_id {
-            if !self.nodes.contains_key(&parent_id) {
-                return Err(CommandError::MissingParent { id: parent_id });
+            let parent = self
+                .nodes
+                .get(&parent_id)
+                .ok_or(CommandError::MissingParent { id: parent_id })?;
+            if !can_contain_children(&parent.kind) {
+                return Err(CommandError::InvalidParent { id: parent_id });
             }
             if self
                 .node_pages
@@ -3135,6 +3255,18 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
     if node.kind == NodeKind::Frame && !node.clips_content {
         hasher.update([2]);
     }
+    if !node.extensions.is_empty() {
+        // Empty maps are skipped so snapshots authored before extensions
+        // existed keep their historical hashes. BTreeMap iteration is ordered,
+        // so the digest is independent of insertion order.
+        hasher.update([5]);
+        hash_len(hasher, node.extensions.len());
+        for (key, value) in &node.extensions {
+            hash_text(hasher, key);
+            hash_len(hasher, value.len());
+            hasher.update(value);
+        }
+    }
 }
 
 fn hash_command(hasher: &mut Sha256, command: &Command) {
@@ -3362,6 +3494,10 @@ fn valid_geometry(kind: &NodeKind, geometry: Geometry) -> bool {
             NodeKind::Line => geometry.height == 0.0,
             _ => geometry.height > 0.0,
         }
+}
+
+fn can_contain_children(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Frame | NodeKind::Group | NodeKind::Section)
 }
 
 fn geometry_for_constraints(parent_before: Geometry, parent_after: Geometry, child: Geometry, constraints: Constraints, kind: &NodeKind) -> Result<Geometry, CommandError> {
@@ -3623,6 +3759,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: BTreeMap::new(),
         }
     }
 
@@ -4424,6 +4561,55 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_grouped_child_via_relative_transform_moves_cleanly_and_undo_redo_exactly() {
+        // A grouped child is Relative-v1, so a move arrives as SetAppearance with
+        // a new relative_transform (never UpdateGeometry). Storing that transform
+        // is the whole fix for "grouped child cannot move": the child must land
+        // exactly where dropped with no compounding jump, and undo/redo must be
+        // canonical-hash exact. The Group is created at the origin so its legacy
+        // frame transform is the identity — exactly the anchor the client
+        // preserves via translateNodeWorldPatch against the Group's pre-move world.
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        group.x = 0.0;
+        group.y = 0.0;
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
+        child.width = 30.0;
+        child.height = 40.0;
+        child.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 100.0, f: 50.0 });
+        document
+            .submit(transaction(0, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser)
+            .unwrap();
+        // Before the move the child's world origin is its local origin.
+        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (100.0, 50.0));
+        let grouped_hash = document.canonical_hash_hex();
+
+        // Move the child by (+40, +40): against the identity frame the new local
+        // origin is simply the new world origin.
+        let mut appearance = appearance_for_node(document.node(NodeId(2)).unwrap());
+        appearance.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 140.0, f: 90.0 });
+        document
+            .submit(transaction(1, vec![Command::SetAppearance { id: NodeId(2), appearance }]), Origin::LocalUser)
+            .unwrap();
+
+        // The child lands exactly where dropped — no compounding jump from a
+        // spurious Group-box refresh dragging the anchor.
+        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (140.0, 90.0));
+        let moved_hash = document.canonical_hash_hex();
+        assert_ne!(moved_hash, grouped_hash);
+
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), grouped_hash);
+        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (100.0, 50.0));
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), moved_hash);
+        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (140.0, 90.0));
+    }
+
+    #[test]
     fn moving_one_relative_group_keeps_other_groups_independent() {
         let mut document = Document::empty();
         let mut first_group = node(1);
@@ -4534,6 +4720,54 @@ mod tests {
         assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), dissolved_hash);
+    }
+
+    #[test]
+    fn deleting_a_multi_level_frame_subtree_is_atomic_and_fully_restored_by_undo() {
+        // Plan 12.2 scenario 5: a Frame with multiple levels of children is deleted
+        // child-first in one transaction; Undo must restore IDs, sibling order, the
+        // parent hierarchy, and every property exactly.
+        let mut document = Document::empty();
+        let mut outer = node(1); outer.name = "Outer".into();
+        let mut inner = node(2); inner.name = "Inner".into(); inner.parent_id = Some(NodeId(1)); inner.x = 10.0; inner.y = 10.0;
+        let mut rect = node(3); rect.kind = NodeKind::Rectangle; rect.name = "Rect".into(); rect.parent_id = Some(NodeId(2)); rect.corner_radii = vec![4.0, 8.0, 12.0, 16.0];
+        let mut ellipse = node(4); ellipse.kind = NodeKind::Ellipse; ellipse.name = "Ellipse".into(); ellipse.parent_id = Some(NodeId(2)); ellipse.x = 40.0;
+        let mut text = node(5); text.kind = NodeKind::Text; text.name = "Text".into(); text.parent_id = Some(NodeId(1)); text.text = "Hi".into(); text.y = 80.0;
+        document.submit(transaction(0, vec![
+            Command::Create(outer), Command::Create(inner),
+            Command::Create(rect), Command::Create(ellipse), Command::Create(text),
+        ]), Origin::LocalUser).unwrap();
+
+        let ordered_before: Vec<(NodeId, Option<NodeId>)> = document
+            .ordered_nodes_on_page(DEFAULT_PAGE_ID).unwrap()
+            .iter().map(|n| (n.id, n.parent_id)).collect();
+        let rect_radii_before = document.node(NodeId(3)).unwrap().corner_radii.clone();
+        let built_hash = document.canonical_hash_hex();
+
+        // Child-first single-transaction subtree delete: deepest leaves, then Inner, then Outer.
+        document.submit(transaction(1, vec![
+            Command::Delete { id: NodeId(3) },
+            Command::Delete { id: NodeId(4) },
+            Command::Delete { id: NodeId(2) },
+            Command::Delete { id: NodeId(5) },
+            Command::Delete { id: NodeId(1) },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node_count(), 0);
+
+        document.undo().unwrap();
+        // Hash equality proves total restoration; the structural asserts pin the
+        // specific ID / order / parent / property expectations the plan names.
+        assert_eq!(document.canonical_hash_hex(), built_hash);
+        let ordered_after: Vec<(NodeId, Option<NodeId>)> = document
+            .ordered_nodes_on_page(DEFAULT_PAGE_ID).unwrap()
+            .iter().map(|n| (n.id, n.parent_id)).collect();
+        assert_eq!(ordered_after, ordered_before);
+        assert_eq!(document.node(NodeId(3)).unwrap().corner_radii, rect_radii_before);
+        assert_eq!(document.node(NodeId(5)).unwrap().text, "Hi");
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
+
+        document.redo().unwrap();
+        assert_eq!(document.node_count(), 0);
     }
 
     #[test]
@@ -4830,6 +5064,124 @@ mod tests {
         assert_eq!(geometry_for_constraints(Geometry { x: 0.0, y: 0.0, width: 0.0, height: 100.0, rotation: 0.0 }, Geometry { x: 0.0, y: 0.0, width: 10.0, height: 100.0, rotation: 0.0 }, Geometry { x: 1.0, y: 1.0, width: 10.0, height: 10.0, rotation: 0.0 }, constraints, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
     }
 
+    // --- P1-5: named unit fixtures directly over `geometry_for_constraints` ---
+    // The five axis rules are asserted as pure geometry so their contract is
+    // pinned independently of the transaction plumbing that consumes them.
+
+    // A 100x40 parent doubling to 200x80, child at local (20,10) sized 40x20.
+    const PARENT_BEFORE: Geometry = Geometry { x: 10.0, y: 20.0, width: 100.0, height: 40.0, rotation: 0.0 };
+    const PARENT_AFTER: Geometry = Geometry { x: 10.0, y: 20.0, width: 200.0, height: 80.0, rotation: 0.0 };
+    // World-space child: parent origin (10,20) + local (20,10).
+    const CHILD: Geometry = Geometry { x: 30.0, y: 30.0, width: 40.0, height: 20.0, rotation: 0.0 };
+
+    fn constrained(horizontal: ConstraintType, vertical: ConstraintType, kind: &NodeKind) -> Geometry {
+        geometry_for_constraints(PARENT_BEFORE, PARENT_AFTER, CHILD, Constraints { horizontal, vertical }, kind).unwrap()
+    }
+
+    #[test]
+    fn constraint_axis_min_pins_leading_edge_and_keeps_size() {
+        let after = constrained(ConstraintType::Min, ConstraintType::Min, &NodeKind::Rectangle);
+        // Local offset preserved from the new parent origin; size unchanged.
+        assert_eq!((after.x, after.y, after.width, after.height), (30.0, 30.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn constraint_axis_max_tracks_trailing_edge() {
+        let after = constrained(ConstraintType::Max, ConstraintType::Max, &NodeKind::Rectangle);
+        // Width delta +100, height delta +40 shift the local position by the full delta.
+        assert_eq!((after.x, after.y, after.width, after.height), (130.0, 70.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn constraint_axis_center_tracks_half_delta() {
+        let after = constrained(ConstraintType::Center, ConstraintType::Center, &NodeKind::Rectangle);
+        assert_eq!((after.x, after.y, after.width, after.height), (80.0, 50.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn constraint_axis_stretch_grows_size_by_delta() {
+        let after = constrained(ConstraintType::Stretch, ConstraintType::Stretch, &NodeKind::Rectangle);
+        // Leading edge fixed; size absorbs the parent delta on each axis.
+        assert_eq!((after.x, after.y, after.width, after.height), (30.0, 30.0, 140.0, 60.0));
+    }
+
+    #[test]
+    fn constraint_axis_scale_multiplies_position_and_size_by_ratio() {
+        let after = constrained(ConstraintType::Scale, ConstraintType::Scale, &NodeKind::Rectangle);
+        // Ratio 2x horizontal, 2x vertical over local (20,10) sized 40x20.
+        assert_eq!((after.x, after.y, after.width, after.height), (50.0, 40.0, 80.0, 40.0));
+    }
+
+    #[test]
+    fn constraint_mixed_axes_resolve_independently() {
+        // Horizontal Max + vertical Scale prove the two axes never share state.
+        let after = constrained(ConstraintType::Max, ConstraintType::Scale, &NodeKind::Rectangle);
+        assert_eq!((after.x, after.width), (130.0, 40.0));
+        assert_eq!((after.y, after.height), (40.0, 40.0));
+    }
+
+    #[test]
+    fn constraint_line_stretch_preserves_zero_height() {
+        // A Line's height must stay exactly zero even under a Stretch vertical
+        // rule, matching `valid_geometry`'s Line invariant.
+        let line = Geometry { x: 30.0, y: 30.0, width: 40.0, height: 0.0, rotation: 0.0 };
+        let after = geometry_for_constraints(PARENT_BEFORE, PARENT_AFTER, line, Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Stretch }, &NodeKind::Line).unwrap();
+        assert_eq!((after.width, after.height), (140.0, 0.0));
+    }
+
+    #[test]
+    fn constraint_scale_rejects_zero_sized_source_axis_per_axis() {
+        // Guard fires the moment either source extent is zero, independent of which axis scales.
+        let zero_width = Geometry { x: 0.0, y: 0.0, width: 0.0, height: 40.0, rotation: 0.0 };
+        assert_eq!(geometry_for_constraints(zero_width, PARENT_AFTER, CHILD, Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Min }, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
+        let zero_height = Geometry { x: 0.0, y: 0.0, width: 100.0, height: 0.0, rotation: 0.0 };
+        assert_eq!(geometry_for_constraints(zero_height, PARENT_AFTER, CHILD, Constraints { horizontal: ConstraintType::Min, vertical: ConstraintType::Scale }, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
+    }
+
+    #[test]
+    fn constrained_child_under_a_clipping_frame_still_resolves_and_reparent_preserves_the_constraint() {
+        let mut document = Document::empty();
+        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0; frame.clips_content = true;
+        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 20.0; child.width = 40.0; child.height = 20.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        // Clip state does not alter constraint math: Max x shifts by +100.
+        assert_eq!(document.node(NodeId(2)).unwrap().x, 120.0);
+        assert!(document.node(NodeId(1)).unwrap().clips_content);
+
+        // Reparenting the constrained child into a Group keeps its constraint record verbatim.
+        let mut group = node(3); group.kind = NodeKind::Group; group.name = "Group".into();
+        document.submit(transaction(2, vec![Command::Create(group)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(3, vec![Command::SetNodeParent { id: NodeId(2), parent_id: Some(NodeId(3)), position: PositionId { key: 5, actor: ActorId(1) } }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(NodeId(2)).unwrap().constraints, Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center }));
+    }
+
+    #[test]
+    fn constrained_resize_is_hash_stable_across_replay_and_undo_redo() {
+        let build = || {
+            let mut document = Document::empty();
+            let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
+            let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 10.0; child.width = 40.0; child.height = 20.0;
+            child.constraints = Some(Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Max });
+            document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+            document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 400.0, height: 260.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+            document
+        };
+        let first = build();
+        let resized_hash = first.canonical_hash_hex();
+        // Independent replay of the same command stream lands on the same hash.
+        assert_eq!(build().canonical_hash_hex(), resized_hash);
+
+        let mut document = build();
+        document.undo().unwrap();
+        let before_hash = document.canonical_hash_hex();
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), resized_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), before_hash);
+    }
+
     #[test]
     fn stroke_style_is_canonicalized_hashed_and_undoable() {
         let mut document = Document::empty();
@@ -5049,6 +5401,84 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn node_creation_rejects_non_container_parent() {
+        let mut document = Document::empty();
+        let mut rectangle = node(1);
+        rectangle.kind = NodeKind::Rectangle;
+        document.seed_node(rectangle).unwrap();
+
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
+        assert_eq!(
+            document.seed_node(child),
+            Err(CommandError::InvalidParent { id: NodeId(1) })
+        );
+        assert_eq!(document.node_count(), 1);
+    }
+
+    #[test]
+    fn locked_group_blocks_descendant_mutations_but_can_be_explicitly_unlocked() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        group.name = "Locked group".into();
+        document.seed_node(group).unwrap();
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
+        document.seed_node(child).unwrap();
+
+        let mut lock_group = appearance_for_node(document.node(NodeId(1)).unwrap());
+        lock_group.locked = true;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: lock_group,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.is_effectively_locked(NodeId(2)));
+
+        assert_eq!(
+            document.submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(2),
+                        x: 10.0,
+                        y: 20.0,
+                        width: 240.0,
+                        height: 160.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::EffectivelyLocked { id: NodeId(2) })
+        );
+
+        let mut unlock_group = appearance_for_node(document.node(NodeId(1)).unwrap());
+        unlock_group.locked = false;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: unlock_group,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(!document.is_effectively_locked(NodeId(2)));
     }
 
     #[test]

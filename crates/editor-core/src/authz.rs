@@ -227,6 +227,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
         }
     }
 

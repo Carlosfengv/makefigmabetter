@@ -12,6 +12,7 @@ use editor_core::{
 use makefigma_protocol::v1;
 use prost::Message;
 use sha2::Digest;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 pub type Hash = [u8; 32];
@@ -20,6 +21,19 @@ pub type Id = [u8; 16];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotError {
     Invalid,
+    /// The snapshot carries a NodeKind minted by a newer engine version. The
+    /// document is not corrupt; the current client is simply too old to open it
+    /// without silently rewriting the unknown node. Kept distinct from `Invalid`
+    /// so the UI can surface a read-only "requires a newer client" state instead
+    /// of a generic corruption error (ADR 0023, P0-3).
+    UnsupportedFutureNode,
+}
+
+struct DecodedNode {
+    page_id: PageId,
+    node: Node,
+    asset_id: Option<AssetId>,
+    text_properties: Option<TextProperties>,
 }
 
 pub fn snapshot_from_document(
@@ -95,13 +109,17 @@ pub fn document_from_snapshot(
             .seed_asset(asset_from_proto(asset)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
-    let mut page_hashes = Vec::new();
+    let mut page_hashes = BTreeMap::new();
+    let mut decoded_nodes = BTreeMap::new();
     for chunk in snapshot.page_chunks {
         if chunk.format_version != SNAPSHOT_FORMAT_VERSION {
             return Err(SnapshotError::Invalid);
         }
         let page = page_from_proto(chunk.page.ok_or(SnapshotError::Invalid)?)?;
-        page_hashes.push((page.id, chunk.content_hash));
+        let chunk_page_id = page.id;
+        if page_hashes.insert(chunk_page_id, chunk.content_hash).is_some() {
+            return Err(SnapshotError::Invalid);
+        }
         if page.id != editor_core::DEFAULT_PAGE_ID {
             document
                 .seed_page(page)
@@ -111,7 +129,8 @@ pub fn document_from_snapshot(
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| SnapshotError::Invalid)?;
             let (page_id, node, asset_id, text_properties) = node_from_proto(node_proto)?;
-            if page_id.0 != id(&reference.page_id)?
+            if page_id != chunk_page_id
+                || page_id.0 != id(&reference.page_id)?
                 || node.id.0 != id(&reference.node_id)?
                 || node.position
                     != position_from_proto(reference.position_id.ok_or(SnapshotError::Invalid)?)?
@@ -123,18 +142,38 @@ pub fn document_from_snapshot(
             {
                 return Err(SnapshotError::Invalid);
             }
-            let node_id = node.id;
-            if let Some(asset_id) = asset_id {
-                document.seed_image_node_on_page(page_id, node, asset_id)
-            } else {
-                document.seed_node_on_page(page_id, node)
+            if decoded_nodes
+                .insert(
+                    node.id,
+                    DecodedNode {
+                        page_id,
+                        node,
+                        asset_id,
+                        text_properties,
+                    },
+                )
+                .is_some()
+            {
+                return Err(SnapshotError::Invalid);
             }
-            .map_err(|_| SnapshotError::Invalid)?;
-            if let Some(properties) = text_properties {
-                document
-                    .seed_text_properties(node_id, properties)
-                    .map_err(|_| SnapshotError::Invalid)?;
-            }
+        }
+    }
+    let hydration_order = nodes_in_hydration_order(&decoded_nodes)?;
+    for node_id in hydration_order {
+        let decoded = decoded_nodes.get(&node_id).ok_or(SnapshotError::Invalid)?;
+        if let Some(asset_id) = decoded.asset_id {
+            document
+                .seed_image_node_on_page(decoded.page_id, decoded.node.clone(), asset_id)
+        } else {
+            document.seed_node_on_page(decoded.page_id, decoded.node.clone())
+        }
+        .map_err(|_| SnapshotError::Invalid)?;
+    }
+    for decoded in decoded_nodes.values() {
+        if let Some(properties) = decoded.text_properties.clone() {
+            document
+                .seed_text_properties(decoded.node.id, properties)
+                .map_err(|_| SnapshotError::Invalid)?;
         }
     }
     for retired_id in snapshot.retired_node_ids {
@@ -154,6 +193,75 @@ pub fn document_from_snapshot(
         return Err(SnapshotError::Invalid);
     }
     Ok(document)
+}
+
+/// Keeps wire ordering independent from hydration ordering. `ordered_nodes_on_page`
+/// is part of the existing page-hash contract, so snapshots continue to use it for
+/// serialization while this helper performs a stable parent-before-child traversal.
+fn nodes_in_hydration_order(
+    decoded: &BTreeMap<NodeId, DecodedNode>,
+) -> Result<Vec<NodeId>, SnapshotError> {
+    let mut children = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    let mut indegree = BTreeMap::<NodeId, usize>::new();
+    let mut sibling_positions = BTreeSet::new();
+
+    for (&node_id, decoded_node) in decoded {
+        let node = &decoded_node.node;
+        if !sibling_positions.insert((decoded_node.page_id, node.parent_id, node.position)) {
+            return Err(SnapshotError::Invalid);
+        }
+        indegree.insert(node_id, 0);
+    }
+
+    for (&node_id, decoded_node) in decoded {
+        let node = &decoded_node.node;
+        if let Some(parent_id) = node.parent_id {
+            let parent = decoded.get(&parent_id).ok_or(SnapshotError::Invalid)?;
+            if parent.page_id != decoded_node.page_id
+                || !matches!(
+                    parent.node.kind,
+                    NodeKind::Frame | NodeKind::Group | NodeKind::Section
+                )
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            *indegree.get_mut(&node_id).ok_or(SnapshotError::Invalid)? = 1;
+            children.entry(parent_id).or_default().push(node_id);
+        }
+    }
+
+    let key_for = |node_id: NodeId| {
+        let decoded_node = decoded
+            .get(&node_id)
+            .expect("hydration nodes always refer to decoded entries");
+        (
+            decoded_node.page_id,
+            decoded_node.node.parent_id,
+            decoded_node.node.position,
+            node_id,
+        )
+    };
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(&node_id, &degree)| (degree == 0).then(|| key_for(node_id)))
+        .collect::<BTreeSet<_>>();
+    let mut ordered = Vec::with_capacity(decoded.len());
+
+    while let Some(key) = ready.pop_first() {
+        let node_id = key.3;
+        ordered.push(node_id);
+        for child_id in children.get(&node_id).into_iter().flatten() {
+            let degree = indegree.get_mut(child_id).ok_or(SnapshotError::Invalid)?;
+            *degree = degree.checked_sub(1).ok_or(SnapshotError::Invalid)?;
+            if *degree == 0 {
+                ready.insert(key_for(*child_id));
+            }
+        }
+    }
+
+    (ordered.len() == decoded.len())
+        .then_some(ordered)
+        .ok_or(SnapshotError::Invalid)
 }
 
 /// Validates a standalone wire snapshot before it exists in a service row.
@@ -274,22 +382,28 @@ fn node_to_proto(
         relative_transform: node.relative_transform.map(transform_to_proto),
         contents_hidden: node.contents_hidden,
         clips_content: Some(node.clips_content),
+        extensions: node.extensions.clone().into_iter().collect(),
     }
 }
 fn node_from_proto(
     node: v1::SceneNode,
 ) -> Result<(PageId, Node, Option<AssetId>, Option<TextProperties>), SnapshotError> {
     let page_id = PageId(id(&node.page_id)?);
-    let kind = match v1::NodeKind::try_from(node.kind).map_err(|_| SnapshotError::Invalid)? {
-        v1::NodeKind::Frame => NodeKind::Frame,
-        v1::NodeKind::Rectangle => NodeKind::Rectangle,
-        v1::NodeKind::Ellipse => NodeKind::Ellipse,
-        v1::NodeKind::Text => NodeKind::Text,
-        v1::NodeKind::Image => NodeKind::Image,
-        v1::NodeKind::Line => NodeKind::Line,
-        v1::NodeKind::Group => NodeKind::Group,
-        v1::NodeKind::Section => NodeKind::Section,
-        v1::NodeKind::Unspecified => return Err(SnapshotError::Invalid),
+    let kind = match v1::NodeKind::try_from(node.kind) {
+        Ok(v1::NodeKind::Frame) => NodeKind::Frame,
+        Ok(v1::NodeKind::Rectangle) => NodeKind::Rectangle,
+        Ok(v1::NodeKind::Ellipse) => NodeKind::Ellipse,
+        Ok(v1::NodeKind::Text) => NodeKind::Text,
+        Ok(v1::NodeKind::Image) => NodeKind::Image,
+        Ok(v1::NodeKind::Line) => NodeKind::Line,
+        Ok(v1::NodeKind::Group) => NodeKind::Group,
+        Ok(v1::NodeKind::Section) => NodeKind::Section,
+        Ok(v1::NodeKind::Unspecified) => return Err(SnapshotError::Invalid),
+        // A positive tag outside the known enum is a NodeKind minted by a newer
+        // engine. Reject the whole snapshot with a distinguishable error so the
+        // client degrades to read-only rather than rewriting the node (ADR 0023).
+        Err(_) if node.kind > 0 => return Err(SnapshotError::UnsupportedFutureNode),
+        Err(_) => return Err(SnapshotError::Invalid),
     };
     let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
     Ok((
@@ -329,6 +443,7 @@ fn node_from_proto(
             locked: node.locked,
             contents_hidden: node.contents_hidden,
             clips_content,
+            extensions: node.extensions.into_iter().collect(),
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         node.text_properties
@@ -663,6 +778,46 @@ mod tests {
         TextAlign, TextAutoSize, TextProperties, TextStyleRun, color::Color, geometry::AffineTransform,
     };
 
+    fn node(id: u128, kind: NodeKind, parent_id: Option<NodeId>) -> Node {
+        Node {
+            id: NodeId(id),
+            parent_id,
+            position: PositionId::for_node(NodeId(id)),
+            name: format!("Node {id}"),
+            kind,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation: 0.0,
+            fill: "#fff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: false,
+            extensions: Default::default(),
+        }
+    }
+
     #[test]
     fn wire_snapshot_round_trips_canonical_document() {
         let mut document = Document::with_id(DocumentId(9));
@@ -674,7 +829,7 @@ mod tests {
                     parent_id: None,
                     position: PositionId::for_node(NodeId(7)),
                     name: "Card".into(),
-                    kind: NodeKind::Rectangle,
+                    kind: NodeKind::Frame,
                     x: 0.0,
                     y: 0.0,
                     width: 100.0,
@@ -704,6 +859,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
                 },
             )
             .unwrap();
@@ -754,6 +910,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
                 },
             )
             .unwrap();
@@ -795,6 +952,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
                 },
                 AssetId(42),
             )
@@ -844,6 +1002,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
                 },
             )
             .unwrap();
@@ -887,6 +1046,251 @@ mod tests {
                 .runs
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn g_01_nested_group_snapshot_parent_order() {
+        let mut document = Document::with_id(DocumentId(91));
+        // The decreasing IDs intentionally make the stable page-hash ordering
+        // place the leaf before its parent Group. Snapshot restoration must not
+        // depend on that serialization order.
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(300, NodeKind::Group, None))
+            .unwrap();
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                node(200, NodeKind::Group, Some(NodeId(300))),
+            )
+            .unwrap();
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                node(100, NodeKind::Rectangle, Some(NodeId(200))),
+            )
+            .unwrap();
+
+        let snapshot = snapshot_from_document(&document, 1).unwrap();
+        let encoded = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        assert_eq!(
+            encoded.page_chunks[0]
+                .nodes
+                .iter()
+                .map(|reference| id(&reference.node_id).unwrap())
+                .collect::<Vec<_>>(),
+            vec![300, 100, 200]
+        );
+
+        let restored = document_from_wire_snapshot(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+        assert_eq!(restored.node(NodeId(100)).unwrap().parent_id, Some(NodeId(200)));
+        assert_eq!(restored.node(NodeId(200)).unwrap().parent_id, Some(NodeId(300)));
+    }
+
+    /// A node authored by a future engine version carries opaque `extensions`
+    /// payloads. P0-2 requires those bytes to survive a snapshot save/restore
+    /// round-trip verbatim, and the canonical hash to stay stable once they do.
+    #[test]
+    fn wire_snapshot_preserves_unknown_node_extensions_byte_for_byte() {
+        let mut extensions = std::collections::BTreeMap::new();
+        // Two keys, inserted out of order, with non-UTF8 and empty payloads to
+        // prove the transport treats them as opaque bytes rather than strings.
+        extensions.insert("phase3.autoLayout".to_string(), vec![0x00, 0xff, 0x10, 0x42, 0x00]);
+        extensions.insert("phase3.blend".to_string(), Vec::<u8>::new());
+
+        let mut document = Document::with_id(DocumentId(21));
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                Node {
+                    id: NodeId(7),
+                    parent_id: None,
+                    position: PositionId::for_node(NodeId(7)),
+                    name: "Future".into(),
+                    kind: NodeKind::Rectangle,
+                    x: 1.0,
+                    y: 2.0,
+                    width: 100.0,
+                    height: 80.0,
+                    rotation: 0.0,
+                    fill: Paint::Solid(Color::from_srgb_u8([10, 20, 30], 255)),
+                    stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
+                    stroke_width: 0.0,
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                    stroke_weights: Vec::new(),
+                    stroke_align: Default::default(),
+                    arc_data: None,
+                    relative_transform: None,
+                    opacity: 1.0,
+                    corner_radius: 0.0,
+                    corner_radii: vec![],
+                    corner_smoothing: 0.0,
+                    constraints: None,
+                    text: String::new(),
+                    visible: true,
+                    locked: false,
+                    contents_hidden: false,
+                    clips_content: false,
+                    extensions: extensions.clone(),
+                },
+            )
+            .unwrap();
+
+        let snapshot = snapshot_from_document(&document, 1).unwrap();
+        let restored = document_from_wire_snapshot(&snapshot).unwrap();
+
+        // Byte-for-byte preservation of every key and payload.
+        assert_eq!(restored.node(NodeId(7)).unwrap().extensions, extensions);
+        // The extensions participate in the canonical hash, and a lossless
+        // round-trip therefore reproduces it exactly.
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+
+        // A second round-trip is idempotent: re-encoding the restored document
+        // yields the identical wire bytes.
+        let snapshot_again = snapshot_from_document(&restored, 1).unwrap();
+        assert_eq!(snapshot_again, snapshot);
+    }
+
+    /// Empty `extensions` maps must not perturb the canonical hash, so documents
+    /// authored before the field existed keep their historical digests.
+    #[test]
+    fn empty_node_extensions_do_not_change_canonical_hash() {
+        fn card(extensions: std::collections::BTreeMap<String, Vec<u8>>) -> Document {
+            let mut document = Document::with_id(DocumentId(22));
+            document
+                .seed_node_on_page(
+                    DEFAULT_PAGE_ID,
+                    Node {
+                        id: NodeId(5),
+                        parent_id: None,
+                        position: PositionId::for_node(NodeId(5)),
+                        name: "Card".into(),
+                        kind: NodeKind::Rectangle,
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 10.0,
+                        rotation: 0.0,
+                        fill: Paint::Solid(Color::from_srgb_u8([1, 2, 3], 255)),
+                        stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                        fills: Vec::new(),
+                        strokes: Vec::new(),
+                        stroke_width: 0.0,
+                        stroke_cap_start: Default::default(),
+                        stroke_cap_end: Default::default(),
+                        stroke_join: Default::default(),
+                        stroke_miter_limit: 10.0,
+                        stroke_dash_pattern: Vec::new(),
+                        stroke_weights: Vec::new(),
+                        stroke_align: Default::default(),
+                        arc_data: None,
+                        relative_transform: None,
+                        opacity: 1.0,
+                        corner_radius: 0.0,
+                        corner_radii: vec![],
+                        corner_smoothing: 0.0,
+                        constraints: None,
+                        text: String::new(),
+                        visible: true,
+                        locked: false,
+                        contents_hidden: false,
+                        clips_content: false,
+                        extensions,
+                    },
+                )
+                .unwrap();
+            document
+        }
+
+        let empty = card(std::collections::BTreeMap::new());
+        let mut with_payload_map = std::collections::BTreeMap::new();
+        with_payload_map.insert("x".to_string(), vec![1u8]);
+        let with_payload = card(with_payload_map);
+
+        // The empty-map document hashes identically to one built before the
+        // field existed (both skip the extensions contribution).
+        assert_ne!(empty.canonical_hash(), with_payload.canonical_hash());
+    }
+
+    #[test]
+    fn future_node_kind_is_rejected_as_requires_newer_client_not_corruption() {
+        let mut document = Document::with_id(DocumentId(31));
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                Node {
+                    id: NodeId(7),
+                    parent_id: None,
+                    position: PositionId::for_node(NodeId(7)),
+                    name: "Shape".into(),
+                    kind: NodeKind::Rectangle,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                    rotation: 0.0,
+                    fill: Paint::Solid(Color::from_srgb_u8([1, 2, 3], 255)),
+                    stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+                    fills: Vec::new(),
+                    strokes: Vec::new(),
+                    stroke_width: 0.0,
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                    stroke_weights: Vec::new(),
+                    stroke_align: Default::default(),
+                    arc_data: None,
+                    relative_transform: None,
+                    opacity: 1.0,
+                    corner_radius: 0.0,
+                    corner_radii: vec![],
+                    corner_smoothing: 0.0,
+                    constraints: None,
+                    text: String::new(),
+                    visible: true,
+                    locked: false,
+                    contents_hidden: false,
+                    clips_content: false,
+                    extensions: std::collections::BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let snapshot = snapshot_from_document(&document, 1).unwrap();
+
+        // Rewrite the single node's kind to a tag no current engine mints,
+        // simulating a Phase 3 NodeKind arriving at an older client.
+        let mut decoded = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        let chunk = &mut decoded.page_chunks[0];
+        let reference = &mut chunk.nodes[0];
+        let mut node = v1::SceneNode::decode(reference.canonical_node.as_slice()).unwrap();
+        node.kind = 9; // beyond NODE_KIND_SECTION = 8
+        reference.canonical_node = node.encode_to_vec();
+        let future_snapshot = decoded.encode_to_vec();
+
+        // The distinguishable variant lets the client degrade to read-only rather
+        // than reporting generic corruption (ADR 0023, P0-3).
+        assert_eq!(
+            document_from_wire_snapshot(&future_snapshot),
+            Err(SnapshotError::UnsupportedFutureNode)
+        );
+        // A genuinely invalid tag (the reserved UNSPECIFIED zero) stays `Invalid`.
+        let mut zero = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        let mut zero_node =
+            v1::SceneNode::decode(zero.page_chunks[0].nodes[0].canonical_node.as_slice()).unwrap();
+        zero_node.kind = 0;
+        zero.page_chunks[0].nodes[0].canonical_node = zero_node.encode_to_vec();
+        assert_eq!(
+            document_from_wire_snapshot(&zero.encode_to_vec()),
+            Err(SnapshotError::Invalid)
         );
     }
 }
