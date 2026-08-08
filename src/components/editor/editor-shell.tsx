@@ -42,11 +42,13 @@ import { cornerSmoothingSelection } from "@/lib/corner-smoothing-selection";
 import { constraintSelection, type ConstraintSelectionValue } from "@/lib/constraint-selection";
 import { hasFrameConstraintScope } from "@/lib/frame-constraint-scope";
 import { mixedInspectorCapabilities, supportsCornerRadiusInspector, supportsGenericAppearanceInspector, supportsPaintStackInspector, supportsPerSideStrokeInspector, supportsStrokeAlignInspector, supportsStrokeDetailsInspector } from "@/lib/inspector-capabilities";
+import { inspectorCapabilityAnnouncement } from "@/lib/inspector-capability-matrix";
 import { layerKeyboardNestingTarget, type LayerNestingIntent } from "@/lib/layer-keyboard-nesting";
 import { resolveMultiResizeSelection } from "@/lib/multi-selection";
 import { selectionGeometryPatches } from "@/lib/selection-geometry-edit";
 import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
 import { ellipseArcUpdatePatch } from "@/lib/ellipse-arc";
+import { isAlternativeUngroupShortcut } from "@/lib/editor-key-command";
 
 const tools: Array<{ id: ToolKind; label: string; glyph: string; key: string }> = [
   { id: "select", label: "Move", glyph: "↖", key: "V" },
@@ -1316,18 +1318,61 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
           post({ type: "tool", tool: match.id });
         } else setStatus("Engine worker online · read-only tab");
       }
-      if ((event.metaKey || event.ctrlKey) && ["d", "g"].includes(event.key.toLowerCase())) event.preventDefault();
+      const modifier = event.metaKey || event.ctrlKey;
+      const shortcutKey = event.key.toLowerCase();
+      const isMac = navigator.platform.includes("Mac");
+      const alternativeUngroup = isAlternativeUngroupShortcut({
+        key: event.key,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        isMac,
+      });
+      if ((modifier && ["d", "g", "c", "x", "v"].includes(shortcutKey)) || alternativeUngroup) {
+        // Claim editor-owned document shortcuts during the capture phase. In
+        // particular, ⌘G / ⇧⌘G can otherwise reach browser-level shortcuts when
+        // a Layer-panel button has focus, which produced the unrelated browser
+        // identity-document save prompt shown by the user.
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+      }
+      if (modifier && shortcutKey === "g") {
+        // Use the same queued command path as the Layer-panel Group button.
+        // Sending this through the low-level Worker key channel could race the
+        // most recent one-layer selection update, leaving it empty when ⌘G was
+        // pressed immediately after choosing a layer.
+        const current = snapshotRef.current;
+        if (event.shiftKey) {
+          const selected = current.selectedIds.length === 1
+            ? current.nodes.find((node) => node.id === current.selectedIds[0])
+            : undefined;
+          if (selected?.kind === "group") command({ type: "ungroup", id: selected.id });
+        } else if (current.selectedIds.length) {
+          command({ type: "group", ids: current.selectedIds });
+        }
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && ["[", "]"].includes(event.key) && writerRef.current) {
         event.preventDefault();
         const direction: LayerOrderAction = event.key === "]" ? (event.shiftKey ? "front" : "forward") : (event.shiftKey ? "back" : "backward");
         reorderSelectedLayers(direction);
         return;
       }
-      if (writerRef.current) post({ type: "key", key: event.key, metaKey: event.metaKey || event.ctrlKey, shiftKey: event.shiftKey });
+      if (writerRef.current) {
+        post({
+          type: "key",
+          key: event.key,
+          metaKey: modifier,
+          shiftKey: event.shiftKey,
+          alternativeUngroup,
+        });
+      }
     };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [post, reorderSelectedLayers, safeMode]);
+    // Capture before focused controls in the Layers panel and before any
+    // browser-integrated shortcut handlers get a chance to observe this event.
+    window.addEventListener("keydown", listener, { capture: true });
+    return () => window.removeEventListener("keydown", listener, { capture: true });
+  }, [command, post, reorderSelectedLayers, safeMode]);
 
   // Viewport updates replace `snapshot`, but keep the document and selection
   // references stable. Depending on the whole snapshot made every zoom frame
@@ -1797,7 +1842,7 @@ export function EditorShell({ documentId, documentName = "Orbit card exploration
       <aside className="inspector panel" aria-label="Properties">
         <div className="panel-heading"><span>Inspect</span><span className="revision">r{snapshot.revision}</span></div>
         {selected ? <Inspector node={selected} sceneNodes={snapshot.nodes} assets={snapshot.assets ?? []} fontAvailability={snapshot.fontAvailability} onUpdate={update} readOnly={!canEdit} /> : selectedNodes.length > 1 ? <MultiInspector nodes={selectedNodes} sceneNodes={snapshot.nodes} onUpdate={updateSelection} onUpdateGeometry={updateSelectionGeometry} onUpdateStrokeWeight={updateSelectionStrokeWeight} onUseUniformStrokeWeights={useSelectionUniformStrokeWeights} onUpdateCornerRadius={updateSelectionCornerRadius} onUseUniformCornerRadius={useSelectionUniformCornerRadius} onUpdateConstraint={updateSelectionConstraint} onRemoveConstraints={removeSelectionConstraints} readOnly={!canEdit} /> : <div className="empty-inspector">Select an object to reveal its geometry, fill and layer settings.</div>}
-        <div className="history-actions"><button disabled={!canEdit || snapshot.selectedIds.length < 2} onClick={groupSelected}>Group ⌘G</button><button disabled={!canEdit || selected?.kind !== "group"} onClick={ungroupSelected}>Ungroup ⇧⌘G</button><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={() => command({ type: "duplicate", ids: snapshot.selectedIds })}>Duplicate ⌘D</button><button disabled={!canEdit || !snapshot.canUndo} onClick={() => command({ type: "undo" })}>↶ Undo</button><button disabled={!canEdit || !snapshot.canRedo} onClick={() => command({ type: "redo" })}>Redo ↷</button></div>
+        <div className="history-actions"><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={groupSelected}>Group ⌘G</button><button disabled={!canEdit || selected?.kind !== "group"} onClick={ungroupSelected}>Ungroup ⇧⌘G</button><button disabled={!canEdit || snapshot.selectedIds.length === 0} onClick={() => command({ type: "duplicate", ids: snapshot.selectedIds })}>Duplicate ⌘D</button><button disabled={!canEdit || !snapshot.canUndo} onClick={() => command({ type: "undo" })}>↶ Undo</button><button disabled={!canEdit || !snapshot.canRedo} onClick={() => command({ type: "redo" })}>Redo ↷</button></div>
       </aside>
     </main>
   );
@@ -1838,7 +1883,7 @@ function MultiInspector({ nodes, sceneNodes, onUpdate, onUpdateGeometry, onUpdat
     if (raw && Number.isFinite(next) && (minimum === undefined || next >= minimum)) apply(next);
   }} /><em>{unit}</em></div></label>;
   return <div className="inspector-content multi-inspector">
-    <div className="selection-title" role="status" aria-live="polite"><span className="node-icon">◫</span><strong>{nodes.length} layers selected</strong></div>
+    <div className="selection-title" role="status" aria-live="polite" data-selection-capabilities={inspectorCapabilityAnnouncement(nodes)}><span className="node-icon" aria-hidden="true">◫</span><strong>{nodes.length} layers selected</strong><span className="visually-hidden">{inspectorCapabilityAnnouncement(nodes)}</span></div>
     {selectionGeometry && <section><h2>Geometry</h2><div className="field-grid">{numericField("X", selectionField(selectionGeometry.bounds.x), "px", (value) => onUpdateGeometry({ x: value }))}{numericField("Y", selectionField(selectionGeometry.bounds.y), "px", (value) => onUpdateGeometry({ y: value }))}{numericField("W", selectionField(selectionGeometry.bounds.width), "px", (value) => onUpdateGeometry({ width: value }), .001)}{numericField("H", selectionField(selectionGeometry.bounds.height), "px", (value) => onUpdateGeometry({ height: value }), .001)}</div></section>}
     <section><h2>Selection</h2><div className="field-grid">{numericField("Rotation", rotation, "°", (value) => onUpdate({ rotation: value }))}<label className="field"><span>Opacity</span><div><input aria-label="Selection opacity" disabled={readOnly} inputMode="decimal" value={opacity.kind === "same" ? Math.round(opacity.value * 100) : ""} placeholder={opacity.kind === "mixed" ? "Mixed" : undefined} onChange={(event) => {
       const raw = event.target.value.trim();

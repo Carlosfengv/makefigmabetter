@@ -30,7 +30,7 @@ export const LayerPanel = memo(function LayerPanel({ nodes, pages, activePageId,
     <div className="panel-heading"><span>Layers</span><button disabled={!canEdit} onClick={onCreateFrame} aria-label="Create frame">+</button></div>
     <div className="page-list" role="list" aria-label="Pages">{pages.map((page) => <button key={page.id} type="button" role="listitem" className={`page-label ${page.id === activePageId ? "active" : ""}`} aria-current={page.id === activePageId ? "page" : undefined} onClick={() => onSelectPage(page.id)}><span className="page-square" />{page.name}</button>)}<button type="button" className="page-add" disabled={!canEdit} onClick={onCreatePage} aria-label="Create page">+</button></div>
     <div className="layer-selection-actions" role="group" aria-label="Selection actions">
-      <button disabled={!canEdit || selectedIds.length < 2} title="Group selection (⌘G)" onClick={onGroup}>Group <kbd>⌘G</kbd></button>
+      <button disabled={!canEdit || !selectedIds.length} title="Group selection (⌘G)" onClick={onGroup}>Group <kbd>⌘G</kbd></button>
       <button disabled={!canEdit || !selectedGroup} title="Ungroup selection (⇧⌘G)" onClick={onUngroup}>Ungroup <kbd>⇧⌘G</kbd></button>
     </div>
     <VirtualLayerList nodes={sortNodesByLayerOrder(nodes).reverse()} selectedIds={selectedIds} canEdit={canEdit} onSelect={onSelect} onDrop={onDrop} onNest={onNest} onRename={onRename} />

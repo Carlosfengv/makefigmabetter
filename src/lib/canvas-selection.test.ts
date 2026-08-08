@@ -22,9 +22,17 @@ describe("canvas object selection", () => {
     expect(resolveCanvasObjectSelection(["sun", "signal"], "headline", true)).toEqual(["sun", "signal", "headline"]);
   });
 
-  it("selects the nearest Group for a normal press and drills into its child on a repeated press", () => {
-    expect(resolveGroupSelectionTarget(groupTree, "child", false)?.id).toBe("inner");
+  it("selects the outer Group and drills through each nested boundary one level at a time", () => {
+    expect(resolveGroupSelectionTarget(groupTree, "child", false)?.id).toBe("outer");
+    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["outer"])?.id).toBe("outer");
+    expect(resolveGroupSelectionTarget(groupTree, "child", true, ["outer"])?.id).toBe("inner");
+    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["inner"])?.id).toBe("inner");
+    expect(resolveGroupSelectionTarget(groupTree, "child", true, ["inner"])?.id).toBe("child");
     expect(resolveGroupSelectionTarget(groupTree, "child", true)?.id).toBe("child");
+  });
+
+  it("keeps a deeply selected child selected when beginning a canvas drag", () => {
+    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["child"])?.id).toBe("child");
   });
 
   it("keeps a directly hit Group and tolerates malformed parent cycles", () => {

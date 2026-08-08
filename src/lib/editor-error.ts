@@ -1,4 +1,4 @@
-export type EditorErrorCode = "INVALID_COMMAND" | "REVISION_CONFLICT" | "AUTHZ_DENIED" | "RESOURCE_LIMIT" | "UNSUPPORTED_FEATURE" | "CORRUPT_DATA" | "TRANSIENT" | "INTERNAL";
+export type EditorErrorCode = "INVALID_COMMAND" | "REVISION_CONFLICT" | "AUTHZ_DENIED" | "RESOURCE_LIMIT" | "UNSUPPORTED_FEATURE" | "UNSUPPORTED_DOCUMENT_VERSION" | "CORRUPT_DATA" | "TRANSIENT" | "INTERNAL";
 
 export interface EditorError {
   code: EditorErrorCode;
@@ -12,6 +12,7 @@ const errors: Record<EditorErrorCode, Omit<EditorError, "code">> = {
   AUTHZ_DENIED: { safeMessage: "You do not have permission for this edit.", retryable: false },
   RESOURCE_LIMIT: { safeMessage: "This edit exceeds the configured resource limit.", retryable: false },
   UNSUPPORTED_FEATURE: { safeMessage: "This feature is not supported in the current engine.", retryable: false },
+  UNSUPPORTED_DOCUMENT_VERSION: { safeMessage: "This document contains nodes from a newer version. Update to edit; it is read-only here.", retryable: false },
   CORRUPT_DATA: { safeMessage: "The document data could not be read safely.", retryable: false },
   TRANSIENT: { safeMessage: "The engine is temporarily unavailable. Please try again.", retryable: true },
   INTERNAL: { safeMessage: "The engine could not complete this request.", retryable: false },
@@ -27,6 +28,10 @@ export function classifyEditorError(error: unknown): EditorError {
   if (/RevisionConflict|REVISION_CONFLICT/i.test(message)) return editorError("REVISION_CONFLICT");
   if (/ResourceLimit|RESOURCE_LIMIT/i.test(message)) return editorError("RESOURCE_LIMIT");
   if (/Authorization|AUTHZ|WriteDenied/i.test(message)) return editorError("AUTHZ_DENIED");
+  // A newer-engine node is not corruption: the snapshot is well-formed but this
+  // client is too old to open it. Must precede the CORRUPT_DATA/INVALID rules so
+  // it is not swallowed by the generic snapshot-rejection classification.
+  if (/DOCUMENT_REQUIRES_NEWER_CLIENT/i.test(message)) return editorError("UNSUPPORTED_DOCUMENT_VERSION");
   if (/Unsupported|UNSUPPORTED/i.test(message)) return editorError("UNSUPPORTED_FEATURE");
   if (/Corrupt|CORRUPT_DATA|INVALID_CORE_SNAPSHOT/i.test(message)) return editorError("CORRUPT_DATA");
   if (/MissingNode|MISSING_|Invalid|INVALID_|DuplicateNode|RetiredNodeId|NodeHasChildren/i.test(message)) return editorError("INVALID_COMMAND");

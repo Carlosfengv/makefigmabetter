@@ -2,6 +2,9 @@ import type { CanvasNode } from "./editor-protocol";
 import { resolveCornerRadii } from "./corner-radii";
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "./corner-smoothing";
 import { dashedLineEndpointPaint, effectiveLineCap, lineLocalBounds } from "./marquee-selection";
+import { decorativeCapContains, isDecorativeCap } from "./decorative-cap-mesh";
+import { outsetRoundedRectRadii } from "./aligned-rounded-rect";
+import { isEffectivelyLocked } from "./hierarchy-lock";
 
 export type WorldPoint = Readonly<{ x: number; y: number }>;
 
@@ -14,16 +17,33 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boo
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height) || node.width <= 0) return false;
   const local = toLocalPoint(node, point);
   if (node.kind === "line") {
-    const hasEndpointDecoration = [node.strokeCapStart, node.strokeCapEnd].some((cap) => cap === "arrowLines" || cap === "arrowEquilateral" || cap === "diamondFilled" || cap === "triangleFilled" || cap === "circleFilled");
-    const endpointExtent = hasEndpointDecoration ? Math.max(8, node.strokeWidth * 4) / 2 : 0;
+    const startDecoration = isDecorativeCap(node.strokeCapStart) ? node.strokeCapStart : undefined;
+    const endDecoration = isDecorativeCap(node.strokeCapEnd) ? node.strokeCapEnd : undefined;
+    const hasEndpointDecoration = Boolean(startDecoration || endDecoration);
     const visualBounds = lineLocalBounds(node, Math.max(4, node.strokeWidth / 2));
     const [drawsAtStart, drawsAtEnd] = dashedLineEndpointPaint(node.width, node.strokeDashPattern);
+    // The vertical broad-phase must clear the tallest marker (all five span at
+    // most ±size/2) so a point over an arrowhead barb is not rejected early.
+    const markerHalfExtent = hasEndpointDecoration ? Math.max(8, node.strokeWidth * 4) / 2 : 0;
     const verticalHitHalfExtent = hasEndpointDecoration
-      ? Math.max(Math.abs(visualBounds.y), Math.abs(visualBounds.y + visualBounds.height), Math.max(4, node.strokeWidth / 2) + endpointExtent)
+      ? Math.max(Math.abs(visualBounds.y), Math.abs(visualBounds.y + visualBounds.height), Math.max(4, node.strokeWidth / 2) + markerHalfExtent)
       : Math.max(Math.abs(visualBounds.y), Math.abs(visualBounds.y + visualBounds.height));
     if (Math.abs(local.y) > verticalHitHalfExtent) return false;
-    if (local.x < 0) return lineCapContains(effectiveLineCap(node, node.strokeCapStart), local, 0, -1, node.strokeWidth / 2, drawsAtStart) || local.x >= -endpointExtent;
-    if (local.x > node.width) return lineCapContains(effectiveLineCap(node, node.strokeCapEnd), local, node.width, 1, node.strokeWidth / 2, drawsAtEnd) || local.x <= node.width + endpointExtent;
+    // Decorative markers hit-test against the exact same triangle mesh the
+    // Canvas renderer fills, so selection and paint never disagree on an
+    // arrowhead's, diamond's or dot's extent.
+    if (local.x < 0) {
+      if (lineCapContains(effectiveLineCap(node, node.strokeCapStart), local, 0, -1, node.strokeWidth / 2, drawsAtStart)) return true;
+      return startDecoration ? decorativeCapContains(startDecoration, 0, -1, node.strokeWidth, local) : false;
+    }
+    if (local.x > node.width) {
+      if (lineCapContains(effectiveLineCap(node, node.strokeCapEnd), local, node.width, 1, node.strokeWidth / 2, drawsAtEnd)) return true;
+      return endDecoration ? decorativeCapContains(endDecoration, node.width, 1, node.strokeWidth, local) : false;
+    }
+    // A marker may also overhang back onto the shaft span (e.g. an arrowhead
+    // base or a dot). Test it before falling back to the dash occupancy.
+    if (startDecoration && decorativeCapContains(startDecoration, 0, -1, node.strokeWidth, local)) return true;
+    if (endDecoration && decorativeCapContains(endDecoration, node.width, 1, node.strokeWidth, local)) return true;
     return strokeDashContains(local.x, node.strokeDashPattern);
   }
   if (node.height <= 0) return false;
@@ -33,10 +53,11 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boo
     const multiplier = strokeAlign === "outside" ? 1 : .5;
     const [top, right, bottom, left] = weights.map((weight) => Math.max(0, weight) * multiplier);
     // A uniform aligned Stroke grows both the outer bounds and each explicit
-    // corner radius. Keep hit testing on that same outer contour instead of
-    // treating an independently rounded corner as an unrounded expansion.
-    const outerCornerRadii = !node.strokeWeights?.length && node.cornerRadii?.length === 4
-      ? node.cornerRadii.map((radius) => Math.max(0, radius) + top) as [number, number, number, number]
+    // corner radius. Derive the grown corners from the shared aligned-rounded
+    // -rect source so hit testing selects the exact same outer contour Canvas
+    // paints and SVG exports, instead of an independently expanded radius.
+    const outerCornerRadii = !node.strokeWeights?.length
+      ? outsetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, top)
       : node.cornerRadii;
     if (roundedRectContains({ x: local.x + left, y: local.y + top }, node.width + left + right, node.height + top + bottom, node.radius + Math.max(top, right, bottom, left), outerCornerRadii, node.cornerSmoothing)) return true;
   }
@@ -55,7 +76,7 @@ function lineCapContains(cap: CanvasNode["strokeCapStart"], point: WorldPoint, e
   if (cap === "square") return direction < 0
     ? point.x >= endpoint - half && point.x <= endpoint && Math.abs(point.y) <= half
     : point.x >= endpoint && point.x <= endpoint + half && Math.abs(point.y) <= half;
-  if (cap === "round" || cap === "circleFilled") return Math.hypot(point.x - endpoint, point.y) <= half;
+  if (cap === "round") return Math.hypot(point.x - endpoint, point.y) <= half;
   return false;
 }
 
@@ -78,7 +99,8 @@ export function strokeDashContains(distance: number, pattern: readonly number[] 
 }
 
 export function findTopmostHit(nodes: readonly CanvasNode[], point: WorldPoint): CanvasNode | undefined {
-  const hits = [...nodes].reverse().filter((node) => node.visible !== false && !node.locked && nodeContainsWorldPoint(node, point));
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const hits = [...nodes].reverse().filter((node) => node.visible !== false && !isEffectivelyLocked(nodesById, node.id) && nodeContainsWorldPoint(node, point));
   // Group has no paint of its own. When its derived bounds overlap a child,
   // target the visible child first; the Group remains directly selectable in
   // blank parts of its bounds and from the Layers panel.

@@ -36,6 +36,19 @@ describe("resolveMultiResizeSelection", () => {
     });
   });
 
+  it("derives Group bounds from children instead of stale compatibility geometry", () => {
+    // The Group record can briefly retain its pre-resize scalar bounds while
+    // its children already have their committed matrices. Canvas hover must use
+    // this same child-derived envelope as Group selection.
+    const group = { ...createNode("group", 0, 0), id: "group", width: 40, height: 20 };
+    const first = { ...createNode("rectangle", 100, 50), id: "first", parentId: group.id, width: 30, height: 20 };
+    const second = { ...createNode("ellipse", 180, 90), id: "second", parentId: group.id, width: 40, height: 30 };
+
+    expect(resolveMultiResizeSelection([group, first, second], [group.id])?.bounds).toEqual({
+      x: 100, y: 50, width: 120, height: 70,
+    });
+  });
+
   it("resolves the rotated Fixture Card and Ellipse selected together", () => {
     const nodes = fixture.nodes as unknown as ReturnType<typeof createNode>[];
     expect(resolveMultiResizeSelection(nodes, [
