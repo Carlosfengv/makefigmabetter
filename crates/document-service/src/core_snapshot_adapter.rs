@@ -1,7 +1,9 @@
 //! Protobuf snapshot ↔ canonical editor-core adapter used only by Document Service.
 
+use std::collections::{HashMap, HashSet};
+
 use editor_core::{
-    ActorId, ArcData, AssetId, AssetReference, ConstraintType, Constraints, Document, DocumentId, FontReference, Node, NodeId, NodeKind,
+    ActorId, ArcData, AssetId, AssetReference, Command, ConstraintType, Constraints, Document, DocumentId, FontReference, Node, NodeId, NodeKind,
     Page, PageId, ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
     TextStyleRun,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
@@ -56,6 +58,7 @@ impl CanonicalReducer for CoreOperationReducer {
             });
         }
         let commands = commands_from_payload(&input.operation.payload)?;
+        validate_delete_subtree_completeness(&document, &commands)?;
         let transaction_id = NodeId(id(&input.operation.transaction_id)?);
         document
             .submit(
@@ -78,6 +81,54 @@ impl CanonicalReducer for CoreOperationReducer {
             document_hash,
         })
     }
+}
+
+/// Server-side guard that a container delete carries its complete subtree.
+///
+/// The TS resolver (`src/lib/transaction-batch.ts`) expands a container delete
+/// into child-first `DeleteNode` commands in one transaction, and editor-core's
+/// `Delete` incidentally rejects a node that still has children. This check
+/// promotes that atomicity to an explicit, independently tested service-level
+/// invariant so a malformed or malicious batch that omits descendants is
+/// rejected *before* any mutation, rather than relying on command ordering.
+///
+/// A descendant "escapes" deletion legitimately only if the same batch also
+/// reparents it out from under the deleted subtree, so reparent targets are
+/// tracked against the post-batch parent, not the pre-batch one.
+fn validate_delete_subtree_completeness(
+    document: &Document,
+    commands: &[Command],
+) -> Result<(), ServiceError> {
+    let deleted: HashSet<NodeId> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Delete { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if deleted.is_empty() {
+        return Ok(());
+    }
+    // Effective parent after the batch: a reparent moves the child's parent, so a
+    // child reparented onto a surviving node is no longer part of the subtree.
+    let mut effective_parent: HashMap<NodeId, Option<NodeId>> = HashMap::new();
+    for node in document.nodes() {
+        effective_parent.insert(node.id, node.parent_id);
+    }
+    for command in commands {
+        if let Command::SetNodeParent { id, parent_id, .. } = command {
+            effective_parent.insert(*id, *parent_id);
+        }
+    }
+    // Every node whose effective parent is deleted must itself be deleted.
+    for (&node_id, &parent) in &effective_parent {
+        if let Some(parent) = parent {
+            if deleted.contains(&parent) && !deleted.contains(&node_id) {
+                return Err(ServiceError::ReducerRejected);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn initial_document_state(
@@ -326,6 +377,7 @@ fn node_to_proto(
         relative_transform: node.relative_transform.map(transform_to_proto),
         contents_hidden: node.contents_hidden,
         clips_content: Some(node.clips_content),
+        extensions: node.extensions.clone().into_iter().collect(),
     }
 }
 
@@ -382,6 +434,7 @@ fn node_from_proto(
             locked: node.locked,
             contents_hidden: node.contents_hidden,
             clips_content,
+            extensions: node.extensions.into_iter().collect(),
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         node.text_properties
@@ -768,6 +821,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
                 },
             )
             .unwrap();
@@ -877,5 +931,194 @@ mod tests {
                 .map(|page| page.name.as_str()),
             Some("Ship")
         );
+    }
+
+    fn container_with_child() -> Document {
+        // A Frame (1) containing a Frame (2) containing a Rectangle (3): two levels
+        // of nesting so a "forgot the deepest descendant" batch is testable. Nested
+        // Frames (rather than Groups) keep the child-first delete valid end-to-end,
+        // since Core auto-dissolves a Group when its final child leaves.
+        let mut document = Document::with_id(DocumentId(21));
+        let mut frame = leaf(NodeId(1), None, NodeKind::Frame);
+        frame.name = "Frame".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+        let mut inner = leaf(NodeId(2), Some(NodeId(1)), NodeKind::Frame);
+        inner.name = "Inner".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, inner).unwrap();
+        let mut rect = leaf(NodeId(3), Some(NodeId(2)), NodeKind::Rectangle);
+        rect.name = "Rect".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, rect).unwrap();
+        document
+    }
+
+    fn leaf(id: NodeId, parent_id: Option<NodeId>, kind: NodeKind) -> Node {
+        let clips_content = kind == NodeKind::Frame;
+        Node {
+            id,
+            parent_id,
+            position: PositionId::for_node(id),
+            name: String::new(),
+            kind,
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 40.0,
+            rotation: 0.0,
+            fill: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+            stroke: Paint::Solid(Color::from_srgb_u8([0, 0, 0], 0)),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content,
+            extensions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn delete_subtree_guard_requires_every_descendant_of_a_deleted_container() {
+        let document = container_with_child();
+
+        // Deleting only the Frame while its Group + Rectangle survive is rejected.
+        assert_eq!(
+            validate_delete_subtree_completeness(&document, &[Command::Delete { id: NodeId(1) }]),
+            Err(ServiceError::ReducerRejected)
+        );
+        // Deleting the Frame + Group but forgetting the deepest Rectangle is also rejected.
+        assert_eq!(
+            validate_delete_subtree_completeness(
+                &document,
+                &[Command::Delete { id: NodeId(1) }, Command::Delete { id: NodeId(2) }]
+            ),
+            Err(ServiceError::ReducerRejected)
+        );
+        // A complete child-first subtree delete is accepted.
+        assert_eq!(
+            validate_delete_subtree_completeness(
+                &document,
+                &[
+                    Command::Delete { id: NodeId(3) },
+                    Command::Delete { id: NodeId(2) },
+                    Command::Delete { id: NodeId(1) },
+                ]
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn delete_subtree_guard_allows_a_descendant_reparented_out_of_the_deleted_subtree() {
+        let document = container_with_child();
+        // The Rectangle is rehomed onto the page root, so deleting the Frame + Group
+        // that no longer contain it is a complete subtree removal.
+        let commands = vec![
+            Command::SetNodeParent { id: NodeId(3), parent_id: None, position: PositionId::for_node(NodeId(3)) },
+            Command::Delete { id: NodeId(2) },
+            Command::Delete { id: NodeId(1) },
+        ];
+        assert_eq!(validate_delete_subtree_completeness(&document, &commands), Ok(()));
+
+        // But reparenting the survivor *within* the doomed subtree does not save it.
+        let commands = vec![
+            Command::SetNodeParent { id: NodeId(3), parent_id: Some(NodeId(1)), position: PositionId::for_node(NodeId(3)) },
+            Command::Delete { id: NodeId(2) },
+            Command::Delete { id: NodeId(1) },
+        ];
+        assert_eq!(
+            validate_delete_subtree_completeness(&document, &commands),
+            Err(ServiceError::ReducerRejected)
+        );
+    }
+
+    #[test]
+    fn service_rejects_an_incomplete_subtree_delete_before_any_mutation() {
+        let service = DocumentService::in_memory(CoreOperationReducer::new(3)).unwrap();
+        let tenant_id = 2_u128.to_be_bytes();
+        let actor_id = 7_u128.to_be_bytes();
+        let mut document = container_with_child();
+        document.revision = 0;
+        service
+            .create_document(initial_document_state(&document, tenant_id, 3).unwrap(), &[actor_id])
+            .unwrap();
+        let principal = TrustedPrincipal { tenant_id, actor_id };
+        let document_id = 21_u128.to_be_bytes();
+
+        let delete_only_frame = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::DeleteNode(v1::DeleteNode {
+                    node_id: 1_u128.to_be_bytes().to_vec(),
+                })),
+            }],
+        }
+        .encode_to_vec();
+        let envelope = |operation_id: u128, payload: Vec<u8>| {
+            v1::OperationEnvelope {
+                schema_version: 1,
+                document_id: document_id.to_vec(),
+                operation_id: operation_id.to_be_bytes().to_vec(),
+                transaction_id: operation_id.to_be_bytes().to_vec(),
+                actor_id: actor_id.to_vec(),
+                session_id: 9_u128.to_be_bytes().to_vec(),
+                client_sequence: operation_id as u64,
+                base_revision: 0,
+                causal_parent_ids: vec![],
+                payload_hash: Sha256::digest(&payload).to_vec(),
+                payload,
+                engine_semantics_version: Some(3),
+            }
+            .encode_to_vec()
+        };
+
+        assert_eq!(
+            service.submit(principal, &envelope(50, delete_only_frame)),
+            Err(ServiceError::ReducerRejected)
+        );
+        // The document is untouched: revision and every node survive.
+        let after = service.load_document(document_id).unwrap();
+        assert_eq!(after.accepted_revision, 0);
+        let restored =
+            document_from_snapshot(&after.snapshot, after.document_id, after.document_hash).unwrap();
+        assert!(restored.node(NodeId(1)).is_some());
+        assert!(restored.node(NodeId(3)).is_some());
+
+        // A complete child-first subtree delete in one batch is accepted and removes all three.
+        let delete_subtree = v1::ResolvedOperationBatch {
+            operations: [3_u128, 2, 1]
+                .into_iter()
+                .map(|node| v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeleteNode(v1::DeleteNode {
+                        node_id: node.to_be_bytes().to_vec(),
+                    })),
+                })
+                .collect(),
+        }
+        .encode_to_vec();
+        assert_eq!(
+            service.submit(principal, &envelope(51, delete_subtree)).unwrap().accepted_revision,
+            1
+        );
+        let after = service.load_document(document_id).unwrap();
+        let restored =
+            document_from_snapshot(&after.snapshot, after.document_id, after.document_hash).unwrap();
+        assert!(restored.node(NodeId(1)).is_none());
+        assert!(restored.node(NodeId(2)).is_none());
+        assert!(restored.node(NodeId(3)).is_none());
     }
 }

@@ -345,7 +345,20 @@ export interface SceneNode {
    */
   fills: Paint[];
   strokes: Paint[];
-  constraints?: Constraints | undefined;
+  constraints?:
+    | Constraints
+    | undefined;
+  /**
+   * Forward-compatibility payloads owned by newer engine versions. Unknown keys
+   * are preserved byte-for-byte across load/save and operation replay so a
+   * Phase 3+ node round-trips through an older client without being rewritten.
+   */
+  extensions: { [key: string]: Uint8Array };
+}
+
+export interface SceneNode_ExtensionsEntry {
+  key: string;
+  value: Uint8Array;
 }
 
 export interface GeometryUpdate {
@@ -2321,6 +2334,7 @@ function createBaseSceneNode(): SceneNode {
     fills: [],
     strokes: [],
     constraints: undefined,
+    extensions: {},
   };
 }
 
@@ -2443,6 +2457,9 @@ export const SceneNode: MessageFns<SceneNode> = {
     if (message.constraints !== undefined) {
       Constraints.encode(message.constraints, writer.uint32(298).fork()).join();
     }
+    globalThis.Object.entries(message.extensions).forEach(([key, value]: [string, Uint8Array]) => {
+      SceneNode_ExtensionsEntry.encode({ key: key as any, value }, writer.uint32(306).fork()).join();
+    });
     return writer;
   },
 
@@ -2779,6 +2796,17 @@ export const SceneNode: MessageFns<SceneNode> = {
           message.constraints = Constraints.decode(reader, reader.uint32());
           continue;
         }
+        case 38: {
+          if (tag !== 306) {
+            break;
+          }
+
+          const entry38 = SceneNode_ExtensionsEntry.decode(reader, reader.uint32());
+          if (entry38.value !== undefined) {
+            message.extensions[entry38.key] = entry38.value;
+          }
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2842,6 +2870,73 @@ export const SceneNode: MessageFns<SceneNode> = {
     message.constraints = (object.constraints !== undefined && object.constraints !== null)
       ? Constraints.fromPartial(object.constraints)
       : undefined;
+    message.extensions = (globalThis.Object.entries(object.extensions ?? {}) as [string, Uint8Array][]).reduce(
+      (acc: { [key: string]: Uint8Array }, [key, value]: [string, Uint8Array]) => {
+        if (value !== undefined) {
+          acc[key] = value;
+        }
+        return acc;
+      },
+      {},
+    );
+    return message;
+  },
+};
+
+function createBaseSceneNode_ExtensionsEntry(): SceneNode_ExtensionsEntry {
+  return { key: "", value: new Uint8Array(0) };
+}
+
+export const SceneNode_ExtensionsEntry: MessageFns<SceneNode_ExtensionsEntry> = {
+  encode(message: SceneNode_ExtensionsEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value.length !== 0) {
+      writer.uint32(18).bytes(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SceneNode_ExtensionsEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSceneNode_ExtensionsEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SceneNode_ExtensionsEntry>, I>>(base?: I): SceneNode_ExtensionsEntry {
+    return SceneNode_ExtensionsEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SceneNode_ExtensionsEntry>, I>>(object: I): SceneNode_ExtensionsEntry {
+    const message = createBaseSceneNode_ExtensionsEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? new Uint8Array(0);
     return message;
   },
 };

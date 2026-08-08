@@ -272,6 +272,10 @@ message SceneNode {
   repeated Paint fills = 35;
   repeated Paint strokes = 36;
   optional Constraints constraints = 37;
+  // Forward-compatibility payloads owned by newer engine versions. Unknown keys
+  // are preserved byte-for-byte across load/save and operation replay so a
+  // Phase 3+ node round-trips through an older client without being rewritten.
+  map<string, bytes> extensions = 38;
 }
 
 message GeometryUpdate {

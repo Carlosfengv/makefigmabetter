@@ -172,6 +172,18 @@ describe("protocol operation codec", () => {
     expect(batch.operations[1].setTextProperties?.properties).toMatchObject({ autoSize: 2, paragraph: { alignment: 2 }, runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700 }] });
   });
 
+  it("passes an unknown-extension payload through the generated node encode byte-for-byte (P0-2)", () => {
+    const extensions = { "com.figma.phase3.motion": [0, 1, 2, 250, 255], "vendor.blob": [42] };
+    const node = { ...createNode("rectangle", 10, 20), id, extensions };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+
+    const decoded = batch.operations[0].createNode?.node?.extensions;
+    expect(decoded && Object.keys(decoded).sort()).toEqual(["com.figma.phase3.motion", "vendor.blob"]);
+    expect(decoded && [...decoded["com.figma.phase3.motion"]]).toEqual([0, 1, 2, 250, 255]);
+    expect(decoded && [...decoded["vendor.blob"]]).toEqual([42]);
+  });
+
   it("serializes a tombstone restore as a distinct history operation", () => {
     const node = { ...createNode("rectangle", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{ type: "restore", node: { ...node, cornerRadius: node.radius, text: "" } }]));

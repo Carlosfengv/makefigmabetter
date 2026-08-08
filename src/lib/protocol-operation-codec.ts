@@ -130,8 +130,18 @@ function nodeProto(node: CoreProjectionNode) {
     nodeId: idBytes(node.id), parentId: node.parentId ? idBytes(node.parentId) : undefined, pageId: idBytes(node.pageId ?? "00000000-0000-0000-0000-000000000001"), positionId: { key, actorId: actor }, name: node.name,
     kind: nodeKind(node.kind), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation,
     fill: paintProto(node.fillGradient, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(node.strokeGradient, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), relativeTransform: relativeTransform(node.relativeTransform),
-    opacity: node.opacity, cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), text: node.text, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined,
+    opacity: node.opacity, cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), text: node.text, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined, extensions: extensionsProto(node.extensions),
   };
+}
+
+/** Forward-compatibility payloads are passed through verbatim so the durable
+ * Protobuf boundary preserves bytes owned by newer engine versions (P0-2). The
+ * JSON projection encodes each Rust `Vec<u8>` as a number array. */
+function extensionsProto(extensions: CoreProjectionNode["extensions"]): { [key: string]: Uint8Array } {
+  const map: { [key: string]: Uint8Array } = {};
+  if (!extensions) return map;
+  for (const [key, value] of Object.entries(extensions)) map[key] = Uint8Array.from(value);
+  return map;
 }
 
 function paintProto(gradient: import("./editor-protocol").DocumentLinearGradient | undefined, solid: DocumentColor): Paint {

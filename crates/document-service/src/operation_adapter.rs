@@ -206,6 +206,7 @@ fn restored_node_from_proto(
             locked: node.locked,
             contents_hidden: node.contents_hidden,
             clips_content,
+            extensions: node.extensions.into_iter().collect(),
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         text_properties,
@@ -473,6 +474,7 @@ mod tests {
             stroke_align: v1::StrokeAlign::Inside as i32,
             arc_data: None,
             relative_transform: None,
+            extensions: Default::default(),
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
