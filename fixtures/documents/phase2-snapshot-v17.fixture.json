@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 17,
+  "documentId": "00000000-0000-4000-8000-000000000010",
+  "revision": 9,
+  "canUndo": false,
+  "canRedo": false,
+  "colorProfile": "srgb",
+  "pages": [
+    { "id": "00000000-0000-0000-0000-000000000001", "name": "Page 1", "positionId": "00000000000000000000000000000001:00000000000000000000000000000000" },
+    { "id": "00000000-0000-4000-8000-000000000020", "name": "Ideas", "positionId": "00000000000000000000000000000020:00000000000000000000000000000000" }
+  ],
+  "resourceIndex": [
+    { "assetId": "00000000-0000-4000-8000-000000000201", "contentHash": "1111111111111111111111111111111111111111111111111111111111111111", "mediaType": "image/png", "byteLength": 256, "pixelWidth": 16, "pixelHeight": 16 }
+  ],
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000101", "name": "Root frame", "kind": "frame", "x": 0, "y": 0, "width": 600, "height": 400, "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000101:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "cornerRadius": 0, "text": "", "visible": true, "locked": false },
+    { "id": "00000000-0000-4000-8000-000000000102", "name": "Arrowed line", "kind": "line", "x": 640, "y": 0, "width": 400, "height": 0, "fill": "#00000000", "stroke": "#111111", "strokeWidth": 4, "strokeCapStart": "round", "strokeCapEnd": "arrowLines", "strokeJoin": "round", "strokeMiterLimit": 8, "positionId": "00000000000000000000000000000102:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "cornerRadius": 0, "text": "", "visible": true, "locked": false },
+    { "id": "00000000-0000-4000-8000-000000000103", "parentId": "00000000-0000-4000-8000-000000000101", "name": "Nested frame", "kind": "rectangle", "x": 24, "y": 24, "width": 300, "height": 180, "fill": "#e6edff", "stroke": "#00000000", "strokeWidth": 0, "cornerRadius": 12, "cornerRadii": [4, 8, 16, 24], "positionId": "00000000000000000000000000000103:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "text": "", "visible": true, "locked": false },
+    { "id": "00000000-0000-4000-8000-000000000104", "parentId": "00000000-0000-4000-8000-000000000101", "name": "Image reference", "kind": "image", "x": 40, "y": 40, "width": 160, "height": 100, "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000104:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "assetId": "00000000-0000-4000-8000-000000000201", "opacity": 1, "cornerRadius": 8, "text": "", "visible": true, "locked": false },
+    { "id": "00000000-0000-4000-8000-000000000105", "parentId": "00000000-0000-4000-8000-000000000102", "name": "Current text", "kind": "text", "x": 680, "y": 32, "width": 180, "height": 40, "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000105:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "textProperties": { "runs": [{ "start": 0, "end": 9, "fontSize": 16, "fontWeight": 500, "italic": false, "letterSpacing": 0 }], "paragraph": { "alignment": "left", "lineHeight": 20, "paragraphSpacing": 0 }, "autoSize": "height", "fallbackFonts": [] }, "opacity": 1, "cornerRadius": 0, "text": "Phase one", "visible": true, "locked": false }
+  ]
+}

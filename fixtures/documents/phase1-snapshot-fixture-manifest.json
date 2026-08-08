@@ -1,6 +1,6 @@
 {
   "format": "makefigma-phase1-snapshot-fixture-manifest-v1",
-  "currentSchemaVersion": 15,
+  "currentSchemaVersion": 19,
   "fixtures": [
     {
       "schemaVersion": 13,
@@ -19,6 +19,30 @@
       "fixture": "fixtures/documents/phase1-snapshot-v15.fixture.json",
       "sourceSha256": "b7d764b4bd7aa25ad8359e5dbc8b8c27920f3b33db17b24b01ad2f939a4da63f",
       "expectedCanonicalHash": "eb71386a777c71c0382a15d57f4198fcc414e8131f61a00671152c2a08ae7268"
+    },
+    {
+      "schemaVersion": 16,
+      "fixture": "fixtures/documents/phase2-snapshot-v16.fixture.json",
+      "sourceSha256": "cef2666a5e3485176f7dada8eae82ff1ac735356631cfef937e6213d211b0391",
+      "expectedCanonicalHash": "4e87b90c55bb672013acd0e1a0baf62d4f35e80b6967ee75feee168fc1c81e05"
+    },
+    {
+      "schemaVersion": 17,
+      "fixture": "fixtures/documents/phase2-snapshot-v17.fixture.json",
+      "sourceSha256": "5c76ea65690048b89a4f5d54c5df313bcbf6de4205e70ee8fb6406ff6bac94c2",
+      "expectedCanonicalHash": "e4100f2040c3448b463f4a21f48fc0766046dafe929256dc9f9971ba3279a893"
+    },
+    {
+      "schemaVersion": 18,
+      "fixture": "fixtures/documents/phase2-snapshot-v18.fixture.json",
+      "sourceSha256": "efc66f81b2799772a72900241f7c45850404b6a8ed8bbb6a088f51b55314c006",
+      "expectedCanonicalHash": "634b5aafcefab752d41cca06a2464ba6624070346a012786e2e34f94868a93dc"
+    },
+    {
+      "schemaVersion": 19,
+      "fixture": "fixtures/documents/phase2-snapshot-v19.fixture.json",
+      "sourceSha256": "fd7c18ec9a3f3ac8eebab3990893829835e0ee3e08f69603677fa957aabe6b77",
+      "expectedCanonicalHash": "9f3f4e0e3eb78fdb388f9991d1eb84e2b8352f66eeb31a48f7a0b8eee5ab3da8"
     }
   ]
 }
