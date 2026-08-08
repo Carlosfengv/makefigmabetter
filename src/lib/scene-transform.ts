@@ -188,6 +188,148 @@ export function nodePropsForWorldTransform(world: AffineMatrix, parentWorld: Aff
   };
 }
 
+/**
+ * Translates a node by a world-space delta and returns the geometry patch that
+ * realizes it. The two transform models move differently and must not be
+ * conflated:
+ *
+ * - a legacy node (no `relativeTransform`) has world x/y, so it moves by adding
+ *   the delta to x/y — exactly the historical behaviour;
+ * - a Relative-v1 node derives its world position from `relativeTransform`
+ *   (x/y are only a display fallback), so a plain x/y patch is silently ignored
+ *   by {@link worldSpaceProjectionNode}. Its world transform is translated and
+ *   reprojected against the resolved parent world, yielding a fresh
+ *   `relativeTransform`. This is the single defect behind grouped children and
+ *   ungrouped nodes appearing frozen: both carry a `relativeTransform`.
+ *
+ * `snap` receives the resulting world origin so grid snapping stays uniform
+ * across both models. Callers must pass the *pre-drag* document so a live drag
+ * applies the total delta once instead of compounding each frame. A
+ * non-invertible parent yields nothing, leaving the node untouched. */
+export function translateNodeWorldPatch(
+  nodes: readonly CanvasNode[],
+  id: string,
+  dx: number,
+  dy: number,
+  snap: (point: TransformPoint) => TransformPoint = (point) => point,
+): Pick<CanvasNode, "x" | "y" | "rotation" | "relativeTransform"> | undefined {
+  const node = nodes.find((candidate) => candidate.id === id);
+  if (!node) return undefined;
+  if (!node.relativeTransform) {
+    const snapped = snap({ x: node.x + dx, y: node.y + dy });
+    return { x: snapped.x, y: snapped.y, rotation: node.rotation, relativeTransform: undefined };
+  }
+  const world = worldTransformForNode(nodes, id);
+  if (!world) return undefined;
+  const parentWorld = node.parentId ? worldTransformForNode(nodes, node.parentId) : undefined;
+  const snapped = snap({ x: world.e + dx, y: world.f + dy });
+  const translated = { ...world, e: snapped.x, f: snapped.y };
+  return nodePropsForWorldTransform(translated, parentWorld, node.width, node.height);
+}
+
+/**
+ * Recomputes Group rectangles from their direct children without changing any
+ * child's world transform. This is the matrix-native counterpart to Figma's
+ * content-fitting Group bounds:
+ *
+ *   group' = group × translate(left, top)
+ *   child' = translate(-left, -top) × child
+ *
+ * Work from the deepest Group out so a nested Group is already normalized when
+ * it contributes to its parent's local bounds. Legacy direct children are
+ * materialized first; mixing their world x/y with local matrices would make a
+ * Group jump as soon as the first Relative-v1 sibling appears.
+ */
+export function normalizeGroupBounds(
+  nodes: readonly CanvasNode[],
+  options: Readonly<{ excludeGroupIds?: ReadonlySet<string> }> = {},
+): CanvasNode[] | undefined {
+  // Clone a mutable array: `structuredClone(nodes)` preserves the readonly
+  // array type even though this normalization intentionally rewrites nodes.
+  const next = structuredClone([...nodes]);
+  const depth = (id: string) => {
+    const byId = new Map(next.map((node) => [node.id, node]));
+    const visited = new Set<string>();
+    let value = 0;
+    let parentId = byId.get(id)?.parentId;
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId);
+      value += 1;
+      parentId = byId.get(parentId)?.parentId;
+    }
+    return value;
+  };
+  const groupIds = next
+    .filter((node) => node.kind === "group" && !options.excludeGroupIds?.has(node.id))
+    .sort((left, right) => depth(right.id) - depth(left.id))
+    .map((node) => node.id);
+
+  for (const groupId of groupIds) {
+    const groupIndex = next.findIndex((node) => node.id === groupId);
+    const group = next[groupIndex];
+    if (!group) return undefined;
+    const parentWorld = group.parentId ? worldTransformForNode(next, group.parentId) : undefined;
+    if (group.parentId && !parentWorld) return undefined;
+    const groupWorld = worldTransformForNode(next, group.id);
+    if (!groupWorld) return undefined;
+    const children = next.filter((node) => node.parentId === group.id);
+    if (!children.length) return undefined;
+
+    // Materialize all direct children in Group-local coordinates first.
+    for (const child of children) {
+      const world = worldTransformForNode(next, child.id);
+      const local = world && nodePropsForWorldTransform(world, groupWorld, child.width, child.height);
+      if (!local) return undefined;
+      const index = next.findIndex((node) => node.id === child.id);
+      next[index] = { ...next[index], ...local };
+    }
+
+    const localChildren = next.filter((node) => node.parentId === group.id);
+    const localBounds = localChildren.flatMap((child) => {
+      const local = child.relativeTransform;
+      if (!local) return [];
+      return [
+        transformPoint(local, { x: 0, y: 0 }),
+        transformPoint(local, { x: child.width, y: 0 }),
+        transformPoint(local, { x: child.width, y: child.height }),
+        transformPoint(local, { x: 0, y: child.height }),
+      ];
+    });
+    if (localBounds.length !== localChildren.length * 4) return undefined;
+    const left = Math.min(...localBounds.map((point) => point.x));
+    const top = Math.min(...localBounds.map((point) => point.y));
+    const right = Math.max(...localBounds.map((point) => point.x));
+    const bottom = Math.max(...localBounds.map((point) => point.y));
+    const width = right - left;
+    const height = bottom - top;
+    if (![left, top, right, bottom, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return undefined;
+
+    const shift = { ...IDENTITY_AFFINE, e: left, f: top };
+    const groupLocal = nodePropsForWorldTransform(groupWorld, parentWorld, group.width, group.height)?.relativeTransform;
+    if (!groupLocal) return undefined;
+    const movedGroupWorld = multiplyAffine(groupWorld, shift);
+    const groupPatch = nodePropsForWorldTransform(movedGroupWorld, parentWorld, width, height);
+    if (!groupPatch) return undefined;
+    next[groupIndex] = { ...group, ...groupPatch, width, height };
+
+    const inverseShift = { ...IDENTITY_AFFINE, e: -left, f: -top };
+    for (const child of localChildren) {
+      const childIndex = next.findIndex((node) => node.id === child.id);
+      const relativeTransform = child.relativeTransform && multiplyAffine(inverseShift, child.relativeTransform);
+      if (!relativeTransform) return undefined;
+      const patch = nodePropsForWorldTransform(
+        multiplyAffine(movedGroupWorld, relativeTransform),
+        movedGroupWorld,
+        child.width,
+        child.height,
+      );
+      if (!patch) return undefined;
+      next[childIndex] = { ...next[childIndex], ...patch };
+    }
+  }
+  return next;
+}
+
 function isInvertibleAffine(matrix: AffineMatrix) {
   return Object.values(matrix).every(Number.isFinite) && Math.abs(matrix.a * matrix.d - matrix.b * matrix.c) > 1e-12;
 }

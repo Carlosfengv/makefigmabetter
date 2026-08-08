@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
+import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
 import { findTopmostHit } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
@@ -12,7 +12,7 @@ import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
 import { styledTextSpans, type RenderTextStyle } from "@/lib/text-style-runs";
 import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { coreProjectionNode, resolveCoreBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { captureClipboard, coreProjectionNode, resolveCoreBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
 import { classifyEditorError, editorError, type EditorErrorCode } from "@/lib/editor-error";
@@ -20,15 +20,17 @@ import { resetDocumentProjection } from "@/lib/document-reset";
 import { resolveInsideRoundedRect } from "@/lib/rounded-rect";
 import { perSideStrokeCenters } from "@/lib/per-side-stroke";
 import { resolveCornerRadii } from "@/lib/corner-radii";
+import { insetRoundedRectRadii, outsetRoundedRectRadii } from "@/lib/aligned-rounded-rect";
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "@/lib/corner-smoothing";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
 import { gpuLayerPrefix } from "@/lib/gpu-layer-prefix";
 import { exceedsMarqueeDragThreshold, lineSelectionBounds, marqueeRect, resolveMarqueeSelection, rotatedNodeBounds } from "@/lib/marquee-selection";
-import { resolveMultiResizeSelection } from "@/lib/multi-selection";
+import { resolveMultiResizeSelection, type MultiResizeSelection } from "@/lib/multi-selection";
 import { worldLineVisualBounds } from "@/lib/line-world-bounds";
 import { selectionDimensions } from "@/lib/selection-label";
 import { resolveCanvasObjectSelection, resolveGroupSelectionTarget } from "@/lib/canvas-selection";
+import { movableSelectionIds } from "@/lib/selection-move-roots";
 import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
 import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
@@ -45,14 +47,15 @@ import { parseRustTextCaretLayout } from "@/lib/rust-text-caret";
 import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { orderNodesByRustRenderCommands, parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
-import { hasCommittedMove } from "@/lib/move-commit";
 import { hasCommittedResize, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
 import { hasCommittedLineEndpointResize, lineEndpoints, resizeLegacyLineEndpoint, type LineEndpoint } from "@/lib/line-endpoint-resize";
 import { resizeRelativeLineEndpointFromWorldGesture } from "@/lib/relative-line-endpoint-resize";
 import { editorKeyCommand } from "@/lib/editor-key-command";
+import { isEffectivelyLocked } from "@/lib/hierarchy-lock";
 import { createKeyboardToolNode } from "@/lib/keyboard-node-create";
 import { solidLineStrokeOutline } from "@/lib/line-stroke-outline";
+import { decorativeCapMesh, isDecorativeCap } from "@/lib/decorative-cap-mesh";
 import { hasCommittedSelectionResize, scaleLegacySelectionGeometry } from "@/lib/selection-resize";
 import { hasCommittedSelectionTransform, scaleSelectionTransforms, type SelectionTransformPatch } from "@/lib/selection-transform-resize";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
@@ -61,7 +64,7 @@ import { planPendingOperationReconciliation } from "@/lib/pending-operation-reco
 import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
 import { fullStateReplayBatch, historyReplayBatch } from "@/lib/history-replay-batch";
 import { visibleNodesOnPage } from "@/lib/hierarchy-visibility";
-import { invertAffine, multiplyAffine, nodePropsForWorldTransform, transformPoint, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode, type AffineMatrix } from "@/lib/scene-transform";
+import { invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode, type AffineMatrix } from "@/lib/scene-transform";
 import { worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
 import { closedShapeStrokeLocalBounds } from "@/lib/closed-shape-stroke-bounds";
 import { ellipseStrokeRing } from "@/lib/ellipse-stroke-ring";
@@ -70,7 +73,7 @@ declare const self: DedicatedWorkerGlobalScope;
 
 type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
-  | { mode: "move"; startX: number; startY: number; before: CanvasNode[]; initial: Map<string, Pick<CanvasNode, "x" | "y">> }
+  | { mode: "move"; startX: number; startY: number; before: CanvasNode[]; initial: Set<string> }
   | { mode: "resize"; id: string; handle: CanvasResizeHandle; start: { x: number; y: number }; node: CanvasNode; before: CanvasNode[] }
   | { mode: "multi-resize"; handle: CanvasResizeHandle; start: { x: number; y: number }; bounds: ResizeGeometry; before: CanvasNode[]; ids: string[]; requiresAffine: boolean }
   | { mode: "line-resize"; id: string; endpoint: LineEndpoint; node: CanvasNode; before: CanvasNode[] }
@@ -119,6 +122,13 @@ let renderQualityTimer: ReturnType<typeof setTimeout> | undefined;
 let tool: ToolKind = "select";
 let nodes: CanvasNode[] = starterNodes();
 let assets: DocumentAsset[] = [];
+/** The Worker-owned copy/cut clipboard. It carries subtree projections by value
+ * and image references by AssetId only (never raw bytes), so paste re-validates
+ * against the target document's Resource Index (P0-1). */
+/** The durable projection version last emitted by the Core. It stamps the
+ * clipboard so a stale cross-tab payload can be rejected on paste (P0-1). */
+let documentSchemaVersion = 19;
+let clipboard: EditorClipboard | undefined;
 const imageBitmaps = new ImageBitmapCache<ImageBitmap>(MAX_RASTER_DECODED_BYTES);
 const imageLoads = new Set<string>();
 const fontFaces = new FontFaceRegistry();
@@ -262,54 +272,9 @@ function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number 
   }
   return true;
 }
-/** Moving a container carries only descendants that do not inherit its
- * transform. A modern Group owns the translation and its Relative-v1 children
- * follow it; legacy world-space children still need an explicit move. This
- * avoids applying the same delta twice to a Group subtree. */
-function movableSelectionIds(selection: readonly string[]) {
-  const movable = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (id: string, parentMoves: boolean) => {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const node = nodeById.get(id);
-    if (!node) return;
-    if (!(parentMoves && node.relativeTransform)) movable.add(id);
-    nodes.filter((candidate) => candidate.parentId === id).forEach((child) => visit(child.id, true));
-  };
-  selection.forEach((id) => visit(id, false));
-  return movable;
-}
 function refreshTransientGroupBounds(preservedGroupIds: ReadonlySet<string> = new Set()) {
-  const depth = (node: CanvasNode) => {
-    let current = node.parentId;
-    let value = 0;
-    const visited = new Set<string>();
-    while (current && !visited.has(current)) {
-      visited.add(current);
-      value += 1;
-      current = nodeById.get(current)?.parentId;
-    }
-    return value;
-  };
-  const next = [...nodes];
-  next.filter((node) => node.kind === "group" && !preservedGroupIds.has(node.id)).sort((left, right) => depth(right) - depth(left)).forEach((group) => {
-    const children = next.filter((node) => node.parentId === group.id);
-    if (!children.length) return;
-    // A Relative-v1 child already carries its position in the Group's local
-    // transform. Treating its fallback x/y as world geometry would reset an
-    // unrelated Group whenever another Group is dragged. Core recomputes this
-    // modern Group's bounds from world transforms at commit time instead.
-    if (children.some((child) => child.relativeTransform)) return;
-    const bounds = children.map(rotatedNodeBounds);
-    const left = Math.min(...bounds.map((bound) => bound.x));
-    const top = Math.min(...bounds.map((bound) => bound.y));
-    const right = Math.max(...bounds.map((bound) => bound.x + bound.width));
-    const bottom = Math.max(...bounds.map((bound) => bound.y + bound.height));
-    const index = next.findIndex((node) => node.id === group.id);
-    next[index] = { ...next[index], x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top), rotation: 0 };
-  });
-  nodes = next;
+  const normalized = normalizeGroupBounds(nodes, { excludeGroupIds: preservedGroupIds });
+  if (normalized) nodes = normalized;
 }
 function rebuildNodeIndex() {
   const projected = nodes.map((node) => worldSpaceProjectionNode(nodes, node) ?? node);
@@ -365,7 +330,11 @@ function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
     return true;
   } catch (error) {
     diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_REJECTED", documentRevision: revision });
-    emitError(error, "CORRUPT_DATA");
+    // A newer-engine node yields DOCUMENT_REQUIRES_NEWER_CLIENT, which classifies
+    // as UNSUPPORTED_DOCUMENT_VERSION (read-only), not corruption. The prior core
+    // document is untouched by the rejected load, so the editor stays consistent.
+    const message = error instanceof Error ? error.message : "";
+    emitError(error, /DOCUMENT_REQUIRES_NEWER_CLIENT/.test(message) ? undefined : "CORRUPT_DATA");
     return false;
   }
 }
@@ -708,7 +677,7 @@ function canvasNodeFromProjection(node: WasmProjectionNode): CanvasNode {
     id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
     rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId,
     stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, strokeJoin: node.strokeJoin, strokeMiterLimit: node.strokeMiterLimit, strokeDashPattern: node.strokeDashPattern, strokeWeights: node.strokeWeights?.length === 4 ? [node.strokeWeights[0], node.strokeWeights[1], node.strokeWeights[2], node.strokeWeights[3]] : undefined, strokeAlign: node.strokeAlign, arcData: node.arcData, relativeTransform: node.relativeTransform, clipsContent: node.clipsContent,
-    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden,
+    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden, extensions: node.extensions,
   };
 }
 function syncProjectionFromWasm(rememberExisting = true) {
@@ -716,6 +685,7 @@ function syncProjectionFromWasm(rememberExisting = true) {
   if (rememberExisting) rememberProjection();
   const snapshot = JSON.parse(wasmDocument.snapshot_json()) as WasmProjectionSnapshot;
   documentId = snapshot.documentId ?? documentId;
+  documentSchemaVersion = snapshot.schemaVersion;
   pages = snapshot.pages?.length ? snapshot.pages : pages;
   assets = snapshot.resourceIndex ?? [];
   if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
@@ -1370,11 +1340,13 @@ function hitFrameName(screenX: number, screenY: number) {
 }
 function hit(worldX: number, worldY: number, drillDown = false) {
   const point = { x: worldX, y: worldY };
-  const candidates = [...activeNodes()].reverse().filter((candidate) => candidate.visible !== false && !candidate.locked && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
+  const active = activeNodes();
+  const nodesById = new Map(active.map((node) => [node.id, node]));
+  const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
   // Groups are the normal selection boundary; a repeated press drills through
   // that boundary to the painted child below it.
   const paintedNode = candidates.find((candidate) => candidate.kind !== "group") ?? candidates[0];
-  const node = paintedNode && resolveGroupSelectionTarget(activeNodes(), paintedNode.id, drillDown);
+  const node = paintedNode && resolveGroupSelectionTarget(active, paintedNode.id, drillDown, selectedIds);
   if (node) return node;
   const screen = toScreen(worldX, worldY);
   return hitFrameName(screen.x, screen.y);
@@ -1585,23 +1557,23 @@ function canonicalRectangleStrokeMesh(node: CanvasNode, width: number, height: n
   }
 }
 /**
- * The existing per-side renderer is four independent butt-capped segments.
- * Keep that exact paint order, but source each segment's finite outline from
- * Rust when the contour is rectilinear. Square-corner dashes keep the
- * established independent-edge phase (Top/Right/Bottom/Left each restart)
- * and now consume the same Core mesh. Rounded/smoothed corners retain their
- * Canvas path until Core owns their full outline.
+ * The per-side model is four independent butt-capped straight centerlines with
+ * no corner joins (see `editor_core::geometry::stroke_meshes_for_per_side_rectangle`).
+ * Keep that exact paint order and source each segment's finite outline from
+ * Rust. Square-corner dashes keep the established independent-edge phase
+ * (Top/Right/Bottom/Left each restart) and consume the same Core mesh.
+ * Rounded/smoothed corners use this identical straight-edge mesh too — the
+ * rounded contour is applied purely by the caller's Inside clip (the same
+ * `roundedRectPath` clip the former Canvas fallback used), so no corner
+ * geometry is duplicated and every consumer shares one centerline source.
  */
 function canonicalPerSideRectangleStrokeMeshes(node: CanvasNode, width: number, height: number): readonly StrokeMesh[] | undefined {
   const weights = node.strokeWeights;
-  const resolvedRadii = resolveCornerRadii(node.width, node.height, node.radius, node.cornerRadii);
   const align = node.strokeAlign ?? "inside";
   if (
     !wasmRuntime
     || !weights
     || weights.length !== 4
-    || !resolvedRadii.every((radius) => radius === 0)
-    || node.cornerSmoothing
     || width <= 0
     || height <= 0
   ) return undefined;
@@ -1680,14 +1652,10 @@ function continuousCorner(ctx: OffscreenCanvasRenderingContext2D, centerX: numbe
   }
 }
 function insetCornerRadii(width: number, height: number, radius: number, cornerRadii: CanvasNode["cornerRadii"], inset: number): CanvasNode["cornerRadii"] | undefined {
-  if (!cornerRadii) return undefined;
-  const values = resolveCornerRadii(width, height, radius, cornerRadii).map((value) => Math.max(0, value - inset)) as CanvasNode["cornerRadii"];
-  return resolveCornerRadii(Math.max(0, width - inset * 2), Math.max(0, height - inset * 2), Math.max(0, radius - inset), values) as CanvasNode["cornerRadii"];
+  return insetRoundedRectRadii(width, height, radius, cornerRadii, inset);
 }
 function outsetCornerRadii(width: number, height: number, radius: number, cornerRadii: CanvasNode["cornerRadii"], outset: number): CanvasNode["cornerRadii"] | undefined {
-  if (!cornerRadii) return undefined;
-  const values = resolveCornerRadii(width, height, radius, cornerRadii).map((value) => value + outset) as CanvasNode["cornerRadii"];
-  return resolveCornerRadii(width + outset * 2, height + outset * 2, radius + outset, values) as CanvasNode["cornerRadii"];
+  return outsetRoundedRectRadii(width, height, radius, cornerRadii, outset);
 }
 function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (node.visible === false) return;
@@ -1722,8 +1690,8 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
           ctx.fillStyle = paintStackStyle(ctx, layer, w, 1);
           ctx.fill();
           ctx.strokeStyle = ctx.fillStyle;
-          renderLineEndpoint(ctx, node.strokeCapStart, 0, Math.PI, strokeWidth);
-          renderLineEndpoint(ctx, node.strokeCapEnd, w, 0, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapStart, 0, -1, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapEnd, w, 1, strokeWidth);
         });
       } else {
         // Canvas has a single lineCap property. For a dashed Line with
@@ -1740,8 +1708,8 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
           const style = paintStackStyle(ctx, layer, w, 1);
           ctx.strokeStyle = style;
           ctx.fillStyle = style;
-          renderLineEndpoint(ctx, node.strokeCapStart, 0, Math.PI, strokeWidth);
-          renderLineEndpoint(ctx, node.strokeCapEnd, w, 0, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapStart, 0, -1, strokeWidth);
+          renderLineEndpoint(ctx, node.strokeCapEnd, w, 1, strokeWidth);
         });
       }
     }
@@ -2085,54 +2053,20 @@ function renderAlignedShapeStroke(ctx: OffscreenCanvasRenderingContext2D, node: 
   strokePaintStack(ctx, node, width, height);
 }
 
-function renderLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasNode["strokeCapStart"], x: number, direction: number, strokeWidth: number) {
-  const size = Math.max(8, strokeWidth * 4);
-  if (cap === "arrowLines") {
-    const spread = Math.PI / 6;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x - Math.cos(direction + spread) * size, -Math.sin(direction + spread) * size);
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x - Math.cos(direction - spread) * size, -Math.sin(direction - spread) * size);
-    ctx.stroke();
-    return;
-  }
-  if (cap === "arrowEquilateral" || cap === "triangleFilled") {
-    const half = cap === "arrowEquilateral" ? size * Math.sqrt(3) / 4 : size * 0.42;
-    const backX = x - Math.cos(direction) * size;
-    const backY = -Math.sin(direction) * size;
-    const normalX = -Math.sin(direction);
-    const normalY = Math.cos(direction);
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(backX + normalX * half, backY + normalY * half);
-    ctx.lineTo(backX - normalX * half, backY - normalY * half);
+function renderLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasNode["strokeCapStart"], x: number, direction: -1 | 1, strokeWidth: number) {
+  if (!isDecorativeCap(cap)) return;
+  // Canvas, hit test and SVG all consume this one mesh from the shared
+  // `decorative-cap-mesh` source, so the arrowhead/diamond/dot can never drift
+  // between what is drawn, what is hit and what is exported.
+  const mesh = decorativeCapMesh(cap, x, direction, strokeWidth);
+  ctx.beginPath();
+  mesh.triangles.forEach(([a, b, c]) => {
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
     ctx.closePath();
-    ctx.fill();
-    return;
-  }
-  if (cap === "diamondFilled") {
-    const half = size / 2;
-    const backX = x - Math.cos(direction) * size;
-    const backY = -Math.sin(direction) * size;
-    const middleX = x - Math.cos(direction) * half;
-    const middleY = -Math.sin(direction) * half;
-    const normalX = -Math.sin(direction) * half;
-    const normalY = Math.cos(direction) * half;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(middleX + normalX, middleY + normalY);
-    ctx.lineTo(backX, backY);
-    ctx.lineTo(middleX - normalX, middleY - normalY);
-    ctx.closePath();
-    ctx.fill();
-    return;
-  }
-  if (cap === "circleFilled") {
-    ctx.beginPath();
-    ctx.arc(x, 0, size / 2, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  });
+  ctx.fill();
 }
 
 function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle) {
@@ -2202,6 +2136,20 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
     ...(properties.autoSize === "widthAndHeight" ? { width: Math.max(1, widest / viewport.zoom) } : {}),
   };
   return { ...command, patch };
+}
+
+/** Resolves the paste destination: the selected container when a single
+ * Frame/Group/Section is selected, otherwise the selected node's parent, else
+ * the active page root. Cross-parent or empty selections fall back to the page
+ * root so paste always has a valid target. */
+function pasteTarget(): { pageId?: string; parentId?: string } {
+  const selected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node));
+  if (selected.length === 1) {
+    const node = selected[0];
+    if (["frame", "group", "section"].includes(node.kind)) return { pageId: node.pageId ?? activePageId, parentId: node.id };
+    return { pageId: node.pageId ?? activePageId, parentId: node.parentId };
+  }
+  return { pageId: activePageId, parentId: undefined };
 }
 
 /** New page-root layers behave like Figma: they enter above the current stack.
@@ -2332,8 +2280,7 @@ function renderResizeHandles(ctx: OffscreenCanvasRenderingContext2D, node: Canva
   });
   ctx.restore();
 }
-function renderMultiResizeSelection(ctx: OffscreenCanvasRenderingContext2D) {
-  const selection = multiResizeSelection();
+function renderMultiResizeSelection(ctx: OffscreenCanvasRenderingContext2D, selection = multiResizeSelection()) {
   if (!selection) return false;
   const point = toScreen(selection.bounds.x, selection.bounds.y);
   const width = selection.bounds.width * viewport.zoom;
@@ -2434,28 +2381,32 @@ function resizeLineForCanvasNode(
 }
 function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (!selectedIds.includes(node.id)) return;
-  if (node.kind === "line") {
-    renderLineOutline(ctx, node, canvasDesignTokens.stroke.selection.width);
-    renderLineEndpointHandles(ctx, node);
+  // The spatial/index projection can flatten a Relative-v1 node for paint
+  // performance. Selection must instead retain its canonical local rectangle
+  // and apply the resolved world matrix exactly once.
+  const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+  if (canonical.kind === "line") {
+    renderLineOutline(ctx, canonical, canvasDesignTokens.stroke.selection.width);
+    renderLineEndpointHandles(ctx, canonical);
     return;
   }
-  const point = toScreen(node.x, node.y);
-  const w = node.width * viewport.zoom;
-  const h = node.height * viewport.zoom;
-  const visualBounds = closedShapeStrokeLocalBounds(node);
+  const point = toScreen(canonical.x, canonical.y);
+  const w = canonical.width * viewport.zoom;
+  const h = canonical.height * viewport.zoom;
+  const visualBounds = closedShapeStrokeLocalBounds(canonical);
   const outlineX = (visualBounds?.x ?? 0) * viewport.zoom;
   const outlineY = (visualBounds?.y ?? 0) * viewport.zoom;
-  const outlineWidth = (visualBounds?.width ?? node.width) * viewport.zoom;
-  const outlineHeight = (visualBounds?.height ?? node.height) * viewport.zoom;
+  const outlineWidth = (visualBounds?.width ?? canonical.width) * viewport.zoom;
+  const outlineHeight = (visualBounds?.height ?? canonical.height) * viewport.zoom;
   ctx.save();
-  if (!applyNativeAffine(ctx, node)) {
+  if (!applyNativeAffine(ctx, canonical)) {
     ctx.translate(point.x + w / 2, point.y + h / 2);
-    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.rotate(canonical.rotation * Math.PI / 180);
     ctx.translate(-w / 2, -h / 2);
   }
   ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(outlineX + canvasDesignTokens.stroke.selection.pixelInset, outlineY + canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1)); ctx.setLineDash([]);
   ctx.restore();
-  renderResizeHandles(ctx, node);
+  renderResizeHandles(ctx, canonical);
 }
 
 /** Figma keeps a Line's selection rectangle centred on its path. A generic
@@ -2501,36 +2452,60 @@ function renderTextCreationHighlight(ctx: OffscreenCanvasRenderingContext2D, nod
 }
 function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   if (hoveredId !== node.id || selectedIds.includes(node.id) || node.visible === false) return;
-  if (node.kind === "line") {
-    renderLineOutline(ctx, node, canvasDesignTokens.stroke.hover.width);
+  const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+  if (canonical.kind === "group") {
+    // Group scalar geometry is a compatibility projection and can legitimately
+    // lag a child-derived resize until the next Core snapshot. Selection already
+    // expands a Group to its editable descendants, so hover must use that same
+    // live world-space envelope rather than the potentially stale Group record.
+    const selection = resolveMultiResizeSelection(nodes, [canonical.id]);
+    if (!selection) return;
+    const point = toScreen(selection.bounds.x, selection.bounds.y);
+    const hoverWidth = selection.bounds.width * viewport.zoom;
+    const hoverHeight = selection.bounds.height * viewport.zoom;
+    ctx.save();
+    ctx.strokeStyle = canvasDesignTokens.color.selection;
+    ctx.lineWidth = canvasDesignTokens.stroke.hover.width;
+    ctx.setLineDash([]);
+    ctx.strokeRect(
+      point.x + canvasDesignTokens.stroke.hover.pixelInset,
+      point.y + canvasDesignTokens.stroke.hover.pixelInset,
+      Math.max(0, hoverWidth - 1),
+      Math.max(0, hoverHeight - 1),
+    );
+    ctx.restore();
     return;
   }
-  const point = toScreen(node.x, node.y);
-  const w = node.width * viewport.zoom;
-  const h = node.height * viewport.zoom;
-  const visualBounds = closedShapeStrokeLocalBounds(node);
+  if (canonical.kind === "line") {
+    renderLineOutline(ctx, canonical, canvasDesignTokens.stroke.hover.width);
+    return;
+  }
+  const point = toScreen(canonical.x, canonical.y);
+  const w = canonical.width * viewport.zoom;
+  const h = canonical.height * viewport.zoom;
+  const visualBounds = closedShapeStrokeLocalBounds(canonical);
   const outlineX = (visualBounds?.x ?? 0) * viewport.zoom;
   const outlineY = (visualBounds?.y ?? 0) * viewport.zoom;
-  const outlineWidth = (visualBounds?.width ?? node.width) * viewport.zoom;
-  const outlineHeight = (visualBounds?.height ?? node.height) * viewport.zoom;
+  const outlineWidth = (visualBounds?.width ?? canonical.width) * viewport.zoom;
+  const outlineHeight = (visualBounds?.height ?? canonical.height) * viewport.zoom;
   if (w <= 0 || h <= 0) return;
   ctx.save();
-  if (!applyNativeAffine(ctx, node)) {
+  if (!applyNativeAffine(ctx, canonical)) {
     ctx.translate(point.x + w / 2, point.y + h / 2);
-    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.rotate(canonical.rotation * Math.PI / 180);
     ctx.translate(-w / 2, -h / 2);
   }
   ctx.strokeStyle = canvasDesignTokens.color.selection;
   ctx.lineWidth = canvasDesignTokens.stroke.hover.width;
-  if (node.kind === "ellipse") {
+  if (canonical.kind === "ellipse") {
     ctx.beginPath();
     ctx.ellipse(outlineX + outlineWidth / 2, outlineY + outlineHeight / 2, Math.max(0, outlineWidth / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, outlineHeight / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
     ctx.stroke();
-  } else if (node.kind === "text" || node.kind === "frame" || node.kind === "section") {
+  } else if (canonical.kind === "text" || canonical.kind === "frame" || canonical.kind === "section") {
     // Frame/Section hover bounds stay rectilinear even when their paint has rounded corners.
     ctx.strokeRect(outlineX + canvasDesignTokens.stroke.hover.pixelInset, outlineY + canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1));
   } else {
-    const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
+    const geometry = resolveInsideRoundedRect(w, h, canonical.radius * viewport.zoom, 0);
     roundedRectPath(ctx, outlineX + canvasDesignTokens.stroke.hover.pixelInset, outlineY + canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1), Math.max(0, geometry.outerRadius - canvasDesignTokens.stroke.hover.pixelInset));
     ctx.stroke();
   }
@@ -2565,61 +2540,63 @@ function renderSelectionDimensions(ctx: OffscreenCanvasRenderingContext2D, dimen
   ctx.textBaseline = "middle";
   ctx.fillText(dimensions, labelX + horizontalInset, labelY + labelHeight / 2);
 }
-function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D) {
+function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelection?: MultiResizeSelection) {
   const selectedNodes = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && node.visible !== false));
   if (selectedNodes.length === 0) return;
-  const screenBounds = selectedNodes.map((node) => {
-    const bounds = boundsForNode(node);
-    const point = toScreen(bounds.x, bounds.y);
-    return { left: point.x, top: point.y, right: point.x + bounds.width * viewport.zoom, bottom: point.y + bounds.height * viewport.zoom };
-  });
+  const screenBounds = multiSelection
+    ? (() => {
+        const point = toScreen(multiSelection.bounds.x, multiSelection.bounds.y);
+        return [{ left: point.x, top: point.y, right: point.x + multiSelection.bounds.width * viewport.zoom, bottom: point.y + multiSelection.bounds.height * viewport.zoom }];
+      })()
+    : selectedNodes.map((node) => {
+    const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+    const world = worldTransformForNode(nodes, canonical.id);
+    const corners = world
+      ? [
+          transformPoint(world, { x: 0, y: 0 }),
+          transformPoint(world, { x: canonical.width, y: 0 }),
+          transformPoint(world, { x: canonical.width, y: canonical.height }),
+          transformPoint(world, { x: 0, y: canonical.height }),
+        ].map((point) => toScreen(point.x, point.y))
+      : (() => {
+          const bounds = boundsForNode(node);
+          const point = toScreen(bounds.x, bounds.y);
+          return [point, { x: point.x + bounds.width * viewport.zoom, y: point.y + bounds.height * viewport.zoom }];
+        })();
+    return {
+      left: Math.min(...corners.map((point) => point.x)),
+      top: Math.min(...corners.map((point) => point.y)),
+      right: Math.max(...corners.map((point) => point.x)),
+      bottom: Math.max(...corners.map((point) => point.y)),
+    };
+    });
   const leftEdge = Math.min(...screenBounds.map((bounds) => bounds.left));
   const topEdge = Math.min(...screenBounds.map((bounds) => bounds.top));
   const rightEdge = Math.max(...screenBounds.map((bounds) => bounds.right));
   const bottomEdge = Math.max(...screenBounds.map((bounds) => bounds.bottom));
-  const dimensions = selectedNodes.length === 1
+  const dimensions = multiSelection
+    ? selectionDimensions(multiSelection.bounds.width, multiSelection.bounds.height)
+    : selectedNodes.length === 1
     ? selectionDimensions(selectedNodes[0].width, selectedNodes[0].height)
     : selectionDimensions((rightEdge - leftEdge) / viewport.zoom, (bottomEdge - topEdge) / viewport.zoom);
   const { height: labelHeight, horizontalInset, cornerRadius, offsetY } = canvasDesignTokens.overlay.selectionLabel;
   ctx.save();
+  // Overlay labels are viewport UI. Rendering a clipped Frame or a native
+  // affine shape earlier in the frame may legitimately leave a non-identity
+  // transform active in the shared Canvas context; never inherit it here.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
   if (selectedNode?.kind === "frame" || selectedNode?.kind === "section") {
     renderLayerName(ctx, selectedNode, true);
   }
   ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
   const labelWidth = Math.ceil(ctx.measureText(dimensions).width) + horizontalInset * 2;
-  if (selectedNode) {
-    if (selectedNode.kind === "line") {
-      const point = toScreen(selectedNode.x, selectedNode.y);
-      const local = lineSelectionBounds(selectedNode);
-      const localWidth = local.width * viewport.zoom;
-      const localBottom = (local.y + local.height) * viewport.zoom;
-      ctx.save();
-      if (!applyNativeAffine(ctx, selectedNode)) {
-        ctx.translate(point.x, point.y);
-        ctx.rotate(selectedNode.rotation * Math.PI / 180);
-      }
-      renderSelectionDimensions(ctx, dimensions, local.x * viewport.zoom + (localWidth - labelWidth) / 2, localBottom + offsetY, labelWidth, labelHeight, horizontalInset, cornerRadius);
-      ctx.restore();
-      ctx.restore();
-      return;
-    }
-    const point = toScreen(selectedNode.x, selectedNode.y);
-    const nodeWidth = selectedNode.width * viewport.zoom;
-    const nodeHeight = selectedNode.height * viewport.zoom;
-    ctx.save();
-    if (!applyNativeAffine(ctx, selectedNode)) {
-      ctx.translate(point.x + nodeWidth / 2, point.y + nodeHeight / 2);
-      ctx.rotate(selectedNode.rotation * Math.PI / 180);
-      ctx.translate(-nodeWidth / 2, -nodeHeight / 2);
-    }
-    renderSelectionDimensions(ctx, dimensions, (nodeWidth - labelWidth) / 2, nodeHeight + offsetY, labelWidth, labelHeight, horizontalInset, cornerRadius);
-    ctx.restore();
-  } else {
-    const labelX = Math.max(0, Math.min((leftEdge + rightEdge - labelWidth) / 2, width - labelWidth));
-    const labelY = Math.max(0, Math.min(bottomEdge + offsetY, height - labelHeight));
-    renderSelectionDimensions(ctx, dimensions, labelX, labelY, labelWidth, labelHeight, horizontalInset, cornerRadius);
-  }
+  // The label is screen-space UI. Its anchor shares the same world-derived
+  // selection rectangle as the outline and handles, then sits just below that
+  // rectangle instead of inheriting an unprojected x/y or object rotation.
+  const labelX = Math.max(0, Math.min((leftEdge + rightEdge - labelWidth) / 2, width - labelWidth));
+  const labelY = Math.max(0, Math.min(bottomEdge + offsetY, height - labelHeight));
+  renderSelectionDimensions(ctx, dimensions, labelX, labelY, labelWidth, labelHeight, horizontalInset, cornerRadius);
   ctx.restore();
 }
 function updateMarqueeSelection(activeDrag: Extract<Drag, { mode: "select" }>, endX: number, endY: number) {
@@ -2774,9 +2751,10 @@ function render(rendersPerInputFrame?: number) {
     && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds)
     && (visibleNodeIds.has(node.id) || node.id === editingTextNodeId),
   ));
-  const renderedMultiSelection = renderMultiResizeSelection(context!);
+  const multiSelection = multiResizeSelection();
+  const renderedMultiSelection = renderMultiResizeSelection(context!, multiSelection);
   if (!renderedMultiSelection) visibleSelected.forEach((node) => renderSelection(context!, node));
-  if (visibleSelected.length) renderSelectionLabel(context);
+  if (visibleSelected.length) renderSelectionLabel(context, multiSelection);
   renderMarquee(context);
   renderGrid(context);
   renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
@@ -2795,10 +2773,9 @@ function dispatch(command: EditorCommand) {
       wasmDocument.apply_transaction_json(structuralTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
       recordHistory("core");
       syncProjectionFromWasm(false);
-      selectedIds = command.type === "group" ? resolved.createdIds : command.type === "reparent" ? [...command.ids] : [];
-      // Ungroup selects the former children; selection must not invent a root
-      // layer from unrelated siblings.
-      if (command.type === "ungroup") selectedIds = resolved.batch[0]?.type === "reparent" ? resolved.batch[0].parentIds.map((entry) => entry.id) : [];
+      selectedIds = resolved.selectionIds.length
+        ? resolved.selectionIds
+        : command.type === "reparent" ? [...command.ids] : [];
       rebuildNodeIndex();
       render();
       emitSnapshot(journalEntry(command, structuralBaseRevision, structuralTransactionId));
@@ -2873,6 +2850,66 @@ function dispatch(command: EditorCommand) {
         render();
         emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, duplicateBaseRevision, duplicateTransactionId));
         queueRemoteOperation(duplicateTransactionId, duplicateBaseRevision, resolved.batch, wasmDocument.canonical_hash());
+      } catch (error) { emitError(error); }
+      break;
+    }
+    case "copy": {
+      // Copy is non-mutating: it only fills the Worker-owned clipboard. It never
+      // produces a Core batch, history entry or remote operation.
+      const captured = captureClipboard(nodes, command.ids, documentSchemaVersion);
+      if (!captured) { emitError(undefined, "INVALID_COMMAND"); break; }
+      clipboard = captured;
+      break;
+    }
+    case "cut": {
+      const captured = captureClipboard(nodes, command.ids, documentSchemaVersion);
+      if (!captured) { emitError(undefined, "INVALID_COMMAND"); break; }
+      // Cut = copy then delete the same roots in one atomic Core transaction.
+      const cutResolved = resolveCoreBatch(nodes, [{ type: "delete", ids: captured.rootIds }]);
+      if (!cutResolved) { emitError(undefined, "INVALID_COMMAND"); break; }
+      if (!wasmDocument) {
+        commit(() => { nodes = cutResolved.nextNodes; selectedIds = []; });
+        clipboard = captured;
+        break;
+      }
+      const cutBaseRevision = Number(wasmDocument.revision);
+      const cutTransactionId = crypto.randomUUID();
+      try {
+        wasmDocument.apply_transaction_json(cutTransactionId, wasmDocument.revision, JSON.stringify(cutResolved.batch));
+        recordHistory("core");
+        syncProjectionFromWasm(false);
+        selectedIds = [];
+        rebuildNodeIndex();
+        render();
+        // Only commit the clipboard once the delete has succeeded, so a rejected
+        // cut leaves the previous clipboard intact.
+        clipboard = captured;
+        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, cutBaseRevision, cutTransactionId));
+        queueRemoteOperation(cutTransactionId, cutBaseRevision, cutResolved.batch, wasmDocument.canonical_hash());
+      } catch (error) { emitError(error); }
+      break;
+    }
+    case "paste": {
+      if (!clipboard) break;
+      const target = pasteTarget();
+      const availableAssetIds = new Set(assets.map((asset) => asset.assetId));
+      const resolved = resolvePasteBatch(nodes, clipboard, target, availableAssetIds);
+      if (!resolved) { emitError(undefined, "INVALID_COMMAND"); break; }
+      if (!wasmDocument) {
+        commit(() => { nodes = resolved.nextNodes; selectedIds = resolved.createdIds; });
+        break;
+      }
+      const pasteBaseRevision = Number(wasmDocument.revision);
+      const pasteTransactionId = crypto.randomUUID();
+      try {
+        wasmDocument.apply_transaction_json(pasteTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
+        recordHistory("core");
+        syncProjectionFromWasm(false);
+        selectedIds = resolved.createdIds;
+        rebuildNodeIndex();
+        render();
+        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pasteBaseRevision, pasteTransactionId));
+        queueRemoteOperation(pasteTransactionId, pasteBaseRevision, resolved.batch, wasmDocument.canonical_hash());
       } catch (error) { emitError(error); }
       break;
     }
@@ -3048,8 +3085,8 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     selectedIds = resolveCanvasObjectSelection(selectedIds, target.id, event.shiftKey);
     if (target && !event.readOnly) {
-      const movable = movableSelectionIds(selectedIds);
-      drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Map(nodes.filter((node) => movable.has(node.id)).map((node) => [node.id, { x: node.x, y: node.y }])) };
+      const movable = movableSelectionIds(nodes, selectedIds);
+      drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Set(nodes.filter((node) => movable.has(node.id)).map((node) => node.id)) };
     }
     render(); emitViewState(); return;
   }
@@ -3114,10 +3151,21 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     if (activeDrag.mode === "move" && activeDrag.initial) {
       const dx = world.x - activeDrag.startX;
       const dy = world.y - activeDrag.startY;
-      nodes = nodes.map((node) => {
-        const start = activeDrag.initial?.get(node.id);
-        return start ? { ...node, ...snapCanvasPoint({ x: start.x + dx, y: start.y + dy }) } : node;
-      });
+      // A moved node's patch is resolved against the immutable pre-drag document
+      // so the total delta is applied once per frame instead of compounding, and
+      // so a Relative-v1 node's parent world transform stays stable. Legacy nodes
+      // translate their world x/y; a Relative-v1 node (every grouped child and
+      // every ungrouped former child) instead gets a fresh relativeTransform, the
+      // only edit worldSpaceProjectionNode honours.
+      const patches = new Map(activeDrag.before
+        .filter((node) => activeDrag.initial?.has(node.id))
+        .map((node) => [node.id, translateNodeWorldPatch(activeDrag.before, node.id, dx, dy, snapCanvasPoint)] as const)
+        .filter((entry): entry is readonly [string, NonNullable<(typeof entry)[1]>] => Boolean(entry[1])));
+      // Rebuild from pointer-down for every frame. `refreshTransientGroupBounds`
+      // rebases the Group and its siblings, so layering this frame's child patch
+      // onto the previous normalized scene mixes two local coordinate systems
+      // and makes a deeply selected child lag or drift away from the cursor.
+      nodes = activeDrag.before.map((node) => patches.has(node.id) ? { ...node, ...patches.get(node.id)! } : node);
       const directlyMovedGroups = new Set(activeDrag.before.filter((node) => node.kind === "group" && activeDrag.initial?.has(node.id)).map((node) => node.id));
       refreshTransientGroupBounds(directlyMovedGroups);
       transientSceneVersion += 1;
@@ -3153,6 +3201,10 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         : scaleLegacySelectionGeometry(sourceNodes, activeDrag.bounds, bounds);
       if (patches) {
         nodes = activeDrag.before.map((node) => patches.has(node.id) ? { ...node, ...patches.get(node.id)! } : node);
+        // Scaling a selected Group changes child world transforms; immediately
+        // derive its local Bounds so the Group record, selection box and Badge
+        // all describe the same transient geometry.
+        refreshTransientGroupBounds();
         transientSceneVersion += 1;
         rebuildNodeIndex();
         render();
@@ -3173,8 +3225,34 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     if (activeDrag.mode === "draw" && activeDrag.node) { dispatch({ type: "create", node: activeDrag.node }); }
     if (activeDrag.mode === "move" && activeDrag.before) {
-      const updates = nodes.filter((node) => activeDrag.initial?.has(node.id)).map(({ id, x, y, width, height }) => ({ id, x, y, width, height }));
-      const moved = hasCommittedMove(activeDrag.initial, updates);
+      // Resolve every moved node against the immutable pre-drag document. Legacy
+      // nodes yield an x/y patch; a Relative-v1 node (grouped child, ungrouped
+      // former child) yields a fresh relativeTransform, so the gesture commits as
+      // one atomic update batch that emits UpdateGeometry + SetAppearance exactly
+      // like resize. move_nodes only ever wrote x/y and silently dropped a
+      // relativeTransform, which is why grouped/ungrouped nodes appeared frozen.
+      // `nodes` is the normalized transient scene: when a child moved inside a
+      // Group it includes the Group + sibling matrix rebases required to keep
+      // every untouched child visually fixed. Persist that complete derived
+      // result in the same transaction as the drag, rather than committing only
+      // the pointer target and letting the next Core projection snap it back.
+      const moveCommands = nodes.flatMap((after) => {
+        const before = activeDrag.before.find((node) => node.id === after.id);
+        if (!before || (
+          before.x === after.x && before.y === after.y && before.width === after.width && before.height === after.height
+          && before.rotation === after.rotation && JSON.stringify(before.relativeTransform) === JSON.stringify(after.relativeTransform)
+        )) return [];
+        return [{
+          type: "update" as const,
+          id: after.id,
+          patch: { x: after.x, y: after.y, width: after.width, height: after.height, rotation: after.rotation, relativeTransform: after.relativeTransform },
+        }];
+      });
+      const moved = activeDrag.before.some((node) => activeDrag.initial?.has(node.id) && (
+        node.x !== nodes.find((candidate) => candidate.id === node.id)?.x
+        || node.y !== nodes.find((candidate) => candidate.id === node.id)?.y
+        || JSON.stringify(node.relativeTransform) !== JSON.stringify(nodes.find((candidate) => candidate.id === node.id)?.relativeTransform)
+      ));
       // A normal click selects an object and creates a move drag boundary, but
       // it must not mint a no-op transaction or remote Operation on pointer-up.
       if (!moved) { drag = undefined; render(); emitViewState(); return; }
@@ -3182,14 +3260,14 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         try {
           const baseRevision = Number(wasmDocument.revision);
           const moveTransactionId = crypto.randomUUID();
-          wasmDocument.move_nodes(moveTransactionId, wasmDocument.revision, JSON.stringify(updates));
+          const resolved = resolveCoreBatch(activeDrag.before, moveCommands);
+          if (!resolved) { emitError(undefined, "TRANSIENT"); drag = undefined; nodes = activeDrag.before; transientSceneVersion += 1; rebuildNodeIndex(); render(); emitSnapshot(); return; }
+          wasmDocument.apply_transaction_json(moveTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
           recordHistory("core");
           syncProjectionFromWasm();
           render();
-          emitSnapshot(journalEntry({ type: "move", updates }, baseRevision, moveTransactionId));
-          const resolved = resolveCoreBatch(activeDrag.before, updates.map((update) => ({ type: "update" as const, id: update.id, patch: update })));
-          if (resolved) queueRemoteOperation(moveTransactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
-          else emitError(undefined, "TRANSIENT");
+          emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, moveTransactionId));
+          queueRemoteOperation(moveTransactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
         } catch (error) {
           nodes = activeDrag.before;
           transientSceneVersion += 1;
@@ -3227,6 +3305,14 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       const beforeById = new Map(activeDrag.before.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y, width: node.width, height: node.height }]));
       const afterById = new Map(nextNodes.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y, width: node.width, height: node.height }]));
       const affinePatches = new Map(nextNodes.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, ({ x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, relativeTransform: node.relativeTransform }) satisfies SelectionTransformPatch]));
+      const derivedCommands = nextNodes.flatMap((after) => {
+        const before = activeDrag.before.find((node) => node.id === after.id);
+        if (!before || (
+          before.x === after.x && before.y === after.y && before.width === after.width && before.height === after.height
+          && before.rotation === after.rotation && JSON.stringify(before.relativeTransform) === JSON.stringify(after.relativeTransform)
+        )) return [];
+        return [{ type: "update" as const, id: after.id, patch: { x: after.x, y: after.y, width: after.width, height: after.height, rotation: after.rotation, relativeTransform: after.relativeTransform } }];
+      });
       nodes = activeDrag.before;
       transientSceneVersion += 1;
       rebuildNodeIndex();
@@ -3235,7 +3321,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         dispatchTransaction({
           id: crypto.randomUUID(),
           baseRevision: Number(wasmDocument.revision),
-          commands: activeDrag.ids.map((id) => ({ type: "update" as const, id, patch: activeDrag.requiresAffine ? affinePatches.get(id)! : afterById.get(id)! })),
+          commands: activeDrag.requiresAffine ? derivedCommands : activeDrag.ids.map((id) => ({ type: "update" as const, id, patch: afterById.get(id)! })),
         });
       } else {
         nodes = nextNodes;

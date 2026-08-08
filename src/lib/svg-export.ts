@@ -1,9 +1,11 @@
 import { colorToOpaqueSrgbCss } from "./color-rendering";
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "./corner-smoothing";
+import { insetRoundedRectRadii, outsetRoundedRectRadii } from "./aligned-rounded-rect";
 import { DEFAULT_TEXT_LINE_HEIGHT, type CanvasNode, type DocumentPaint } from "./editor-protocol";
 import { visibleNodesOnPage } from "./hierarchy-visibility";
 import { sortNodesByLayerOrder } from "./layer-order";
 import { solidLineStrokeOutlinePath } from "./line-stroke-outline";
+import { decorativeCapMeshPath, isDecorativeCap } from "./decorative-cap-mesh";
 import { perSideStrokeCenters } from "./per-side-stroke";
 import { styledTextSpans, type RenderTextStyle } from "./text-style-runs";
 import { worldTransformForNode } from "./scene-transform";
@@ -76,29 +78,24 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       : { css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient };
     return [legacy];
   };
-  const markerAttribute = (cap: CanvasNode["strokeCapStart"], edge: "start" | "end", paint: SvgPaint) => {
-    if (!cap || cap === "none" || cap === "round" || cap === "square") return "";
-    const id = `makefigma-marker-${nextDefinitionId++}`;
-    const style = `stroke="${attribute(paint.value)}" fill="${attribute(paint.value)}"${paintOpacity("stroke", paint)}${paintOpacity("fill", paint)}`;
-    const content = cap === "arrowLines"
-      ? `<path d="M 1 1 L 9 5 L 1 9" fill="none" ${style}/>`
-      : cap === "diamondFilled"
-        ? `<path d="M 1 5 L 5 1 L 9 5 L 5 9 Z" ${style}/>`
-        : cap === "circleFilled"
-          ? `<circle cx="5" cy="5" r="4" ${style}/>`
-          : `<path d="M 1 1 L 9 5 L 1 9 Z" ${style}/>`;
-    definitions.push(`<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">${content}</marker>`);
-    return ` marker-${edge}="url(#${id})"`;
+  // Decorative Line endpoints (arrowheads, diamond, dot) are filled from the
+  // shared `decorative-cap-mesh` triangle source — the exact geometry Canvas
+  // draws and hit testing selects — instead of an independently sized SVG
+  // <marker>. `endpoint`/`direction` place it in the Line's local space.
+  const decorativeCapPaint = (cap: CanvasNode["strokeCapStart"], endpoint: number, direction: -1 | 1, node: CanvasNode, paint: SvgPaint) => {
+    if (!isDecorativeCap(cap)) return "";
+    const d = decorativeCapMeshPath(cap, endpoint, direction, node.strokeWidth, number);
+    if (!d) return "";
+    return `<path d="${d}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} stroke="none" fill-rule="nonzero"/>`;
   };
   const shape = (node: CanvasNode, fill: SvgPaint, stroke: SvgPaint, fillRule = "nonzero") => {
     const common = `fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} stroke="${attribute(stroke.value)}"${paintOpacity("stroke", stroke)} fill-rule="${fillRule}" stroke-linecap="${svgStrokeCap(node)}" stroke-linejoin="${attribute(node.strokeJoin ?? "miter")}" stroke-miterlimit="${number(node.strokeMiterLimit ?? 10)}"${node.strokeDashPattern?.length ? ` stroke-dasharray="${node.strokeDashPattern.map(number).join(" ")}"` : ""}${stroke.value !== "none" ? ` stroke-width="${number(node.strokeWidth)}"` : ""}`;
     if (node.kind === "line") {
-      const markers = stroke.value === "none" ? "" : `${markerAttribute(node.strokeCapStart, "start", stroke)}${markerAttribute(node.strokeCapEnd, "end", stroke)}`;
+      const markers = stroke.value === "none" ? "" : `${decorativeCapPaint(node.strokeCapStart, 0, -1, node, stroke)}${decorativeCapPaint(node.strokeCapEnd, node.width, 1, node, stroke)}`;
       if (stroke.value !== "none" && !node.strokeDashPattern?.length && needsIndependentLineOutline(node)) {
-        const markerHost = markers ? `<path d="M 0 0 H ${number(node.width)}" fill="none" stroke="none"${markers}/>` : "";
-        return `<path d="${solidLineStrokeOutlinePath(node.width, node.strokeWidth, node.strokeCapStart, node.strokeCapEnd, number)}" fill="${attribute(stroke.value)}"${paintOpacity("fill", stroke)} stroke="none" fill-rule="nonzero"/>${markerHost}`;
+        return `<path d="${solidLineStrokeOutlinePath(node.width, node.strokeWidth, node.strokeCapStart, node.strokeCapEnd, number)}" fill="${attribute(stroke.value)}"${paintOpacity("fill", stroke)} stroke="none" fill-rule="nonzero"/>${markers}`;
       }
-      return `<path d="M 0 0 H ${number(node.width)}" ${common}${markers}/>`;
+      return `<path d="M 0 0 H ${number(node.width)}" ${common}/>${markers}`;
     }
     if (node.kind === "ellipse") {
       if (node.arcData) return `<path d="${ellipseArcPath(node)}" ${common.replace(`fill-rule="${fillRule}"`, 'fill-rule="evenodd"')}/>`;
@@ -117,27 +114,27 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     if (node.strokeDashPattern?.length) {
       const half = node.strokeWidth / 2;
       if (node.strokeAlign === "outside") {
-        const outerRadii = node.cornerRadii?.map((value) => Math.max(0, value) + half) as CanvasNode["cornerRadii"] | undefined;
+        const outerRadii = outsetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, half);
         const outer = roundedRectPath(node.width + node.strokeWidth, node.height + node.strokeWidth, node.radius + half, outerRadii, node.cornerSmoothing);
         return `${strokes.map((paint) => dashedStroke(outer, paint, ` transform="translate(${-number(half)} ${-number(half)})"`)).join("")}${fills.map((paint) => filledPath(path, paint)).join("")}`;
       }
       const innerWidth = Math.max(0, node.width - node.strokeWidth);
       const innerHeight = Math.max(0, node.height - node.strokeWidth);
-      const innerRadii = node.cornerRadii?.map((value) => Math.max(0, value - half)) as CanvasNode["cornerRadii"] | undefined;
+      const innerRadii = insetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, half);
       const inner = roundedRectPath(innerWidth, innerHeight, Math.max(0, node.radius - half), innerRadii, node.cornerSmoothing);
       return `${fills.map((paint) => filledPath(path, paint)).join("")}${innerWidth > 0 && innerHeight > 0 ? strokes.map((paint) => dashedStroke(inner, paint, ` transform="translate(${number(half)} ${number(half)})"`)).join("") : ""}`;
     }
     const shortestSide = Math.max(0, Math.min(node.width, node.height));
     if (node.strokeAlign === "outside") {
       const outset = node.strokeWidth;
-      const outerRadii = node.cornerRadii?.map((value) => Math.max(0, value) + outset) as CanvasNode["cornerRadii"] | undefined;
+      const outerRadii = outsetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, outset);
       const outer = roundedRectPath(node.width + outset * 2, node.height + outset * 2, node.radius + outset, outerRadii, node.cornerSmoothing);
       return `${strokes.map((paint) => filledPath(outer, paint, ` transform="translate(${-number(outset)} ${-number(outset)})"`)).join("")}${fills.map((paint) => filledPath(path, paint)).join("")}`;
     }
     const inset = Math.min(node.strokeWidth, shortestSide / 2);
     const innerWidth = Math.max(0, node.width - inset * 2);
     const innerHeight = Math.max(0, node.height - inset * 2);
-    const innerRadii = node.cornerRadii?.map((value) => Math.max(0, value - inset)) as CanvasNode["cornerRadii"] | undefined;
+    const innerRadii = insetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, inset);
     const inner = roundedRectPath(innerWidth, innerHeight, Math.max(0, node.radius - inset), innerRadii, node.cornerSmoothing);
     const innerPaints = innerWidth > 0 && innerHeight > 0
       ? fills.map((paint) => filledPath(inner, paint, ` transform="translate(${number(inset)} ${number(inset)})"`)).join("")

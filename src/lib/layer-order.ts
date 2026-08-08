@@ -21,6 +21,12 @@ export function sortNodesByLayerOrder<T extends Pick<CanvasNode, "id" | "positio
 }
 
 export function orderNewLayerAtFront(nodes: readonly CanvasNode[], nodeId: string): string | undefined {
+  // A legacy presentation projection may not yet carry Core's canonical
+  // sibling keys. Its visual order is still usable, but inventing a midpoint
+  // from only some keys can duplicate an occupied Core key. Use the new node's
+  // deterministic, collision-free Core fallback until the next bridge sync
+  // supplies the complete sibling key set.
+  if (nodes.some((node) => !node.positionId)) return positionIdFromNodeId(nodeId);
   const ordered = sortNodesByLayerOrder(nodes);
   return allocatePosition(ordered.at(-1)?.positionId, undefined, 1)?.[0] ?? positionIdFromNodeId(nodeId);
 }

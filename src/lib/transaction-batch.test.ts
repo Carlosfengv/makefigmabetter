@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode, type CanvasNode } from "./editor-protocol";
-import { transformPoint, worldTransformForNode } from "./scene-transform";
-import { resolveCoreBatch } from "./transaction-batch";
+import { transformPoint, translateNodeWorldPatch, worldTransformForNode } from "./scene-transform";
+import { captureClipboard, resolveCoreBatch, resolvePasteBatch } from "./transaction-batch";
 
 function rectangle(id: string): CanvasNode {
   return { ...createNode("rectangle", 10, 20), id };
@@ -140,8 +140,8 @@ describe("Core transaction batch resolution", () => {
     const before = worldTransformForNode([oldParent, newParent, child, grandchild], child.id)!;
     const resolved = resolveCoreBatch([oldParent, newParent, child, grandchild], [{ type: "reparent", ids: [child.id, grandchild.id], parentId: newParent.id }]);
 
-    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["update", "reparent"]);
-    expect(resolved?.batch[1]).toMatchObject({ type: "reparent", parentIds: [{ id: child.id, parentId: newParent.id }] });
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["reparent", "update"]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "reparent", parentIds: [{ id: child.id, parentId: newParent.id }] });
     const movedChild = resolved!.nextNodes.find((node) => node.id === child.id)!;
     const movedGrandchild = resolved!.nextNodes.find((node) => node.id === grandchild.id)!;
     expect(movedChild).toMatchObject({ parentId: newParent.id, relativeTransform: expect.any(Object) });
@@ -228,13 +228,43 @@ describe("Core transaction batch resolution", () => {
     expect(resolved?.createdIds).toEqual([groupId]);
     expect(resolved?.batch).toEqual([
       expect.objectContaining({ type: "create", node: expect.objectContaining({ id: groupId, kind: "group", x: 10, y: 20, width: 90, height: 50 }) }),
+      { type: "reparent", parentIds: [{ id: first.id, parentId: groupId, positionId: first.positionId }, { id: second.id, parentId: groupId, positionId: second.positionId }] },
       expect.objectContaining({ type: "update", node: expect.objectContaining({ id: first.id, parentId: groupId, x: 0, y: 0, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } }) }),
       expect.objectContaining({ type: "update", node: expect.objectContaining({ id: second.id, parentId: groupId, x: 70, y: 30, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 70, f: 30 } }) }),
-      { type: "reparent", parentIds: [{ id: first.id, parentId: groupId, positionId: first.positionId }, { id: second.id, parentId: groupId, positionId: second.positionId }] },
     ]);
     expect(resolved?.nextNodes.find((node) => node.id === first.id)).toMatchObject({ parentId: groupId, x: 0, y: 0, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } });
     expect(transformPoint(worldTransformForNode(resolved!.nextNodes, first.id)!, { x: 0, y: 0 })).toEqual({ x: 10, y: 20 });
     expect(transformPoint(worldTransformForNode(resolved!.nextNodes, second.id)!, { x: 0, y: 0 })).toEqual({ x: 80, y: 50 });
+  });
+
+  it("wraps a single selected layer and makes the wrapper the resolved selection", () => {
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000001"), x: 25, y: 40, width: 48, height: 24 };
+    const groupId = "00000000-0000-4000-8000-000000000003";
+    const before = worldTransformForNode([child], child.id)!;
+    const resolved = resolveCoreBatch([child], [{ type: "group", ids: [child.id] }], () => groupId);
+
+    expect(resolved?.selectionIds).toEqual([groupId]);
+    expect(resolved?.affectedGroupIds).toEqual([groupId]);
+    expect(resolved?.nextNodes.find((node) => node.id === groupId)).toMatchObject({ kind: "group", width: 48, height: 24 });
+    const after = worldTransformForNode(resolved!.nextNodes, child.id)!;
+    for (const point of [{ x: 0, y: 0 }, { x: child.width, y: 0 }, { x: child.width, y: child.height }, { x: 0, y: child.height }]) {
+      expect(transformPoint(after, point)).toEqual(transformPoint(before, point));
+    }
+  });
+
+  it("wraps a single child in a rotated Frame without visual drift", () => {
+    const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000010", width: 300, height: 200, rotation: 30 };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000011"), parentId: frame.id, width: 48, height: 24, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 30, f: 40 } };
+    const before = worldTransformForNode([frame, child], child.id)!;
+    const groupId = "00000000-0000-4000-8000-000000000012";
+    const resolved = resolveCoreBatch([frame, child], [{ type: "group", ids: [child.id] }], () => groupId)!;
+    const after = worldTransformForNode(resolved.nextNodes, child.id)!;
+
+    expect(resolved.nextNodes.find((node) => node.id === groupId)?.relativeTransform).toBeDefined();
+    for (const point of [{ x: 0, y: 0 }, { x: child.width, y: 0 }, { x: child.width, y: child.height }, { x: 0, y: child.height }]) {
+      expect(transformPoint(after, point).x).toBeCloseTo(transformPoint(before, point).x, 10);
+      expect(transformPoint(after, point).y).toBeCloseTo(transformPoint(before, point).y, 10);
+    }
   });
 
   it("wraps an existing Group and a sibling in a nested Group without moving its descendants", () => {
@@ -258,10 +288,46 @@ describe("Core transaction batch resolution", () => {
     const resolved = resolveCoreBatch([group, child], [{ type: "ungroup", id: group.id }]);
 
     expect(resolved?.batch).toEqual([
+      { type: "reparent", parentIds: [expect.objectContaining({ id: child.id, parentId: undefined, positionId: expect.any(String) })] },
       expect.objectContaining({ type: "update", node: expect.objectContaining({ id: child.id, parentId: undefined, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 20 } }) }),
-      { type: "reparent", parentIds: [{ id: child.id, parentId: undefined, positionId: child.positionId }] },
     ]);
     expect(resolved?.nextNodes).toEqual([expect.objectContaining({ id: child.id, parentId: undefined, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 20 } })]);
+    expect(resolved?.selectionIds).toEqual([child.id]);
+  });
+
+  it("moves a grouped child after grouping — the pointer drag commits its new relativeTransform", () => {
+    // Regression: after group, the child is Relative-v1, so its world position is
+    // derived from relativeTransform and ignores x/y. A move must yield a fresh
+    // relativeTransform, not an x/y patch, or the child appears frozen.
+    const first = { ...rectangle("00000000-0000-4000-8000-000000000001"), x: 10, y: 20, width: 40, height: 30, positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const second = { ...rectangle("00000000-0000-4000-8000-000000000002"), x: 80, y: 50, width: 20, height: 20, positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };
+    const groupId = "00000000-0000-4000-8000-000000000003";
+    const grouped = resolveCoreBatch([first, second], [{ type: "group", ids: [first.id, second.id] }], () => groupId);
+    const scene = grouped!.nextNodes;
+    expect(scene.find((node) => node.id === first.id)).toMatchObject({ relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } });
+
+    const patch = translateNodeWorldPatch(scene, first.id, 15, -5)!;
+    expect(patch.relativeTransform).toBeDefined();
+    const moved = resolveCoreBatch(scene, [{ type: "update", id: first.id, patch }]);
+    expect(moved).toBeDefined();
+    // The child's world origin actually shifts by the drag delta.
+    expect(transformPoint(worldTransformForNode(moved!.nextNodes, first.id)!, { x: 0, y: 0 })).toEqual({ x: 25, y: 15 });
+  });
+
+  it("moves a former child after ungrouping — its committed relativeTransform still translates", () => {
+    // Regression: ungroup leaves each former child Relative-v1 relative to the old
+    // Group's parent, so a subsequent move must also update relativeTransform.
+    const group = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000002"), parentId: group.id, positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };
+    const ungrouped = resolveCoreBatch([group, child], [{ type: "ungroup", id: group.id }]);
+    const scene = ungrouped!.nextNodes;
+    expect(scene.find((node) => node.id === child.id)).toMatchObject({ parentId: undefined, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 20 } });
+
+    const patch = translateNodeWorldPatch(scene, child.id, 30, 40)!;
+    expect(patch.relativeTransform).toBeDefined();
+    const moved = resolveCoreBatch(scene, [{ type: "update", id: child.id, patch }]);
+    expect(moved).toBeDefined();
+    expect(transformPoint(worldTransformForNode(moved!.nextNodes, child.id)!, { x: 0, y: 0 })).toEqual({ x: 40, y: 60 });
   });
 
   it("rejects duplicate requests with empty, repeated, missing, or colliding IDs", () => {
@@ -281,5 +347,107 @@ describe("Core transaction batch resolution", () => {
       { type: "update", id: "00000000-0000-4000-8000-000000000099", patch: { x: 4 } },
     ])).toBeUndefined();
     expect(source).toEqual(before);
+  });
+});
+
+describe("clipboard capture and paste resolution", () => {
+  const frameId = "00000000-0000-4000-8000-000000000011";
+  const innerId = "00000000-0000-4000-8000-000000000012";
+  const imageId = "00000000-0000-4000-8000-000000000013";
+  const siblingId = "00000000-0000-4000-8000-000000000014";
+
+  function subtreeDocument(): CanvasNode[] {
+    const frame = { ...createNode("frame", 10, 20), id: frameId, positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const inner = { ...createNode("group", 15, 25), id: innerId, parentId: frame.id, positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };
+    const image = { ...createNode("image", 5, 5), id: imageId, parentId: inner.id, assetId: "asset-a", positionId: "00000000000000000000000000000003:00000000000000000000000000000000" };
+    const sibling = { ...createNode("rectangle", 200, 40), id: siblingId, positionId: "00000000000000000000000000000004:00000000000000000000000000000000" };
+    return [frame, inner, image, sibling];
+  }
+
+  it("captures a full subtree by value and lists image asset references without bytes", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId], 19);
+    expect(clipboard?.schemaVersion).toBe(19);
+    expect(clipboard?.rootIds).toEqual([frameId]);
+    expect(clipboard?.nodes.map((node) => node.id)).toEqual([frameId, innerId, imageId]);
+    expect(clipboard?.assetIds).toEqual(["asset-a"]);
+    // A captured node must be a detached clone, never a live document reference.
+    expect(clipboard?.nodes[0]).not.toBe(subtreeDocument()[0]);
+  });
+
+  it("collapses an ancestor+descendant selection to the single owning root", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId, imageId], 19);
+    expect(clipboard?.rootIds).toEqual([frameId]);
+    expect(clipboard?.nodes).toHaveLength(3);
+  });
+
+  it("returns nothing for empty, repeated, or missing selections", () => {
+    const document = subtreeDocument();
+    expect(captureClipboard(document, [], 19)).toBeUndefined();
+    expect(captureClipboard(document, [frameId, frameId], 19)).toBeUndefined();
+    expect(captureClipboard(document, ["00000000-0000-4000-8000-000000000099"], 19)).toBeUndefined();
+  });
+
+  it("pastes a captured subtree under the page root with fresh IDs and offset roots", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId], 19)!;
+    const ids = ["00000000-0000-4000-8000-000000000021", "00000000-0000-4000-8000-000000000022", "00000000-0000-4000-8000-000000000023"];
+    const resolved = resolvePasteBatch([], clipboard, {}, new Set(["asset-a"]), () => ids.shift()!);
+
+    expect(resolved?.createdIds).toEqual(["00000000-0000-4000-8000-000000000021"]);
+    expect(resolved?.batch.map((entry) => (entry as { node: { id: string; parentId?: string; kind: string } }).node)).toEqual([
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000021", kind: "frame", parentId: undefined, x: 34, y: 44 }),
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000022", kind: "group", parentId: "00000000-0000-4000-8000-000000000021" }),
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000023", kind: "image", parentId: "00000000-0000-4000-8000-000000000022" }),
+    ]);
+  });
+
+  it("re-homes pasted roots onto the target container while remapping internal parents", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId], 19)!;
+    const target = { ...createNode("frame", 400, 400), id: "00000000-0000-4000-8000-000000000031" };
+    const ids = ["00000000-0000-4000-8000-000000000041", "00000000-0000-4000-8000-000000000042", "00000000-0000-4000-8000-000000000043"];
+    const resolved = resolvePasteBatch([target], clipboard, { parentId: target.id }, new Set(["asset-a"]), () => ids.shift()!);
+
+    expect(resolved?.batch[0]).toMatchObject({ node: { parentId: target.id } });
+    expect(resolved?.batch[1]).toMatchObject({ node: { parentId: "00000000-0000-4000-8000-000000000041" } });
+    expect(resolved?.batch[2]).toMatchObject({ node: { parentId: "00000000-0000-4000-8000-000000000042" } });
+  });
+
+  it("rejects a cross-document paste whose image asset is missing from the target index (P0-1)", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId], 19)!;
+    expect(resolvePasteBatch([], clipboard, {}, new Set())).toBeUndefined();
+    expect(resolvePasteBatch([], clipboard, {}, new Set(["other-asset"]))).toBeUndefined();
+  });
+
+  it("pastes an asset-free subtree into any document regardless of the asset index", () => {
+    const rect = { ...createNode("rectangle", 10, 20), id: siblingId, positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const clipboard = captureClipboard([rect], [siblingId], 19)!;
+    expect(clipboard.assetIds).toEqual([]);
+    const pasteId = "00000000-0000-4000-8000-000000000051";
+    const resolved = resolvePasteBatch([], clipboard, {}, new Set(), () => pasteId);
+    expect(resolved?.createdIds).toEqual([pasteId]);
+  });
+
+  it("captures and pastes all six node kinds and a nested container subtree with distinct fresh IDs", () => {
+    const frame = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000101", positionId: "00000000000000000000000000000101:00000000000000000000000000000000" };
+    const rect = { ...createNode("rectangle", 5, 5), id: "00000000-0000-4000-8000-000000000102", parentId: frame.id, positionId: "00000000000000000000000000000102:00000000000000000000000000000000" };
+    const ellipse = { ...createNode("ellipse", 6, 6), id: "00000000-0000-4000-8000-000000000103", parentId: frame.id, positionId: "00000000000000000000000000000103:00000000000000000000000000000000" };
+    const line = { ...createNode("line", 7, 7), id: "00000000-0000-4000-8000-000000000104", parentId: frame.id, positionId: "00000000000000000000000000000104:00000000000000000000000000000000" };
+    const text = { ...createNode("text", 8, 8), id: "00000000-0000-4000-8000-000000000105", parentId: frame.id, text: "Hi", positionId: "00000000000000000000000000000105:00000000000000000000000000000000" };
+    const image = { ...createNode("image", 9, 9), id: "00000000-0000-4000-8000-000000000106", parentId: frame.id, assetId: "asset-z", positionId: "00000000000000000000000000000106:00000000000000000000000000000000" };
+    const document = [frame, rect, ellipse, line, text, image];
+
+    const clipboard = captureClipboard(document, [frame.id], 19)!;
+    expect(clipboard.nodes.map((node) => node.kind)).toEqual(["frame", "rectangle", "ellipse", "line", "text", "image"]);
+    expect(clipboard.assetIds).toEqual(["asset-z"]);
+
+    let seq = 0;
+    const resolved = resolvePasteBatch(document, clipboard, { parentId: frame.id }, new Set(["asset-z"]), () => `00000000-0000-4000-8000-0000000002${(seq++).toString().padStart(2, "0")}`);
+    const created = resolved!.batch.map((entry) => (entry as { node: { id: string; kind: string; parentId?: string } }).node);
+    expect(created.map((node) => node.kind)).toEqual(["frame", "rectangle", "ellipse", "line", "text", "image"]);
+    // Every pasted node receives a fresh ID distinct from the source document.
+    expect(created.every((node) => !document.some((original) => original.id === node.id))).toBe(true);
+    expect(new Set(created.map((node) => node.id)).size).toBe(6);
+    // Only the root is reported for post-paste selection; descendants re-nest under the remapped root.
+    expect(resolved!.createdIds).toEqual([created[0].id]);
+    expect(created.slice(1).every((node) => node.parentId === created[0].id)).toBe(true);
   });
 });

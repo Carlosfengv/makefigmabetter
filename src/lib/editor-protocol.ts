@@ -130,6 +130,11 @@ export interface CanvasNode {
   contentsHidden?: boolean;
   /** Frame-only. Omission retains Figma's default: descendants are clipped. */
   clipsContent?: boolean;
+  /** Forward-compatibility payloads owned by newer engine versions. The browser
+   * treats this as an opaque read-only pass-through: bytes are preserved verbatim
+   * across every snapshot and operation boundary and never surfaced in the
+   * Inspector. serde_json encodes each Rust `Vec<u8>` as a number array (P0-2). */
+  extensions?: Record<string, number[]>;
 }
 
 export interface CanvasPage {
@@ -151,7 +156,7 @@ export interface DocumentAsset {
 /** A fully resolved Core mutation. It is intentionally byte-free so a pending
  * remote operation can be reapplied to a newer canonical snapshot after a
  * rejected base revision. */
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "cornerRadii" | "cornerSmoothing" | "constraints" | "relativeTransform" | "opacity" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "assetId" | "textProperties"> & { cornerRadius: number; text: string };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "cornerRadii" | "cornerSmoothing" | "constraints" | "relativeTransform" | "opacity" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
@@ -160,6 +165,21 @@ export type CoreBatchCommand =
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   | { type: "reparent"; parentIds: Array<{ id: string; parentId?: string; positionId: string }> }
   | { type: "delete"; ids: string[] };
+
+/** The Worker-owned clipboard. It holds captured subtree projections by value,
+ * carrying image references only as AssetIds — never raw bytes — so a paste into
+ * another document must re-validate each AssetId against that document's
+ * Resource Index before instantiating the node (P0-1). */
+export interface EditorClipboard {
+  /** Current durable schema version, guarding a stale cross-tab payload. */
+  schemaVersion: number;
+  /** Layer-ordered top-level roots to instantiate, in this capture. */
+  rootIds: string[];
+  /** Every node of every captured subtree, parent-before-child. */
+  nodes: CanvasNode[];
+  /** Distinct image AssetIds the capture references, for paste re-validation. */
+  assetIds: string[];
+}
 
 export interface Viewport {
   x: number;
@@ -358,6 +378,15 @@ export type EditorCommand =
   | { type: "select"; ids: string[] }
   | { type: "delete"; ids: string[] }
   | { type: "duplicate"; ids: string[] }
+  /** Captures the selected hierarchy roots into the Worker-owned clipboard.
+   * Never carries raw asset bytes: image nodes reference an AssetId that paste
+   * re-validates against the target document's Resource Index. */
+  | { type: "copy"; ids: string[] }
+  /** Copy followed by an atomic delete of the same subtree roots. */
+  | { type: "cut"; ids: string[] }
+  /** Instantiates the clipboard subtree under the current container or page
+   * root, remapping every node to a fresh ID. No-op on an empty clipboard. */
+  | { type: "paste" }
   | { type: "undo" }
   | { type: "redo" }
   | { type: "reset" }
@@ -410,7 +439,14 @@ export type MainToWorker =
   | { type: "command"; command: EditorCommand }
   | EditorInputEvent
   | { type: "input"; buffer: ArrayBuffer }
-  | { type: "key"; key: string; metaKey: boolean; shiftKey: boolean };
+  | {
+      type: "key";
+      key: string;
+      metaKey: boolean;
+      shiftKey: boolean;
+      /** Resolved in the browser so the Worker never guesses platform shortcuts. */
+      alternativeUngroup: boolean;
+    };
 
 export type WorkerToMain =
   | { type: "snapshot"; snapshot: EditorSnapshot }

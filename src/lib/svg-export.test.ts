@@ -81,13 +81,21 @@ describe("SVG export", () => {
     expect(result.svg).toContain('<path d="M 100 40 A 50 40');
   });
 
-  it("maps Arrow's Line + StrokeCap representation to SVG markers", () => {
+  it("fills decorative Line endpoints from the shared cap mesh instead of independently sized markers", () => {
     const arrow = { ...createNode("line", 0, 0), id: "00000000-0000-4000-8000-000000000001", pageId, width: 120, strokeCapEnd: "arrowLines" as const, strokeCapStart: "diamondFilled" as const };
     const result = exportPageToSvg([arrow], { pageId, defaultPageId: pageId });
 
-    expect(result.svg).toContain('marker-start="url(#makefigma-marker-');
-    expect(result.svg).toContain('marker-end="url(#makefigma-marker-');
-    expect(result.svg).toContain('<marker id="makefigma-marker-');
+    // The decorative caps are now filled triangle meshes in the Line's local
+    // space — the same geometry Canvas draws and hit testing selects — so no
+    // <marker> element or independent size model can drift from the render.
+    expect(result.svg).not.toContain("<marker");
+    expect(result.svg).not.toContain("marker-start=");
+    expect(result.svg).not.toContain("marker-end=");
+    // Diamond start cap: size = max(8, 1·4) = 8, direction −1, so it reaches
+    // back to x = −8 with the near vertex at x = −4 (half) and ±4 vertically.
+    expect(result.svg).toContain('<path d="M 0 0 L -4 4 L -8 0 Z M 0 0 L -8 0 L -4 -4 Z" fill="#0048FF" stroke="none" fill-rule="nonzero"/>');
+    // End arrowLines barbs point back from x = 120 as thin filled quads.
+    expect(result.svg).toContain('L 113.32179676972449');
   });
 
   it("uses Line's start-endpoint transform and visible stroke envelope for the export viewport", () => {
@@ -151,8 +159,20 @@ describe("SVG export", () => {
     expect(result.svg).toContain('opacity="0.8"');
   });
 
-  it("exports Frame/Rectangle inside and outside Stroke as paint rings", () => {
-    const inside = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000001", pageId, width: 100, height: 60, radius: 12, strokeWidth: 8, strokeAlign: "inside" as const };
+  it("expands explicit per-corner radii through the shared aligned-stroke source for Outside export", () => {
+    const rectangle = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000001", pageId, width: 100, height: 60, cornerRadii: [10, 10, 10, 10] as [number, number, number, number], strokeWidth: 8, strokeAlign: "outside" as const };
+    const result = exportPageToSvg([rectangle], { pageId, defaultPageId: pageId });
+
+    // The outer ring's corners are 10 + 8 = 18, derived from the shared
+    // `outsetRoundedRectRadii` — the same source Canvas and hit testing use — so
+    // an explicit per-corner radius grows identically across all three consumers
+    // instead of each re-deriving the aligned expansion.
+    expect(result.warnings).toEqual([]);
+    expect(result.svg).toContain('d="M 18 0 H 98 A 18 18 0 0 1 116 18 V 58 A 18 18 0 0 1 98 76 H 18 A 18 18 0 0 1 0 58 V 18 A 18 18 0 0 1 18 0 Z"');
+    expect(result.svg).toContain('transform="translate(-8 -8)"');
+  });
+
+  it("exports Frame/Rectangle inside and outside Stroke as paint rings", () => {    const inside = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000001", pageId, width: 100, height: 60, radius: 12, strokeWidth: 8, strokeAlign: "inside" as const };
     const outside = { ...createNode("rectangle", 120, 0), id: "00000000-0000-4000-8000-000000000002", pageId, width: 100, height: 60, radius: 12, strokeWidth: 8, strokeAlign: "outside" as const };
 
     const result = exportPageToSvg([inside, outside], { pageId, defaultPageId: pageId });
