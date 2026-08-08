@@ -567,6 +567,38 @@ export class DocumentEngine {
 if (Symbol.dispose) DocumentEngine.prototype[Symbol.dispose] = DocumentEngine.prototype.free;
 
 /**
+ * Projects a decorative Line endpoint marker (arrowhead, diamond or dot) from
+ * the same Core geometry the Canvas renderer, hit test and SVG export consume.
+ * `endpoint`/`direction` place and orient the marker in the Line's local space
+ * (`direction` is `-1` at the start, `1` at the end); `stroke_width` sizes it.
+ * @param {string} cap
+ * @param {number} endpoint
+ * @param {number} direction
+ * @param {number} stroke_width
+ * @returns {string}
+ */
+export function decorative_cap_mesh_json(cap, endpoint, direction, stroke_width) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decorative_cap_mesh_json(ptr0, len0, endpoint, direction, stroke_width);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * @returns {number}
  */
 export function engine_semantics_version() {

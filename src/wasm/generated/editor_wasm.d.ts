@@ -99,6 +99,14 @@ export class DocumentEngine {
     readonly revision: bigint;
 }
 
+/**
+ * Projects a decorative Line endpoint marker (arrowhead, diamond or dot) from
+ * the same Core geometry the Canvas renderer, hit test and SVG export consume.
+ * `endpoint`/`direction` place and orient the marker in the Line's local space
+ * (`direction` is `-1` at the start, `1` at the end); `stroke_width` sizes it.
+ */
+export function decorative_cap_mesh_json(cap: string, endpoint: number, direction: number, stroke_width: number): string;
+
 export function engine_semantics_version(): number;
 
 /**
@@ -212,6 +220,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_documentengine_free: (a: number, b: number) => void;
+    readonly decorative_cap_mesh_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly documentengine_apply_transaction_json: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
     readonly documentengine_can_redo: (a: number) => number;
     readonly documentengine_can_undo: (a: number) => number;

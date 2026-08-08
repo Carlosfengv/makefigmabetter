@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_documentengine_free: (a: number, b: number) => void;
+export const decorative_cap_mesh_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const documentengine_apply_transaction_json: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
 export const documentengine_can_redo: (a: number) => number;
 export const documentengine_can_undo: (a: number) => number;

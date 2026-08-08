@@ -18,3 +18,5 @@ serde_json = "1"
 
 [dev-dependencies]
 font-test-data = "0.8"
+makefigma-protocol = { path = "../protocol" }
+prost = "0.13.5"

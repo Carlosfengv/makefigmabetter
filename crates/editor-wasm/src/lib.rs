@@ -9,7 +9,7 @@ use editor_core::{
     ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun,
     Transaction, TransactionId,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
-    geometry::{PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle, StrokeStyle, stroke_mesh_for_continuous_rounded_rectangle_with_radii, stroke_mesh_for_dashed_line, stroke_mesh_for_dashed_polyline, stroke_mesh_for_dashed_rounded_rectangle_with_radii, stroke_mesh_for_polyline, stroke_mesh_for_rounded_rectangle, stroke_mesh_for_rounded_rectangle_with_radii, stroke_meshes_for_per_side_rectangle, stroke_meshes_for_per_side_rectangle_with_dash},
+    geometry::{DecorativeCapStyle, PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle, StrokeStyle, decorative_cap_mesh, stroke_mesh_for_continuous_rounded_rectangle_with_radii, stroke_mesh_for_dashed_line, stroke_mesh_for_dashed_polyline, stroke_mesh_for_dashed_rounded_rectangle_with_radii, stroke_mesh_for_polyline, stroke_mesh_for_rounded_rectangle, stroke_mesh_for_rounded_rectangle_with_radii, stroke_meshes_for_per_side_rectangle, stroke_meshes_for_per_side_rectangle_with_dash},
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -335,24 +335,32 @@ impl DocumentEngine {
                         contents_hidden: node.contents_hidden,
                         clips_content: Some(node.clips_content),
                     };
-                    commands.extend([
-                        Command::UpdateGeometry {
-                            id: node.id,
-                            x: node.x,
-                            y: node.y,
-                            width: node.width,
-                            height: node.height,
-                            rotation: node.rotation,
-                        },
-                        Command::Rename {
-                            id: node.id,
-                            name: node.name,
-                        },
-                        Command::SetAppearance {
-                            id: node.id,
-                            appearance,
-                        },
-                    ]);
+                    let geometry = Command::UpdateGeometry {
+                        id: node.id,
+                        x: node.x,
+                        y: node.y,
+                        width: node.width,
+                        height: node.height,
+                        rotation: node.rotation,
+                    };
+                    let rename = Command::Rename {
+                        id: node.id,
+                        name: node.name,
+                    };
+                    let appearance = Command::SetAppearance {
+                        id: node.id,
+                        appearance,
+                    };
+                    // A Group promoted into another Group acquires a
+                    // parent-relative matrix in this same batch. Core must see
+                    // that matrix before validating its derived geometry;
+                    // otherwise the legacy Group gate rejects a valid nested
+                    // Group as an invalid edit.
+                    if node.kind == NodeKind::Group && node.relative_transform.is_some() {
+                        commands.extend([appearance, geometry, rename]);
+                    } else {
+                        commands.extend([geometry, rename, appearance]);
+                    }
                     if node.kind != NodeKind::Text {
                         if self.document.asset_for_node(node.id) != asset_id {
                             commands.push(Command::SetNodeAsset {
@@ -621,6 +629,13 @@ struct ProjectionNode {
     contents_hidden: bool,
     #[serde(default)]
     clips_content: Option<bool>,
+    /// Forward-compatibility payloads owned by newer engine versions. Absent in
+    /// snapshots written before extensions existed. The browser treats this as
+    /// an opaque read-only pass-through: bytes are preserved verbatim across the
+    /// JSON round-trip and never surfaced in the Inspector. serde_json encodes
+    /// each `Vec<u8>` as a number array, so the round-trip is byte-exact.
+    #[serde(default)]
+    extensions: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -787,7 +802,9 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn load_snapshot_protobuf(&mut self, bytes: &[u8]) -> Result<u64, JsValue> {
         self.document = makefigma_document_codec::document_from_wire_snapshot(bytes)
-            .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))?;
+            // The prior `self.document` is untouched because `?` short-circuits
+            // before the assignment: a rejected load never mutates the open doc.
+            .map_err(|error| JsValue::from_str(snapshot_error_code(error)))?;
         Ok(self.document.revision)
     }
 
@@ -1271,6 +1288,7 @@ impl DocumentEngine {
             locked,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         self.submit_create(
             parse_id(transaction_id)?,
@@ -1340,6 +1358,7 @@ impl DocumentEngine {
             locked,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         self.submit_create_on_page(
             parse_id(transaction_id)?,
@@ -1410,6 +1429,7 @@ impl DocumentEngine {
             locked,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         let _ = parse_id(transaction_id)?;
         if base_revision != self.document.revision {
@@ -1630,6 +1650,39 @@ pub fn stroke_mesh_for_polyline_json(
         closed,
     )
     .map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_STYLE"))?;
+    Ok(serde_json::json!({
+        "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
+        "bounds": mesh.bounds.map(|bounds| {
+            serde_json::json!({
+                "min": [bounds.min.x, bounds.min.y],
+                "max": [bounds.max.x, bounds.max.y],
+            })
+        }),
+    })
+    .to_string())
+}
+
+/// Projects a decorative Line endpoint marker (arrowhead, diamond or dot) from
+/// the same Core geometry the Canvas renderer, hit test and SVG export consume.
+/// `endpoint`/`direction` place and orient the marker in the Line's local space
+/// (`direction` is `-1` at the start, `1` at the end); `stroke_width` sizes it.
+#[wasm_bindgen]
+pub fn decorative_cap_mesh_json(
+    cap: &str,
+    endpoint: f64,
+    direction: f64,
+    stroke_width: f64,
+) -> Result<String, JsValue> {
+    let cap = match cap {
+        "arrowLines" => DecorativeCapStyle::ArrowLines,
+        "arrowEquilateral" => DecorativeCapStyle::ArrowEquilateral,
+        "triangleFilled" => DecorativeCapStyle::TriangleFilled,
+        "diamondFilled" => DecorativeCapStyle::DiamondFilled,
+        "circleFilled" => DecorativeCapStyle::CircleFilled,
+        _ => return Err(JsValue::from_str("INVALID_DECORATIVE_CAP")),
+    };
+    let mesh = decorative_cap_mesh(cap, endpoint, direction, stroke_width)
+        .map_err(|_| JsValue::from_str("INVALID_DECORATIVE_CAP_STYLE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| {
@@ -2239,6 +2292,19 @@ fn parse_id(value: &str) -> Result<NodeId, JsValue> {
         .map_err(|_| JsValue::from_str("INVALID_ID"))
 }
 
+/// Maps a codec snapshot rejection to a stable string code for the Worker error
+/// boundary. A node minted by a newer engine is not corruption: it gets a
+/// distinguishable code so the shell degrades to read-only rather than reporting
+/// generic data corruption (ADR 0023, P0-3).
+fn snapshot_error_code(error: makefigma_document_codec::SnapshotError) -> &'static str {
+    match error {
+        makefigma_document_codec::SnapshotError::UnsupportedFutureNode => {
+            "DOCUMENT_REQUIRES_NEWER_CLIENT"
+        }
+        makefigma_document_codec::SnapshotError::Invalid => "INVALID_CORE_SNAPSHOT",
+    }
+}
+
 fn parse_kind(value: &str) -> Result<NodeKind, JsValue> {
     match value {
         "frame" => Ok(NodeKind::Frame),
@@ -2581,6 +2647,7 @@ fn projection_node(
         locked: node.locked,
         contents_hidden: node.contents_hidden,
         clips_content: Some(node.clips_content),
+        extensions: node.extensions.clone().into_iter().collect(),
     }
 }
 
@@ -2756,6 +2823,7 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         locked: node.locked,
         contents_hidden: node.contents_hidden,
         clips_content,
+        extensions: node.extensions.into_iter().collect(),
     })
 }
 
@@ -2819,6 +2887,46 @@ fn core_error(error: editor_core::CommandError) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn existing_rect(id: NodeId) -> Node {
+        Node {
+            id,
+            parent_id: None,
+            position: PositionId::for_node(id),
+            name: "Existing".into(),
+            kind: NodeKind::Rectangle,
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+            rotation: 0.0,
+            fill: "#ffffff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
+        }
+    }
 
     #[test]
     fn exposes_canonical_stroke_mesh_at_the_wasm_boundary() {
@@ -2903,6 +3011,26 @@ mod tests {
             ).unwrap(),
         ).unwrap();
         assert!(dashed_closed["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+    }
+
+    #[test]
+    fn exposes_decorative_endpoint_cap_meshes_at_the_wasm_boundary() {
+        // End arrowhead: tip at the endpoint, base `size` (= max(8, w·4)) beyond.
+        let arrow = serde_json::from_str::<serde_json::Value>(
+            &decorative_cap_mesh_json("arrowEquilateral", 100.0, 1.0, 3.0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(arrow["bounds"]["min"][0], serde_json::json!(100.0));
+        assert_eq!(arrow["bounds"]["max"][0], serde_json::json!(112.0));
+        assert!(arrow["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+
+        // Start dot: centred on the endpoint, radius size/2 = 8.
+        let dot = serde_json::from_str::<serde_json::Value>(
+            &decorative_cap_mesh_json("circleFilled", 0.0, -1.0, 4.0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dot["bounds"]["min"], serde_json::json!([-8.0, -8.0]));
+        assert_eq!(dot["bounds"]["max"], serde_json::json!([8.0, 8.0]));
     }
 
     #[test]
@@ -3403,6 +3531,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         assert_eq!(
             engine
@@ -3415,6 +3544,161 @@ mod tests {
                 .submit_rename(NodeId(17), 0, id, "Stale".into())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unknown_node_extensions_survive_operation_replay_and_both_snapshot_boundaries() {
+        // A node authored by a future engine carries opaque extension payloads.
+        // They must ride through operation replay (submit_create) and both the
+        // durable Protobuf service boundary and the browser-local JSON boundary
+        // byte-for-byte, without ever surfacing as an editable field.
+        let mut extensions = std::collections::BTreeMap::new();
+        extensions.insert("phase3.autoLayout".to_string(), vec![0x00, 0xff, 0x7f, 0x80, 0x00]);
+        extensions.insert("phase3.blend".to_string(), Vec::<u8>::new());
+
+        let id = NodeId(1);
+        let node = Node {
+            id,
+            parent_id: None,
+            position: PositionId::for_node(id),
+            name: "Future".into(),
+            kind: NodeKind::Rectangle,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation: 0.0,
+            fill: "#e6edff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: false,
+            extensions: extensions.clone(),
+        };
+
+        let mut source = DocumentEngine::new();
+        source.submit_create(NodeId(16), 0, node, Origin::LocalUser).unwrap();
+        // Operation replay preserved the payloads verbatim.
+        assert_eq!(source.document.node(id).unwrap().extensions, extensions);
+        let source_hash = source.canonical_hash();
+
+        // Durable Protobuf service boundary.
+        let service_wire = source.snapshot_protobuf().unwrap();
+        let mut service_rehydrated = DocumentEngine::new();
+        service_rehydrated.load_snapshot_protobuf(&service_wire).unwrap();
+        assert_eq!(service_rehydrated.document.node(id).unwrap().extensions, extensions);
+        assert_eq!(service_rehydrated.canonical_hash(), source_hash);
+
+        // Browser-local JSON recovery boundary.
+        let mut browser_rehydrated = DocumentEngine::new();
+        browser_rehydrated.load_snapshot_json(&service_rehydrated.snapshot_json()).unwrap();
+        assert_eq!(browser_rehydrated.document.node(id).unwrap().extensions, extensions);
+        assert_eq!(browser_rehydrated.canonical_hash(), source_hash);
+    }
+
+    #[test]
+    fn future_node_kind_snapshot_is_rejected_read_only_without_mutating_the_open_document() {
+        use prost::Message;
+        // Build a valid one-node snapshot, then rewrite that node's kind to a tag
+        // no current engine mints (a Phase 3 NodeKind reaching an old client).
+        let id = NodeId(1);
+        let node = Node {
+            id,
+            parent_id: None,
+            position: PositionId::for_node(id),
+            name: "Present".into(),
+            kind: NodeKind::Rectangle,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            rotation: 0.0,
+            fill: "#e6edff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: Default::default(),
+            stroke_cap_end: Default::default(),
+            stroke_join: Default::default(),
+            stroke_miter_limit: 10.0,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
+            arc_data: None,
+            relative_transform: None,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            text: String::new(),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: false,
+            extensions: std::collections::BTreeMap::new(),
+        };
+        let mut source = DocumentEngine::new();
+        source.submit_create(NodeId(16), 0, node, Origin::LocalUser).unwrap();
+        let wire = source.snapshot_protobuf().unwrap();
+
+        let mut decoded = makefigma_protocol::v1::DocumentSnapshot::decode(wire.as_slice()).unwrap();
+        let reference = &mut decoded.page_chunks[0].nodes[0];
+        let mut inner =
+            makefigma_protocol::v1::SceneNode::decode(reference.canonical_node.as_slice()).unwrap();
+        inner.kind = 9; // beyond NODE_KIND_SECTION = 8
+        reference.canonical_node = inner.encode_to_vec();
+        let future_wire = decoded.encode_to_vec();
+
+        // A client with an already-open document. The codec rejects the future
+        // snapshot before `load_snapshot_protobuf` ever reassigns `self.document`
+        // (the `?` short-circuits), so the open document cannot be mutated. We
+        // assert the rejection at the codec layer directly: constructing the
+        // wasm-bindgen JsValue error is not possible in a native test.
+        let mut engine = DocumentEngine::new();
+        engine.submit_create(NodeId(17), 0, existing_rect(NodeId(2)), Origin::LocalUser).unwrap();
+        let hash_before = engine.canonical_hash();
+
+        assert_eq!(
+            makefigma_document_codec::document_from_wire_snapshot(&future_wire).unwrap_err(),
+            makefigma_document_codec::SnapshotError::UnsupportedFutureNode
+        );
+        // That rejection maps to the distinguishable read-only code, not the
+        // generic corruption code (ADR 0023, P0-3).
+        assert_eq!(
+            snapshot_error_code(makefigma_document_codec::SnapshotError::UnsupportedFutureNode),
+            "DOCUMENT_REQUIRES_NEWER_CLIENT"
+        );
+        assert_eq!(
+            snapshot_error_code(makefigma_document_codec::SnapshotError::Invalid),
+            "INVALID_CORE_SNAPSHOT"
+        );
+        // The open document is untouched and still loadable.
+        assert_eq!(engine.canonical_hash(), hash_before);
+        assert!(engine.document.node(NodeId(2)).is_some());
+        // The same well-formed wire still loads once its kind is a known value.
+        let mut ok_engine = DocumentEngine::new();
+        assert!(ok_engine.load_snapshot_protobuf(&wire).is_ok());
     }
 
     #[test]
@@ -3455,6 +3739,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         let second = Node {
             id: NodeId(2),
@@ -3557,6 +3842,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         engine
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -3607,6 +3893,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         source
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -3660,6 +3947,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         source
             .document
@@ -3771,6 +4059,98 @@ mod tests {
     }
 
     #[test]
+    fn phase2_snapshot_fixtures_migrate_and_preserve_new_version_fields() {
+        // Phase 2 introduced v16 (StrokeCap), v17 (corner_radii), v18 (corner
+        // smoothing) and v19 (paint stacks). Each fixture freezes the version that
+        // first carried its new field; all migrate to the current projection, keep
+        // that field, round-trip Hash-stable, and re-migrate idempotently (P0-4).
+        let fixtures = [
+            (
+                "v16",
+                include_str!("../../../fixtures/documents/phase2-snapshot-v16.fixture.json"),
+                "4e87b90c55bb672013acd0e1a0baf62d4f35e80b6967ee75feee168fc1c81e05",
+            ),
+            (
+                "v17",
+                include_str!("../../../fixtures/documents/phase2-snapshot-v17.fixture.json"),
+                "e4100f2040c3448b463f4a21f48fc0766046dafe929256dc9f9971ba3279a893",
+            ),
+            (
+                "v18",
+                include_str!("../../../fixtures/documents/phase2-snapshot-v18.fixture.json"),
+                "634b5aafcefab752d41cca06a2464ba6624070346a012786e2e34f94868a93dc",
+            ),
+            (
+                "v19",
+                include_str!("../../../fixtures/documents/phase2-snapshot-v19.fixture.json"),
+                "9f3f4e0e3eb78fdb388f9991d1eb84e2b8352f66eeb31a48f7a0b8eee5ab3da8",
+            ),
+        ];
+        let line_id = parse_id("00000000-0000-4000-8000-000000000102").unwrap();
+        let panel_id = parse_id("00000000-0000-4000-8000-000000000103").unwrap();
+        for (version, fixture, expected_hash) in fixtures {
+            let mut migrated = DocumentEngine::new();
+            migrated.load_snapshot_json(fixture).unwrap();
+            assert_eq!(migrated.document.pages().count(), 2, "{version}");
+            assert_eq!(migrated.document.nodes().count(), 5, "{version}");
+
+            // v16: the arrow cap survived migration to the current projection.
+            let line = migrated.document.node(line_id).unwrap();
+            assert_eq!(line.stroke_cap_end, StrokeCap::ArrowLines, "{version}");
+
+            let panel = migrated.document.node(panel_id).unwrap();
+            if version >= "v17" {
+                // v17: independent per-corner radii are preserved.
+                assert_eq!(panel.corner_radii, vec![4.0, 8.0, 16.0, 24.0], "{version}");
+            }
+            if version >= "v18" {
+                // v18: continuous corner smoothing is preserved.
+                assert_eq!(panel.corner_smoothing, 0.6, "{version}");
+            }
+            if version >= "v19" {
+                // v19: the ordered fill/stroke stacks are preserved.
+                assert_eq!(panel.fills.len(), 2, "{version}");
+                assert_eq!(panel.strokes.len(), 2, "{version}");
+            }
+
+            let projection = migrated.snapshot_json();
+            assert!(projection.contains(r#""schemaVersion":19"#), "{version}");
+
+            // Re-migrating the current projection is idempotent and Hash-stable.
+            let mut round_trip = DocumentEngine::new();
+            round_trip.load_snapshot_json(&projection).unwrap();
+            assert_eq!(round_trip.canonical_hash(), migrated.canonical_hash(), "{version}");
+            assert_eq!(migrated.canonical_hash(), expected_hash, "{version}");
+        }
+    }
+
+    #[test]
+    fn transparent_legacy_paint_migrates_to_transparent_paint_not_empty() {
+        // Phase 2 froze the rule that a transparent CSS paint ("#00000000" or
+        // "transparent") migrates to a transparent Solid Paint, never to an empty
+        // paint stack. parse_css_color implements it; this pins the behavior (P0-4).
+        let transparent = parse_css_color("#00000000").unwrap();
+        assert_eq!(transparent.alpha, 0.0);
+        assert_eq!(parse_css_color("transparent").unwrap().alpha, 0.0);
+
+        // A node whose stroke is transparent keeps a Solid transparent stroke.
+        let mut engine = DocumentEngine::new();
+        engine
+            .load_snapshot_json(include_str!(
+                "../../../fixtures/documents/phase2-snapshot-v16.fixture.json"
+            ))
+            .unwrap();
+        let root = engine
+            .document
+            .node(parse_id("00000000-0000-4000-8000-000000000101").unwrap())
+            .unwrap();
+        match &root.stroke {
+            Paint::Solid(color) => assert_eq!(color.alpha, 0.0),
+            _ => panic!("transparent stroke must remain a Solid transparent paint, not a gradient/empty"),
+        }
+    }
+
+    #[test]
     fn core_snapshot_retains_deleted_id_tombstones() {
         let mut source = DocumentEngine::new();
         let node = Node {
@@ -3808,6 +4188,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
         };
         source
             .submit_create(NodeId(16), 0, node, Origin::LocalUser)
@@ -3861,6 +4242,7 @@ mod tests {
                         locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
                     },
                     Origin::LocalUser,
                 )
@@ -3910,6 +4292,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
                 },
                 Origin::LocalUser,
             )
@@ -3973,6 +4356,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
         };
 
         let revision = engine
@@ -4020,7 +4404,6 @@ mod tests {
                 1,
                 vec![
                     BatchCommand::Create { node: group },
-                    BatchCommand::Update { node: first_as_group_child },
                     BatchCommand::Reparent {
                         parent_ids: vec![ParentUpdate {
                             id: "00000000-0000-4000-8000-000000000001".into(),
@@ -4028,6 +4411,7 @@ mod tests {
                             position_id: "00000000000000000000000000000001:00000000000000000000000000000000".into(),
                         }],
                     },
+                    BatchCommand::Update { node: first_as_group_child },
                 ],
             )
             .unwrap();
@@ -4038,6 +4422,45 @@ mod tests {
         assert_eq!(engine.document.node(first_id).unwrap().relative_transform, None);
         engine.document.redo().unwrap();
         assert_eq!(engine.document.node(first_id).unwrap().parent_id, Some(group_core_id));
+
+        // A Group is itself a valid Group child. Re-wrapping it must carry the
+        // same parent-relative transform protocol as a shape child.
+        let outer_group_id = "00000000-0000-0000-0000-000000000004";
+        let outer_group_core_id = parse_id(outer_group_id).unwrap();
+        let mut outer_group = node(outer_group_id, "Outer Group");
+        outer_group.kind = "group".into();
+        outer_group.x = 10.0;
+        outer_group.y = 20.0;
+        let mut nested_group = node(group_id, "Group");
+        nested_group.kind = "group".into();
+        nested_group.x = 0.0;
+        nested_group.y = 0.0;
+        nested_group.relative_transform = Some(ProjectionTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        });
+        engine
+            .submit_batch(
+                NodeId(18),
+                engine.document.revision,
+                vec![
+                    BatchCommand::Create { node: outer_group },
+                    BatchCommand::Reparent {
+                        parent_ids: vec![ParentUpdate {
+                            id: group_id.into(),
+                            parent_id: Some(outer_group_id.into()),
+                            position_id: "00000000000000000000000000000003:00000000000000000000000000000000".into(),
+                        }],
+                    },
+                    BatchCommand::Update { node: nested_group },
+                ],
+            )
+            .unwrap();
+        assert_eq!(engine.document.node(group_core_id).unwrap().parent_id, Some(outer_group_core_id));
     }
 
     #[test]
@@ -4097,6 +4520,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: Some(true),
+            extensions: Default::default(),
         };
         engine
             .submit_batch(
@@ -4182,6 +4606,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
         };
         let first = "00000000-0000-4000-8000-000000000001";
         let second = "00000000-0000-4000-8000-000000000002";
@@ -4298,6 +4723,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
         };
         engine
             .submit_batch(
@@ -4413,6 +4839,7 @@ mod tests {
             locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
         };
         engine
             .submit_batch(NodeId(16), 0, vec![BatchCommand::Create { node }])
@@ -4578,6 +5005,7 @@ mod tests {
                         locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
                     },
                 }],
             )
@@ -4761,6 +5189,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: false,
+            extensions: Default::default(),
                 })
                 .unwrap();
             updates.push(BatchCommand::Update {
@@ -4806,6 +5235,7 @@ mod tests {
                     locked: false,
             contents_hidden: false,
             clips_content: Some(false),
+            extensions: Default::default(),
                 },
             });
         }
