@@ -3,6 +3,7 @@ import type { NextConfig } from "next";
 const development = process.env.NODE_ENV !== "production";
 const documentApiTarget = process.env.MAKEFIGMA_DOCUMENT_API_TARGET ?? "http://127.0.0.1:8788";
 const assetApiTarget = process.env.MAKEFIGMA_ASSET_API_TARGET ?? "http://127.0.0.1:8789";
+const workspaceApiTarget = process.env.MAKEFIGMA_WORKSPACE_API_TARGET ?? "http://127.0.0.1:8790";
 const contentSecurityPolicy = [
   "default-src 'self'",
   // Next emits inline bootstrapping/style tags. WASM evaluation is explicitly allowed
@@ -37,6 +38,7 @@ const nextConfig: NextConfig = {
     return [
       { source: "/document-api/:path*", destination: `${documentApiTarget}/:path*` },
       { source: "/asset-api/:path*", destination: `${assetApiTarget}/:path*` },
+      { source: "/workspace-api/:path*", destination: `${workspaceApiTarget}/:path*` },
     ];
   },
   async headers() {

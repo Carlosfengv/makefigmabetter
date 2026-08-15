@@ -41,11 +41,55 @@ describe("workspace save queue", () => {
     expect(conflicts).toEqual([latest]);
   });
 
+  it("silently adopts the server catalogue when a recency-only save conflicts", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", browserWindow());
+    const store = await import("./workspace-store");
+    const initial = store.createSeedWorkspace(store.DEMO_WORKSPACE_KEY);
+    const latest = { ...initial, revision: 2, name: "server catalogue" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(latest), { status: 409 })));
+    const errors: unknown[] = [];
+    window.addEventListener("makefigma:workspace-save-error", (event) => errors.push(event));
+
+    store.patchWorkspaceDocument(initial, initial.documents[0].id, { lastOpenedAt: "2026-08-09T00:00:00.000Z" }, { suppressConflict: true });
+
+    await expect(store.flushWorkspaceSave(initial.key)).resolves.toBeUndefined();
+    expect(errors).toEqual([]);
+    expect(store.loadWorkspace(initial.key)).toMatchObject(latest);
+  });
+
+  it("does not surface a recency-only save while offline", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", browserWindow());
+    const store = await import("./workspace-store");
+    const initial = store.createSeedWorkspace(store.DEMO_WORKSPACE_KEY);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
+    const errors: unknown[] = [];
+    window.addEventListener("makefigma:workspace-save-error", (event) => errors.push(event));
+
+    store.patchWorkspaceDocument(initial, initial.documents[0].id, { lastOpenedAt: "2026-08-09T00:00:00.000Z" }, { suppressConflict: true });
+
+    await expect(store.flushWorkspaceSave(initial.key)).resolves.toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
   it("does not fall back to a local cache while recovering a failed write", async () => {
     vi.resetModules();
     vi.stubGlobal("window", browserWindow());
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
     const store = await import("./workspace-store");
     expect(await store.fetchWorkspace(store.DEMO_WORKSPACE_KEY, { allowCachedFallback: false })).toBeUndefined();
+  });
+
+  it("uses the local workspace cache when the API proxy is temporarily unavailable", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", browserWindow());
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream unavailable", { status: 500 })));
+    const store = await import("./workspace-store");
+
+    await expect(store.fetchWorkspace(store.DEMO_WORKSPACE_KEY)).resolves.toMatchObject({
+      key: store.DEMO_WORKSPACE_KEY,
+      name: "Makefigma 测试工作区",
+    });
   });
 });

@@ -34,6 +34,8 @@
     "check:phase1-snapshot-fixtures": "node scripts/verify-phase1-snapshot-fixtures.mjs",
     "mock:backend": "node services/mock-backend/server.mjs",
     "mock:backend:check": "node services/mock-backend/check.mjs",
+    "workspace:api": "node services/workspace-api/server.mjs",
+    "workspace:api:check": "node services/workspace-api/check.mjs",
     "document:api": "cargo run -p makefigma-document-api",
     "document:api:check": "cargo test -p makefigma-document-api",
     "asset:api": "cargo run -p makefigma-asset-api",

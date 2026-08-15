@@ -1,4 +1,12 @@
+import { createId } from "./editor-protocol";
+
 export const DEMO_WORKSPACE_KEY = "design-lab-2026";
+
+// The workspace catalogue lives in an independently deployable backend
+// (services/workspace-api), reached same-origin through the Next `/workspace-api`
+// rewrite proxy — deployment overrides the target, never the browser origin.
+const workspaceApiUrl = process.env.NEXT_PUBLIC_WORKSPACE_API_URL ?? "/workspace-api";
+const workspaceEndpoint = (key: string) => `${workspaceApiUrl}/v1/workspaces/${encodeURIComponent(key)}`;
 
 export type DocumentStatus = "active" | "saving" | "save_failed" | "conflicted" | "trashed";
 
@@ -39,7 +47,7 @@ const storageKey = (key: string) => `makefigma:workspace:${key}`;
 const date = (offsetHours = 0) => new Date(Date.now() - offsetHours * 3_600_000).toISOString();
 
 function id() {
-  return crypto.randomUUID();
+  return createId();
 }
 
 export function createSeedWorkspace(key: string): WorkspaceData {
@@ -75,9 +83,11 @@ export function loadWorkspace(key: string): WorkspaceData | undefined {
   try { return JSON.parse(stored) as WorkspaceData; } catch { return undefined; }
 }
 
-export function saveWorkspace(workspace: WorkspaceData) {
+type WorkspaceSaveOptions = { suppressConflict?: boolean };
+
+export function saveWorkspace(workspace: WorkspaceData, options?: WorkspaceSaveOptions) {
   window.localStorage.setItem(storageKey(workspace.key), JSON.stringify(workspace));
-  queueWorkspaceSave(workspace);
+  queueWorkspaceSave(workspace, options);
   return workspace;
 }
 
@@ -94,26 +104,42 @@ function notifyWorkspaceSaveError(key: string, error: WorkspaceSaveError) {
   window.dispatchEvent(new CustomEvent("makefigma:workspace-save-error", { detail: { key, error } }));
 }
 
-function queueWorkspaceSave(workspace: WorkspaceData) {
+function queueWorkspaceSave(workspace: WorkspaceData, options?: WorkspaceSaveOptions) {
   const previous = saveQueues.get(workspace.key) ?? Promise.resolve();
   // A rejected write intentionally blocks every stale mutation queued behind it.
   // Continuing with an old full-catalogue body after a 409 would overwrite the
   // other window's successful change under its newer revision.
   const task = previous.then(async () => {
-    const revision = serverRevisions.get(workspace.key) ?? workspace.revision;
-    const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.key)}`, {
-      method: "PUT", headers: { "content-type": "application/json", "if-match": String(revision) }, body: JSON.stringify(workspace),
-    });
-    if (response.status === 409) {
-      const latest = await response.json() as WorkspaceData;
-      serverRevisions.set(workspace.key, latest.revision);
-      window.dispatchEvent(new CustomEvent("makefigma:workspace-conflict", { detail: latest }));
-      throw new WorkspaceSaveError("WORKSPACE_CONFLICT");
+    try {
+      const revision = serverRevisions.get(workspace.key) ?? workspace.revision;
+      const response = await fetch(workspaceEndpoint(workspace.key), {
+        method: "PUT", headers: { "content-type": "application/json", "if-match": String(revision) }, body: JSON.stringify(workspace),
+      });
+      if (response.status === 409) {
+        const latest = await response.json() as WorkspaceData;
+        serverRevisions.set(workspace.key, latest.revision);
+        // Opening a document only updates recency metadata. Losing that race is
+        // harmless; adopt the authoritative catalogue so it cannot surface as a
+        // false editing error or block a later real mutation.
+        if (options?.suppressConflict) {
+          window.localStorage.setItem(storageKey(workspace.key), JSON.stringify(latest));
+          return;
+        }
+        window.dispatchEvent(new CustomEvent("makefigma:workspace-conflict", { detail: latest }));
+        throw new WorkspaceSaveError("WORKSPACE_CONFLICT");
+      }
+      if (!response.ok) throw new WorkspaceSaveError("WORKSPACE_SAVE_FAILED");
+      const saved = await response.json() as WorkspaceData;
+      serverRevisions.set(workspace.key, saved.revision);
+      window.localStorage.setItem(storageKey(workspace.key), JSON.stringify(saved));
+    } catch (error) {
+      // Document-service edits remain durable in the local journal while the
+      // workspace catalogue records only display metadata (version/recency).
+      // A temporary offline failure for that metadata must not show an editor
+      // failure banner or poison the later remote-operation replay queue.
+      if (options?.suppressConflict) return;
+      throw error;
     }
-    if (!response.ok) throw new WorkspaceSaveError("WORKSPACE_SAVE_FAILED");
-    const saved = await response.json() as WorkspaceData;
-    serverRevisions.set(workspace.key, saved.revision);
-    window.localStorage.setItem(storageKey(workspace.key), JSON.stringify(saved));
   });
   saveQueues.set(workspace.key, task);
   void task.catch((error: unknown) => notifyWorkspaceSaveError(
@@ -134,8 +160,12 @@ export async function flushWorkspaceSave(key: string) {
 export async function fetchWorkspace(key: string, { allowCachedFallback = true }: { allowCachedFallback?: boolean } = {}) {
   if (key !== DEMO_WORKSPACE_KEY) return undefined;
   try {
-    const response = await fetch(`/api/workspaces/${encodeURIComponent(key)}`, { cache: "no-store" });
-    if (!response.ok) return undefined;
+    const response = await fetch(workspaceEndpoint(key), { cache: "no-store" });
+    // A missing key is definitive, but a proxy/backend failure is transient.
+    // Preserve the offline-cache contract instead of presenting a valid test
+    // link as a nonexistent workspace while the independent API restarts.
+    if (response.status === 404) return undefined;
+    if (!response.ok) return allowCachedFallback ? loadWorkspace(key) : undefined;
     const workspace = await response.json() as WorkspaceData;
     serverRevisions.set(key, workspace.revision);
     window.localStorage.setItem(storageKey(key), JSON.stringify(workspace));
@@ -159,9 +189,9 @@ export function createWorkspaceDocument(workspace: WorkspaceData, projectId?: st
   return saveWorkspace({ ...workspace, documents: [document, ...workspace.documents] });
 }
 
-export function patchWorkspaceDocument(workspace: WorkspaceData, documentId: string, patch: Partial<WorkspaceDocument>) {
+export function patchWorkspaceDocument(workspace: WorkspaceData, documentId: string, patch: Partial<WorkspaceDocument>, options?: WorkspaceSaveOptions) {
   const now = date();
-  return saveWorkspace({ ...workspace, documents: workspace.documents.map((document) => document.id === documentId ? { ...document, ...patch, updatedAt: patch.status === "trashed" ? document.updatedAt : now } : document) });
+  return saveWorkspace({ ...workspace, documents: workspace.documents.map((document) => document.id === documentId ? { ...document, ...patch, updatedAt: patch.status === "trashed" ? document.updatedAt : now } : document) }, options);
 }
 
 export function removeWorkspaceDocument(workspace: WorkspaceData, documentId: string) {

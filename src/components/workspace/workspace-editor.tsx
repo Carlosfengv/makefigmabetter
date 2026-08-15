@@ -15,7 +15,7 @@ export function WorkspaceEditor({ workspaceKey, documentId }: { workspaceKey: st
     if (!item) { setMissing("document"); return; }
     if (item.status === "trashed") { setMissing("trashed"); return; }
     setDocument(item);
-    patchWorkspaceDocument(workspace, item.id, { lastOpenedAt: new Date().toISOString() });
+    patchWorkspaceDocument(workspace, item.id, { lastOpenedAt: new Date().toISOString() }, { suppressConflict: true });
   }); return () => { active = false; }; }, [documentId, workspaceKey]);
   useEffect(() => {
     const onSaveError = (event: Event) => {
@@ -42,6 +42,10 @@ export function WorkspaceEditor({ workspaceKey, documentId }: { workspaceKey: st
     if (updated) setDocument(updated);
   }} onDocumentSaved={(version) => {
     const workspace = loadWorkspace(workspaceKey);
-    if (workspace) patchWorkspaceDocument(workspace, document.id, { version });
+    // The document service is authoritative for editor operations. This
+    // catalogue version is display metadata only, so another tab updating
+    // recency must not surface as an editor-save failure after a successful
+    // Core transaction.
+    if (workspace) patchWorkspaceDocument(workspace, document.id, { version }, { suppressConflict: true });
   }} /></>;
 }
