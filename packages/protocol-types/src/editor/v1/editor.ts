@@ -27,6 +27,14 @@ export enum NodeKind {
    * change the Section's own visibility or geometry.
    */
   NODE_KIND_SECTION = 8,
+  /** NODE_KIND_POLYGON - Generated closed outline whose durable source is a point count. */
+  NODE_KIND_POLYGON = 9,
+  /** NODE_KIND_STAR - Generated concave outline whose durable source includes an inner ratio. */
+  NODE_KIND_STAR = 10,
+  NODE_KIND_VECTOR = 11,
+  NODE_KIND_BOOLEAN_OPERATION = 12,
+  /** NODE_KIND_SLICE - Non-painting canonical export region (Phase 2 G5). */
+  NODE_KIND_SLICE = 13,
   UNRECOGNIZED = -1,
 }
 
@@ -64,6 +72,21 @@ export enum StrokeAlign {
 }
 
 /**
+ * E1's initial interoperable blend subset. Zero preserves the historical
+ * source-over result for snapshots and operation payloads authored before
+ * Blend Mode existed.
+ */
+export enum BlendMode {
+  BLEND_MODE_NORMAL = 0,
+  BLEND_MODE_MULTIPLY = 1,
+  BLEND_MODE_SCREEN = 2,
+  BLEND_MODE_OVERLAY = 3,
+  BLEND_MODE_DARKEN = 4,
+  BLEND_MODE_LIGHTEN = 5,
+  UNRECOGNIZED = -1,
+}
+
+/**
  * Figma's per-axis behavior when the containing Frame is resized. Unspecified
  * remains a legacy absence at the Canonical boundary rather than silently
  * becoming an effective constraint.
@@ -75,6 +98,35 @@ export enum ConstraintType {
   CONSTRAINT_TYPE_MAX = 3,
   CONSTRAINT_TYPE_STRETCH = 4,
   CONSTRAINT_TYPE_SCALE = 5,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * Auto Layout is explicit canonical input. Omission is the legacy fixed-size,
+ * non-layout default; it must never be inferred from a node's current bounds.
+ */
+export enum LayoutMode {
+  LAYOUT_MODE_UNSPECIFIED = 0,
+  LAYOUT_MODE_NONE = 1,
+  LAYOUT_MODE_HORIZONTAL = 2,
+  LAYOUT_MODE_VERTICAL = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum LayoutAlignment {
+  LAYOUT_ALIGNMENT_UNSPECIFIED = 0,
+  LAYOUT_ALIGNMENT_START = 1,
+  LAYOUT_ALIGNMENT_CENTER = 2,
+  LAYOUT_ALIGNMENT_END = 3,
+  LAYOUT_ALIGNMENT_SPACE_BETWEEN = 4,
+  UNRECOGNIZED = -1,
+}
+
+export enum LayoutSizing {
+  LAYOUT_SIZING_UNSPECIFIED = 0,
+  LAYOUT_SIZING_FIXED = 1,
+  LAYOUT_SIZING_HUG = 2,
+  LAYOUT_SIZING_FILL = 3,
   UNRECOGNIZED = -1,
 }
 
@@ -90,6 +142,34 @@ export enum DocumentColorProfile {
   DOCUMENT_COLOR_PROFILE_UNSPECIFIED = 0,
   DOCUMENT_COLOR_PROFILE_SRGB = 1,
   DOCUMENT_COLOR_PROFILE_DISPLAY_P3 = 2,
+  UNRECOGNIZED = -1,
+}
+
+export enum VectorPointType {
+  VECTOR_POINT_TYPE_UNSPECIFIED = 0,
+  VECTOR_POINT_TYPE_CORNER = 1,
+  VECTOR_POINT_TYPE_MIRRORED = 2,
+  VECTOR_POINT_TYPE_ASYMMETRIC = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum FillRule {
+  FILL_RULE_UNSPECIFIED = 0,
+  FILL_RULE_NON_ZERO = 1,
+  FILL_RULE_EVEN_ODD = 2,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * The durable BooleanOperation selector. Operand children remain ordinary
+ * SceneNodes beneath the BooleanOperation node (ADR 0028).
+ */
+export enum BooleanOperation {
+  BOOLEAN_OPERATION_UNSPECIFIED = 0,
+  BOOLEAN_OPERATION_UNION = 1,
+  BOOLEAN_OPERATION_INTERSECT = 2,
+  BOOLEAN_OPERATION_SUBTRACT = 3,
+  BOOLEAN_OPERATION_EXCLUDE = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -213,12 +293,80 @@ export interface Constraints {
   vertical: ConstraintType;
 }
 
+export interface AutoLayout {
+  mode: LayoutMode;
+  paddingTop: number;
+  paddingRight: number;
+  paddingBottom: number;
+  paddingLeft: number;
+  itemSpacing: number;
+  wrap: boolean;
+  primaryAlignment: LayoutAlignment;
+  counterAlignment: LayoutAlignment;
+  primarySizing: LayoutSizing;
+  counterSizing: LayoutSizing;
+  minWidth?: number | undefined;
+  maxWidth?: number | undefined;
+  minHeight?: number | undefined;
+  maxHeight?: number | undefined;
+  absolute: boolean;
+}
+
 export interface Color {
   space: ColorSpace;
   red: number;
   green: number;
   blue: number;
   alpha: number;
+}
+
+/**
+ * R3's single base effect. E1 will migrate this losslessly into an ordered
+ * Effect Stack; omission means the node has no shadow.
+ */
+export interface DropShadow {
+  offsetX: number;
+  offsetY: number;
+  blurRadius: number;
+  spread: number;
+  color?: Color | undefined;
+  visible: boolean;
+}
+
+/**
+ * Blurs the node's isolated source surface before it is composited.  This is
+ * intentionally separate from Background Blur, which requires a backdrop pass.
+ */
+export interface LayerBlur {
+  radius: number;
+  visible: boolean;
+}
+
+/** A shadow clipped to the node's isolated source alpha. */
+export interface InnerShadow {
+  offsetX: number;
+  offsetY: number;
+  blurRadius: number;
+  spread: number;
+  color?: Color | undefined;
+  visible: boolean;
+}
+
+/** Blurs already-composited backdrop pixels within the node's source alpha. */
+export interface BackgroundBlur {
+  radius: number;
+  visible: boolean;
+}
+
+/**
+ * Ordered, extensible Effect Stack. The legacy drop_shadow fields remain a
+ * compatibility projection of the first entry while older clients upgrade.
+ */
+export interface Effect {
+  dropShadow?: DropShadow | undefined;
+  layerBlur?: LayerBlur | undefined;
+  innerShadow?: InnerShadow | undefined;
+  backgroundBlur?: BackgroundBlur | undefined;
 }
 
 export interface GradientStop {
@@ -238,6 +386,36 @@ export interface ArcData {
   startingAngle: number;
   endingAngle: number;
   innerRadius: number;
+}
+
+export interface PolygonParameters {
+  pointCount: number;
+}
+
+export interface StarParameters {
+  pointCount: number;
+  innerRatio: number;
+}
+
+export interface VectorPoint {
+  pointId: Uint8Array;
+  x: number;
+  y: number;
+  handleInX?: number | undefined;
+  handleInY?: number | undefined;
+  handleOutX?: number | undefined;
+  handleOutY?: number | undefined;
+  pointType: VectorPointType;
+}
+
+export interface VectorSubpath {
+  closed: boolean;
+  points: VectorPoint[];
+}
+
+export interface VectorPath {
+  fillRule: FillRule;
+  subpaths: VectorSubpath[];
 }
 
 export interface Transform {
@@ -275,6 +453,8 @@ export interface TextStyleRun {
   fontWeight: number;
   italic: boolean;
   letterSpacing: number;
+  /** Optional per-run color; omission inherits the Text node fill. */
+  color?: Color | undefined;
 }
 
 export interface ParagraphStyle {
@@ -354,6 +534,14 @@ export interface SceneNode {
    * Phase 3+ node round-trips through an older client without being rewritten.
    */
   extensions: { [key: string]: Uint8Array };
+  dropShadow?: DropShadow | undefined;
+  polygonParameters?: PolygonParameters | undefined;
+  starParameters?: StarParameters | undefined;
+  vectorPath?: VectorPath | undefined;
+  booleanOperation?: BooleanOperation | undefined;
+  effectStack: Effect[];
+  autoLayout?: AutoLayout | undefined;
+  blendMode: BlendMode;
 }
 
 export interface SceneNode_ExtensionsEntry {
@@ -395,6 +583,22 @@ export interface AppearanceUpdate {
   fills: Paint[];
   strokes: Paint[];
   constraints?: Constraints | undefined;
+  dropShadow?: DropShadow | undefined;
+  polygonParameters?: PolygonParameters | undefined;
+  starParameters?: StarParameters | undefined;
+  effectStack: Effect[];
+  autoLayout?: AutoLayout | undefined;
+  blendMode: BlendMode;
+}
+
+/**
+ * Canonical Frame layout configuration. Kept separate from AppearanceUpdate so
+ * layout carries an explicit reducer command and can reflow descendants
+ * atomically rather than being an incidental visual field.
+ */
+export interface AutoLayoutUpdate {
+  nodeId: Uint8Array;
+  autoLayout?: AutoLayout | undefined;
 }
 
 export interface CreatePage {
@@ -474,6 +678,111 @@ export interface ImageFillUpdate {
   assetId?: Uint8Array | undefined;
 }
 
+/**
+ * Replaces a Vector node's canonical path atomically. Fine-grained point
+ * editing is intentionally represented by a complete resolved path so all
+ * replicas apply the same deterministic result.
+ */
+export interface SetVectorPath {
+  nodeId: Uint8Array;
+  vectorPath?: VectorPath | undefined;
+}
+
+/**
+ * Moves one existing anchor in a VectorPath. Point identity stays stable so
+ * replicas do not need to infer which duplicate coordinate was edited.
+ */
+export interface MoveVectorPoint {
+  nodeId: Uint8Array;
+  pointId: Uint8Array;
+  x: number;
+  y: number;
+}
+
+/** Opens or closes an existing subpath by stable canonical array index. */
+export interface SetVectorSubpathClosed {
+  nodeId: Uint8Array;
+  subpathIndex: number;
+  closed: boolean;
+}
+
+/**
+ * Inserts a client-allocated stable point after a resolved predecessor. An
+ * absent predecessor means the beginning of the addressed subpath.
+ */
+export interface InsertVectorPoint {
+  nodeId: Uint8Array;
+  subpathIndex: number;
+  afterPointId?: Uint8Array | undefined;
+  point?: VectorPoint | undefined;
+}
+
+/**
+ * Deletes one anchor. Core rejects the operation if it would violate the
+ * minimum-point invariant for the addressed open or closed subpath.
+ */
+export interface DeleteVectorPoint {
+  nodeId: Uint8Array;
+  pointId: Uint8Array;
+}
+
+/**
+ * Replaces both relative handles and the tangent classification of one point.
+ * Each handle is absent only when both components are absent.
+ */
+export interface SetVectorPointHandles {
+  nodeId: Uint8Array;
+  pointId: Uint8Array;
+  handleInX?: number | undefined;
+  handleInY?: number | undefined;
+  handleOutX?: number | undefined;
+  handleOutY?: number | undefined;
+  pointType: VectorPointType;
+}
+
+/**
+ * Changes the reducer selector of a live BooleanOperation while retaining its
+ * ordered children and all editable source geometry.
+ */
+export interface SetBooleanOperation {
+  nodeId: Uint8Array;
+  operation: BooleanOperation;
+}
+
+/**
+ * Splits the directed segment after `after_point_id` at `t` in (0, 1). Core
+ * performs exact de Casteljau subdivision and allocates the supplied PointId.
+ */
+export interface SplitVectorSegment {
+  nodeId: Uint8Array;
+  subpathIndex: number;
+  afterPointId: Uint8Array;
+  t: number;
+  pointId: Uint8Array;
+}
+
+/**
+ * Joins two endpoint anchors belonging to one VectorPath. Different open
+ * subpaths merge in the explicit first→second direction; opposite endpoints
+ * on one subpath close that subpath.
+ */
+export interface ConnectVectorEndpoints {
+  nodeId: Uint8Array;
+  firstSubpathIndex: number;
+  firstPointId: Uint8Array;
+  secondSubpathIndex: number;
+  secondPointId: Uint8Array;
+}
+
+/**
+ * Phase 2's sole general-mask mode. A true flag marks this paintable sibling
+ * as the alpha source for following siblings until the next mask sibling.
+ */
+export interface SetMask {
+  nodeId: Uint8Array;
+  enabled: boolean;
+}
+
 export interface ResolvedOperation {
   createPage?: CreatePage | undefined;
   createNode?: CreateNode | undefined;
@@ -489,6 +798,17 @@ export interface ResolvedOperation {
   setNodePosition?: SetNodePosition | undefined;
   restoreNode?: RestoreNode | undefined;
   setNodeParent?: SetNodeParent | undefined;
+  setVectorPath?: SetVectorPath | undefined;
+  moveVectorPoint?: MoveVectorPoint | undefined;
+  setVectorSubpathClosed?: SetVectorSubpathClosed | undefined;
+  insertVectorPoint?: InsertVectorPoint | undefined;
+  deleteVectorPoint?: DeleteVectorPoint | undefined;
+  setVectorPointHandles?: SetVectorPointHandles | undefined;
+  setBooleanOperation?: SetBooleanOperation | undefined;
+  splitVectorSegment?: SplitVectorSegment | undefined;
+  setMask?: SetMask | undefined;
+  setAutoLayout?: AutoLayoutUpdate | undefined;
+  connectVectorEndpoints?: ConnectVectorEndpoints | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -1411,6 +1731,249 @@ export const Constraints: MessageFns<Constraints> = {
   },
 };
 
+function createBaseAutoLayout(): AutoLayout {
+  return {
+    mode: 0,
+    paddingTop: 0,
+    paddingRight: 0,
+    paddingBottom: 0,
+    paddingLeft: 0,
+    itemSpacing: 0,
+    wrap: false,
+    primaryAlignment: 0,
+    counterAlignment: 0,
+    primarySizing: 0,
+    counterSizing: 0,
+    minWidth: undefined,
+    maxWidth: undefined,
+    minHeight: undefined,
+    maxHeight: undefined,
+    absolute: false,
+  };
+}
+
+export const AutoLayout: MessageFns<AutoLayout> = {
+  encode(message: AutoLayout, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.mode !== 0) {
+      writer.uint32(8).int32(message.mode);
+    }
+    if (message.paddingTop !== 0) {
+      writer.uint32(17).double(message.paddingTop);
+    }
+    if (message.paddingRight !== 0) {
+      writer.uint32(25).double(message.paddingRight);
+    }
+    if (message.paddingBottom !== 0) {
+      writer.uint32(33).double(message.paddingBottom);
+    }
+    if (message.paddingLeft !== 0) {
+      writer.uint32(41).double(message.paddingLeft);
+    }
+    if (message.itemSpacing !== 0) {
+      writer.uint32(49).double(message.itemSpacing);
+    }
+    if (message.wrap !== false) {
+      writer.uint32(56).bool(message.wrap);
+    }
+    if (message.primaryAlignment !== 0) {
+      writer.uint32(64).int32(message.primaryAlignment);
+    }
+    if (message.counterAlignment !== 0) {
+      writer.uint32(72).int32(message.counterAlignment);
+    }
+    if (message.primarySizing !== 0) {
+      writer.uint32(80).int32(message.primarySizing);
+    }
+    if (message.counterSizing !== 0) {
+      writer.uint32(88).int32(message.counterSizing);
+    }
+    if (message.minWidth !== undefined) {
+      writer.uint32(97).double(message.minWidth);
+    }
+    if (message.maxWidth !== undefined) {
+      writer.uint32(105).double(message.maxWidth);
+    }
+    if (message.minHeight !== undefined) {
+      writer.uint32(113).double(message.minHeight);
+    }
+    if (message.maxHeight !== undefined) {
+      writer.uint32(121).double(message.maxHeight);
+    }
+    if (message.absolute !== false) {
+      writer.uint32(128).bool(message.absolute);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AutoLayout {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAutoLayout();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.paddingTop = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.paddingRight = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.paddingBottom = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.paddingLeft = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.itemSpacing = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.wrap = reader.bool();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.primaryAlignment = reader.int32() as any;
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.counterAlignment = reader.int32() as any;
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.primarySizing = reader.int32() as any;
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.counterSizing = reader.int32() as any;
+          continue;
+        }
+        case 12: {
+          if (tag !== 97) {
+            break;
+          }
+
+          message.minWidth = reader.double();
+          continue;
+        }
+        case 13: {
+          if (tag !== 105) {
+            break;
+          }
+
+          message.maxWidth = reader.double();
+          continue;
+        }
+        case 14: {
+          if (tag !== 113) {
+            break;
+          }
+
+          message.minHeight = reader.double();
+          continue;
+        }
+        case 15: {
+          if (tag !== 121) {
+            break;
+          }
+
+          message.maxHeight = reader.double();
+          continue;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.absolute = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<AutoLayout>, I>>(base?: I): AutoLayout {
+    return AutoLayout.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AutoLayout>, I>>(object: I): AutoLayout {
+    const message = createBaseAutoLayout();
+    message.mode = object.mode ?? 0;
+    message.paddingTop = object.paddingTop ?? 0;
+    message.paddingRight = object.paddingRight ?? 0;
+    message.paddingBottom = object.paddingBottom ?? 0;
+    message.paddingLeft = object.paddingLeft ?? 0;
+    message.itemSpacing = object.itemSpacing ?? 0;
+    message.wrap = object.wrap ?? false;
+    message.primaryAlignment = object.primaryAlignment ?? 0;
+    message.counterAlignment = object.counterAlignment ?? 0;
+    message.primarySizing = object.primarySizing ?? 0;
+    message.counterSizing = object.counterSizing ?? 0;
+    message.minWidth = object.minWidth ?? undefined;
+    message.maxWidth = object.maxWidth ?? undefined;
+    message.minHeight = object.minHeight ?? undefined;
+    message.maxHeight = object.maxHeight ?? undefined;
+    message.absolute = object.absolute ?? false;
+    return message;
+  },
+};
+
 function createBaseColor(): Color {
   return { space: 0, red: 0, green: 0, blue: 0, alpha: 0 };
 }
@@ -1501,6 +2064,424 @@ export const Color: MessageFns<Color> = {
     message.green = object.green ?? 0;
     message.blue = object.blue ?? 0;
     message.alpha = object.alpha ?? 0;
+    return message;
+  },
+};
+
+function createBaseDropShadow(): DropShadow {
+  return { offsetX: 0, offsetY: 0, blurRadius: 0, spread: 0, color: undefined, visible: false };
+}
+
+export const DropShadow: MessageFns<DropShadow> = {
+  encode(message: DropShadow, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.offsetX !== 0) {
+      writer.uint32(9).double(message.offsetX);
+    }
+    if (message.offsetY !== 0) {
+      writer.uint32(17).double(message.offsetY);
+    }
+    if (message.blurRadius !== 0) {
+      writer.uint32(25).double(message.blurRadius);
+    }
+    if (message.spread !== 0) {
+      writer.uint32(33).double(message.spread);
+    }
+    if (message.color !== undefined) {
+      Color.encode(message.color, writer.uint32(42).fork()).join();
+    }
+    if (message.visible !== false) {
+      writer.uint32(48).bool(message.visible);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DropShadow {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDropShadow();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.offsetX = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.offsetY = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.blurRadius = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.spread = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.color = Color.decode(reader, reader.uint32());
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DropShadow>, I>>(base?: I): DropShadow {
+    return DropShadow.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DropShadow>, I>>(object: I): DropShadow {
+    const message = createBaseDropShadow();
+    message.offsetX = object.offsetX ?? 0;
+    message.offsetY = object.offsetY ?? 0;
+    message.blurRadius = object.blurRadius ?? 0;
+    message.spread = object.spread ?? 0;
+    message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
+    message.visible = object.visible ?? false;
+    return message;
+  },
+};
+
+function createBaseLayerBlur(): LayerBlur {
+  return { radius: 0, visible: false };
+}
+
+export const LayerBlur: MessageFns<LayerBlur> = {
+  encode(message: LayerBlur, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.radius !== 0) {
+      writer.uint32(9).double(message.radius);
+    }
+    if (message.visible !== false) {
+      writer.uint32(16).bool(message.visible);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LayerBlur {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLayerBlur();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.radius = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<LayerBlur>, I>>(base?: I): LayerBlur {
+    return LayerBlur.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LayerBlur>, I>>(object: I): LayerBlur {
+    const message = createBaseLayerBlur();
+    message.radius = object.radius ?? 0;
+    message.visible = object.visible ?? false;
+    return message;
+  },
+};
+
+function createBaseInnerShadow(): InnerShadow {
+  return { offsetX: 0, offsetY: 0, blurRadius: 0, spread: 0, color: undefined, visible: false };
+}
+
+export const InnerShadow: MessageFns<InnerShadow> = {
+  encode(message: InnerShadow, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.offsetX !== 0) {
+      writer.uint32(9).double(message.offsetX);
+    }
+    if (message.offsetY !== 0) {
+      writer.uint32(17).double(message.offsetY);
+    }
+    if (message.blurRadius !== 0) {
+      writer.uint32(25).double(message.blurRadius);
+    }
+    if (message.spread !== 0) {
+      writer.uint32(33).double(message.spread);
+    }
+    if (message.color !== undefined) {
+      Color.encode(message.color, writer.uint32(42).fork()).join();
+    }
+    if (message.visible !== false) {
+      writer.uint32(48).bool(message.visible);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InnerShadow {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInnerShadow();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.offsetX = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.offsetY = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.blurRadius = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.spread = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.color = Color.decode(reader, reader.uint32());
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<InnerShadow>, I>>(base?: I): InnerShadow {
+    return InnerShadow.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InnerShadow>, I>>(object: I): InnerShadow {
+    const message = createBaseInnerShadow();
+    message.offsetX = object.offsetX ?? 0;
+    message.offsetY = object.offsetY ?? 0;
+    message.blurRadius = object.blurRadius ?? 0;
+    message.spread = object.spread ?? 0;
+    message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
+    message.visible = object.visible ?? false;
+    return message;
+  },
+};
+
+function createBaseBackgroundBlur(): BackgroundBlur {
+  return { radius: 0, visible: false };
+}
+
+export const BackgroundBlur: MessageFns<BackgroundBlur> = {
+  encode(message: BackgroundBlur, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.radius !== 0) {
+      writer.uint32(9).double(message.radius);
+    }
+    if (message.visible !== false) {
+      writer.uint32(16).bool(message.visible);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BackgroundBlur {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBackgroundBlur();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.radius = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<BackgroundBlur>, I>>(base?: I): BackgroundBlur {
+    return BackgroundBlur.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BackgroundBlur>, I>>(object: I): BackgroundBlur {
+    const message = createBaseBackgroundBlur();
+    message.radius = object.radius ?? 0;
+    message.visible = object.visible ?? false;
+    return message;
+  },
+};
+
+function createBaseEffect(): Effect {
+  return { dropShadow: undefined, layerBlur: undefined, innerShadow: undefined, backgroundBlur: undefined };
+}
+
+export const Effect: MessageFns<Effect> = {
+  encode(message: Effect, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.dropShadow !== undefined) {
+      DropShadow.encode(message.dropShadow, writer.uint32(10).fork()).join();
+    }
+    if (message.layerBlur !== undefined) {
+      LayerBlur.encode(message.layerBlur, writer.uint32(18).fork()).join();
+    }
+    if (message.innerShadow !== undefined) {
+      InnerShadow.encode(message.innerShadow, writer.uint32(26).fork()).join();
+    }
+    if (message.backgroundBlur !== undefined) {
+      BackgroundBlur.encode(message.backgroundBlur, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Effect {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseEffect();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.dropShadow = DropShadow.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.layerBlur = LayerBlur.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.innerShadow = InnerShadow.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.backgroundBlur = BackgroundBlur.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<Effect>, I>>(base?: I): Effect {
+    return Effect.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Effect>, I>>(object: I): Effect {
+    const message = createBaseEffect();
+    message.dropShadow = (object.dropShadow !== undefined && object.dropShadow !== null)
+      ? DropShadow.fromPartial(object.dropShadow)
+      : undefined;
+    message.layerBlur = (object.layerBlur !== undefined && object.layerBlur !== null)
+      ? LayerBlur.fromPartial(object.layerBlur)
+      : undefined;
+    message.innerShadow = (object.innerShadow !== undefined && object.innerShadow !== null)
+      ? InnerShadow.fromPartial(object.innerShadow)
+      : undefined;
+    message.backgroundBlur = (object.backgroundBlur !== undefined && object.backgroundBlur !== null)
+      ? BackgroundBlur.fromPartial(object.backgroundBlur)
+      : undefined;
     return message;
   },
 };
@@ -1723,6 +2704,365 @@ export const ArcData: MessageFns<ArcData> = {
     message.startingAngle = object.startingAngle ?? 0;
     message.endingAngle = object.endingAngle ?? 0;
     message.innerRadius = object.innerRadius ?? 0;
+    return message;
+  },
+};
+
+function createBasePolygonParameters(): PolygonParameters {
+  return { pointCount: 0 };
+}
+
+export const PolygonParameters: MessageFns<PolygonParameters> = {
+  encode(message: PolygonParameters, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.pointCount !== 0) {
+      writer.uint32(8).uint32(message.pointCount);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PolygonParameters {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePolygonParameters();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.pointCount = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PolygonParameters>, I>>(base?: I): PolygonParameters {
+    return PolygonParameters.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PolygonParameters>, I>>(object: I): PolygonParameters {
+    const message = createBasePolygonParameters();
+    message.pointCount = object.pointCount ?? 0;
+    return message;
+  },
+};
+
+function createBaseStarParameters(): StarParameters {
+  return { pointCount: 0, innerRatio: 0 };
+}
+
+export const StarParameters: MessageFns<StarParameters> = {
+  encode(message: StarParameters, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.pointCount !== 0) {
+      writer.uint32(8).uint32(message.pointCount);
+    }
+    if (message.innerRatio !== 0) {
+      writer.uint32(17).double(message.innerRatio);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): StarParameters {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStarParameters();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.pointCount = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.innerRatio = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<StarParameters>, I>>(base?: I): StarParameters {
+    return StarParameters.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<StarParameters>, I>>(object: I): StarParameters {
+    const message = createBaseStarParameters();
+    message.pointCount = object.pointCount ?? 0;
+    message.innerRatio = object.innerRatio ?? 0;
+    return message;
+  },
+};
+
+function createBaseVectorPoint(): VectorPoint {
+  return {
+    pointId: new Uint8Array(0),
+    x: 0,
+    y: 0,
+    handleInX: undefined,
+    handleInY: undefined,
+    handleOutX: undefined,
+    handleOutY: undefined,
+    pointType: 0,
+  };
+}
+
+export const VectorPoint: MessageFns<VectorPoint> = {
+  encode(message: VectorPoint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.pointId.length !== 0) {
+      writer.uint32(10).bytes(message.pointId);
+    }
+    if (message.x !== 0) {
+      writer.uint32(17).double(message.x);
+    }
+    if (message.y !== 0) {
+      writer.uint32(25).double(message.y);
+    }
+    if (message.handleInX !== undefined) {
+      writer.uint32(33).double(message.handleInX);
+    }
+    if (message.handleInY !== undefined) {
+      writer.uint32(41).double(message.handleInY);
+    }
+    if (message.handleOutX !== undefined) {
+      writer.uint32(49).double(message.handleOutX);
+    }
+    if (message.handleOutY !== undefined) {
+      writer.uint32(57).double(message.handleOutY);
+    }
+    if (message.pointType !== 0) {
+      writer.uint32(64).int32(message.pointType);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VectorPoint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVectorPoint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.pointId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.x = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.y = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.handleInX = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.handleInY = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.handleOutX = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 57) {
+            break;
+          }
+
+          message.handleOutY = reader.double();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.pointType = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VectorPoint>, I>>(base?: I): VectorPoint {
+    return VectorPoint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VectorPoint>, I>>(object: I): VectorPoint {
+    const message = createBaseVectorPoint();
+    message.pointId = object.pointId ?? new Uint8Array(0);
+    message.x = object.x ?? 0;
+    message.y = object.y ?? 0;
+    message.handleInX = object.handleInX ?? undefined;
+    message.handleInY = object.handleInY ?? undefined;
+    message.handleOutX = object.handleOutX ?? undefined;
+    message.handleOutY = object.handleOutY ?? undefined;
+    message.pointType = object.pointType ?? 0;
+    return message;
+  },
+};
+
+function createBaseVectorSubpath(): VectorSubpath {
+  return { closed: false, points: [] };
+}
+
+export const VectorSubpath: MessageFns<VectorSubpath> = {
+  encode(message: VectorSubpath, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.closed !== false) {
+      writer.uint32(8).bool(message.closed);
+    }
+    for (const v of message.points) {
+      VectorPoint.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VectorSubpath {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVectorSubpath();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.closed = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.points.push(VectorPoint.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VectorSubpath>, I>>(base?: I): VectorSubpath {
+    return VectorSubpath.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VectorSubpath>, I>>(object: I): VectorSubpath {
+    const message = createBaseVectorSubpath();
+    message.closed = object.closed ?? false;
+    message.points = object.points?.map((e) => VectorPoint.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseVectorPath(): VectorPath {
+  return { fillRule: 0, subpaths: [] };
+}
+
+export const VectorPath: MessageFns<VectorPath> = {
+  encode(message: VectorPath, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.fillRule !== 0) {
+      writer.uint32(8).int32(message.fillRule);
+    }
+    for (const v of message.subpaths) {
+      VectorSubpath.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VectorPath {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVectorPath();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.fillRule = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.subpaths.push(VectorSubpath.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VectorPath>, I>>(base?: I): VectorPath {
+    return VectorPath.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VectorPath>, I>>(object: I): VectorPath {
+    const message = createBaseVectorPath();
+    message.fillRule = object.fillRule ?? 0;
+    message.subpaths = object.subpaths?.map((e) => VectorSubpath.fromPartial(e)) || [];
     return message;
   },
 };
@@ -2022,7 +3362,16 @@ export const FontReference: MessageFns<FontReference> = {
 };
 
 function createBaseTextStyleRun(): TextStyleRun {
-  return { start: 0, end: 0, font: undefined, fontSize: 0, fontWeight: 0, italic: false, letterSpacing: 0 };
+  return {
+    start: 0,
+    end: 0,
+    font: undefined,
+    fontSize: 0,
+    fontWeight: 0,
+    italic: false,
+    letterSpacing: 0,
+    color: undefined,
+  };
 }
 
 export const TextStyleRun: MessageFns<TextStyleRun> = {
@@ -2047,6 +3396,9 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     if (message.letterSpacing !== 0) {
       writer.uint32(57).double(message.letterSpacing);
+    }
+    if (message.color !== undefined) {
+      Color.encode(message.color, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -2114,6 +3466,14 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.letterSpacing = reader.double();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.color = Color.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2137,6 +3497,7 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     message.fontWeight = object.fontWeight ?? 0;
     message.italic = object.italic ?? false;
     message.letterSpacing = object.letterSpacing ?? 0;
+    message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
     return message;
   },
 };
@@ -2335,6 +3696,14 @@ function createBaseSceneNode(): SceneNode {
     strokes: [],
     constraints: undefined,
     extensions: {},
+    dropShadow: undefined,
+    polygonParameters: undefined,
+    starParameters: undefined,
+    vectorPath: undefined,
+    booleanOperation: undefined,
+    effectStack: [],
+    autoLayout: undefined,
+    blendMode: 0,
   };
 }
 
@@ -2460,6 +3829,30 @@ export const SceneNode: MessageFns<SceneNode> = {
     globalThis.Object.entries(message.extensions).forEach(([key, value]: [string, Uint8Array]) => {
       SceneNode_ExtensionsEntry.encode({ key: key as any, value }, writer.uint32(306).fork()).join();
     });
+    if (message.dropShadow !== undefined) {
+      DropShadow.encode(message.dropShadow, writer.uint32(314).fork()).join();
+    }
+    if (message.polygonParameters !== undefined) {
+      PolygonParameters.encode(message.polygonParameters, writer.uint32(322).fork()).join();
+    }
+    if (message.starParameters !== undefined) {
+      StarParameters.encode(message.starParameters, writer.uint32(330).fork()).join();
+    }
+    if (message.vectorPath !== undefined) {
+      VectorPath.encode(message.vectorPath, writer.uint32(338).fork()).join();
+    }
+    if (message.booleanOperation !== undefined) {
+      writer.uint32(344).int32(message.booleanOperation);
+    }
+    for (const v of message.effectStack) {
+      Effect.encode(v!, writer.uint32(354).fork()).join();
+    }
+    if (message.autoLayout !== undefined) {
+      AutoLayout.encode(message.autoLayout, writer.uint32(362).fork()).join();
+    }
+    if (message.blendMode !== 0) {
+      writer.uint32(368).int32(message.blendMode);
+    }
     return writer;
   },
 
@@ -2807,6 +4200,70 @@ export const SceneNode: MessageFns<SceneNode> = {
           }
           continue;
         }
+        case 39: {
+          if (tag !== 314) {
+            break;
+          }
+
+          message.dropShadow = DropShadow.decode(reader, reader.uint32());
+          continue;
+        }
+        case 40: {
+          if (tag !== 322) {
+            break;
+          }
+
+          message.polygonParameters = PolygonParameters.decode(reader, reader.uint32());
+          continue;
+        }
+        case 41: {
+          if (tag !== 330) {
+            break;
+          }
+
+          message.starParameters = StarParameters.decode(reader, reader.uint32());
+          continue;
+        }
+        case 42: {
+          if (tag !== 338) {
+            break;
+          }
+
+          message.vectorPath = VectorPath.decode(reader, reader.uint32());
+          continue;
+        }
+        case 43: {
+          if (tag !== 344) {
+            break;
+          }
+
+          message.booleanOperation = reader.int32() as any;
+          continue;
+        }
+        case 44: {
+          if (tag !== 354) {
+            break;
+          }
+
+          message.effectStack.push(Effect.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 45: {
+          if (tag !== 362) {
+            break;
+          }
+
+          message.autoLayout = AutoLayout.decode(reader, reader.uint32());
+          continue;
+        }
+        case 46: {
+          if (tag !== 368) {
+            break;
+          }
+
+          message.blendMode = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2879,6 +4336,24 @@ export const SceneNode: MessageFns<SceneNode> = {
       },
       {},
     );
+    message.dropShadow = (object.dropShadow !== undefined && object.dropShadow !== null)
+      ? DropShadow.fromPartial(object.dropShadow)
+      : undefined;
+    message.polygonParameters = (object.polygonParameters !== undefined && object.polygonParameters !== null)
+      ? PolygonParameters.fromPartial(object.polygonParameters)
+      : undefined;
+    message.starParameters = (object.starParameters !== undefined && object.starParameters !== null)
+      ? StarParameters.fromPartial(object.starParameters)
+      : undefined;
+    message.vectorPath = (object.vectorPath !== undefined && object.vectorPath !== null)
+      ? VectorPath.fromPartial(object.vectorPath)
+      : undefined;
+    message.booleanOperation = object.booleanOperation ?? undefined;
+    message.effectStack = object.effectStack?.map((e) => Effect.fromPartial(e)) || [];
+    message.autoLayout = (object.autoLayout !== undefined && object.autoLayout !== null)
+      ? AutoLayout.fromPartial(object.autoLayout)
+      : undefined;
+    message.blendMode = object.blendMode ?? 0;
     return message;
   },
 };
@@ -3073,6 +4548,12 @@ function createBaseAppearanceUpdate(): AppearanceUpdate {
     fills: [],
     strokes: [],
     constraints: undefined,
+    dropShadow: undefined,
+    polygonParameters: undefined,
+    starParameters: undefined,
+    effectStack: [],
+    autoLayout: undefined,
+    blendMode: 0,
   };
 }
 
@@ -3155,6 +4636,24 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
     }
     if (message.constraints !== undefined) {
       Constraints.encode(message.constraints, writer.uint32(194).fork()).join();
+    }
+    if (message.dropShadow !== undefined) {
+      DropShadow.encode(message.dropShadow, writer.uint32(202).fork()).join();
+    }
+    if (message.polygonParameters !== undefined) {
+      PolygonParameters.encode(message.polygonParameters, writer.uint32(210).fork()).join();
+    }
+    if (message.starParameters !== undefined) {
+      StarParameters.encode(message.starParameters, writer.uint32(218).fork()).join();
+    }
+    for (const v of message.effectStack) {
+      Effect.encode(v!, writer.uint32(226).fork()).join();
+    }
+    if (message.autoLayout !== undefined) {
+      AutoLayout.encode(message.autoLayout, writer.uint32(234).fork()).join();
+    }
+    if (message.blendMode !== 0) {
+      writer.uint32(240).int32(message.blendMode);
     }
     return writer;
   },
@@ -3388,6 +4887,54 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
           message.constraints = Constraints.decode(reader, reader.uint32());
           continue;
         }
+        case 25: {
+          if (tag !== 202) {
+            break;
+          }
+
+          message.dropShadow = DropShadow.decode(reader, reader.uint32());
+          continue;
+        }
+        case 26: {
+          if (tag !== 210) {
+            break;
+          }
+
+          message.polygonParameters = PolygonParameters.decode(reader, reader.uint32());
+          continue;
+        }
+        case 27: {
+          if (tag !== 218) {
+            break;
+          }
+
+          message.starParameters = StarParameters.decode(reader, reader.uint32());
+          continue;
+        }
+        case 28: {
+          if (tag !== 226) {
+            break;
+          }
+
+          message.effectStack.push(Effect.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 29: {
+          if (tag !== 234) {
+            break;
+          }
+
+          message.autoLayout = AutoLayout.decode(reader, reader.uint32());
+          continue;
+        }
+        case 30: {
+          if (tag !== 240) {
+            break;
+          }
+
+          message.blendMode = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3433,6 +4980,80 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
     message.strokes = object.strokes?.map((e) => Paint.fromPartial(e)) || [];
     message.constraints = (object.constraints !== undefined && object.constraints !== null)
       ? Constraints.fromPartial(object.constraints)
+      : undefined;
+    message.dropShadow = (object.dropShadow !== undefined && object.dropShadow !== null)
+      ? DropShadow.fromPartial(object.dropShadow)
+      : undefined;
+    message.polygonParameters = (object.polygonParameters !== undefined && object.polygonParameters !== null)
+      ? PolygonParameters.fromPartial(object.polygonParameters)
+      : undefined;
+    message.starParameters = (object.starParameters !== undefined && object.starParameters !== null)
+      ? StarParameters.fromPartial(object.starParameters)
+      : undefined;
+    message.effectStack = object.effectStack?.map((e) => Effect.fromPartial(e)) || [];
+    message.autoLayout = (object.autoLayout !== undefined && object.autoLayout !== null)
+      ? AutoLayout.fromPartial(object.autoLayout)
+      : undefined;
+    message.blendMode = object.blendMode ?? 0;
+    return message;
+  },
+};
+
+function createBaseAutoLayoutUpdate(): AutoLayoutUpdate {
+  return { nodeId: new Uint8Array(0), autoLayout: undefined };
+}
+
+export const AutoLayoutUpdate: MessageFns<AutoLayoutUpdate> = {
+  encode(message: AutoLayoutUpdate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.autoLayout !== undefined) {
+      AutoLayout.encode(message.autoLayout, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AutoLayoutUpdate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAutoLayoutUpdate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.autoLayout = AutoLayout.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<AutoLayoutUpdate>, I>>(base?: I): AutoLayoutUpdate {
+    return AutoLayoutUpdate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AutoLayoutUpdate>, I>>(object: I): AutoLayoutUpdate {
+    const message = createBaseAutoLayoutUpdate();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.autoLayout = (object.autoLayout !== undefined && object.autoLayout !== null)
+      ? AutoLayout.fromPartial(object.autoLayout)
       : undefined;
     return message;
   },
@@ -4082,6 +5703,802 @@ export const ImageFillUpdate: MessageFns<ImageFillUpdate> = {
   },
 };
 
+function createBaseSetVectorPath(): SetVectorPath {
+  return { nodeId: new Uint8Array(0), vectorPath: undefined };
+}
+
+export const SetVectorPath: MessageFns<SetVectorPath> = {
+  encode(message: SetVectorPath, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.vectorPath !== undefined) {
+      VectorPath.encode(message.vectorPath, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVectorPath {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVectorPath();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.vectorPath = VectorPath.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetVectorPath>, I>>(base?: I): SetVectorPath {
+    return SetVectorPath.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVectorPath>, I>>(object: I): SetVectorPath {
+    const message = createBaseSetVectorPath();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.vectorPath = (object.vectorPath !== undefined && object.vectorPath !== null)
+      ? VectorPath.fromPartial(object.vectorPath)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMoveVectorPoint(): MoveVectorPoint {
+  return { nodeId: new Uint8Array(0), pointId: new Uint8Array(0), x: 0, y: 0 };
+}
+
+export const MoveVectorPoint: MessageFns<MoveVectorPoint> = {
+  encode(message: MoveVectorPoint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.pointId.length !== 0) {
+      writer.uint32(18).bytes(message.pointId);
+    }
+    if (message.x !== 0) {
+      writer.uint32(25).double(message.x);
+    }
+    if (message.y !== 0) {
+      writer.uint32(33).double(message.y);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MoveVectorPoint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMoveVectorPoint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pointId = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.x = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.y = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<MoveVectorPoint>, I>>(base?: I): MoveVectorPoint {
+    return MoveVectorPoint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MoveVectorPoint>, I>>(object: I): MoveVectorPoint {
+    const message = createBaseMoveVectorPoint();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.pointId = object.pointId ?? new Uint8Array(0);
+    message.x = object.x ?? 0;
+    message.y = object.y ?? 0;
+    return message;
+  },
+};
+
+function createBaseSetVectorSubpathClosed(): SetVectorSubpathClosed {
+  return { nodeId: new Uint8Array(0), subpathIndex: 0, closed: false };
+}
+
+export const SetVectorSubpathClosed: MessageFns<SetVectorSubpathClosed> = {
+  encode(message: SetVectorSubpathClosed, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.subpathIndex !== 0) {
+      writer.uint32(16).uint32(message.subpathIndex);
+    }
+    if (message.closed !== false) {
+      writer.uint32(24).bool(message.closed);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVectorSubpathClosed {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVectorSubpathClosed();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.subpathIndex = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.closed = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetVectorSubpathClosed>, I>>(base?: I): SetVectorSubpathClosed {
+    return SetVectorSubpathClosed.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVectorSubpathClosed>, I>>(object: I): SetVectorSubpathClosed {
+    const message = createBaseSetVectorSubpathClosed();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.subpathIndex = object.subpathIndex ?? 0;
+    message.closed = object.closed ?? false;
+    return message;
+  },
+};
+
+function createBaseInsertVectorPoint(): InsertVectorPoint {
+  return { nodeId: new Uint8Array(0), subpathIndex: 0, afterPointId: undefined, point: undefined };
+}
+
+export const InsertVectorPoint: MessageFns<InsertVectorPoint> = {
+  encode(message: InsertVectorPoint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.subpathIndex !== 0) {
+      writer.uint32(16).uint32(message.subpathIndex);
+    }
+    if (message.afterPointId !== undefined) {
+      writer.uint32(26).bytes(message.afterPointId);
+    }
+    if (message.point !== undefined) {
+      VectorPoint.encode(message.point, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InsertVectorPoint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInsertVectorPoint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.subpathIndex = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.afterPointId = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.point = VectorPoint.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<InsertVectorPoint>, I>>(base?: I): InsertVectorPoint {
+    return InsertVectorPoint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InsertVectorPoint>, I>>(object: I): InsertVectorPoint {
+    const message = createBaseInsertVectorPoint();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.subpathIndex = object.subpathIndex ?? 0;
+    message.afterPointId = object.afterPointId ?? undefined;
+    message.point = (object.point !== undefined && object.point !== null)
+      ? VectorPoint.fromPartial(object.point)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeleteVectorPoint(): DeleteVectorPoint {
+  return { nodeId: new Uint8Array(0), pointId: new Uint8Array(0) };
+}
+
+export const DeleteVectorPoint: MessageFns<DeleteVectorPoint> = {
+  encode(message: DeleteVectorPoint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.pointId.length !== 0) {
+      writer.uint32(18).bytes(message.pointId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteVectorPoint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteVectorPoint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pointId = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteVectorPoint>, I>>(base?: I): DeleteVectorPoint {
+    return DeleteVectorPoint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteVectorPoint>, I>>(object: I): DeleteVectorPoint {
+    const message = createBaseDeleteVectorPoint();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.pointId = object.pointId ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseSetVectorPointHandles(): SetVectorPointHandles {
+  return {
+    nodeId: new Uint8Array(0),
+    pointId: new Uint8Array(0),
+    handleInX: undefined,
+    handleInY: undefined,
+    handleOutX: undefined,
+    handleOutY: undefined,
+    pointType: 0,
+  };
+}
+
+export const SetVectorPointHandles: MessageFns<SetVectorPointHandles> = {
+  encode(message: SetVectorPointHandles, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.pointId.length !== 0) {
+      writer.uint32(18).bytes(message.pointId);
+    }
+    if (message.handleInX !== undefined) {
+      writer.uint32(25).double(message.handleInX);
+    }
+    if (message.handleInY !== undefined) {
+      writer.uint32(33).double(message.handleInY);
+    }
+    if (message.handleOutX !== undefined) {
+      writer.uint32(41).double(message.handleOutX);
+    }
+    if (message.handleOutY !== undefined) {
+      writer.uint32(49).double(message.handleOutY);
+    }
+    if (message.pointType !== 0) {
+      writer.uint32(56).int32(message.pointType);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVectorPointHandles {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVectorPointHandles();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pointId = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.handleInX = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.handleInY = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.handleOutX = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.handleOutY = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.pointType = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetVectorPointHandles>, I>>(base?: I): SetVectorPointHandles {
+    return SetVectorPointHandles.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVectorPointHandles>, I>>(object: I): SetVectorPointHandles {
+    const message = createBaseSetVectorPointHandles();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.pointId = object.pointId ?? new Uint8Array(0);
+    message.handleInX = object.handleInX ?? undefined;
+    message.handleInY = object.handleInY ?? undefined;
+    message.handleOutX = object.handleOutX ?? undefined;
+    message.handleOutY = object.handleOutY ?? undefined;
+    message.pointType = object.pointType ?? 0;
+    return message;
+  },
+};
+
+function createBaseSetBooleanOperation(): SetBooleanOperation {
+  return { nodeId: new Uint8Array(0), operation: 0 };
+}
+
+export const SetBooleanOperation: MessageFns<SetBooleanOperation> = {
+  encode(message: SetBooleanOperation, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.operation !== 0) {
+      writer.uint32(16).int32(message.operation);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetBooleanOperation {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetBooleanOperation();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.operation = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetBooleanOperation>, I>>(base?: I): SetBooleanOperation {
+    return SetBooleanOperation.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetBooleanOperation>, I>>(object: I): SetBooleanOperation {
+    const message = createBaseSetBooleanOperation();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.operation = object.operation ?? 0;
+    return message;
+  },
+};
+
+function createBaseSplitVectorSegment(): SplitVectorSegment {
+  return {
+    nodeId: new Uint8Array(0),
+    subpathIndex: 0,
+    afterPointId: new Uint8Array(0),
+    t: 0,
+    pointId: new Uint8Array(0),
+  };
+}
+
+export const SplitVectorSegment: MessageFns<SplitVectorSegment> = {
+  encode(message: SplitVectorSegment, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.subpathIndex !== 0) {
+      writer.uint32(16).uint32(message.subpathIndex);
+    }
+    if (message.afterPointId.length !== 0) {
+      writer.uint32(26).bytes(message.afterPointId);
+    }
+    if (message.t !== 0) {
+      writer.uint32(33).double(message.t);
+    }
+    if (message.pointId.length !== 0) {
+      writer.uint32(42).bytes(message.pointId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SplitVectorSegment {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSplitVectorSegment();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.subpathIndex = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.afterPointId = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.t = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.pointId = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SplitVectorSegment>, I>>(base?: I): SplitVectorSegment {
+    return SplitVectorSegment.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SplitVectorSegment>, I>>(object: I): SplitVectorSegment {
+    const message = createBaseSplitVectorSegment();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.subpathIndex = object.subpathIndex ?? 0;
+    message.afterPointId = object.afterPointId ?? new Uint8Array(0);
+    message.t = object.t ?? 0;
+    message.pointId = object.pointId ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseConnectVectorEndpoints(): ConnectVectorEndpoints {
+  return {
+    nodeId: new Uint8Array(0),
+    firstSubpathIndex: 0,
+    firstPointId: new Uint8Array(0),
+    secondSubpathIndex: 0,
+    secondPointId: new Uint8Array(0),
+  };
+}
+
+export const ConnectVectorEndpoints: MessageFns<ConnectVectorEndpoints> = {
+  encode(message: ConnectVectorEndpoints, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.firstSubpathIndex !== 0) {
+      writer.uint32(16).uint32(message.firstSubpathIndex);
+    }
+    if (message.firstPointId.length !== 0) {
+      writer.uint32(26).bytes(message.firstPointId);
+    }
+    if (message.secondSubpathIndex !== 0) {
+      writer.uint32(32).uint32(message.secondSubpathIndex);
+    }
+    if (message.secondPointId.length !== 0) {
+      writer.uint32(42).bytes(message.secondPointId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectVectorEndpoints {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectVectorEndpoints();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.firstSubpathIndex = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.firstPointId = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.secondSubpathIndex = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.secondPointId = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectVectorEndpoints>, I>>(base?: I): ConnectVectorEndpoints {
+    return ConnectVectorEndpoints.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectVectorEndpoints>, I>>(object: I): ConnectVectorEndpoints {
+    const message = createBaseConnectVectorEndpoints();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.firstSubpathIndex = object.firstSubpathIndex ?? 0;
+    message.firstPointId = object.firstPointId ?? new Uint8Array(0);
+    message.secondSubpathIndex = object.secondSubpathIndex ?? 0;
+    message.secondPointId = object.secondPointId ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseSetMask(): SetMask {
+  return { nodeId: new Uint8Array(0), enabled: false };
+}
+
+export const SetMask: MessageFns<SetMask> = {
+  encode(message: SetMask, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.enabled !== false) {
+      writer.uint32(16).bool(message.enabled);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetMask {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetMask();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.enabled = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetMask>, I>>(base?: I): SetMask {
+    return SetMask.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetMask>, I>>(object: I): SetMask {
+    const message = createBaseSetMask();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.enabled = object.enabled ?? false;
+    return message;
+  },
+};
+
 function createBaseResolvedOperation(): ResolvedOperation {
   return {
     createPage: undefined,
@@ -4098,6 +6515,17 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setNodePosition: undefined,
     restoreNode: undefined,
     setNodeParent: undefined,
+    setVectorPath: undefined,
+    moveVectorPoint: undefined,
+    setVectorSubpathClosed: undefined,
+    insertVectorPoint: undefined,
+    deleteVectorPoint: undefined,
+    setVectorPointHandles: undefined,
+    setBooleanOperation: undefined,
+    splitVectorSegment: undefined,
+    setMask: undefined,
+    setAutoLayout: undefined,
+    connectVectorEndpoints: undefined,
   };
 }
 
@@ -4144,6 +6572,39 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.setNodeParent !== undefined) {
       SetNodeParent.encode(message.setNodeParent, writer.uint32(114).fork()).join();
+    }
+    if (message.setVectorPath !== undefined) {
+      SetVectorPath.encode(message.setVectorPath, writer.uint32(122).fork()).join();
+    }
+    if (message.moveVectorPoint !== undefined) {
+      MoveVectorPoint.encode(message.moveVectorPoint, writer.uint32(130).fork()).join();
+    }
+    if (message.setVectorSubpathClosed !== undefined) {
+      SetVectorSubpathClosed.encode(message.setVectorSubpathClosed, writer.uint32(138).fork()).join();
+    }
+    if (message.insertVectorPoint !== undefined) {
+      InsertVectorPoint.encode(message.insertVectorPoint, writer.uint32(146).fork()).join();
+    }
+    if (message.deleteVectorPoint !== undefined) {
+      DeleteVectorPoint.encode(message.deleteVectorPoint, writer.uint32(154).fork()).join();
+    }
+    if (message.setVectorPointHandles !== undefined) {
+      SetVectorPointHandles.encode(message.setVectorPointHandles, writer.uint32(162).fork()).join();
+    }
+    if (message.setBooleanOperation !== undefined) {
+      SetBooleanOperation.encode(message.setBooleanOperation, writer.uint32(170).fork()).join();
+    }
+    if (message.splitVectorSegment !== undefined) {
+      SplitVectorSegment.encode(message.splitVectorSegment, writer.uint32(178).fork()).join();
+    }
+    if (message.setMask !== undefined) {
+      SetMask.encode(message.setMask, writer.uint32(186).fork()).join();
+    }
+    if (message.setAutoLayout !== undefined) {
+      AutoLayoutUpdate.encode(message.setAutoLayout, writer.uint32(194).fork()).join();
+    }
+    if (message.connectVectorEndpoints !== undefined) {
+      ConnectVectorEndpoints.encode(message.connectVectorEndpoints, writer.uint32(202).fork()).join();
     }
     return writer;
   },
@@ -4267,6 +6728,94 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.setNodeParent = SetNodeParent.decode(reader, reader.uint32());
           continue;
         }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.setVectorPath = SetVectorPath.decode(reader, reader.uint32());
+          continue;
+        }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.moveVectorPoint = MoveVectorPoint.decode(reader, reader.uint32());
+          continue;
+        }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.setVectorSubpathClosed = SetVectorSubpathClosed.decode(reader, reader.uint32());
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.insertVectorPoint = InsertVectorPoint.decode(reader, reader.uint32());
+          continue;
+        }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.deleteVectorPoint = DeleteVectorPoint.decode(reader, reader.uint32());
+          continue;
+        }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.setVectorPointHandles = SetVectorPointHandles.decode(reader, reader.uint32());
+          continue;
+        }
+        case 21: {
+          if (tag !== 170) {
+            break;
+          }
+
+          message.setBooleanOperation = SetBooleanOperation.decode(reader, reader.uint32());
+          continue;
+        }
+        case 22: {
+          if (tag !== 178) {
+            break;
+          }
+
+          message.splitVectorSegment = SplitVectorSegment.decode(reader, reader.uint32());
+          continue;
+        }
+        case 23: {
+          if (tag !== 186) {
+            break;
+          }
+
+          message.setMask = SetMask.decode(reader, reader.uint32());
+          continue;
+        }
+        case 24: {
+          if (tag !== 194) {
+            break;
+          }
+
+          message.setAutoLayout = AutoLayoutUpdate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 25: {
+          if (tag !== 202) {
+            break;
+          }
+
+          message.connectVectorEndpoints = ConnectVectorEndpoints.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4324,6 +6873,42 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     message.setNodeParent = (object.setNodeParent !== undefined && object.setNodeParent !== null)
       ? SetNodeParent.fromPartial(object.setNodeParent)
       : undefined;
+    message.setVectorPath = (object.setVectorPath !== undefined && object.setVectorPath !== null)
+      ? SetVectorPath.fromPartial(object.setVectorPath)
+      : undefined;
+    message.moveVectorPoint = (object.moveVectorPoint !== undefined && object.moveVectorPoint !== null)
+      ? MoveVectorPoint.fromPartial(object.moveVectorPoint)
+      : undefined;
+    message.setVectorSubpathClosed =
+      (object.setVectorSubpathClosed !== undefined && object.setVectorSubpathClosed !== null)
+        ? SetVectorSubpathClosed.fromPartial(object.setVectorSubpathClosed)
+        : undefined;
+    message.insertVectorPoint = (object.insertVectorPoint !== undefined && object.insertVectorPoint !== null)
+      ? InsertVectorPoint.fromPartial(object.insertVectorPoint)
+      : undefined;
+    message.deleteVectorPoint = (object.deleteVectorPoint !== undefined && object.deleteVectorPoint !== null)
+      ? DeleteVectorPoint.fromPartial(object.deleteVectorPoint)
+      : undefined;
+    message.setVectorPointHandles =
+      (object.setVectorPointHandles !== undefined && object.setVectorPointHandles !== null)
+        ? SetVectorPointHandles.fromPartial(object.setVectorPointHandles)
+        : undefined;
+    message.setBooleanOperation = (object.setBooleanOperation !== undefined && object.setBooleanOperation !== null)
+      ? SetBooleanOperation.fromPartial(object.setBooleanOperation)
+      : undefined;
+    message.splitVectorSegment = (object.splitVectorSegment !== undefined && object.splitVectorSegment !== null)
+      ? SplitVectorSegment.fromPartial(object.splitVectorSegment)
+      : undefined;
+    message.setMask = (object.setMask !== undefined && object.setMask !== null)
+      ? SetMask.fromPartial(object.setMask)
+      : undefined;
+    message.setAutoLayout = (object.setAutoLayout !== undefined && object.setAutoLayout !== null)
+      ? AutoLayoutUpdate.fromPartial(object.setAutoLayout)
+      : undefined;
+    message.connectVectorEndpoints =
+      (object.connectVectorEndpoints !== undefined && object.connectVectorEndpoints !== null)
+        ? ConnectVectorEndpoints.fromPartial(object.connectVectorEndpoints)
+        : undefined;
     return message;
   },
 };

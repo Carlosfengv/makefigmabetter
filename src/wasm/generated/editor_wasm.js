@@ -404,6 +404,19 @@ export class DocumentEngine {
         return BigInt.asUintN(64, ret);
     }
     /**
+     * Adds trusted legacy fixture metadata before `seed_batch_json` installs
+     * image or font references. Bytes are deliberately not accepted here.
+     * @param {string} value
+     */
+    seed_assets_json(value) {
+        const ptr0 = passStringToWasm0(value, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_seed_assets_json(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Installs a trusted legacy projection without adding history. Unlike the narrow
      * v1 seed_node bridge, this carries the full v7 paint projection during one-time
      * hydration of older local records and fixtures.
@@ -567,6 +580,73 @@ export class DocumentEngine {
 if (Symbol.dispose) DocumentEngine.prototype[Symbol.dispose] = DocumentEngine.prototype.free;
 
 /**
+ * Returns one transient Boolean outline for two or more VectorPath operands.
+ * The input and output are projection data only: the editable source paths and
+ * BooleanOperation children remain Canonical, while Canvas, hit tests and
+ * exporters can consume this one validated Rust-derived result.
+ * @param {string} operation
+ * @param {string} operands_json
+ * @param {number} tolerance
+ * @returns {string}
+ */
+export function boolean_vector_paths_json(operation, operands_json, tolerance) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(operation, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(operands_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.boolean_vector_paths_json(ptr0, len0, ptr1, len1, tolerance);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * @param {number} width
+ * @param {number} stroke_width
+ * @param {string} dash_json
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function dashed_line_outline_json(width, stroke_width, dash_json, cap, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.dashed_line_outline_json(width, stroke_width, ptr0, len0, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
  * Projects a decorative Line endpoint marker (arrowhead, diamond or dot) from
  * the same Core geometry the Canvas renderer, hit test and SVG export consume.
  * `endpoint`/`direction` place and orient the marker in the Line's local space
@@ -627,6 +707,39 @@ export function fallback_text_layout_json(text, max_graphemes_per_line) {
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Builds a transient GPU instance projection from a validated Core snapshot
+ * without borrowing the live browser editing engine. The renderer owns this
+ * derived data only; edits and history remain on its separate DocumentEngine.
+ * Keeping the projection receiver-free avoids a wasm-bindgen borrow spanning a
+ * browser Worker render read and a later mutable transaction.
+ * @param {string} snapshot_json
+ * @param {string} page_id
+ * @returns {string}
+ */
+export function gpu_scene_instances_from_snapshot_json(snapshot_json, page_id) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(snapshot_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.gpu_scene_instances_from_snapshot_json(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
 }
 
@@ -695,6 +808,93 @@ export function layout_shaped_text_with_variations_json(font_bytes, face_index, 
         return getStringFromWasm0(ptr4, len4);
     } finally {
         wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Converts a solid straight Line and either standard or decorative endpoint
+ * caps into one unioned editable outline. Dashed lines remain deliberately
+ * excluded because their terminal-cap semantics differ per dash run.
+ * @param {number} width
+ * @param {number} stroke_width
+ * @param {string} start_cap
+ * @param {string} end_cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function line_outline_json(width, stroke_width, start_cap, end_cap, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(start_cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(end_cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.line_outline_json(width, stroke_width, ptr0, len0, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Canonical non-zero fill containment for editable Polygon/Star nodes. The
+ * document stores only parameters; this recomputes the bounded Core outline.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} shape_json
+ * @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
+export function parametric_shape_contains_point_json(width, height, shape_json, x, y) {
+    const ptr0 = passStringToWasm0(shape_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.parametric_shape_contains_point_json(width, height, ptr0, len0, x, y);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * Returns the one Core-derived local contour for an ADR 0026 Polygon or Star.
+ * It is transient presentation geometry only; the canonical document continues
+ * to store the bounded parametric record rather than this generated point list.
+ * @param {number} width
+ * @param {number} height
+ * @param {string} shape_json
+ * @returns {string}
+ */
+export function parametric_shape_outline_json(width, height, shape_json) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(shape_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.parametric_shape_outline_json(width, height, ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
 }
 
@@ -1139,6 +1339,260 @@ export function stroke_meshes_for_per_side_rectangle_with_dash_json(width, heigh
         const ptr2 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.stroke_meshes_for_per_side_rectangle_with_dash_json(width, height, ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Canonical fill containment for Worker hit tests. Open subpaths do not
+ * contribute to fill containment; stroke hits use the separate mesh bridge.
+ * @param {string} path_json
+ * @param {number} x
+ * @param {number} y
+ * @param {number} tolerance
+ * @returns {boolean}
+ */
+export function vector_path_contains_json(path_json, x, y, tolerance) {
+    const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.vector_path_contains_json(ptr0, len0, x, y, tolerance);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * @param {string} path_json
+ * @param {number} tolerance
+ * @param {number} width
+ * @param {string} dash_json
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function vector_path_dashed_outline_json(path_json, tolerance, width, dash_json, cap, join, miter_limit) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(dash_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_dashed_outline_json(ptr0, len0, tolerance, width, ptr1, len1, ptr2, len2, ptr3, len3, miter_limit);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Returns the budgeted Core flattening for a JSON-projected VectorPath. This
+ * is presentation data only; callers must never persist the returned points.
+ * @param {string} path_json
+ * @param {number} tolerance
+ * @returns {string}
+ */
+export function vector_path_geometry_json(path_json, tolerance) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_geometry_json(ptr0, len0, tolerance);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Finds the nearest editable original VectorPath segment for direct canvas
+ * splitting. Its `t` is Core-derived and can be passed unchanged to the
+ * Canonical SplitVectorSegment command.
+ * @param {string} path_json
+ * @param {number} x
+ * @param {number} y
+ * @param {number} tolerance
+ * @param {number} max_distance
+ * @returns {string}
+ */
+export function vector_path_nearest_segment_json(path_json, x, y, tolerance, max_distance) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_nearest_segment_json(ptr0, len0, x, y, tolerance, max_distance);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Expands a VectorPath stroke through the same Core tessellation used by the
+ * Canvas fallback and stroke hit testing, then unions that mesh into editable
+ * closed VectorPath contours for the Outline Stroke command.
+ * @param {string} path_json
+ * @param {number} tolerance
+ * @param {number} width
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function vector_path_outline_json(path_json, tolerance, width, cap, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_outline_json(ptr0, len0, tolerance, width, ptr1, len1, ptr2, len2, miter_limit);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * As [`vector_path_outline_json`], but open paths can use different standard
+ * caps at their start and end. Decorative caps remain a Line rendering mode.
+ * @param {string} path_json
+ * @param {number} tolerance
+ * @param {number} width
+ * @param {string} start_cap
+ * @param {string} end_cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function vector_path_outline_with_caps_json(path_json, tolerance, width, start_cap, end_cap, join, miter_limit) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(start_cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(end_cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_outline_with_caps_json(ptr0, len0, tolerance, width, ptr1, len1, ptr2, len2, ptr3, len3, miter_limit);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * @param {string} path_json
+ * @param {number} x
+ * @param {number} y
+ * @param {number} tolerance
+ * @param {number} width
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {boolean}
+ */
+export function vector_path_stroke_contains_json(path_json, x, y, tolerance, width, cap, join, miter_limit) {
+    const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.vector_path_stroke_contains_json(ptr0, len0, x, y, tolerance, width, ptr1, len1, ptr2, len2, miter_limit);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * Projects the Core VectorPath stroke mesh for Canvas fallback or a future
+ * GPU upload. Unlike an HTML canvas stroke, this shares Core's joins, caps
+ * and transient geometry budget with precise stroke hit testing.
+ * @param {string} path_json
+ * @param {number} tolerance
+ * @param {number} width
+ * @param {string} cap
+ * @param {string} join
+ * @param {number} miter_limit
+ * @returns {string}
+ */
+export function vector_path_stroke_mesh_json(path_json, tolerance, width, cap, join, miter_limit) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(path_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(cap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(join, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.vector_path_stroke_mesh_json(ptr0, len0, tolerance, width, ptr1, len1, ptr2, len2, miter_limit);
         var ptr4 = ret[0];
         var len4 = ret[1];
         if (ret[3]) {

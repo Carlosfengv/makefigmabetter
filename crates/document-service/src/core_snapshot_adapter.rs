@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use editor_core::{
-    ActorId, ArcData, AssetId, AssetReference, Command, ConstraintType, Constraints, Document, DocumentId, FontReference, Node, NodeId, NodeKind,
+    ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, Node, NodeId, NodeKind, ParametricShape, PointId, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     Page, PageId, ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
     TextStyleRun,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
@@ -168,6 +168,7 @@ pub fn snapshot_from_document(
                         page.id,
                         document.asset_for_node(node.id),
                         document.text_properties_for_node(node.id),
+                        document.auto_layout_for_node(node.id),
                     )
                     .encode_to_vec();
                     Ok(v1::SceneNodeRef {
@@ -237,7 +238,7 @@ pub fn document_from_snapshot(
         for reference in chunk.nodes {
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| ServiceError::ReducerRejected)?;
-            let (page_id, node, asset_id, text_properties) = node_from_proto(node_proto)?;
+            let (page_id, node, asset_id, text_properties, auto_layout) = node_from_proto(node_proto)?;
             if page_id.0 != id(&reference.page_id)?
                 || node.id.0 != id(&reference.node_id)?
                 || node.position
@@ -264,6 +265,9 @@ pub fn document_from_snapshot(
                     .seed_text_properties(node_id, properties)
                     .map_err(|_| ServiceError::ReducerRejected)?;
             }
+            document
+                .seed_auto_layout(node_id, auto_layout)
+                .map_err(|_| ServiceError::ReducerRejected)?;
         }
     }
     for retired_id in snapshot.retired_node_ids {
@@ -329,6 +333,7 @@ fn node_to_proto(
     page_id: PageId,
     asset_id: Option<AssetId>,
     text_properties: Option<&TextProperties>,
+    auto_layout: AutoLayout,
 ) -> v1::SceneNode {
     v1::SceneNode {
         node_id: id_to_bytes(node.id.0),
@@ -345,6 +350,11 @@ fn node_to_proto(
             NodeKind::Line => v1::NodeKind::Line,
             NodeKind::Group => v1::NodeKind::Group,
             NodeKind::Section => v1::NodeKind::Section,
+            NodeKind::Polygon => v1::NodeKind::Polygon,
+            NodeKind::Star => v1::NodeKind::Star,
+            NodeKind::Vector => v1::NodeKind::Vector,
+            NodeKind::BooleanOperation => v1::NodeKind::BooleanOperation,
+            NodeKind::Slice => v1::NodeKind::Slice,
         } as i32,
         x: node.x,
         y: node.y,
@@ -357,6 +367,7 @@ fn node_to_proto(
         strokes: node.strokes.iter().map(paint_to_proto).collect(),
         stroke_width: node.stroke_width,
         opacity: node.opacity,
+        blend_mode: blend_mode_to_proto(node.blend_mode) as i32,
         corner_radius: node.corner_radius,
         corner_radii: node.corner_radii.clone(),
         corner_smoothing: node.corner_smoothing,
@@ -374,16 +385,29 @@ fn node_to_proto(
         stroke_weights: node.stroke_weights.clone(),
         stroke_align: stroke_align_to_proto(node.stroke_align) as i32,
         arc_data: node.arc_data.map(arc_to_proto),
+        polygon_parameters: match node.parametric_shape {
+            Some(ParametricShape::Polygon { point_count }) => Some(v1::PolygonParameters { point_count }),
+            _ => None,
+        },
+        star_parameters: match node.parametric_shape {
+            Some(ParametricShape::Star { point_count, inner_ratio }) => Some(v1::StarParameters { point_count, inner_ratio }),
+            _ => None,
+        },
         relative_transform: node.relative_transform.map(transform_to_proto),
         contents_hidden: node.contents_hidden,
         clips_content: Some(node.clips_content),
         extensions: node.extensions.clone().into_iter().collect(),
+        drop_shadow: node.drop_shadow.map(drop_shadow_to_proto),
+        effect_stack: node.effect_stack.iter().copied().map(effect_to_proto).collect(),
+        vector_path: node.vector_path.as_ref().map(vector_path_to_proto),
+        boolean_operation: node.boolean_operation.map(boolean_operation_to_proto),
+        auto_layout: Some(auto_layout_to_proto(&auto_layout)),
     }
 }
 
 fn node_from_proto(
     node: v1::SceneNode,
-) -> Result<(PageId, Node, Option<AssetId>, Option<TextProperties>), ServiceError> {
+) -> Result<(PageId, Node, Option<AssetId>, Option<TextProperties>, AutoLayout), ServiceError> {
     let page_id = PageId(id(&node.page_id)?);
     let kind = match v1::NodeKind::try_from(node.kind).map_err(|_| ServiceError::ReducerRejected)? {
         v1::NodeKind::Frame => NodeKind::Frame,
@@ -394,6 +418,11 @@ fn node_from_proto(
         v1::NodeKind::Line => NodeKind::Line,
         v1::NodeKind::Group => NodeKind::Group,
         v1::NodeKind::Section => NodeKind::Section,
+        v1::NodeKind::Polygon => NodeKind::Polygon,
+        v1::NodeKind::Star => NodeKind::Star,
+        v1::NodeKind::Vector => NodeKind::Vector,
+        v1::NodeKind::BooleanOperation => NodeKind::BooleanOperation,
+        v1::NodeKind::Slice => NodeKind::Slice,
         v1::NodeKind::Unspecified => return Err(ServiceError::ReducerRejected),
     };
     let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
@@ -423,8 +452,12 @@ fn node_from_proto(
             stroke_weights: node.stroke_weights,
             stroke_align: stroke_align_from_proto(node.stroke_align)?,
             arc_data: node.arc_data.map(arc_from_proto).transpose()?,
+            parametric_shape: parametric_shape_from_proto(node.polygon_parameters, node.star_parameters)?,
+            vector_path: node.vector_path.map(vector_path_from_proto).transpose()?,
+            boolean_operation: node.boolean_operation.map(boolean_operation_from_proto).transpose()?,
             relative_transform: node.relative_transform.map(transform_from_proto).transpose()?,
             opacity: node.opacity,
+            blend_mode: blend_mode_from_proto(node.blend_mode)?,
             corner_radius: node.corner_radius,
             corner_radii: node.corner_radii,
             corner_smoothing: node.corner_smoothing,
@@ -434,13 +467,61 @@ fn node_from_proto(
             locked: node.locked,
             contents_hidden: node.contents_hidden,
             clips_content,
+            drop_shadow: node.drop_shadow.map(drop_shadow_from_proto).transpose()?,
+            effect_stack: node.effect_stack.into_iter().map(effect_from_proto).collect::<Result<Vec<_>, _>>()?,
             extensions: node.extensions.into_iter().collect(),
         },
         node.asset_id.as_deref().map(id).transpose()?.map(AssetId),
         node.text_properties
             .map(text_properties_from_proto)
             .transpose()?,
+        node.auto_layout
+            .map(auto_layout_from_proto)
+            .transpose()?
+            .unwrap_or_default(),
     ))
+}
+
+fn drop_shadow_to_proto(shadow: DropShadow) -> v1::DropShadow {
+    v1::DropShadow {
+        offset_x: shadow.offset_x,
+        offset_y: shadow.offset_y,
+        blur_radius: shadow.blur_radius,
+        spread: shadow.spread,
+        color: Some(color_to_proto(shadow.color)),
+        visible: shadow.visible,
+    }
+}
+
+fn effect_to_proto(effect: Effect) -> v1::Effect {
+    v1::Effect {
+        kind: Some(match effect {
+            Effect::DropShadow(shadow) => v1::effect::Kind::DropShadow(drop_shadow_to_proto(shadow)),
+            Effect::LayerBlur(blur) => v1::effect::Kind::LayerBlur(v1::LayerBlur { radius: blur.radius, visible: blur.visible }),
+            Effect::InnerShadow(shadow) => v1::effect::Kind::InnerShadow(v1::InnerShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: Some(color_to_proto(shadow.color)), visible: shadow.visible }),
+            Effect::BackgroundBlur(blur) => v1::effect::Kind::BackgroundBlur(v1::BackgroundBlur { radius: blur.radius, visible: blur.visible }),
+        }),
+    }
+}
+
+fn effect_from_proto(effect: v1::Effect) -> Result<Effect, ServiceError> {
+    match effect.kind.ok_or(ServiceError::ReducerRejected)? {
+        v1::effect::Kind::DropShadow(shadow) => Ok(Effect::DropShadow(drop_shadow_from_proto(shadow)?)),
+        v1::effect::Kind::LayerBlur(blur) => Ok(Effect::LayerBlur(LayerBlur { radius: blur.radius, visible: blur.visible })),
+        v1::effect::Kind::InnerShadow(shadow) => Ok(Effect::InnerShadow(InnerShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: color_from_proto(shadow.color.ok_or(ServiceError::ReducerRejected)?)?, visible: shadow.visible })),
+        v1::effect::Kind::BackgroundBlur(blur) => Ok(Effect::BackgroundBlur(BackgroundBlur { radius: blur.radius, visible: blur.visible })),
+    }
+}
+
+fn drop_shadow_from_proto(shadow: v1::DropShadow) -> Result<DropShadow, ServiceError> {
+    Ok(DropShadow {
+        offset_x: shadow.offset_x,
+        offset_y: shadow.offset_y,
+        blur_radius: shadow.blur_radius,
+        spread: shadow.spread,
+        color: color_from_proto(shadow.color.ok_or(ServiceError::ReducerRejected)?)?,
+        visible: shadow.visible,
+    })
 }
 
 fn stroke_cap_to_proto(cap: StrokeCap) -> v1::StrokeCap {
@@ -508,6 +589,96 @@ fn constraints_from_proto(value: v1::Constraints) -> Result<Constraints, Service
     Ok(Constraints { horizontal: convert(value.horizontal)?, vertical: convert(value.vertical)? })
 }
 
+fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
+    v1::AutoLayout {
+        mode: match value.mode {
+            LayoutMode::None => v1::LayoutMode::None,
+            LayoutMode::Horizontal => v1::LayoutMode::Horizontal,
+            LayoutMode::Vertical => v1::LayoutMode::Vertical,
+        } as i32,
+        padding_top: value.padding[0],
+        padding_right: value.padding[1],
+        padding_bottom: value.padding[2],
+        padding_left: value.padding[3],
+        item_spacing: value.item_spacing,
+        wrap: value.wrap,
+        primary_alignment: alignment_to_proto(value.primary_alignment) as i32,
+        counter_alignment: alignment_to_proto(value.counter_alignment) as i32,
+        primary_sizing: sizing_to_proto(value.primary_sizing) as i32,
+        counter_sizing: sizing_to_proto(value.counter_sizing) as i32,
+        min_width: value.min_width,
+        max_width: value.max_width,
+        min_height: value.min_height,
+        max_height: value.max_height,
+        absolute: value.absolute,
+    }
+}
+
+fn alignment_to_proto(value: LayoutAlignment) -> v1::LayoutAlignment {
+    match value {
+        LayoutAlignment::Start => v1::LayoutAlignment::Start,
+        LayoutAlignment::Center => v1::LayoutAlignment::Center,
+        LayoutAlignment::End => v1::LayoutAlignment::End,
+        LayoutAlignment::SpaceBetween => v1::LayoutAlignment::SpaceBetween,
+    }
+}
+
+fn sizing_to_proto(value: LayoutSizing) -> v1::LayoutSizing {
+    match value {
+        LayoutSizing::Fixed => v1::LayoutSizing::Fixed,
+        LayoutSizing::Hug => v1::LayoutSizing::Hug,
+        LayoutSizing::Fill => v1::LayoutSizing::Fill,
+    }
+}
+
+fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceError> {
+    let mode = match v1::LayoutMode::try_from(value.mode)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::LayoutMode::None => LayoutMode::None,
+        v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
+        v1::LayoutMode::Vertical => LayoutMode::Vertical,
+        v1::LayoutMode::Unspecified => return Err(ServiceError::ReducerRejected),
+    };
+    let alignment = |value| match v1::LayoutAlignment::try_from(value)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::LayoutAlignment::Start => Ok(LayoutAlignment::Start),
+        v1::LayoutAlignment::Center => Ok(LayoutAlignment::Center),
+        v1::LayoutAlignment::End => Ok(LayoutAlignment::End),
+        v1::LayoutAlignment::SpaceBetween => Ok(LayoutAlignment::SpaceBetween),
+        v1::LayoutAlignment::Unspecified => Err(ServiceError::ReducerRejected),
+    };
+    let sizing = |value| match v1::LayoutSizing::try_from(value)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::LayoutSizing::Fixed => Ok(LayoutSizing::Fixed),
+        v1::LayoutSizing::Hug => Ok(LayoutSizing::Hug),
+        v1::LayoutSizing::Fill => Ok(LayoutSizing::Fill),
+        v1::LayoutSizing::Unspecified => Err(ServiceError::ReducerRejected),
+    };
+    Ok(AutoLayout {
+        mode,
+        padding: [
+            value.padding_top,
+            value.padding_right,
+            value.padding_bottom,
+            value.padding_left,
+        ],
+        item_spacing: value.item_spacing,
+        wrap: value.wrap,
+        primary_alignment: alignment(value.primary_alignment)?,
+        counter_alignment: alignment(value.counter_alignment)?,
+        primary_sizing: sizing(value.primary_sizing)?,
+        counter_sizing: sizing(value.counter_sizing)?,
+        min_width: value.min_width,
+        max_width: value.max_width,
+        min_height: value.min_height,
+        max_height: value.max_height,
+        absolute: value.absolute,
+    })
+}
+
 fn stroke_align_to_proto(align: StrokeAlign) -> v1::StrokeAlign {
     match align {
         StrokeAlign::Center => v1::StrokeAlign::Center,
@@ -524,8 +695,85 @@ fn stroke_align_from_proto(value: i32) -> Result<StrokeAlign, ServiceError> {
     })
 }
 
+fn blend_mode_to_proto(mode: BlendMode) -> v1::BlendMode {
+    match mode {
+        BlendMode::Normal => v1::BlendMode::Normal,
+        BlendMode::Multiply => v1::BlendMode::Multiply,
+        BlendMode::Screen => v1::BlendMode::Screen,
+        BlendMode::Overlay => v1::BlendMode::Overlay,
+        BlendMode::Darken => v1::BlendMode::Darken,
+        BlendMode::Lighten => v1::BlendMode::Lighten,
+    }
+}
+
+fn blend_mode_from_proto(value: i32) -> Result<BlendMode, ServiceError> {
+    match v1::BlendMode::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::BlendMode::Normal => Ok(BlendMode::Normal),
+        v1::BlendMode::Multiply => Ok(BlendMode::Multiply),
+        v1::BlendMode::Screen => Ok(BlendMode::Screen),
+        v1::BlendMode::Overlay => Ok(BlendMode::Overlay),
+        v1::BlendMode::Darken => Ok(BlendMode::Darken),
+        v1::BlendMode::Lighten => Ok(BlendMode::Lighten),
+    }
+}
+
 fn arc_to_proto(arc: ArcData) -> v1::ArcData { v1::ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius } }
 fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> { Ok(ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }) }
+fn parametric_shape_from_proto(
+    polygon: Option<v1::PolygonParameters>,
+    star: Option<v1::StarParameters>,
+) -> Result<Option<ParametricShape>, ServiceError> {
+    match (polygon, star) {
+        (Some(_), Some(_)) => Err(ServiceError::ReducerRejected),
+        (Some(parameters), None) => Ok(Some(ParametricShape::Polygon { point_count: parameters.point_count })),
+        (None, Some(parameters)) => Ok(Some(ParametricShape::Star { point_count: parameters.point_count, inner_ratio: parameters.inner_ratio })),
+        (None, None) => Ok(None),
+    }
+}
+fn vector_path_to_proto(path: &VectorPath) -> v1::VectorPath {
+    v1::VectorPath {
+        fill_rule: match path.fill_rule { FillRule::NonZero => v1::FillRule::NonZero, FillRule::EvenOdd => v1::FillRule::EvenOdd } as i32,
+        subpaths: path.subpaths.iter().map(|subpath| v1::VectorSubpath {
+            closed: subpath.closed,
+            points: subpath.points.iter().map(|point| v1::VectorPoint {
+                point_id: id_to_bytes(point.id.0), x: point.position.x, y: point.position.y,
+                handle_in_x: point.handle_in.map(|handle| handle.x), handle_in_y: point.handle_in.map(|handle| handle.y),
+                handle_out_x: point.handle_out.map(|handle| handle.x), handle_out_y: point.handle_out.map(|handle| handle.y),
+                point_type: match point.point_type { VectorPointType::Corner => v1::VectorPointType::Corner, VectorPointType::Mirrored => v1::VectorPointType::Mirrored, VectorPointType::Asymmetric => v1::VectorPointType::Asymmetric } as i32,
+            }).collect(),
+        }).collect(),
+    }
+}
+fn vector_path_from_proto(path: v1::VectorPath) -> Result<VectorPath, ServiceError> {
+    let fill_rule = match v1::FillRule::try_from(path.fill_rule).map_err(|_| ServiceError::ReducerRejected)? { v1::FillRule::NonZero => FillRule::NonZero, v1::FillRule::EvenOdd => FillRule::EvenOdd, v1::FillRule::Unspecified => return Err(ServiceError::ReducerRejected) };
+    let subpaths = path.subpaths.into_iter().map(|subpath| Ok(VectorSubpath {
+        closed: subpath.closed,
+        points: subpath.points.into_iter().map(|point| {
+            let point_type = match v1::VectorPointType::try_from(point.point_type).map_err(|_| ServiceError::ReducerRejected)? { v1::VectorPointType::Corner => VectorPointType::Corner, v1::VectorPointType::Mirrored => VectorPointType::Mirrored, v1::VectorPointType::Asymmetric => VectorPointType::Asymmetric, v1::VectorPointType::Unspecified => return Err(ServiceError::ReducerRejected) };
+            let handle_in = match (point.handle_in_x, point.handle_in_y) { (None, None) => None, (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }), _ => return Err(ServiceError::ReducerRejected) };
+            let handle_out = match (point.handle_out_x, point.handle_out_y) { (None, None) => None, (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }), _ => return Err(ServiceError::ReducerRejected) };
+            Ok(VectorPoint { id: PointId(id(&point.point_id)?), position: editor_core::geometry::Point { x: point.x, y: point.y }, handle_in, handle_out, point_type })
+        }).collect::<Result<Vec<_>, ServiceError>>()?,
+    })).collect::<Result<Vec<_>, ServiceError>>()?;
+    Ok(VectorPath { fill_rule, subpaths })
+}
+fn boolean_operation_to_proto(operation: BooleanOperation) -> i32 {
+    (match operation {
+        BooleanOperation::Union => v1::BooleanOperation::Union,
+        BooleanOperation::Intersect => v1::BooleanOperation::Intersect,
+        BooleanOperation::Subtract => v1::BooleanOperation::Subtract,
+        BooleanOperation::Exclude => v1::BooleanOperation::Exclude,
+    }) as i32
+}
+fn boolean_operation_from_proto(operation: i32) -> Result<BooleanOperation, ServiceError> {
+    match v1::BooleanOperation::try_from(operation).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::BooleanOperation::Union => Ok(BooleanOperation::Union),
+        v1::BooleanOperation::Intersect => Ok(BooleanOperation::Intersect),
+        v1::BooleanOperation::Subtract => Ok(BooleanOperation::Subtract),
+        v1::BooleanOperation::Exclude => Ok(BooleanOperation::Exclude),
+        v1::BooleanOperation::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
 fn transform_to_proto(transform: editor_core::geometry::AffineTransform) -> v1::Transform { v1::Transform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f } }
 fn transform_from_proto(transform: v1::Transform) -> Result<editor_core::geometry::AffineTransform, ServiceError> { Ok(editor_core::geometry::AffineTransform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f }) }
 
@@ -574,6 +822,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 font_weight: u32::from(run.font_weight),
                 italic: run.italic,
                 letter_spacing: run.letter_spacing,
+                color: run.color.map(color_to_proto),
             })
             .collect(),
         paragraph: Some(v1::ParagraphStyle {
@@ -632,6 +881,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map_err(|_| ServiceError::ReducerRejected)?,
                     italic: run.italic,
                     letter_spacing: run.letter_spacing,
+                    color: run.color.map(color_from_proto).transpose()?,
                 })
             })
             .collect::<Result<_, ServiceError>>()?,
@@ -810,8 +1060,14 @@ mod tests {
                    stroke_weights: Vec::new(),
                    stroke_align: Default::default(),
                     arc_data: None,
+                    parametric_shape: None,
+                    vector_path: None,
+                    boolean_operation: None,
                     relative_transform: Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 24.0, f: 12.0 }),
                     opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    drop_shadow: None,
+            effect_stack: Vec::new(),
                     corner_radius: 0.0,
                     corner_radii: vec![4.0, 8.0, 12.0, 16.0],
                     corner_smoothing: 0.0,
@@ -977,8 +1233,14 @@ mod tests {
             stroke_weights: Vec::new(),
             stroke_align: Default::default(),
             arc_data: None,
+            parametric_shape: None,
+            vector_path: None,
+            boolean_operation: None,
             relative_transform: None,
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
             corner_radius: 0.0,
             corner_radii: Vec::new(),
             corner_smoothing: 0.0,
@@ -990,6 +1252,24 @@ mod tests {
             clips_content,
             extensions: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn service_snapshot_adapter_round_trips_slice_kind_and_world_geometry() {
+        let mut slice = leaf(NodeId(17), None, NodeKind::Slice);
+        slice.name = "Export area".into();
+        slice.stroke_align = StrokeAlign::Inside;
+        slice.rotation = 22.5;
+        let wire = node_to_proto(&slice, DEFAULT_PAGE_ID, None, None, AutoLayout::default());
+        assert_eq!(wire.kind, v1::NodeKind::Slice as i32);
+
+        let (page_id, restored, asset_id, text_properties, auto_layout) = node_from_proto(wire).unwrap();
+        assert_eq!(page_id, DEFAULT_PAGE_ID);
+        assert_eq!(restored.kind, NodeKind::Slice);
+        assert_eq!(restored.rotation, 22.5);
+        assert_eq!(asset_id, None);
+        assert_eq!(text_properties, None);
+        assert_eq!(auto_layout, AutoLayout::default());
     }
 
     #[test]

@@ -74,6 +74,14 @@ enum NodeKind {
   // Canvas organization container. Unlike Frame, hiding its contents does not
   // change the Section's own visibility or geometry.
   NODE_KIND_SECTION = 8;
+  // Generated closed outline whose durable source is a point count.
+  NODE_KIND_POLYGON = 9;
+  // Generated concave outline whose durable source includes an inner ratio.
+  NODE_KIND_STAR = 10;
+  NODE_KIND_VECTOR = 11;
+  NODE_KIND_BOOLEAN_OPERATION = 12;
+  // Non-painting canonical export region (Phase 2 G5).
+  NODE_KIND_SLICE = 13;
 }
 
 // Open-path endpoint decoration. Unspecified is accepted from historical
@@ -104,6 +112,18 @@ enum StrokeAlign {
   STROKE_ALIGN_OUTSIDE = 3;
 }
 
+// E1's initial interoperable blend subset. Zero preserves the historical
+// source-over result for snapshots and operation payloads authored before
+// Blend Mode existed.
+enum BlendMode {
+  BLEND_MODE_NORMAL = 0;
+  BLEND_MODE_MULTIPLY = 1;
+  BLEND_MODE_SCREEN = 2;
+  BLEND_MODE_OVERLAY = 3;
+  BLEND_MODE_DARKEN = 4;
+  BLEND_MODE_LIGHTEN = 5;
+}
+
 // Figma's per-axis behavior when the containing Frame is resized. Unspecified
 // remains a legacy absence at the Canonical boundary rather than silently
 // becoming an effective constraint.
@@ -119,6 +139,49 @@ enum ConstraintType {
 message Constraints {
   ConstraintType horizontal = 1;
   ConstraintType vertical = 2;
+}
+
+// Auto Layout is explicit canonical input. Omission is the legacy fixed-size,
+// non-layout default; it must never be inferred from a node's current bounds.
+enum LayoutMode {
+  LAYOUT_MODE_UNSPECIFIED = 0;
+  LAYOUT_MODE_NONE = 1;
+  LAYOUT_MODE_HORIZONTAL = 2;
+  LAYOUT_MODE_VERTICAL = 3;
+}
+
+enum LayoutAlignment {
+  LAYOUT_ALIGNMENT_UNSPECIFIED = 0;
+  LAYOUT_ALIGNMENT_START = 1;
+  LAYOUT_ALIGNMENT_CENTER = 2;
+  LAYOUT_ALIGNMENT_END = 3;
+  LAYOUT_ALIGNMENT_SPACE_BETWEEN = 4;
+}
+
+enum LayoutSizing {
+  LAYOUT_SIZING_UNSPECIFIED = 0;
+  LAYOUT_SIZING_FIXED = 1;
+  LAYOUT_SIZING_HUG = 2;
+  LAYOUT_SIZING_FILL = 3;
+}
+
+message AutoLayout {
+  LayoutMode mode = 1;
+  double padding_top = 2;
+  double padding_right = 3;
+  double padding_bottom = 4;
+  double padding_left = 5;
+  double item_spacing = 6;
+  bool wrap = 7;
+  LayoutAlignment primary_alignment = 8;
+  LayoutAlignment counter_alignment = 9;
+  LayoutSizing primary_sizing = 10;
+  LayoutSizing counter_sizing = 11;
+  optional double min_width = 12;
+  optional double max_width = 13;
+  optional double min_height = 14;
+  optional double max_height = 15;
+  bool absolute = 16;
 }
 
 enum ColorSpace {
@@ -142,6 +205,51 @@ message Color {
   float alpha = 5;
 }
 
+// R3's single base effect. E1 will migrate this losslessly into an ordered
+// Effect Stack; omission means the node has no shadow.
+message DropShadow {
+  double offset_x = 1;
+  double offset_y = 2;
+  double blur_radius = 3;
+  double spread = 4;
+  Color color = 5;
+  bool visible = 6;
+}
+
+// Blurs the node's isolated source surface before it is composited.  This is
+// intentionally separate from Background Blur, which requires a backdrop pass.
+message LayerBlur {
+  double radius = 1;
+  bool visible = 2;
+}
+
+// A shadow clipped to the node's isolated source alpha.
+message InnerShadow {
+  double offset_x = 1;
+  double offset_y = 2;
+  double blur_radius = 3;
+  double spread = 4;
+  Color color = 5;
+  bool visible = 6;
+}
+
+// Blurs already-composited backdrop pixels within the node's source alpha.
+message BackgroundBlur {
+  double radius = 1;
+  bool visible = 2;
+}
+
+// Ordered, extensible Effect Stack. The legacy drop_shadow fields remain a
+// compatibility projection of the first entry while older clients upgrade.
+message Effect {
+  oneof kind {
+    DropShadow drop_shadow = 1;
+    LayerBlur layer_blur = 2;
+    InnerShadow inner_shadow = 3;
+    BackgroundBlur background_blur = 4;
+  }
+}
+
 message GradientStop {
   float position = 1;
   Color color = 2;
@@ -159,6 +267,59 @@ message ArcData {
   double starting_angle = 1;
   double ending_angle = 2;
   double inner_radius = 3;
+}
+
+message PolygonParameters {
+  uint32 point_count = 1;
+}
+
+message StarParameters {
+  uint32 point_count = 1;
+  double inner_ratio = 2;
+}
+
+enum VectorPointType {
+  VECTOR_POINT_TYPE_UNSPECIFIED = 0;
+  VECTOR_POINT_TYPE_CORNER = 1;
+  VECTOR_POINT_TYPE_MIRRORED = 2;
+  VECTOR_POINT_TYPE_ASYMMETRIC = 3;
+}
+
+enum FillRule {
+  FILL_RULE_UNSPECIFIED = 0;
+  FILL_RULE_NON_ZERO = 1;
+  FILL_RULE_EVEN_ODD = 2;
+}
+
+message VectorPoint {
+  bytes point_id = 1;
+  double x = 2;
+  double y = 3;
+  optional double handle_in_x = 4;
+  optional double handle_in_y = 5;
+  optional double handle_out_x = 6;
+  optional double handle_out_y = 7;
+  VectorPointType point_type = 8;
+}
+
+message VectorSubpath {
+  bool closed = 1;
+  repeated VectorPoint points = 2;
+}
+
+message VectorPath {
+  FillRule fill_rule = 1;
+  repeated VectorSubpath subpaths = 2;
+}
+
+// The durable BooleanOperation selector. Operand children remain ordinary
+// SceneNodes beneath the BooleanOperation node (ADR 0028).
+enum BooleanOperation {
+  BOOLEAN_OPERATION_UNSPECIFIED = 0;
+  BOOLEAN_OPERATION_UNION = 1;
+  BOOLEAN_OPERATION_INTERSECT = 2;
+  BOOLEAN_OPERATION_SUBTRACT = 3;
+  BOOLEAN_OPERATION_EXCLUDE = 4;
 }
 
 message Transform {
@@ -211,6 +372,8 @@ message TextStyleRun {
   uint32 font_weight = 5;
   bool italic = 6;
   double letter_spacing = 7;
+  // Optional per-run color; omission inherits the Text node fill.
+  optional Color color = 8;
 }
 
 message ParagraphStyle {
@@ -276,6 +439,14 @@ message SceneNode {
   // are preserved byte-for-byte across load/save and operation replay so a
   // Phase 3+ node round-trips through an older client without being rewritten.
   map<string, bytes> extensions = 38;
+  optional DropShadow drop_shadow = 39;
+  optional PolygonParameters polygon_parameters = 40;
+  optional StarParameters star_parameters = 41;
+  optional VectorPath vector_path = 42;
+  optional BooleanOperation boolean_operation = 43;
+  repeated Effect effect_stack = 44;
+  optional AutoLayout auto_layout = 45;
+  BlendMode blend_mode = 46;
 }
 
 message GeometryUpdate {
@@ -312,6 +483,20 @@ message AppearanceUpdate {
   repeated Paint fills = 22;
   repeated Paint strokes = 23;
   optional Constraints constraints = 24;
+  optional DropShadow drop_shadow = 25;
+  optional PolygonParameters polygon_parameters = 26;
+  optional StarParameters star_parameters = 27;
+  repeated Effect effect_stack = 28;
+  optional AutoLayout auto_layout = 29;
+  BlendMode blend_mode = 30;
+}
+
+// Canonical Frame layout configuration. Kept separate from AppearanceUpdate so
+// layout carries an explicit reducer command and can reflow descendants
+// atomically rather than being an incidental visual field.
+message AutoLayoutUpdate {
+  bytes node_id = 1;
+  AutoLayout auto_layout = 2;
 }
 
 message CreatePage {
@@ -381,6 +566,93 @@ message ImageFillUpdate {
   optional bytes asset_id = 2;
 }
 
+// Replaces a Vector node's canonical path atomically. Fine-grained point
+// editing is intentionally represented by a complete resolved path so all
+// replicas apply the same deterministic result.
+message SetVectorPath {
+  bytes node_id = 1;
+  VectorPath vector_path = 2;
+}
+
+// Moves one existing anchor in a VectorPath. Point identity stays stable so
+// replicas do not need to infer which duplicate coordinate was edited.
+message MoveVectorPoint {
+  bytes node_id = 1;
+  bytes point_id = 2;
+  double x = 3;
+  double y = 4;
+}
+
+// Opens or closes an existing subpath by stable canonical array index.
+message SetVectorSubpathClosed {
+  bytes node_id = 1;
+  uint32 subpath_index = 2;
+  bool closed = 3;
+}
+
+// Inserts a client-allocated stable point after a resolved predecessor. An
+// absent predecessor means the beginning of the addressed subpath.
+message InsertVectorPoint {
+  bytes node_id = 1;
+  uint32 subpath_index = 2;
+  optional bytes after_point_id = 3;
+  VectorPoint point = 4;
+}
+
+// Deletes one anchor. Core rejects the operation if it would violate the
+// minimum-point invariant for the addressed open or closed subpath.
+message DeleteVectorPoint {
+  bytes node_id = 1;
+  bytes point_id = 2;
+}
+
+// Replaces both relative handles and the tangent classification of one point.
+// Each handle is absent only when both components are absent.
+message SetVectorPointHandles {
+  bytes node_id = 1;
+  bytes point_id = 2;
+  optional double handle_in_x = 3;
+  optional double handle_in_y = 4;
+  optional double handle_out_x = 5;
+  optional double handle_out_y = 6;
+  VectorPointType point_type = 7;
+}
+
+// Changes the reducer selector of a live BooleanOperation while retaining its
+// ordered children and all editable source geometry.
+message SetBooleanOperation {
+  bytes node_id = 1;
+  BooleanOperation operation = 2;
+}
+
+// Splits the directed segment after `after_point_id` at `t` in (0, 1). Core
+// performs exact de Casteljau subdivision and allocates the supplied PointId.
+message SplitVectorSegment {
+  bytes node_id = 1;
+  uint32 subpath_index = 2;
+  bytes after_point_id = 3;
+  double t = 4;
+  bytes point_id = 5;
+}
+
+// Joins two endpoint anchors belonging to one VectorPath. Different open
+// subpaths merge in the explicit first→second direction; opposite endpoints
+// on one subpath close that subpath.
+message ConnectVectorEndpoints {
+  bytes node_id = 1;
+  uint32 first_subpath_index = 2;
+  bytes first_point_id = 3;
+  uint32 second_subpath_index = 4;
+  bytes second_point_id = 5;
+}
+
+// Phase 2's sole general-mask mode. A true flag marks this paintable sibling
+// as the alpha source for following siblings until the next mask sibling.
+message SetMask {
+  bytes node_id = 1;
+  bool enabled = 2;
+}
+
 message ResolvedOperation {
   oneof kind {
     CreatePage create_page = 1;
@@ -397,6 +669,17 @@ message ResolvedOperation {
     SetNodePosition set_node_position = 12;
     RestoreNode restore_node = 13;
     SetNodeParent set_node_parent = 14;
+    SetVectorPath set_vector_path = 15;
+    MoveVectorPoint move_vector_point = 16;
+    SetVectorSubpathClosed set_vector_subpath_closed = 17;
+    InsertVectorPoint insert_vector_point = 18;
+    DeleteVectorPoint delete_vector_point = 19;
+    SetVectorPointHandles set_vector_point_handles = 20;
+    SetBooleanOperation set_boolean_operation = 21;
+    SplitVectorSegment split_vector_segment = 22;
+    SetMask set_mask = 23;
+    AutoLayoutUpdate set_auto_layout = 24;
+    ConnectVectorEndpoints connect_vector_endpoints = 25;
   }
 }
 

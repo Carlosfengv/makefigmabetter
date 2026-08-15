@@ -66,6 +66,11 @@ export class DocumentEngine {
      */
     render_graph_plan_json(viewport_x: number, viewport_y: number, viewport_width: number, viewport_height: number): string;
     /**
+     * Adds trusted legacy fixture metadata before `seed_batch_json` installs
+     * image or font references. Bytes are deliberately not accepted here.
+     */
+    seed_assets_json(value: string): void;
+    /**
      * Installs a trusted legacy projection without adding history. Unlike the narrow
      * v1 seed_node bridge, this carries the full v7 paint projection during one-time
      * hydration of older local records and fixtures.
@@ -100,6 +105,16 @@ export class DocumentEngine {
 }
 
 /**
+ * Returns one transient Boolean outline for two or more VectorPath operands.
+ * The input and output are projection data only: the editable source paths and
+ * BooleanOperation children remain Canonical, while Canvas, hit tests and
+ * exporters can consume this one validated Rust-derived result.
+ */
+export function boolean_vector_paths_json(operation: string, operands_json: string, tolerance: number): string;
+
+export function dashed_line_outline_json(width: number, stroke_width: number, dash_json: string, cap: string, join: string, miter_limit: number): string;
+
+/**
  * Projects a decorative Line endpoint marker (arrowhead, diamond or dot) from
  * the same Core geometry the Canvas renderer, hit test and SVG export consume.
  * `endpoint`/`direction` place and orient the marker in the Line's local space
@@ -118,6 +133,15 @@ export function engine_semantics_version(): number;
 export function fallback_text_layout_json(text: string, max_graphemes_per_line: number): string;
 
 /**
+ * Builds a transient GPU instance projection from a validated Core snapshot
+ * without borrowing the live browser editing engine. The renderer owns this
+ * derived data only; edits and history remain on its separate DocumentEngine.
+ * Keeping the projection receiver-free avoids a wasm-bindgen borrow spanning a
+ * browser Worker render read and a later mutable transaction.
+ */
+export function gpu_scene_instances_from_snapshot_json(snapshot_json: string, page_id: string): string;
+
+/**
  * Produces ICU4X line ranges and Rustybuzz advances from explicit font bytes.
  * The width is measured in em, so viewport zoom never changes the derived
  * source ranges. Glyph pixels remain a renderer-owned cache.
@@ -129,6 +153,26 @@ export function layout_shaped_text_json(font_bytes: Uint8Array, face_index: numb
  * the shaping and glyph-raster stages.
  */
 export function layout_shaped_text_with_variations_json(font_bytes: Uint8Array, face_index: number, variation_axes_json: string, text: string, max_width_em: number): string;
+
+/**
+ * Converts a solid straight Line and either standard or decorative endpoint
+ * caps into one unioned editable outline. Dashed lines remain deliberately
+ * excluded because their terminal-cap semantics differ per dash run.
+ */
+export function line_outline_json(width: number, stroke_width: number, start_cap: string, end_cap: string, join: string, miter_limit: number): string;
+
+/**
+ * Canonical non-zero fill containment for editable Polygon/Star nodes. The
+ * document stores only parameters; this recomputes the bounded Core outline.
+ */
+export function parametric_shape_contains_point_json(width: number, height: number, shape_json: string, x: number, y: number): boolean;
+
+/**
+ * Returns the one Core-derived local contour for an ADR 0026 Polygon or Star.
+ * It is transient presentation geometry only; the canonical document continues
+ * to store the bounded parametric record rather than this generated point list.
+ */
+export function parametric_shape_outline_json(width: number, height: number, shape_json: string): string;
 
 /**
  * Produces a transient text-edit/IME preview. It has no DocumentEngine
@@ -215,11 +259,56 @@ export function stroke_meshes_for_per_side_rectangle_json(width: number, height:
  */
 export function stroke_meshes_for_per_side_rectangle_with_dash_json(width: number, height: number, weights_json: string, align: string, dash_json: string): string;
 
+/**
+ * Canonical fill containment for Worker hit tests. Open subpaths do not
+ * contribute to fill containment; stroke hits use the separate mesh bridge.
+ */
+export function vector_path_contains_json(path_json: string, x: number, y: number, tolerance: number): boolean;
+
+export function vector_path_dashed_outline_json(path_json: string, tolerance: number, width: number, dash_json: string, cap: string, join: string, miter_limit: number): string;
+
+/**
+ * Returns the budgeted Core flattening for a JSON-projected VectorPath. This
+ * is presentation data only; callers must never persist the returned points.
+ */
+export function vector_path_geometry_json(path_json: string, tolerance: number): string;
+
+/**
+ * Finds the nearest editable original VectorPath segment for direct canvas
+ * splitting. Its `t` is Core-derived and can be passed unchanged to the
+ * Canonical SplitVectorSegment command.
+ */
+export function vector_path_nearest_segment_json(path_json: string, x: number, y: number, tolerance: number, max_distance: number): string;
+
+/**
+ * Expands a VectorPath stroke through the same Core tessellation used by the
+ * Canvas fallback and stroke hit testing, then unions that mesh into editable
+ * closed VectorPath contours for the Outline Stroke command.
+ */
+export function vector_path_outline_json(path_json: string, tolerance: number, width: number, cap: string, join: string, miter_limit: number): string;
+
+/**
+ * As [`vector_path_outline_json`], but open paths can use different standard
+ * caps at their start and end. Decorative caps remain a Line rendering mode.
+ */
+export function vector_path_outline_with_caps_json(path_json: string, tolerance: number, width: number, start_cap: string, end_cap: string, join: string, miter_limit: number): string;
+
+export function vector_path_stroke_contains_json(path_json: string, x: number, y: number, tolerance: number, width: number, cap: string, join: string, miter_limit: number): boolean;
+
+/**
+ * Projects the Core VectorPath stroke mesh for Canvas fallback or a future
+ * GPU upload. Unlike an HTML canvas stroke, this shares Core's joins, caps
+ * and transient geometry budget with precise stroke hit testing.
+ */
+export function vector_path_stroke_mesh_json(path_json: string, tolerance: number, width: number, cap: string, join: string, miter_limit: number): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_documentengine_free: (a: number, b: number) => void;
+    readonly boolean_vector_paths_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly dashed_line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly decorative_cap_mesh_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly documentengine_apply_transaction_json: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
     readonly documentengine_can_redo: (a: number) => number;
@@ -241,6 +330,7 @@ export interface InitOutput {
     readonly documentengine_render_graph_plan_for_page_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly documentengine_render_graph_plan_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly documentengine_revision: (a: number) => bigint;
+    readonly documentengine_seed_assets_json: (a: number, b: number, c: number) => [number, number];
     readonly documentengine_seed_batch_json: (a: number, b: number, c: number) => [bigint, number, number];
     readonly documentengine_seed_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
     readonly documentengine_set_document_color_profile: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
@@ -250,8 +340,12 @@ export interface InitOutput {
     readonly documentengine_update_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number) => [bigint, number, number];
     readonly engine_semantics_version: () => number;
     readonly fallback_text_layout_json: (a: number, b: number, c: number) => [number, number];
+    readonly gpu_scene_instances_from_snapshot_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly parametric_shape_outline_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly preview_text_replacement_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
@@ -265,6 +359,14 @@ export interface InitOutput {
     readonly stroke_mesh_for_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly stroke_meshes_for_per_side_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly stroke_meshes_for_per_side_rectangle_with_dash_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly vector_path_contains_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly vector_path_dashed_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly vector_path_geometry_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vector_path_nearest_segment_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly vector_path_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly vector_path_outline_with_caps_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly vector_path_stroke_contains_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number];
+    readonly vector_path_stroke_mesh_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

@@ -2,6 +2,8 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_documentengine_free: (a: number, b: number) => void;
+export const boolean_vector_paths_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const dashed_line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const decorative_cap_mesh_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const documentengine_apply_transaction_json: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
 export const documentengine_can_redo: (a: number) => number;
@@ -23,6 +25,7 @@ export const documentengine_rename_node: (a: number, b: number, c: number, d: bi
 export const documentengine_render_graph_plan_for_page_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const documentengine_render_graph_plan_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const documentengine_revision: (a: number) => bigint;
+export const documentengine_seed_assets_json: (a: number, b: number, c: number) => [number, number];
 export const documentengine_seed_batch_json: (a: number, b: number, c: number) => [bigint, number, number];
 export const documentengine_seed_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
 export const documentengine_set_document_color_profile: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
@@ -32,8 +35,12 @@ export const documentengine_undo: (a: number) => [bigint, number, number];
 export const documentengine_update_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number) => [bigint, number, number];
 export const engine_semantics_version: () => number;
 export const fallback_text_layout_json: (a: number, b: number, c: number) => [number, number];
+export const gpu_scene_instances_from_snapshot_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+export const line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+export const parametric_shape_outline_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const preview_text_replacement_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
@@ -47,6 +54,14 @@ export const stroke_mesh_for_rounded_rectangle_json: (a: number, b: number, c: n
 export const stroke_mesh_for_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const stroke_meshes_for_per_side_rectangle_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const stroke_meshes_for_per_side_rectangle_with_dash_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+export const vector_path_contains_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+export const vector_path_dashed_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+export const vector_path_geometry_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const vector_path_nearest_segment_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const vector_path_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const vector_path_outline_with_caps_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+export const vector_path_stroke_contains_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number];
+export const vector_path_stroke_mesh_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

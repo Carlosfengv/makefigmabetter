@@ -318,6 +318,14 @@ impl AssetService {
                asset_id BLOB NOT NULL REFERENCES assets(asset_id) ON DELETE RESTRICT,
                PRIMARY KEY (document_id, asset_id)
              );
+             -- Tracks only attachments made for a pending cross-document
+             -- clipboard paste. This makes failure compensation unable to
+             -- detach an asset which was already part of the target document.
+             CREATE TABLE IF NOT EXISTS clipboard_document_assets (
+               document_id BLOB NOT NULL CHECK(length(document_id) = 16),
+               asset_id BLOB NOT NULL REFERENCES assets(asset_id) ON DELETE RESTRICT,
+               PRIMARY KEY (document_id, asset_id)
+             );
              CREATE TABLE IF NOT EXISTS download_grants (
                token BLOB PRIMARY KEY NOT NULL CHECK(length(token) = 32),
                tenant_id BLOB NOT NULL CHECK(length(tenant_id) = 16),
@@ -664,6 +672,125 @@ impl AssetService {
             "asset_attached",
             "accepted",
         )?;
+        Ok(())
+    }
+
+    /// Authorizes a cross-document clipboard reference without trusting an
+    /// AssetId supplied by the browser. The caller must still be able to read
+    /// the source document, the source must already attach the asset, and the
+    /// caller must be able to write the destination document. The destination
+    /// attachment is then inserted idempotently as one database mutation.
+    pub fn attach_asset_from_document(
+        &self,
+        principal: TrustedPrincipal,
+        source_document_id: Id,
+        target_document_id: Id,
+        asset_id: Id,
+    ) -> Result<bool, AssetServiceError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AssetServiceError::Storage)?;
+        if !can_read_document(&connection, principal, source_document_id)?
+            || !can_write_document(&connection, principal, target_document_id)?
+        {
+            return Err(AssetServiceError::PermissionDenied);
+        }
+        // Do not turn a same-tenant but unattached object into a transferable
+        // resource merely because a caller knows its opaque AssetId.
+        if !document_has_asset(&connection, source_document_id, asset_id)? {
+            return Err(AssetServiceError::AssetMissing);
+        }
+        let asset = load_asset(&connection, asset_id)?.ok_or(AssetServiceError::AssetMissing)?;
+        if asset.tenant_id != principal.tenant_id {
+            return Err(AssetServiceError::PermissionDenied);
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AssetServiceError::Storage)?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO document_assets (document_id, asset_id) VALUES (?1, ?2)",
+                params![target_document_id.as_slice(), asset_id.as_slice()],
+            )
+            .map_err(|_| AssetServiceError::Storage)? > 0;
+        if inserted {
+            transaction
+                .execute(
+                    "INSERT INTO clipboard_document_assets (document_id, asset_id) VALUES (?1, ?2)",
+                    params![target_document_id.as_slice(), asset_id.as_slice()],
+                )
+                .map_err(|_| AssetServiceError::Storage)?;
+            transaction
+                .execute(
+                    "INSERT INTO asset_audit_events (tenant_id, document_id, asset_id, action, outcome, at_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![principal.tenant_id.as_slice(), target_document_id.as_slice(), asset_id.as_slice(), "asset_attached_from_document", "accepted", current_time_seconds()],
+                )
+                .map_err(|_| AssetServiceError::Storage)?;
+        }
+        transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+        Ok(inserted)
+    }
+
+    /// Reverts only an attachment that was newly created for a clipboard paste.
+    /// Existing target resources never get a marker and therefore cannot be
+    /// removed by a failed client-side paste.
+    pub fn detach_clipboard_asset_from_document(
+        &self,
+        principal: TrustedPrincipal,
+        document_id: Id,
+        asset_id: Id,
+    ) -> Result<bool, AssetServiceError> {
+        let mut connection = self.connection.lock().map_err(|_| AssetServiceError::Storage)?;
+        if !can_write_document(&connection, principal, document_id)? {
+            return Err(AssetServiceError::PermissionDenied);
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AssetServiceError::Storage)?;
+        let removed = transaction
+            .execute(
+                "DELETE FROM clipboard_document_assets WHERE document_id = ?1 AND asset_id = ?2",
+                params![document_id.as_slice(), asset_id.as_slice()],
+            )
+            .map_err(|_| AssetServiceError::Storage)? > 0;
+        if removed {
+            transaction
+                .execute(
+                    "DELETE FROM document_assets WHERE document_id = ?1 AND asset_id = ?2",
+                    params![document_id.as_slice(), asset_id.as_slice()],
+                )
+                .map_err(|_| AssetServiceError::Storage)?;
+            transaction
+                .execute(
+                    "INSERT INTO asset_audit_events (tenant_id, document_id, asset_id, action, outcome, at_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![principal.tenant_id.as_slice(), document_id.as_slice(), asset_id.as_slice(), "clipboard_asset_attachment_reverted", "accepted", current_time_seconds()],
+                )
+                .map_err(|_| AssetServiceError::Storage)?;
+        }
+        transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+        Ok(removed)
+    }
+
+    /// Clears the short-lived rollback marker once the Core transaction has
+    /// committed. The document attachment remains in place; this only prevents
+    /// a later rollback call from treating a successful paste as pending.
+    pub fn finalize_clipboard_asset_attachment(
+        &self,
+        principal: TrustedPrincipal,
+        document_id: Id,
+        asset_id: Id,
+    ) -> Result<(), AssetServiceError> {
+        let connection = self.connection.lock().map_err(|_| AssetServiceError::Storage)?;
+        if !can_write_document(&connection, principal, document_id)? {
+            return Err(AssetServiceError::PermissionDenied);
+        }
+        connection
+            .execute(
+                "DELETE FROM clipboard_document_assets WHERE document_id = ?1 AND asset_id = ?2",
+                params![document_id.as_slice(), asset_id.as_slice()],
+            )
+            .map_err(|_| AssetServiceError::Storage)?;
         Ok(())
     }
 
@@ -1485,6 +1612,70 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn cross_document_attachment_requires_source_membership_and_destination_write_access() {
+        let service = AssetService::in_memory().unwrap();
+        let bytes = png();
+        service
+            .begin_upload(principal(7), request(10, &bytes))
+            .unwrap();
+        service
+            .append_chunk(principal(7), id(10), 0, &bytes)
+            .unwrap();
+        let asset = service.complete_upload(principal(7), id(10)).unwrap().asset;
+        let source = id(3);
+        let target = id(4);
+        service.grant_document_writer(id(2), source, id(7)).unwrap();
+        service.grant_document_writer(id(2), target, id(7)).unwrap();
+        service
+            .attach_asset_to_document(principal(7), source, asset.asset_id)
+            .unwrap();
+
+        assert!(service
+            .attach_asset_from_document(principal(7), source, target, asset.asset_id)
+            .unwrap());
+        let grant = service
+            .issue_download_grant(principal(7), target, asset.asset_id, 100, 30)
+            .unwrap();
+        assert_eq!(
+            service.download_with_grant(principal(7), &grant, 101).unwrap().1,
+            bytes,
+        );
+
+        assert_eq!(
+            service.attach_asset_from_document(principal(7), source, target, id(99)),
+            Err(AssetServiceError::AssetMissing)
+        );
+        assert_eq!(
+            service.attach_asset_from_document(principal(8), source, target, asset.asset_id),
+            Err(AssetServiceError::PermissionDenied)
+        );
+        assert!(service
+            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+            .unwrap());
+        assert!(!service
+            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+            .unwrap());
+        assert_eq!(
+            service.issue_download_grant(principal(7), target, asset.asset_id, 102, 30),
+            Err(AssetServiceError::PermissionDenied)
+        );
+        assert!(service
+            .attach_asset_from_document(principal(7), source, target, asset.asset_id)
+            .unwrap());
+        // Finalizing a successful Core transaction keeps the attachment but
+        // consumes its rollback marker.
+        service
+            .finalize_clipboard_asset_attachment(principal(7), target, asset.asset_id)
+            .unwrap();
+        assert!(!service
+            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+            .unwrap());
+        assert!(service
+            .issue_download_grant(principal(7), target, asset.asset_id, 103, 30)
+            .is_ok());
     }
 
     #[test]

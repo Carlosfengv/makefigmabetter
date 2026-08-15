@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::color::{Color, ColorSpace, DocumentColorProfile, Paint};
 use crate::geometry::{AffineTransform, Point};
 use sha2::{Digest, Sha256};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MAX_TRANSACTION_COMMANDS: usize = 10_000;
 pub const MAX_TRANSACTION_BYTES: usize = 4 * 1024 * 1024;
@@ -45,6 +46,11 @@ pub struct OperationId(pub u128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u128);
+
+/// Stable identity for one editable VectorPath anchor. Point order may change
+/// through future edit commands; identity never depends on that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PointId(pub u128);
 
 /// Stable content-addressed resource identity. Raw image/font bytes never live
 /// in the Document; the resource service owns those bytes and the Document keeps
@@ -109,7 +115,39 @@ pub enum NodeKind {
     /// Canvas organization container. It can hide descendants without
     /// becoming invisible itself, matching Figma's Section semantics.
     Section,
+    /// Editable regular polygon. Its point count, rather than a flattened path,
+    /// is the durable source of the generated outline (ADR 0026).
+    Polygon,
+    /// Editable regular star. The durable inner ratio retains its concavity
+    /// instead of reducing creation to a one-way Vector conversion (ADR 0026).
+    Star,
+    /// Editable multi-subpath cubic path (ADR 0027).
+    Vector,
+    /// Live boolean structure. Its direct children remain the durable operands
+    /// and the derived result is intentionally never persisted (ADR 0028).
+    BooleanOperation,
+    /// Non-painting export region. Slice keeps ordinary world geometry so it
+    /// can be selected and transformed, but never contributes to page paint.
+    Slice,
 }
+
+/// The durable operation applied to a BooleanOperation node's ordered direct
+/// children. Geometry is derived elsewhere; this enum is the only Canonical
+/// Boolean result input stored on the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BooleanOperation {
+    Union,
+    Intersect,
+    Subtract,
+    Exclude,
+}
+
+/// Reserved Canonical extension for G4's sole Phase 2 mask mode. A present
+/// byte `1` means the node alpha-masks its following siblings at the same
+/// hierarchy level. Keeping the flag in the extensibility channel preserves
+/// historical snapshot wire shape while making the relationship hashed and
+/// replayable like every other node extension.
+const ALPHA_MASK_EXTENSION_KEY: &str = "makefigma.mask.alpha.v1";
 
 /// Endpoint decorations shared by Figma-compatible open paths. Arrow is a
 /// Line preset, never a separate document node kind.
@@ -146,6 +184,19 @@ pub enum StrokeAlign {
     Outside,
 }
 
+/// E1's supported compositing modes. `Normal` remains the durable default so
+/// older snapshots and operation payloads retain their historical result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+}
+
 /// Figma-compatible per-axis response to a containing Frame resize. `None` on
 /// a node remains a deliberate legacy/no-constraint state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +214,72 @@ pub struct Constraints {
     pub vertical: ConstraintType,
 }
 
+/// Phase 2's persisted Auto Layout direction. `None` retains existing Frame
+/// behavior so legacy documents have no implicit layout migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    #[default]
+    None,
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutAlignment {
+    #[default]
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutSizing {
+    #[default]
+    Fixed,
+    Hug,
+    Fill,
+}
+
+/// Container and child inputs live in a separate canonical table, which keeps
+/// legacy Node snapshots byte-compatible while still making layout semantic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoLayout {
+    pub mode: LayoutMode,
+    pub padding: [f64; 4],
+    pub item_spacing: f64,
+    pub wrap: bool,
+    pub primary_alignment: LayoutAlignment,
+    pub counter_alignment: LayoutAlignment,
+    pub primary_sizing: LayoutSizing,
+    pub counter_sizing: LayoutSizing,
+    pub min_width: Option<f64>,
+    pub max_width: Option<f64>,
+    pub min_height: Option<f64>,
+    pub max_height: Option<f64>,
+    pub absolute: bool,
+}
+
+impl Default for AutoLayout {
+    fn default() -> Self {
+        Self {
+            mode: LayoutMode::None,
+            padding: [0.0; 4],
+            item_spacing: 0.0,
+            wrap: false,
+            primary_alignment: LayoutAlignment::Start,
+            counter_alignment: LayoutAlignment::Start,
+            primary_sizing: LayoutSizing::Fixed,
+            counter_sizing: LayoutSizing::Fixed,
+            min_width: None,
+            max_width: None,
+            min_height: None,
+            max_height: None,
+            absolute: false,
+        }
+    }
+}
+
 /// Figma-compatible Ellipse arc/donut parameters. Angles are degrees in the
 /// local clockwise Canvas coordinate space; the full ellipse is represented
 /// by `None` to retain historical snapshots and hashes.
@@ -171,6 +288,97 @@ pub struct ArcData {
     pub starting_angle: f64,
     pub ending_angle: f64,
     pub inner_radius: f64,
+}
+
+/// Durable parameters for the two G0 regular-shape node kinds. Geometry comes
+/// from the Node bounds; this record is deliberately small so regular shapes
+/// cannot become an unbounded alternate VectorPath representation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParametricShape {
+    Polygon { point_count: u32 },
+    Star { point_count: u32, inner_ratio: f64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorPointType {
+    Corner,
+    Mirrored,
+    Asymmetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorPoint {
+    pub id: PointId,
+    pub position: Point,
+    /// Tangent offsets are relative to `position`, retaining editable cubic
+    /// semantics without baking absolute coordinates into two places.
+    pub handle_in: Option<Point>,
+    pub handle_out: Option<Point>,
+    pub point_type: VectorPointType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSubpath {
+    pub closed: bool,
+    pub points: Vec<VectorPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorPath {
+    pub fill_rule: FillRule,
+    pub subpaths: Vec<VectorSubpath>,
+}
+
+/// A drop shadow entry in the ordered Effect Stack. Coordinates, blur and
+/// spread are in document pixels; color stays in the same explicit
+/// non-premultiplied space as paints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DropShadow {
+    pub offset_x: f64,
+    pub offset_y: f64,
+    pub blur_radius: f64,
+    pub spread: f64,
+    pub color: Color,
+    pub visible: bool,
+}
+
+/// A blur applied to the isolated source surface before it is composited.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerBlur {
+    pub radius: f64,
+    pub visible: bool,
+}
+
+/// A shadow composited only within the isolated source alpha.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InnerShadow {
+    pub offset_x: f64,
+    pub offset_y: f64,
+    pub blur_radius: f64,
+    pub spread: f64,
+    pub color: Color,
+    pub visible: bool,
+}
+
+/// A blur of previously composited backdrop pixels, clipped to the source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundBlur { pub radius: f64, pub visible: bool }
+
+/// Phase 2's extensible, ordered effect model.  The first rollout has one
+/// effect kind, but uses the final stack-shaped storage so documents never
+/// need a lossy schema migration when Inner Shadow, Blur or Blend arrive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Effect {
+    DropShadow(DropShadow),
+    LayerBlur(LayerBlur),
+    InnerShadow(InnerShadow),
+    BackgroundBlur(BackgroundBlur),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,10 +419,21 @@ pub struct Node {
     pub stroke_weights: Vec<f64>,
     pub stroke_align: StrokeAlign,
     pub arc_data: Option<ArcData>,
+    pub parametric_shape: Option<ParametricShape>,
+    pub vector_path: Option<VectorPath>,
+    /// Present exactly for `NodeKind::BooleanOperation` (ADR 0028).
+    pub boolean_operation: Option<BooleanOperation>,
     /// Optional during Dual-read migration. A present value is an authoritative
     /// parent-relative 2×3 matrix; absent records retain legacy world x/y/rotation.
     pub relative_transform: Option<AffineTransform>,
     pub opacity: f64,
+    pub blend_mode: BlendMode,
+    /// Legacy R3 compatibility projection of the first drop shadow. New writes
+    /// must keep it equal to the first Effect Stack item when the stack is set.
+    pub drop_shadow: Option<DropShadow>,
+    /// Empty retains the legacy R3 `drop_shadow`; otherwise this ordered stack
+    /// is authoritative. The legacy field remains for old-client round trips.
+    pub effect_stack: Vec<Effect>,
     pub corner_radius: f64,
     /// Empty retains `corner_radius`; four values are TL/TR/BR/BL.
     pub corner_radii: Vec<f64>,
@@ -293,6 +512,9 @@ pub struct TextStyleRun {
     pub font_weight: u16,
     pub italic: bool,
     pub letter_spacing: f64,
+    /// Optional per-run text color. Omission inherits the Text node's legacy
+    /// fill, preserving existing documents and their canonical hashes.
+    pub color: Option<Color>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,11 +564,14 @@ pub struct Document {
     sibling_positions: BTreeSet<(PageId, Option<NodeId>, PositionId)>,
     node_assets: BTreeMap<NodeId, AssetId>,
     node_text_properties: BTreeMap<NodeId, TextProperties>,
+    /// Explicit entries only; omitted records are exactly `AutoLayout::default`.
+    node_auto_layout: BTreeMap<NodeId, AutoLayout>,
     /// Retained page membership for node tombstones; undo/redo therefore restores
     /// a node to the page it came from.
     retired_node_pages: BTreeMap<NodeId, PageId>,
     retired_node_assets: BTreeMap<NodeId, AssetId>,
     retired_node_text_properties: BTreeMap<NodeId, TextProperties>,
+    retired_node_auto_layout: BTreeMap<NodeId, AutoLayout>,
     nodes: BTreeMap<NodeId, Node>,
     /// Versioned Resource Index. Asset references are canonical state even before
     /// an Image/Text node consumes them, so cache eviction cannot alter a document.
@@ -420,6 +645,83 @@ pub enum Command {
         id: NodeId,
         appearance: Appearance,
     },
+    /// Replaces a complete validated VectorPath in one history/replication
+    /// unit. This remains the import/snapshot escape hatch for vector edits.
+    SetVectorPath {
+        id: NodeId,
+        path: VectorPath,
+    },
+    /// Changes the durable reducer selector of a live BooleanOperation without
+    /// flattening or rewriting its ordered operand children.
+    SetBooleanOperation {
+        id: NodeId,
+        operation: BooleanOperation,
+    },
+    /// Marks a paintable layer as an alpha mask for its following siblings.
+    /// The relationship is intentionally expressed by durable sibling order;
+    /// the mask flag itself is stored in the reserved Phase 2 extension key so
+    /// snapshots predating G4 remain byte-for-byte compatible.
+    SetMask {
+        id: NodeId,
+        enabled: bool,
+    },
+    /// Moves one existing vector anchor without rewriting unrelated path data.
+    MoveVectorPoint {
+        id: NodeId,
+        point_id: PointId,
+        position: Point,
+    },
+    /// Opens or closes one existing vector subpath. Closing is validated against
+    /// the same canonical path invariants as a complete replacement.
+    SetVectorSubpathClosed {
+        id: NodeId,
+        subpath_index: u32,
+        closed: bool,
+    },
+    /// Inserts a stable PointId into one existing Vector subpath. The caller
+    /// supplies the resolved predecessor so replicas never infer placement.
+    InsertVectorPoint {
+        id: NodeId,
+        subpath_index: u32,
+        after_point_id: Option<PointId>,
+        point: VectorPoint,
+    },
+    /// Splits the directed segment after one anchor at an exact normalized
+    /// parameter. Curved segments use de Casteljau subdivision so the visible
+    /// curve is invariant; replicas never infer control handles locally.
+    SplitVectorSegment {
+        id: NodeId,
+        subpath_index: u32,
+        after_point_id: PointId,
+        t: f64,
+        point_id: PointId,
+    },
+    /// Joins two endpoint anchors from one VectorPath. Distinct open subpaths
+    /// are oriented so `first_point_id` becomes the preceding endpoint and
+    /// `second_point_id` becomes the following endpoint; opposite endpoints of
+    /// the same subpath close it. Replicas never infer orientation locally.
+    ConnectVectorEndpoints {
+        id: NodeId,
+        first_subpath_index: u32,
+        first_point_id: PointId,
+        second_subpath_index: u32,
+        second_point_id: PointId,
+    },
+    /// Removes one anchor while preserving the canonical minimum-point rules
+    /// for open and closed subpaths.
+    DeleteVectorPoint {
+        id: NodeId,
+        point_id: PointId,
+    },
+    /// Replaces both relative handles and the tangent classification of one
+    /// anchor as one atomic curve-editing intent.
+    SetVectorPointHandles {
+        id: NodeId,
+        point_id: PointId,
+        handle_in: Option<Point>,
+        handle_out: Option<Point>,
+        point_type: VectorPointType,
+    },
     /// Associates an admitted raster Asset with a fill-capable node. The image
     /// bytes remain outside Canonical state; this stable reference participates
     /// in snapshots, hashes, undo/redo and remote Operations.
@@ -434,6 +736,11 @@ pub enum Command {
     SetTextProperties {
         id: NodeId,
         properties: TextProperties,
+    },
+    /// Sets either a Frame container mode or a direct child's sizing intent.
+    SetAutoLayout {
+        id: NodeId,
+        layout: AutoLayout,
     },
     /// Replaces a canonical sibling-order key without changing geometry or
     /// hierarchy. Positions are resolved before this command crosses the
@@ -520,6 +827,26 @@ pub enum AppliedChange {
         before: Appearance,
         after: Appearance,
     },
+    AutoLayoutChanged {
+        id: NodeId,
+        before: Option<AutoLayout>,
+        after: Option<AutoLayout>,
+    },
+    VectorPathChanged {
+        id: NodeId,
+        before: VectorPath,
+        after: VectorPath,
+    },
+    BooleanOperationChanged {
+        id: NodeId,
+        before: BooleanOperation,
+        after: BooleanOperation,
+    },
+    MaskChanged {
+        id: NodeId,
+        before: bool,
+        after: bool,
+    },
     NodeAssetChanged {
         id: NodeId,
         before: Option<AssetId>,
@@ -596,8 +923,12 @@ pub struct Appearance {
     pub stroke_weights: Vec<f64>,
     pub stroke_align: StrokeAlign,
     pub arc_data: Option<ArcData>,
+    pub parametric_shape: Option<ParametricShape>,
     pub relative_transform: Option<AffineTransform>,
     pub opacity: f64,
+    pub blend_mode: BlendMode,
+    pub drop_shadow: Option<DropShadow>,
+    pub effect_stack: Vec<Effect>,
     pub corner_radius: f64,
     pub corner_radii: Vec<f64>,
     pub corner_smoothing: f64,
@@ -670,10 +1001,26 @@ pub enum CommandError {
     InvalidAppearance,
     InvalidText,
     InvalidTextProperties,
+    InvalidAutoLayout,
+    AutoLayoutUnsupported,
+    AutoLayoutLimit,
     MissingParent {
         id: NodeId,
     },
     InvalidParent {
+        id: NodeId,
+    },
+    /// Groups are structural containers whose rectangle is derived from at
+    /// least one child. A transaction may construct a Group before reparenting
+    /// its children, but it must not commit an empty Group as Canonical state.
+    EmptyGroup {
+        id: NodeId,
+    },
+    /// A live Boolean result is defined by an ordered set of at least two
+    /// direct operands. As with Groups, construction can be temporary within
+    /// one transaction, but an accepted Canonical document never contains a
+    /// one-operand Boolean shell.
+    InsufficientBooleanOperands {
         id: NodeId,
     },
     EffectivelyLocked {
@@ -738,9 +1085,11 @@ impl Document {
             sibling_positions: BTreeSet::new(),
             node_assets: BTreeMap::new(),
             node_text_properties: BTreeMap::new(),
+            node_auto_layout: BTreeMap::new(),
             retired_node_pages: BTreeMap::new(),
             retired_node_assets: BTreeMap::new(),
             retired_node_text_properties: BTreeMap::new(),
+            retired_node_auto_layout: BTreeMap::new(),
             nodes: BTreeMap::new(),
             assets: BTreeMap::new(),
             node_bytes: 0,
@@ -786,6 +1135,28 @@ impl Document {
     /// default text semantics, preserving snapshots written before rich text.
     pub fn text_properties_for_node(&self, id: NodeId) -> Option<&TextProperties> {
         self.node_text_properties.get(&id)
+    }
+
+    /// An absent record is exactly the stable Auto Layout default.
+    pub fn auto_layout_for_node(&self, id: NodeId) -> AutoLayout {
+        self.node_auto_layout.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// A Frame that owns Auto Layout describes its own width and height using
+    /// its primary/counter axes. Map those physical axes to the parent's axes
+    /// before the parent lays it out; this keeps nested Frame sizing stable
+    /// when the two containers use different directions.
+    fn auto_layout_child_sizing(&self, node: &Node, parent_horizontal: bool) -> (LayoutSizing, LayoutSizing) {
+        let layout = self.auto_layout_for_node(node.id);
+        if node.kind == NodeKind::Frame && layout.mode != LayoutMode::None {
+            let (width, height) = match layout.mode {
+                LayoutMode::Horizontal => (layout.primary_sizing, layout.counter_sizing),
+                LayoutMode::Vertical => (layout.counter_sizing, layout.primary_sizing),
+                LayoutMode::None => unreachable!("active layout has a direction"),
+            };
+            return if parent_horizontal { (width, height) } else { (height, width) };
+        }
+        (layout.primary_sizing, layout.counter_sizing)
     }
 
     pub fn ordered_nodes_on_page(&self, page_id: PageId) -> Result<Vec<&Node>, CommandError> {
@@ -952,6 +1323,14 @@ impl Document {
                 hash_text_properties(&mut hasher, properties);
             }
         }
+        if !self.node_auto_layout.is_empty() {
+            hasher.update(b"makefigma/editor-core/auto-layout-v1");
+            hash_len(&mut hasher, self.node_auto_layout.len());
+            for (node_id, layout) in &self.node_auto_layout {
+                hasher.update(node_id.0.to_be_bytes());
+                hash_auto_layout(&mut hasher, layout);
+            }
+        }
         hash_len(&mut hasher, self.assets.len());
         for asset in self.assets.values() {
             hasher.update(asset.asset_id.0.to_be_bytes());
@@ -1020,6 +1399,32 @@ impl Document {
         }
         self.replace_text_properties(id, properties);
         Ok(())
+    }
+
+    /// Trusted snapshot hydration for explicit Auto Layout input. Omitted
+    /// records remain the stable default and are not materialized in the map.
+    pub fn seed_auto_layout(&mut self, id: NodeId, layout: AutoLayout) -> Result<(), CommandError> {
+        let node = self.nodes.get(&id).ok_or(CommandError::MissingNode { id })?;
+        if !valid_auto_layout(&layout) || (layout.mode != LayoutMode::None && node.kind != NodeKind::Frame) {
+            return Err(CommandError::InvalidAutoLayout);
+        }
+        self.replace_auto_layout_option(id, (layout != AutoLayout::default()).then_some(layout));
+        Ok(())
+    }
+
+    /// Completes trusted projection hydration after every node and layout
+    /// record has been installed.  Seed operations intentionally do not create
+    /// history or advance the revision, but a newly created Auto Layout tree
+    /// still needs the same deterministic geometry pass as a user transaction.
+    /// Persisted snapshots deliberately do not call this: their stored geometry
+    /// is already canonical and must continue to verify byte-for-byte.
+    pub fn reflow_seeded_auto_layout(&mut self) -> Result<(), CommandError> {
+        let dirty_frames = self
+            .node_auto_layout
+            .iter()
+            .filter_map(|(id, layout)| (layout.mode != LayoutMode::None).then_some(*id))
+            .collect();
+        self.reflow_auto_layout(dirty_frames).map(|_| ())
     }
 
     pub fn seed_page(&mut self, page: Page) -> Result<(), CommandError> {
@@ -1099,6 +1504,8 @@ impl Document {
         for command in &transaction.commands {
             changes.push(next.apply(command)?);
         }
+        changes.extend(next.reflow_auto_layout(next.auto_layout_dirty_frames(&transaction.commands, self))?);
+        next.ensure_non_empty_groups()?;
         next.revision += 1;
         let accepted_revision = next.revision;
         let history_item = HistoryItem {
@@ -1359,7 +1766,14 @@ impl Document {
                     return Err(CommandError::InvalidGeometry);
                 }
                 let frame_before = self.geometry_for(*id);
+                // Constraints are preserved for round-trip compatibility, but
+                // an active Auto Layout Frame is the sole owner of descendant
+                // placement and sizing. Applying both systems during a resize
+                // would transiently rewrite the child before layout reflows.
+                let frame_has_active_auto_layout = kind == NodeKind::Frame
+                    && self.auto_layout_for_node(*id).mode != LayoutMode::None;
                 let constrained_children = if kind == NodeKind::Frame
+                    && !frame_has_active_auto_layout
                     && after.rotation == 0.0
                     && self.nodes.get(id).is_some_and(|node| node.relative_transform.is_none() && node.rotation == 0.0)
                 {
@@ -1370,7 +1784,7 @@ impl Document {
                         while let Some(ancestor_id) = parent_id {
                             if ancestor_id == *id { return true; }
                             let Some(ancestor) = self.nodes.get(&ancestor_id) else { return false; };
-                            if ancestor.kind != NodeKind::Group { return false; }
+                            if !is_structural_container(&ancestor.kind) { return false; }
                             parent_id = ancestor.parent_id;
                         }
                         false
@@ -1382,7 +1796,7 @@ impl Document {
                 // including below one or more transformed Groups. Unlike legacy
                 // world-space coordinates, their constraints remain correct when
                 // the Frame itself is rotated or has an arbitrary affine matrix.
-                let matrix_constrained_children = if kind == NodeKind::Frame {
+                let mut matrix_constrained_children = if kind == NodeKind::Frame && !frame_has_active_auto_layout {
                     let frame_before_local = Geometry {
                         x: 0.0,
                         y: 0.0,
@@ -1431,9 +1845,156 @@ impl Document {
                         }))
                     }).collect::<Result<Vec<_>, _>>()?
                 } else { Vec::new() };
+                // Legacy direct Frame children historically store world-space
+                // geometry.  Leaving them on that projection when a Frame is
+                // rotated or matrix-backed silently made an Inspector-visible
+                // constraint a no-op.  At this transaction boundary their
+                // current world transform is unambiguous, so migrate it once
+                // into the Frame's local Relative-v1 space and apply exactly
+                // the same per-axis rule as modern children.  Group paths are
+                // intentionally not guessed here: a legacy Group has derived
+                // world bounds and must be migrated as a complete subtree.
+                if kind == NodeKind::Frame && !frame_has_active_auto_layout && constrained_children.is_empty() {
+                    let frame_before_transform = self.node_world_transform(*id)
+                        .ok_or(CommandError::InvalidGeometry)?;
+                    let frame_inverse = frame_before_transform.inverse()
+                        .map_err(|_| CommandError::InvalidGeometry)?;
+                    let frame_before_local = Geometry {
+                        x: 0.0,
+                        y: 0.0,
+                        width: frame_before.expect("existing node has geometry").width,
+                        height: frame_before.expect("existing node has geometry").height,
+                        rotation: 0.0,
+                    };
+                    let frame_after_local = Geometry {
+                        x: 0.0,
+                        y: 0.0,
+                        width: after.width,
+                        height: after.height,
+                        rotation: 0.0,
+                    };
+                    let legacy_direct = self.nodes.values().filter_map(|child| {
+                        let constraints = child.constraints?;
+                        (child.parent_id == Some(*id) && child.relative_transform.is_none())
+                            .then_some((child, constraints))
+                    }).map(|(child, constraints)| {
+                        let child_to_frame = node_legacy_transform(child)
+                            .ok_or(CommandError::InvalidGeometry)?
+                            .then(frame_inverse);
+                        let child_before = Geometry {
+                            x: child_to_frame.e,
+                            y: child_to_frame.f,
+                            width: child.width,
+                            height: child.height,
+                            rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
+                        };
+                        let child_after_local = geometry_for_constraints(
+                            frame_before_local,
+                            frame_after_local,
+                            child_before,
+                            constraints,
+                            &child.kind,
+                        )?;
+                        let child_after_transform = AffineTransform {
+                            e: child_after_local.x,
+                            f: child_after_local.y,
+                            ..child_to_frame
+                        };
+                        let child_after_geometry = geometry_for_relative_transform(
+                            child_after_transform,
+                            child_after_local.width,
+                            child_after_local.height,
+                            &child.kind,
+                        )?;
+                        Ok((child.id, child_after_geometry, child_after_transform))
+                    }).collect::<Result<Vec<_>, CommandError>>()?;
+                    matrix_constrained_children.extend(legacy_direct);
+
+                    // A legacy Group's scalar geometry is a derived world-space
+                    // envelope, so treating only its constrained leaf as a direct
+                    // Frame child would break the relationship as soon as the
+                    // Frame is rotated. Migrate every legacy Group subtree in
+                    // parent-before-child order. Each legacy link first becomes
+                    // Frame-local from its old world transform; it is then made
+                    // relative to its immediate (possibly just-migrated) Group.
+                    // This preserves unconstrained siblings while allowing a
+                    // constrained leaf to use the same Frame-local rule as a
+                    // modern Relative-v1 subtree.
+                    let mut local_to_frame = BTreeMap::new();
+                    local_to_frame.insert(*id, AffineTransform::IDENTITY);
+                    let mut pending = self.nodes.values()
+                        .filter(|node| node.parent_id == Some(*id) && node.kind == NodeKind::Group && node.relative_transform.is_none())
+                        .map(|node| node.id)
+                        .collect::<Vec<_>>();
+                    let mut legacy_group_subtree = Vec::new();
+                    while let Some(child_id) = pending.pop() {
+                        let child = self.nodes.get(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
+                        // A nested Frame/Section/Boolean owns a fresh layout or
+                        // structural context. Its legacy descendants are not a
+                        // transparent Group chain, so an outer Frame resize must
+                        // leave that boundary untouched until its own migration
+                        // transaction has an unambiguous local coordinate space.
+                        if matches!(child.kind, NodeKind::Frame | NodeKind::Section | NodeKind::BooleanOperation)
+                            && self.nodes.values().any(|descendant| descendant.parent_id == Some(child_id))
+                        {
+                            continue;
+                        }
+                        let parent_id = child.parent_id.ok_or(CommandError::InvalidGeometry)?;
+                        let parent_to_frame = *local_to_frame.get(&parent_id).ok_or(CommandError::InvalidGeometry)?;
+                        let child_to_frame = match child.relative_transform {
+                            Some(local) => local.then(parent_to_frame),
+                            None => node_legacy_transform(child)
+                                .ok_or(CommandError::InvalidGeometry)?
+                                .then(frame_inverse),
+                        };
+                        let child_before = Geometry {
+                            x: child_to_frame.e,
+                            y: child_to_frame.f,
+                            width: child.width,
+                            height: child.height,
+                            rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
+                        };
+                        let child_after_local = child.constraints.map(|constraints| {
+                            geometry_for_constraints(
+                                frame_before_local,
+                                frame_after_local,
+                                child_before,
+                                constraints,
+                                &child.kind,
+                            )
+                        }).transpose()?.unwrap_or(child_before);
+                        let child_to_frame_after = AffineTransform {
+                            e: child_after_local.x,
+                            f: child_after_local.y,
+                            ..child_to_frame
+                        };
+                        let child_after_transform = child_to_frame_after
+                            .then(parent_to_frame.inverse().map_err(|_| CommandError::InvalidGeometry)?);
+                        local_to_frame.insert(child_id, child_to_frame_after);
+                        // A modern leaf below a legacy Group retains its local
+                        // matrix unless the Frame resize changed its constrained
+                        // Frame-local placement. Legacy links always need their
+                        // one-time Relative-v1 conversion.
+                        if child.relative_transform.is_none() || child.constraints.is_some() {
+                            let child_after_geometry = geometry_for_relative_transform(
+                                child_after_transform,
+                                child_after_local.width,
+                                child_after_local.height,
+                                &child.kind,
+                            )?;
+                            legacy_group_subtree.push((child_id, child_after_geometry, child_after_transform));
+                        }
+                        if child.kind == NodeKind::Group {
+                            pending.extend(self.nodes.values()
+                                .filter(|descendant| descendant.parent_id == Some(child_id))
+                                .map(|descendant| descendant.id));
+                        }
+                    }
+                    matrix_constrained_children.extend(legacy_group_subtree);
+                }
                 let parent_id = self.nodes.get(id).and_then(|node| node.parent_id);
                 let mut affected_groups = self.group_ancestor_ids([parent_id]);
-                if kind == NodeKind::Group {
+                if is_structural_container(&kind) {
                     affected_groups.insert(0, *id);
                 }
                 for group_id in self.group_ancestor_ids(constrained_children.iter().map(|(child_id, _)| self.nodes.get(child_id).and_then(|child| child.parent_id))) {
@@ -1592,7 +2153,7 @@ impl Document {
                 if after.corner_smoothing != 0.0 && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section) {
                     return Err(CommandError::InvalidAppearance);
                 }
-                if after.constraints.is_some() && matches!(node.kind, NodeKind::Group | NodeKind::Section) {
+                if after.constraints.is_some() && matches!(node.kind, NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section) {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if !after.stroke_weights.is_empty()
@@ -1601,12 +2162,23 @@ impl Document {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if after.stroke_align != StrokeAlign::Inside
-                    && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
+                    && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Polygon | NodeKind::Star)
                         || after.arc_data.is_some())
                 {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if after.arc_data.is_some() && node.kind != NodeKind::Ellipse {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if !valid_parametric_shape(&node.kind, after.parametric_shape) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if (after.drop_shadow.is_some() || !after.effect_stack.is_empty())
+                    && is_structural_container(&node.kind)
+                {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                if node.kind == NodeKind::Slice && !valid_slice_appearance(&after) {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if !valid_relative_transform(after.relative_transform) {
@@ -1622,6 +2194,8 @@ impl Document {
                     .saturating_add(after.stroke.estimated_bytes())
                     .saturating_add(paint_stack_bytes(&after.fills))
                     .saturating_add(paint_stack_bytes(&after.strokes))
+                    .saturating_sub(effect_stack_bytes(&node.effect_stack))
+                    .saturating_add(effect_stack_bytes(&after.effect_stack))
                     .saturating_sub(node.stroke_dash_pattern.len() * std::mem::size_of::<f64>())
                     .saturating_add(after.stroke_dash_pattern.len() * std::mem::size_of::<f64>())
                     .saturating_sub(node.stroke_weights.len() * std::mem::size_of::<f64>())
@@ -1648,8 +2222,12 @@ impl Document {
                     stroke_weights: node.stroke_weights.clone(),
                     stroke_align: node.stroke_align,
                     arc_data: node.arc_data,
+                    parametric_shape: node.parametric_shape,
                     relative_transform: node.relative_transform,
                     opacity: node.opacity,
+                    blend_mode: node.blend_mode,
+                    drop_shadow: node.drop_shadow,
+                    effect_stack: node.effect_stack.clone(),
                     corner_radius: node.corner_radius,
                     corner_radii: node.corner_radii.clone(),
                     corner_smoothing: node.corner_smoothing,
@@ -1672,8 +2250,12 @@ impl Document {
                 node.stroke_weights = after.stroke_weights.clone();
                 node.stroke_align = after.stroke_align;
                 node.arc_data = after.arc_data;
+                node.parametric_shape = after.parametric_shape;
                 node.relative_transform = after.relative_transform;
                 node.opacity = after.opacity;
+                node.blend_mode = after.blend_mode;
+                node.drop_shadow = after.drop_shadow;
+                node.effect_stack = after.effect_stack.clone();
                 node.corner_radius = after.corner_radius;
                 node.corner_radii = after.corner_radii.clone();
                 node.corner_smoothing = after.corner_smoothing;
@@ -1703,6 +2285,201 @@ impl Document {
                 // and is handled where that structural math already lives (the
                 // group/ungroup batch), not on an appearance edit.
                 Ok(appearance_change)
+            }
+            Command::SetVectorPath { id, path } => {
+                self.assert_mutable(*id)?;
+                self.replace_vector_path(*id, path.clone())
+            }
+            Command::SetBooleanOperation { id, operation } => {
+                self.assert_mutable(*id)?;
+                let node = self.nodes.get_mut(id).ok_or(CommandError::MissingNode { id: *id })?;
+                if node.kind != NodeKind::BooleanOperation {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                let before = node.boolean_operation.ok_or(CommandError::InvalidGeometry)?;
+                node.boolean_operation = Some(*operation);
+                Ok(AppliedChange::BooleanOperationChanged { id: *id, before, after: *operation })
+            }
+            Command::SetMask { id, enabled } => {
+                self.assert_mutable(*id)?;
+                let (before, before_bytes, after_bytes) = {
+                    let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
+                    if is_structural_container(&node.kind)
+                        || matches!(node.kind, NodeKind::Section | NodeKind::Slice)
+                    {
+                        return Err(CommandError::InvalidGeometry);
+                    }
+                    let before = is_alpha_mask(node);
+                    let before_bytes = node.estimated_bytes();
+                    let mut after = node.clone();
+                    if *enabled {
+                        after.extensions.insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
+                    } else {
+                        after.extensions.remove(ALPHA_MASK_EXTENSION_KEY);
+                    }
+                    (before, before_bytes, after.estimated_bytes())
+                };
+                if *enabled && !self.has_following_sibling(*id) {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                if self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes) > MAX_DOCUMENT_BYTES {
+                    return Err(CommandError::ResourceLimit);
+                }
+                self.set_mask(*id, *enabled);
+                Ok(AppliedChange::MaskChanged { id: *id, before, after: *enabled })
+            }
+            Command::MoveVectorPoint { id, point_id, position } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                let point = path
+                    .subpaths
+                    .iter_mut()
+                    .flat_map(|subpath| subpath.points.iter_mut())
+                    .find(|point| point.id == *point_id)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                point.position = *position;
+                self.replace_vector_path(*id, path)
+            }
+            Command::SetVectorSubpathClosed { id, subpath_index, closed } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                let subpath = path
+                    .subpaths
+                    .get_mut(*subpath_index as usize)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                subpath.closed = *closed;
+                self.replace_vector_path(*id, path)
+            }
+            Command::InsertVectorPoint { id, subpath_index, after_point_id, point } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                if path.subpaths.iter().flat_map(|subpath| &subpath.points).any(|candidate| candidate.id == point.id) {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                let subpath = path
+                    .subpaths
+                    .get_mut(*subpath_index as usize)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                let insertion_index = match after_point_id {
+                    Some(after_point_id) => subpath
+                        .points
+                        .iter()
+                        .position(|candidate| candidate.id == *after_point_id)
+                        .map(|index| index + 1)
+                        .ok_or(CommandError::InvalidGeometry)?,
+                    None => 0,
+                };
+                subpath.points.insert(insertion_index, point.clone());
+                self.replace_vector_path(*id, path)
+            }
+            Command::SplitVectorSegment { id, subpath_index, after_point_id, t, point_id } => {
+                self.assert_mutable(*id)?;
+                if !t.is_finite() || *t <= 0.0 || *t >= 1.0 { return Err(CommandError::InvalidGeometry); }
+                let mut path = self.vector_path_for_node(*id)?;
+                if path.subpaths.iter().flat_map(|subpath| &subpath.points).any(|candidate| candidate.id == *point_id) {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                let subpath = path.subpaths.get_mut(*subpath_index as usize).ok_or(CommandError::InvalidGeometry)?;
+                let after_index = subpath.points.iter().position(|candidate| candidate.id == *after_point_id).ok_or(CommandError::InvalidGeometry)?;
+                let next_index = if after_index + 1 < subpath.points.len() { after_index + 1 } else if subpath.closed { 0 } else { return Err(CommandError::InvalidGeometry); };
+                let from = subpath.points[after_index].clone();
+                let to = subpath.points[next_index].clone();
+                let control_from = from.handle_out.map(|handle| Point { x: from.position.x + handle.x, y: from.position.y + handle.y }).unwrap_or(from.position);
+                let control_to = to.handle_in.map(|handle| Point { x: to.position.x + handle.x, y: to.position.y + handle.y }).unwrap_or(to.position);
+                let interpolate = |left: Point, right: Point| Point { x: left.x + (right.x - left.x) * *t, y: left.y + (right.y - left.y) * *t };
+                let first = interpolate(from.position, control_from);
+                let second = interpolate(control_from, control_to);
+                let third = interpolate(control_to, to.position);
+                let fourth = interpolate(first, second);
+                let fifth = interpolate(second, third);
+                let position = interpolate(fourth, fifth);
+                let curved = from.handle_out.is_some() || to.handle_in.is_some();
+                subpath.points[after_index].handle_out = curved.then_some(Point { x: first.x - from.position.x, y: first.y - from.position.y });
+                subpath.points[next_index].handle_in = curved.then_some(Point { x: third.x - to.position.x, y: third.y - to.position.y });
+                subpath.points.insert(after_index + 1, VectorPoint {
+                    id: *point_id,
+                    position,
+                    handle_in: curved.then_some(Point { x: fourth.x - position.x, y: fourth.y - position.y }),
+                    handle_out: curved.then_some(Point { x: fifth.x - position.x, y: fifth.y - position.y }),
+                    point_type: if curved { VectorPointType::Asymmetric } else { VectorPointType::Corner },
+                });
+                self.replace_vector_path(*id, path)
+            }
+            Command::ConnectVectorEndpoints { id, first_subpath_index, first_point_id, second_subpath_index, second_point_id } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                let first_index = *first_subpath_index as usize;
+                let second_index = *second_subpath_index as usize;
+                let first = path.subpaths.get(first_index).ok_or(CommandError::InvalidGeometry)?;
+                let second = path.subpaths.get(second_index).ok_or(CommandError::InvalidGeometry)?;
+                let endpoint = |subpath: &VectorSubpath, point_id: PointId| {
+                    if subpath.closed || subpath.points.is_empty() { return None; }
+                    if subpath.points.first().is_some_and(|point| point.id == point_id) { Some(true) }
+                    else if subpath.points.last().is_some_and(|point| point.id == point_id) { Some(false) }
+                    else { None }
+                };
+                let first_at_start = endpoint(first, *first_point_id).ok_or(CommandError::InvalidGeometry)?;
+                let second_at_start = endpoint(second, *second_point_id).ok_or(CommandError::InvalidGeometry)?;
+                if first_index == second_index {
+                    if first_point_id == second_point_id || first_at_start == second_at_start || first.points.len() < 3 {
+                        return Err(CommandError::InvalidGeometry);
+                    }
+                    path.subpaths[first_index].closed = true;
+                    return self.replace_vector_path(*id, path);
+                }
+                let mut first = path.subpaths[first_index].clone();
+                let mut second = path.subpaths[second_index].clone();
+                let reverse = |subpath: &mut VectorSubpath| {
+                    subpath.points.reverse();
+                    for point in &mut subpath.points {
+                        std::mem::swap(&mut point.handle_in, &mut point.handle_out);
+                    }
+                };
+                if first_at_start { reverse(&mut first); }
+                if !second_at_start { reverse(&mut second); }
+                if first.points.last().is_some_and(|left| second.points.first().is_some_and(|right| left.position == right.position)) {
+                    let joined = second.points.remove(0);
+                    let last = first.points.last_mut().ok_or(CommandError::InvalidGeometry)?;
+                    last.handle_out = joined.handle_out;
+                    last.point_type = if last.handle_in.is_some() || last.handle_out.is_some() { VectorPointType::Asymmetric } else { VectorPointType::Corner };
+                }
+                first.points.extend(second.points);
+                let insertion_index = first_index.min(second_index);
+                let higher_index = first_index.max(second_index);
+                path.subpaths.remove(higher_index);
+                path.subpaths.remove(insertion_index);
+                path.subpaths.insert(insertion_index, first);
+                self.replace_vector_path(*id, path)
+            }
+            Command::DeleteVectorPoint { id, point_id } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                let subpath = path
+                    .subpaths
+                    .iter_mut()
+                    .find(|subpath| subpath.points.iter().any(|candidate| candidate.id == *point_id))
+                    .ok_or(CommandError::InvalidGeometry)?;
+                if subpath.points.len() <= if subpath.closed { 3 } else { 1 } {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                let point_index = subpath.points.iter().position(|candidate| candidate.id == *point_id)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                subpath.points.remove(point_index);
+                self.replace_vector_path(*id, path)
+            }
+            Command::SetVectorPointHandles { id, point_id, handle_in, handle_out, point_type } => {
+                self.assert_mutable(*id)?;
+                let mut path = self.vector_path_for_node(*id)?;
+                let point = path
+                    .subpaths
+                    .iter_mut()
+                    .flat_map(|subpath| subpath.points.iter_mut())
+                    .find(|candidate| candidate.id == *point_id)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                point.handle_in = *handle_in;
+                point.handle_out = *handle_out;
+                point.point_type = *point_type;
+                self.replace_vector_path(*id, path)
             }
             Command::SetNodeAsset { id, asset_id } => {
                 self.assert_mutable(*id)?;
@@ -1797,6 +2574,20 @@ impl Document {
                     before,
                     after,
                 })
+            }
+            Command::SetAutoLayout { id, layout } => {
+                self.assert_mutable(*id)?;
+                let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
+                if !valid_auto_layout(layout) || (layout.mode != LayoutMode::None && node.kind != NodeKind::Frame) {
+                    return Err(CommandError::InvalidAutoLayout);
+                }
+                let before = self.node_auto_layout.get(id).cloned();
+                let after = (layout != &AutoLayout::default()).then_some(layout.clone());
+                match &after {
+                    Some(layout) => { self.node_auto_layout.insert(*id, layout.clone()); }
+                    None => { self.node_auto_layout.remove(id); }
+                }
+                Ok(AppliedChange::AutoLayoutChanged { id: *id, before, after })
             }
             Command::SetNodePosition { id, position } => {
                 self.assert_mutable(*id)?;
@@ -2000,6 +2791,14 @@ impl Document {
             }
             AppliedChange::NameChanged { id, before, .. } => self.set_name(*id, before),
             AppliedChange::AppearanceChanged { id, before, .. } => self.set_appearance(*id, before),
+            AppliedChange::AutoLayoutChanged { id, before, .. } => {
+                self.replace_auto_layout_option(*id, before.clone());
+            }
+            AppliedChange::VectorPathChanged { id, before, .. } => self.set_vector_path(*id, before),
+            AppliedChange::BooleanOperationChanged { id, before, .. } => {
+                if let Some(node) = self.nodes.get_mut(id) { node.boolean_operation = Some(*before); }
+            }
+            AppliedChange::MaskChanged { id, before, .. } => self.set_mask(*id, *before),
             AppliedChange::NodeAssetChanged { id, before, .. } => self.set_node_asset(*id, *before),
             AppliedChange::TextChanged {
                 id,
@@ -2052,6 +2851,14 @@ impl Document {
             }
             AppliedChange::NameChanged { id, after, .. } => self.set_name(*id, after),
             AppliedChange::AppearanceChanged { id, after, .. } => self.set_appearance(*id, after),
+            AppliedChange::AutoLayoutChanged { id, after, .. } => {
+                self.replace_auto_layout_option(*id, after.clone());
+            }
+            AppliedChange::VectorPathChanged { id, after, .. } => self.set_vector_path(*id, after),
+            AppliedChange::BooleanOperationChanged { id, after, .. } => {
+                if let Some(node) = self.nodes.get_mut(id) { node.boolean_operation = Some(*after); }
+            }
+            AppliedChange::MaskChanged { id, after, .. } => self.set_mask(*id, *after),
             AppliedChange::NodeAssetChanged { id, after, .. } => self.set_node_asset(*id, *after),
             AppliedChange::TextChanged {
                 id,
@@ -2094,7 +2901,9 @@ impl Document {
                 .saturating_add(appearance.fill.estimated_bytes())
                 .saturating_add(appearance.stroke.estimated_bytes())
                 .saturating_add(paint_stack_bytes(&appearance.fills))
-                .saturating_add(paint_stack_bytes(&appearance.strokes));
+                .saturating_add(paint_stack_bytes(&appearance.strokes))
+                .saturating_sub(effect_stack_bytes(&node.effect_stack))
+                .saturating_add(effect_stack_bytes(&appearance.effect_stack));
             node.fill = appearance.fill.clone();
             node.stroke = appearance.stroke.clone();
             node.fills = appearance.fills.clone();
@@ -2108,8 +2917,12 @@ impl Document {
             node.stroke_weights = appearance.stroke_weights.clone();
             node.stroke_align = appearance.stroke_align;
             node.arc_data = appearance.arc_data;
+            node.parametric_shape = appearance.parametric_shape;
             node.relative_transform = appearance.relative_transform;
             node.opacity = appearance.opacity;
+            node.blend_mode = appearance.blend_mode;
+            node.drop_shadow = appearance.drop_shadow;
+            node.effect_stack = appearance.effect_stack.clone();
             node.corner_radius = appearance.corner_radius;
             node.corner_radii = appearance.corner_radii.clone();
             node.corner_smoothing = appearance.corner_smoothing;
@@ -2123,6 +2936,469 @@ impl Document {
                 .saturating_sub(before_bytes)
                 .saturating_add(after_bytes);
         }
+    }
+
+    fn replace_auto_layout_option(&mut self, id: NodeId, layout: Option<AutoLayout>) {
+        match layout {
+            Some(layout) => { self.node_auto_layout.insert(id, layout); }
+            None => { self.node_auto_layout.remove(&id); }
+        }
+    }
+
+    /// The dirty set follows touched nodes only through their ancestor chain;
+    /// it never defaults to an all-page layout scan.
+    fn auto_layout_dirty_frames(&self, commands: &[Command], before_transaction: &Document) -> Vec<NodeId> {
+        let mut touched = BTreeSet::new();
+        for command in commands {
+            match command {
+                Command::Create(node) => { touched.insert(node.id); }
+                Command::CreateInPage { node, .. } | Command::CreateImageInPage { node, .. } | Command::RestoreNode { node, .. } => { touched.insert(node.id); }
+                Command::UpdateGeometry { id, .. } | Command::Rename { id, .. } | Command::SetAppearance { id, .. }
+                | Command::SetVectorPath { id, .. } | Command::SetBooleanOperation { id, .. } | Command::SetMask { id, .. }
+                | Command::MoveVectorPoint { id, .. } | Command::SetVectorSubpathClosed { id, .. }
+                | Command::InsertVectorPoint { id, .. } | Command::SplitVectorSegment { id, .. } | Command::ConnectVectorEndpoints { id, .. }
+                | Command::DeleteVectorPoint { id, .. } | Command::SetVectorPointHandles { id, .. }
+                | Command::SetNodeAsset { id, .. } | Command::SetText { id, .. } | Command::SetTextProperties { id, .. }
+                | Command::SetAutoLayout { id, .. } | Command::SetNodePosition { id, .. } | Command::SetNodeParent { id, .. }
+                | Command::Delete { id } => { touched.insert(*id); }
+                Command::CreatePage(_) | Command::SetDocumentColorProfile { .. } | Command::RegisterAsset { .. } => {}
+            }
+        }
+        let mut frames = BTreeSet::new();
+        for id in touched {
+            // Reparent and delete remove the node from its old ancestry before
+            // this pass. Follow both snapshots so the old container closes its
+            // gap as well as the new container accepting the child.
+            for document in [self, before_transaction] {
+                let mut current = Some(id);
+                let mut visited = BTreeSet::new();
+                while let Some(id) = current {
+                    if !visited.insert(id) { break; }
+                    let Some(node) = document.nodes.get(&id) else { break; };
+                    if self.nodes.get(&id).is_some_and(|current_node| current_node.kind == NodeKind::Frame)
+                        && self.auto_layout_for_node(id).mode != LayoutMode::None {
+                        frames.insert(id);
+                    }
+                    current = node.parent_id;
+                }
+            }
+        }
+        // A parent reflow can change a nested Frame's available Fill axis.
+        // That Frame then owns a second layout pass for its own descendants;
+        // walking ancestors alone misses it because the nested container was
+        // not directly touched by the user command. Expand only the affected
+        // layout subtrees, then the convergence loop below resolves deepest
+        // containers before their parents and repeats if a parent resized one.
+        let dirty_roots = frames.iter().copied().collect::<Vec<_>>();
+        for root_id in dirty_roots {
+            for candidate in self.nodes.values() {
+                if candidate.id == root_id
+                    || candidate.kind != NodeKind::Frame
+                    || self.auto_layout_for_node(candidate.id).mode == LayoutMode::None
+                {
+                    continue;
+                }
+                let mut current = candidate.parent_id;
+                let mut visited = BTreeSet::new();
+                while let Some(parent_id) = current {
+                    if !visited.insert(parent_id) { break; }
+                    if parent_id == root_id {
+                        frames.insert(candidate.id);
+                        break;
+                    }
+                    current = self.nodes.get(&parent_id).and_then(|node| node.parent_id);
+                }
+            }
+        }
+        let mut frames = frames.into_iter().collect::<Vec<_>>();
+        frames.sort_by_key(|id| std::cmp::Reverse(self.node_depth(*id)));
+        frames
+    }
+
+    fn node_depth(&self, id: NodeId) -> usize {
+        let mut current = Some(id);
+        let mut visited = BTreeSet::new();
+        let mut depth = 0;
+        while let Some(id) = current {
+            if !visited.insert(id) { return usize::MAX; }
+            current = self.nodes.get(&id).and_then(|node| node.parent_id);
+            if current.is_some() { depth += 1; }
+        }
+        depth
+    }
+
+    /// The layout engine cannot rely on a browser FontFace being present during
+    /// snapshot replay. This deliberately small metric model keeps Auto Layout
+    /// deterministic across Core, service and WASM while the canvas may refine
+    /// glyph painting with an available font.
+    fn auto_layout_text_size(&self, node: &Node) -> (f64, f64) {
+        let properties = self.node_text_properties.get(&node.id);
+        let line_height = properties
+            .and_then(|value| value.paragraph.line_height)
+            .unwrap_or(20.0);
+        let paragraph_spacing = properties.map(|value| value.paragraph.paragraph_spacing).unwrap_or(0.0);
+        let runs = properties.map(|value| value.runs.as_slice()).unwrap_or(&[]);
+        // Height-auto text keeps its authored width. Measure its soft wraps in
+        // Core as well, so snapshot replay does not depend on a browser font
+        // layout pass to decide an Auto Layout row's height.
+        let wrap_width = properties
+            .filter(|value| value.auto_size == TextAutoSize::Height)
+            .map(|_| node.width)
+            .filter(|width| width.is_finite() && *width > 0.0);
+        let mut line_width = 0.0_f64;
+        let mut widest = 0.0_f64;
+        let mut lines = 1usize;
+        let mut paragraph_breaks = 0usize;
+        let mut glyphs_on_line = 0usize;
+        for (offset, grapheme) in node.text.grapheme_indices(true) {
+            if matches!(grapheme, "\n" | "\r" | "\r\n" | "\u{2028}" | "\u{2029}") {
+                // CRLF is one grapheme and one paragraph boundary, matching
+                // DOM editing/export semantics without splitting source bytes.
+                widest = widest.max(line_width);
+                line_width = 0.0;
+                glyphs_on_line = 0;
+                lines += 1;
+                paragraph_breaks += 1;
+                continue;
+            }
+            let run = runs.iter().find(|run| (run.start as usize) <= offset && offset < run.end as usize);
+            let font_size = run.map(|run| run.font_size).unwrap_or(31.0);
+            let letter_spacing = run.map(|run| run.letter_spacing).unwrap_or(0.0);
+            // A fallback advance is attributed to one legal editing grapheme,
+            // so combining marks and Emoji ZWJ sequences cannot manufacture
+            // soft-wrap lines that the text editor cannot address.
+            let advance = font_size * 0.6;
+            let spacing = (glyphs_on_line > 0).then_some(letter_spacing).unwrap_or(0.0);
+            if glyphs_on_line > 0 && wrap_width.is_some_and(|width| line_width + spacing + advance > width) {
+                widest = widest.max(line_width);
+                line_width = 0.0;
+                glyphs_on_line = 0;
+                lines += 1;
+            }
+            if glyphs_on_line > 0 { line_width += letter_spacing; }
+            line_width += advance;
+            glyphs_on_line += 1;
+        }
+        widest = widest.max(line_width);
+        (
+            normalize_layout_number(widest.max(1.0)),
+            normalize_layout_number((lines as f64 * line_height + paragraph_breaks as f64 * paragraph_spacing).max(1.0)),
+        )
+    }
+
+    fn reflow_auto_layout(&mut self, dirty_frames: Vec<NodeId>) -> Result<Vec<AppliedChange>, CommandError> {
+        const MAX_LAYOUT_NODES: usize = 10_000;
+        const MAX_LAYOUT_ITERATIONS: usize = 32;
+        let mut changes = Vec::new();
+        let mut visited_nodes = 0usize;
+        for _iteration in 0..MAX_LAYOUT_ITERATIONS {
+            let changes_before_iteration = changes.len();
+            for frame_id in dirty_frames.iter().copied() {
+            let layout = self.auto_layout_for_node(frame_id);
+            if layout.mode == LayoutMode::None { continue; }
+            let frame = self.nodes.get(&frame_id).cloned().ok_or(CommandError::MissingNode { id: frame_id })?;
+            if frame.kind != NodeKind::Frame || frame.relative_transform.is_some() { return Err(CommandError::AutoLayoutUnsupported); }
+            let mut children = self.nodes.values()
+                .filter(|node| node.parent_id == Some(frame_id))
+                .cloned().collect::<Vec<_>>();
+            children.sort_unstable_by_key(|node| (node.position, node.id));
+            visited_nodes = visited_nodes.saturating_add(children.len());
+            if visited_nodes > MAX_LAYOUT_NODES { return Err(CommandError::AutoLayoutLimit); }
+            let flow = children.into_iter().filter(|node| !self.auto_layout_for_node(node.id).absolute).collect::<Vec<_>>();
+            if flow.iter().any(|node| node.relative_transform.is_some()) { return Err(CommandError::AutoLayoutUnsupported); }
+            let horizontal = layout.mode == LayoutMode::Horizontal;
+            if flow.iter().any(|node| {
+                let child = self.auto_layout_for_node(node.id);
+                let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(node, horizontal);
+                let text_auto_size = self.node_text_properties.get(&node.id).map(|properties| properties.auto_size);
+                let text_supports_primary_hug = node.kind == NodeKind::Text
+                    && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
+                        || (!horizontal && matches!(text_auto_size, Some(TextAutoSize::Height))));
+                let text_supports_counter_hug = node.kind == NodeKind::Text
+                    && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
+                        || (horizontal && matches!(text_auto_size, Some(TextAutoSize::Height))));
+                (primary_sizing == LayoutSizing::Hug
+                    && node.kind != NodeKind::Frame
+                    && !text_supports_primary_hug)
+                    || (counter_sizing == LayoutSizing::Hug
+                        && node.kind != NodeKind::Frame
+                        && !text_supports_counter_hug)
+                    || child.wrap
+            }) { return Err(CommandError::AutoLayoutUnsupported); }
+            let [top, right, bottom, left] = layout.padding;
+            let intrinsic_primary = flow.iter().map(|node| {
+                let (primary_sizing, _) = self.auto_layout_child_sizing(node, horizontal);
+                let (text_width, text_height) = (node.kind == NodeKind::Text).then(|| self.auto_layout_text_size(node)).unwrap_or((node.width, node.height));
+                if primary_sizing == LayoutSizing::Hug {
+                    if horizontal { text_width } else { text_height }
+                } else if horizontal { node.width } else { node.height }
+            }).sum::<f64>()
+                + layout.item_spacing * flow.len().saturating_sub(1) as f64;
+            let intrinsic_counter = flow.iter().map(|node| {
+                let (_, counter_sizing) = self.auto_layout_child_sizing(node, horizontal);
+                let (text_width, text_height) = (node.kind == NodeKind::Text).then(|| self.auto_layout_text_size(node)).unwrap_or((node.width, node.height));
+                if counter_sizing == LayoutSizing::Hug {
+                    if horizontal { text_height } else { text_width }
+                } else if horizontal { node.height } else { node.width }
+            }).fold(0.0, f64::max);
+            let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
+                max.map(|limit| value.min(limit)).unwrap_or(value).max(min.unwrap_or(0.0))
+            };
+            let (candidate_width, candidate_height) = if horizontal {
+                (
+                    clamp_size(if layout.primary_sizing == LayoutSizing::Hug { left + intrinsic_primary + right } else { frame.width }, layout.min_width, layout.max_width),
+                    clamp_size(if layout.counter_sizing == LayoutSizing::Hug { top + intrinsic_counter + bottom } else { frame.height }, layout.min_height, layout.max_height),
+                )
+            } else {
+                (
+                    clamp_size(if layout.counter_sizing == LayoutSizing::Hug { left + intrinsic_counter + right } else { frame.width }, layout.min_width, layout.max_width),
+                    clamp_size(if layout.primary_sizing == LayoutSizing::Hug { top + intrinsic_primary + bottom } else { frame.height }, layout.min_height, layout.max_height),
+                )
+            };
+            if frame.width != candidate_width || frame.height != candidate_height {
+                let before = Geometry { x: frame.x, y: frame.y, width: frame.width, height: frame.height, rotation: frame.rotation };
+                let after = Geometry { x: frame.x, y: frame.y, width: normalize_layout_number(candidate_width), height: normalize_layout_number(candidate_height), rotation: frame.rotation };
+                let node = self.nodes.get_mut(&frame_id).expect("layout frame exists");
+                (node.width, node.height) = (after.width, after.height);
+                changes.push(AppliedChange::GeometryChanged { id: frame_id, before, after });
+            }
+            let frame = self.nodes.get(&frame_id).cloned().expect("layout frame exists");
+            let primary_extent = if horizontal { frame.width - left - right } else { frame.height - top - bottom };
+            let counter_extent = if horizontal { frame.height - top - bottom } else { frame.width - left - right };
+            if primary_extent < 0.0 || counter_extent < 0.0 { return Err(CommandError::InvalidAutoLayout); }
+            if layout.wrap {
+                if layout.primary_sizing != LayoutSizing::Fixed || layout.counter_sizing != LayoutSizing::Fixed
+                    || flow.iter().any(|child| {
+                        let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(child, horizontal);
+                        primary_sizing != LayoutSizing::Fixed || counter_sizing != LayoutSizing::Fixed
+                    }) {
+                    return Err(CommandError::AutoLayoutUnsupported);
+                }
+                let mut lines = Vec::<Vec<(Node, f64, f64)>>::new();
+                let mut line_primary = 0.0;
+                for child in flow {
+                    let child_layout = self.auto_layout_for_node(child.id);
+                    let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
+                        (child_layout.min_width, child_layout.max_width, child_layout.min_height, child_layout.max_height)
+                    } else {
+                        (child_layout.min_height, child_layout.max_height, child_layout.min_width, child_layout.max_width)
+                    };
+                    let primary = clamp_size(if horizontal { child.width } else { child.height }, primary_min, primary_max);
+                    let counter = clamp_size(if horizontal { child.height } else { child.width }, counter_min, counter_max);
+                    let next_primary = if lines.last().is_some_and(|line| !line.is_empty()) {
+                        line_primary + layout.item_spacing + primary
+                    } else { primary };
+                    if next_primary > primary_extent && lines.last().is_some_and(|line| !line.is_empty()) {
+                        lines.push(Vec::new());
+                        line_primary = 0.0;
+                    }
+                    if lines.is_empty() { lines.push(Vec::new()); }
+                    let line = lines.last_mut().expect("wrap line exists");
+                    line_primary = if line.is_empty() { primary } else { line_primary + layout.item_spacing + primary };
+                    line.push((child, primary, counter));
+                }
+                let mut counter_cursor = 0.0;
+                for (line_index, line) in lines.iter().enumerate() {
+                    let content_primary = line.iter().map(|(_, primary, _)| *primary).sum::<f64>();
+                    let regular_spacing = layout.item_spacing * line.len().saturating_sub(1) as f64;
+                    let (mut primary_cursor, spacing) = match layout.primary_alignment {
+                        LayoutAlignment::Start => (0.0, layout.item_spacing),
+                        LayoutAlignment::Center => (((primary_extent - content_primary - regular_spacing).max(0.0)) / 2.0, layout.item_spacing),
+                        LayoutAlignment::End => ((primary_extent - content_primary - regular_spacing).max(0.0), layout.item_spacing),
+                        LayoutAlignment::SpaceBetween if line.len() > 1 => (0.0, ((primary_extent - content_primary).max(0.0)) / (line.len() - 1) as f64),
+                        LayoutAlignment::SpaceBetween => (0.0, 0.0),
+                    };
+                    let line_counter = line.iter().map(|(_, _, counter)| *counter).fold(0.0, f64::max);
+                    for (child, primary, counter) in line {
+                        let counter_offset = match layout.counter_alignment {
+                            LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
+                            LayoutAlignment::Center => ((line_counter - *counter).max(0.0)) / 2.0,
+                            LayoutAlignment::End => (line_counter - *counter).max(0.0),
+                        };
+                        let (x, y) = if horizontal {
+                            (frame.x + left + primary_cursor, frame.y + top + counter_cursor + counter_offset)
+                        } else {
+                            (frame.x + left + counter_cursor + counter_offset, frame.y + top + primary_cursor)
+                        };
+                        primary_cursor += *primary + spacing;
+                        let after = Geometry {
+                            x: normalize_layout_number(x), y: normalize_layout_number(y),
+                            width: normalize_layout_number(if horizontal { *primary } else { *counter }),
+                            height: normalize_layout_number(if horizontal { *counter } else { *primary }),
+                            rotation: child.rotation,
+                        };
+                        let before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                        if before != after {
+                            let node = self.nodes.get_mut(&child.id).expect("layout child exists");
+                            (node.x, node.y, node.width, node.height) = (after.x, after.y, after.width, after.height);
+                            changes.push(AppliedChange::GeometryChanged { id: child.id, before, after });
+                        }
+                    }
+                    counter_cursor += line_counter;
+                    if line_index + 1 < lines.len() { counter_cursor += layout.item_spacing; }
+                }
+                continue;
+            }
+            let regular_spacing = layout.item_spacing * flow.len().saturating_sub(1) as f64;
+            let mut sized = flow.into_iter().map(|child| {
+                let child_layout = self.auto_layout_for_node(child.id);
+                let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(&child, horizontal);
+                let (text_width, text_height) = (child.kind == NodeKind::Text).then(|| self.auto_layout_text_size(&child)).unwrap_or((child.width, child.height));
+                let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
+                    (child_layout.min_width, child_layout.max_width, child_layout.min_height, child_layout.max_height)
+                } else {
+                    (child_layout.min_height, child_layout.max_height, child_layout.min_width, child_layout.max_width)
+                };
+                let primary = if primary_sizing == LayoutSizing::Fill {
+                    primary_min.unwrap_or(0.0)
+                } else if primary_sizing == LayoutSizing::Hug {
+                    clamp_size(if horizontal { text_width } else { text_height }, primary_min, primary_max)
+                } else {
+                    clamp_size(if horizontal { child.width } else { child.height }, primary_min, primary_max)
+                };
+                let counter = if counter_sizing == LayoutSizing::Fill {
+                    if counter_min.is_some_and(|minimum| minimum > counter_extent) {
+                        return Err(CommandError::InvalidAutoLayout);
+                    }
+                    clamp_size(counter_extent, counter_min, counter_max)
+                } else if counter_sizing == LayoutSizing::Hug {
+                    clamp_size(if horizontal { text_height } else { text_width }, counter_min, counter_max)
+                } else {
+                    clamp_size(if horizontal { child.height } else { child.width }, counter_min, counter_max)
+                };
+                Ok((child, primary_sizing, primary, counter, primary_max))
+            }).collect::<Result<Vec<_>, CommandError>>()?;
+            let fixed_content_extent = sized.iter()
+                .filter(|(_, primary_sizing, _, _, _)| *primary_sizing != LayoutSizing::Fill)
+                .map(|(_, _, primary, _, _)| *primary)
+                .sum::<f64>();
+            let fill_indices = sized.iter().enumerate()
+                .filter_map(|(index, (_, primary_sizing, _, _, _))| (*primary_sizing == LayoutSizing::Fill).then_some(index))
+                .collect::<Vec<_>>();
+            let available_fill_extent = primary_extent - fixed_content_extent - regular_spacing;
+            let minimum_fill_extent = fill_indices.iter().map(|index| sized[*index].2).sum::<f64>();
+            if !fill_indices.is_empty() && minimum_fill_extent > available_fill_extent + 1e-6 {
+                return Err(CommandError::InvalidAutoLayout);
+            }
+            let mut remaining_fill_extent = (available_fill_extent - minimum_fill_extent).max(0.0);
+            let mut active_fill_indices = fill_indices;
+            while remaining_fill_extent > 1e-6 && !active_fill_indices.is_empty() {
+                let share = remaining_fill_extent / active_fill_indices.len() as f64;
+                let constrained = active_fill_indices.iter().copied()
+                    .filter(|index| sized[*index].4.is_some_and(|maximum| maximum - sized[*index].2 < share))
+                    .collect::<Vec<_>>();
+                if constrained.is_empty() {
+                    for index in active_fill_indices { sized[index].2 += share; }
+                    break;
+                }
+                for index in constrained {
+                    let maximum = sized[index].4.expect("constrained fill has a maximum");
+                    remaining_fill_extent -= maximum - sized[index].2;
+                    sized[index].2 = maximum;
+                }
+                active_fill_indices.retain(|index| !sized[*index].4.is_some_and(|maximum| (maximum - sized[*index].2).abs() <= 1e-6));
+            }
+            let content_extent = sized.iter().map(|(_, _, primary, _, _)| *primary).sum::<f64>();
+            let (start_offset, spacing) = match layout.primary_alignment {
+                LayoutAlignment::Start => (0.0, layout.item_spacing),
+                LayoutAlignment::Center => (((primary_extent - content_extent - regular_spacing).max(0.0)) / 2.0, layout.item_spacing),
+                LayoutAlignment::End => ((primary_extent - content_extent - regular_spacing).max(0.0), layout.item_spacing),
+                LayoutAlignment::SpaceBetween if sized.len() > 1 => (0.0, ((primary_extent - content_extent).max(0.0)) / (sized.len() - 1) as f64),
+                LayoutAlignment::SpaceBetween => (0.0, 0.0),
+            };
+            let mut cursor = start_offset;
+            for (child, _primary_sizing, primary, counter, _) in sized {
+                let counter_offset = match layout.counter_alignment {
+                    LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
+                    LayoutAlignment::Center => ((counter_extent - counter).max(0.0)) / 2.0,
+                    LayoutAlignment::End => (counter_extent - counter).max(0.0),
+                };
+                let (x, y) = if horizontal { (frame.x + left + cursor, frame.y + top + counter_offset) } else { (frame.x + left + counter_offset, frame.y + top + cursor) };
+                cursor += primary + spacing;
+                let after = Geometry {
+                    x: normalize_layout_number(x),
+                    y: normalize_layout_number(y),
+                    width: normalize_layout_number(if horizontal { primary } else { counter }),
+                    height: normalize_layout_number(if horizontal { counter } else { primary }),
+                    rotation: child.rotation,
+                };
+                let before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                if before != after {
+                    let node = self.nodes.get_mut(&child.id).expect("layout child exists");
+                    (node.x, node.y, node.width, node.height) = (after.x, after.y, after.width, after.height);
+                    changes.push(AppliedChange::GeometryChanged { id: child.id, before, after });
+                }
+            }
+        }
+            if changes.len() == changes_before_iteration {
+                return Ok(changes);
+            }
+        }
+        return Err(CommandError::AutoLayoutLimit);
+    }
+
+    fn has_following_sibling(&self, id: NodeId) -> bool {
+        let Some(node) = self.nodes.get(&id) else { return false; };
+        let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
+        self.nodes.values().any(|candidate| {
+            candidate.id != id
+                && self.node_pages.get(&candidate.id).copied().unwrap_or(DEFAULT_PAGE_ID) == page_id
+                && candidate.parent_id == node.parent_id
+                && candidate.position > node.position
+        })
+    }
+
+    fn set_mask(&mut self, id: NodeId, enabled: bool) {
+        let Some((before_bytes, after_bytes)) = self.nodes.get_mut(&id).map(|node| {
+            let before_bytes = node.estimated_bytes();
+            if enabled {
+                node.extensions.insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
+            } else {
+                node.extensions.remove(ALPHA_MASK_EXTENSION_KEY);
+            }
+            (before_bytes, node.estimated_bytes())
+        }) else { return; };
+        self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
+    }
+
+    fn set_vector_path(&mut self, id: NodeId, path: &VectorPath) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            let before_bytes = node.estimated_bytes();
+            let after_bytes = before_bytes
+                .saturating_sub(node.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0))
+                .saturating_add(path.estimated_bytes());
+            node.vector_path = Some(path.clone());
+            self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
+        }
+    }
+
+    fn vector_path_for_node(&self, id: NodeId) -> Result<VectorPath, CommandError> {
+        let node = self.nodes.get(&id).ok_or(CommandError::MissingNode { id })?;
+        if node.kind != NodeKind::Vector {
+            return Err(CommandError::InvalidGeometry);
+        }
+        node.vector_path.clone().ok_or(CommandError::InvalidGeometry)
+    }
+
+    fn replace_vector_path(&mut self, id: NodeId, path: VectorPath) -> Result<AppliedChange, CommandError> {
+        if !valid_vector_path(&path) {
+            return Err(CommandError::InvalidGeometry);
+        }
+        let node = self.nodes.get_mut(&id).ok_or(CommandError::MissingNode { id })?;
+        if node.kind != NodeKind::Vector {
+            return Err(CommandError::InvalidGeometry);
+        }
+        let before_bytes = node.estimated_bytes();
+        let after_bytes = before_bytes
+            .saturating_sub(node.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0))
+            .saturating_add(path.estimated_bytes());
+        if self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes) > MAX_DOCUMENT_BYTES {
+            return Err(CommandError::ResourceLimit);
+        }
+        let before = std::mem::replace(&mut node.vector_path, Some(path.clone()))
+            .ok_or(CommandError::InvalidGeometry)?;
+        self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
+        Ok(AppliedChange::VectorPathChanged { id, before, after: path })
     }
 
     fn set_node_position(&mut self, id: NodeId, position: PositionId) {
@@ -2166,7 +3442,7 @@ impl Document {
         for mut current in parents.into_iter().flatten() {
             loop {
                 let Some(node) = self.nodes.get(&current) else { break };
-                if node.kind == NodeKind::Group && !ids.contains(&current) {
+                if is_structural_container(&node.kind) && !ids.contains(&current) {
                     ids.push(current);
                 }
                 let Some(parent_id) = node.parent_id else { break };
@@ -2176,15 +3452,17 @@ impl Document {
         ids
     }
 
-    /// Groups are structural only: their rectangle is always the world-space
-    /// bounding union of direct children. The Dual-read transform rule is
-    /// deliberately applied here as well as in the Worker: legacy children use
-    /// their historical world x/y/rotation while a child with
+    /// Structural containers derive their rectangle from the world-space union
+    /// of their direct children. Boolean results will later use the shared
+    /// clipping engine for their exact visible outline; the operand union is a
+    /// stable conservative bound in the meantime. The Dual-read transform rule
+    /// is deliberately applied here as well as in the Worker: legacy children
+    /// use their historical world x/y/rotation while a child with
     /// `relative_transform` inherits its parent's world matrix.
     fn refresh_group_bounds(&mut self, mut group_id: Option<NodeId>) {
         while let Some(id) = group_id {
             let Some(group) = self.nodes.get(&id).cloned() else { break };
-            if group.kind != NodeKind::Group { break; }
+            if !is_structural_container(&group.kind) { break; }
             // A Relative-v1 Group has already been normalized by the shared
             // matrix resolver before its complete batch crosses into Core.
             // Recomputing it from world AABBs here would overwrite its local
@@ -2241,7 +3519,7 @@ impl Document {
             Some(parent_id) if parent_id == frame_id => AffineTransform::IDENTITY,
             Some(parent_id) => {
                 let parent = self.nodes.get(&parent_id)?;
-                if parent.kind != NodeKind::Group || parent.relative_transform.is_none() {
+                if !is_structural_container(&parent.kind) || parent.relative_transform.is_none() {
                     return None;
                 }
                 self.relative_transform_to_frame(parent_id, frame_id)?.0
@@ -2303,6 +3581,37 @@ impl Document {
             dissolved.push(group);
         }
         dissolved
+    }
+
+    /// A Group or BooleanOperation may be temporarily incomplete while commands
+    /// in one transaction are being applied (Create followed by Reparent is
+    /// the normal construction path). The atomic boundary, not an individual
+    /// command, owns the invariant so alternate clients and operation replay
+    /// cannot persist an invalid structural shell.
+    fn ensure_non_empty_groups(&self) -> Result<(), CommandError> {
+        if let Some(group) = self.nodes
+            .values()
+            .filter(|node| node.kind == NodeKind::Group)
+            .find(|group| !self.nodes.values().any(|node| node.parent_id == Some(group.id)))
+        {
+            return Err(CommandError::EmptyGroup { id: group.id });
+        }
+        if let Some(boolean) = self
+            .nodes
+            .values()
+            .filter(|node| node.kind == NodeKind::BooleanOperation)
+            .find(|boolean| {
+                self.nodes
+                    .values()
+                    .filter(|node| node.parent_id == Some(boolean.id))
+                    .take(2)
+                    .count()
+                    < 2
+            })
+        {
+            return Err(CommandError::InsufficientBooleanOperands { id: boolean.id });
+        }
+        Ok(())
     }
 
     fn set_node_asset(&mut self, id: NodeId, asset_id: Option<AssetId>) {
@@ -2388,6 +3697,7 @@ impl Document {
                 || run.font_weight > 1_000
                 || !run.letter_spacing.is_finite()
                 || !(-10_000.0..=10_000.0).contains(&run.letter_spacing)
+                || !run.color.is_none_or(Color::is_valid)
                 || !run
                     .font
                     .as_ref()
@@ -2499,13 +3809,25 @@ impl Document {
             return Err(CommandError::InvalidAppearance);
         }
         if node.stroke_align != StrokeAlign::Inside
-            && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
+            && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Polygon | NodeKind::Star)
                 || node.arc_data.is_some())
         {
             return Err(CommandError::InvalidAppearance);
         }
         if node.arc_data.is_some() && node.kind != NodeKind::Ellipse {
             return Err(CommandError::InvalidAppearance);
+        }
+        if !valid_parametric_shape(&node.kind, node.parametric_shape) {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if !valid_vector_path_for_kind(&node.kind, node.vector_path.as_ref()) {
+            return Err(CommandError::InvalidGeometry);
+        }
+        if !valid_boolean_operation(&node.kind, node.boolean_operation) {
+            return Err(CommandError::InvalidGeometry);
+        }
+        if !valid_boolean_operation(&node.kind, node.boolean_operation) {
+            return Err(CommandError::InvalidGeometry);
         }
         if !valid_relative_transform(node.relative_transform) {
             return Err(CommandError::InvalidAppearance);
@@ -2666,8 +3988,12 @@ impl Document {
             stroke_weights: node.stroke_weights.clone(),
             stroke_align: node.stroke_align,
             arc_data: node.arc_data,
+            parametric_shape: node.parametric_shape,
             relative_transform: node.relative_transform,
             opacity: node.opacity,
+            blend_mode: node.blend_mode,
+            drop_shadow: node.drop_shadow,
+            effect_stack: node.effect_stack.clone(),
             corner_radius: node.corner_radius,
             corner_radii: node.corner_radii.clone(),
             corner_smoothing: node.corner_smoothing,
@@ -2684,6 +4010,14 @@ impl Document {
         }
         if node.clips_content && node.kind != NodeKind::Frame {
             return Err(CommandError::InvalidAppearance);
+        }
+        if node.kind == NodeKind::Slice
+            && !valid_slice_node(node)
+        {
+            return Err(CommandError::InvalidAppearance);
+        }
+        if !valid_vector_path_for_kind(&node.kind, node.vector_path.as_ref()) {
+            return Err(CommandError::InvalidGeometry);
         }
         if node.text.len() > MAX_TEXT_BYTES
             || (node.kind != NodeKind::Text && !node.text.is_empty())
@@ -2854,6 +4188,34 @@ impl Command {
             Command::SetAppearance { appearance, .. } => {
                 std::mem::size_of::<NodeId>() + appearance.estimated_bytes()
             }
+            Command::SetVectorPath { path, .. } => std::mem::size_of::<NodeId>() + path.estimated_bytes(),
+            Command::SetBooleanOperation { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<BooleanOperation>(),
+            Command::SetMask { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<bool>(),
+            Command::MoveVectorPoint { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>() + std::mem::size_of::<Point>()
+            }
+            Command::SetVectorSubpathClosed { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>() + std::mem::size_of::<bool>()
+            }
+            Command::InsertVectorPoint { point, .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<Option<PointId>>() + std::mem::size_of_val(point)
+            }
+            Command::SplitVectorSegment { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<PointId>() * 2 + std::mem::size_of::<f64>()
+            }
+            Command::ConnectVectorEndpoints { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>() * 2
+                    + std::mem::size_of::<PointId>() * 2
+            }
+            Command::DeleteVectorPoint { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>()
+            }
+            Command::SetVectorPointHandles { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>()
+                    + std::mem::size_of::<Option<Point>>() * 2 + std::mem::size_of::<VectorPointType>()
+            }
             Command::SetNodeAsset { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>()
             }
@@ -2861,6 +4223,7 @@ impl Command {
             Command::SetTextProperties { properties, .. } => {
                 std::mem::size_of::<NodeId>() + properties.estimated_bytes()
             }
+            Command::SetAutoLayout { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<AutoLayout>(),
             Command::SetNodePosition { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>()
             }
@@ -2889,6 +4252,16 @@ impl Node {
             + paint_stack_bytes(&self.strokes)
             + self.stroke_dash_pattern.len() * std::mem::size_of::<f64>()
             + self.stroke_weights.len() * std::mem::size_of::<f64>()
+            + self.extensions.iter().map(|(key, value)| key.len() + value.len()).sum::<usize>()
+            + self.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0)
+    }
+}
+
+impl VectorPath {
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.subpaths.iter().map(|subpath| {
+            std::mem::size_of::<VectorSubpath>() + subpath.points.len() * std::mem::size_of::<VectorPoint>()
+        }).sum::<usize>()
     }
 }
 
@@ -2956,6 +4329,18 @@ impl AppliedChange {
             }
             AppliedChange::AppearanceChanged { before, after, .. } => {
                 std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::AutoLayoutChanged { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AutoLayout>>() * 2
+            }
+            AppliedChange::VectorPathChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::BooleanOperationChanged { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<BooleanOperation>() * 2
+            }
+            AppliedChange::MaskChanged { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<bool>() * 2
             }
             AppliedChange::NodeAssetChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>() * 2
@@ -3044,6 +4429,34 @@ fn hash_number(hasher: &mut Sha256, value: f64) {
     );
 }
 
+fn normalize_layout_number(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
+    hasher.update([match layout.mode { LayoutMode::None => 0, LayoutMode::Horizontal => 1, LayoutMode::Vertical => 2 }]);
+    for value in layout.padding { hash_number(hasher, value); }
+    hash_number(hasher, layout.item_spacing);
+    hasher.update([u8::from(layout.wrap)]);
+    hasher.update([match layout.primary_alignment { LayoutAlignment::Start => 0, LayoutAlignment::Center => 1, LayoutAlignment::End => 2, LayoutAlignment::SpaceBetween => 3 }]);
+    hasher.update([match layout.counter_alignment { LayoutAlignment::Start => 0, LayoutAlignment::Center => 1, LayoutAlignment::End => 2, LayoutAlignment::SpaceBetween => 3 }]);
+    hasher.update([match layout.primary_sizing { LayoutSizing::Fixed => 0, LayoutSizing::Hug => 1, LayoutSizing::Fill => 2 }]);
+    hasher.update([match layout.counter_sizing { LayoutSizing::Fixed => 0, LayoutSizing::Hug => 1, LayoutSizing::Fill => 2 }]);
+    for value in [layout.min_width, layout.max_width, layout.min_height, layout.max_height] {
+        match value { Some(value) => { hasher.update([1]); hash_number(hasher, value); }, None => hasher.update([0]) }
+    }
+    hasher.update([u8::from(layout.absolute)]);
+}
+
+fn valid_auto_layout(layout: &AutoLayout) -> bool {
+    layout.padding.into_iter().all(|value| value.is_finite() && value >= 0.0)
+        && layout.item_spacing.is_finite()
+        && [layout.min_width, layout.max_width, layout.min_height, layout.max_height]
+            .into_iter().flatten().all(|value| value.is_finite() && value >= 0.0)
+        && layout.min_width.zip(layout.max_width).is_none_or(|(min, max)| min <= max)
+        && layout.min_height.zip(layout.max_height).is_none_or(|(min, max)| min <= max)
+}
+
 fn hash_color(hasher: &mut Sha256, color: Color) {
     hasher.update([match color.space {
         ColorSpace::Srgb => 0,
@@ -3062,6 +4475,40 @@ fn hash_color(hasher: &mut Sha256, color: Color) {
             .to_bits()
             .to_be_bytes(),
     );
+}
+
+fn hash_drop_shadow(hasher: &mut Sha256, shadow: DropShadow) {
+    for value in [shadow.offset_x, shadow.offset_y, shadow.blur_radius, shadow.spread] {
+        hash_number(hasher, value);
+    }
+    hash_color(hasher, shadow.color);
+    hasher.update([u8::from(shadow.visible)]);
+}
+
+fn hash_effect_stack(hasher: &mut Sha256, effects: &[Effect]) {
+    if effects.is_empty() {
+        return;
+    }
+    hasher.update(b"makefigma/editor-core/effect-stack-v1");
+    hash_len(hasher, effects.len());
+    for effect in effects {
+        match effect {
+            Effect::DropShadow(shadow) => {
+                hasher.update([0]);
+                hash_drop_shadow(hasher, *shadow);
+            }
+            Effect::LayerBlur(blur) => {
+                hasher.update([1]);
+                hash_number(hasher, blur.radius);
+                hasher.update([u8::from(blur.visible)]);
+            }
+            Effect::InnerShadow(shadow) => {
+                hasher.update([2]);
+                hash_drop_shadow(hasher, DropShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: shadow.color, visible: shadow.visible });
+            }
+            Effect::BackgroundBlur(blur) => { hasher.update([3]); hash_number(hasher, blur.radius); hasher.update([u8::from(blur.visible)]); }
+        }
+    }
 }
 
 fn hash_paint(hasher: &mut Sha256, paint: &Paint) {
@@ -3158,6 +4605,20 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
         hasher.update([u8::from(run.italic)]);
         hash_number(hasher, run.letter_spacing);
     }
+    // Append the extension only when any run uses it so pre-L1 documents retain
+    // their existing Canonical Hashes byte-for-byte.
+    if properties.runs.iter().any(|run| run.color.is_some()) {
+        hasher.update(b"makefigma/editor-core/text-run-color-v1");
+        for run in &properties.runs {
+            match run.color {
+                Some(color) => {
+                    hasher.update([1]);
+                    hash_color(hasher, color);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
     hasher.update([match properties.paragraph.alignment {
         TextAlign::Left => 0,
         TextAlign::Center => 1,
@@ -3204,6 +4665,11 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
         NodeKind::Line => 5,
         NodeKind::Group => 6,
         NodeKind::Section => 7,
+        NodeKind::Polygon => 8,
+        NodeKind::Star => 9,
+        NodeKind::Vector => 10,
+        NodeKind::BooleanOperation => 11,
+        NodeKind::Slice => 12,
     }]);
     for value in [
         node.x,
@@ -3233,6 +4699,40 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
     hash_paint(hasher, &node.stroke);
     hash_paint_stack(hasher, &node.fills, 5);
     hash_paint_stack(hasher, &node.strokes, 6);
+    if let Some(path) = &node.vector_path {
+        hasher.update(b"makefigma/editor-core/vector-path-v1");
+        hash_vector_path(hasher, path);
+    }
+    if let Some(operation) = node.boolean_operation {
+        hasher.update(b"makefigma/editor-core/boolean-operation-v1");
+        hasher.update([match operation {
+            BooleanOperation::Union => 0,
+            BooleanOperation::Intersect => 1,
+            BooleanOperation::Subtract => 2,
+            BooleanOperation::Exclude => 3,
+        }]);
+    }
+    if let Some(shadow) = node.drop_shadow {
+        // Existing no-effect documents keep their historical digest exactly.
+        hasher.update(b"makefigma/editor-core/drop-shadow-v1");
+        hash_drop_shadow(hasher, shadow);
+    }
+    hash_effect_stack(hasher, &node.effect_stack);
+    if node.blend_mode != BlendMode::Normal {
+        hasher.update(b"makefigma/editor-core/blend-mode-v1");
+        hasher.update([match node.blend_mode {
+            BlendMode::Normal => unreachable!(),
+            BlendMode::Multiply => 1,
+            BlendMode::Screen => 2,
+            BlendMode::Overlay => 3,
+            BlendMode::Darken => 4,
+            BlendMode::Lighten => 5,
+        }]);
+    }
+    if let Some(shape) = node.parametric_shape {
+        hasher.update(b"makefigma/editor-core/parametric-shape-v1");
+        hash_parametric_shape(hasher, shape);
+    }
     hash_stroke_cap(hasher, node.stroke_cap_start);
     hash_stroke_cap(hasher, node.stroke_cap_end);
     hash_stroke_style(
@@ -3347,6 +4847,26 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hash_paint(hasher, &appearance.stroke);
             hash_paint_stack(hasher, &appearance.fills, 5);
             hash_paint_stack(hasher, &appearance.strokes, 6);
+            if let Some(shadow) = appearance.drop_shadow {
+                hasher.update(b"makefigma/editor-core/drop-shadow-v1");
+                hash_drop_shadow(hasher, shadow);
+            }
+            hash_effect_stack(hasher, &appearance.effect_stack);
+            if appearance.blend_mode != BlendMode::Normal {
+                hasher.update(b"makefigma/editor-core/blend-mode-v1");
+                hasher.update([match appearance.blend_mode {
+                    BlendMode::Normal => unreachable!(),
+                    BlendMode::Multiply => 1,
+                    BlendMode::Screen => 2,
+                    BlendMode::Overlay => 3,
+                    BlendMode::Darken => 4,
+                    BlendMode::Lighten => 5,
+                }]);
+            }
+            if let Some(shape) = appearance.parametric_shape {
+                hasher.update(b"makefigma/editor-core/parametric-shape-v1");
+                hash_parametric_shape(hasher, shape);
+            }
             hash_number(hasher, appearance.stroke_width);
             hash_stroke_cap(hasher, appearance.stroke_cap_start);
             hash_stroke_cap(hasher, appearance.stroke_cap_end);
@@ -3382,6 +4902,91 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                 hasher.update([2]);
             }
         }
+        Command::SetVectorPath { id, path } => {
+            hasher.update([16]);
+            hasher.update(id.0.to_be_bytes());
+            hash_vector_path(hasher, path);
+        }
+        Command::SetBooleanOperation { id, operation } => {
+            hasher.update([22]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update([match operation {
+                BooleanOperation::Union => 0,
+                BooleanOperation::Intersect => 1,
+                BooleanOperation::Subtract => 2,
+                BooleanOperation::Exclude => 3,
+            }]);
+        }
+        Command::SetMask { id, enabled } => {
+            hasher.update([24]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update([u8::from(*enabled)]);
+        }
+        Command::MoveVectorPoint { id, point_id, position } => {
+            hasher.update([17]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(point_id.0.to_be_bytes());
+            hash_number(hasher, position.x);
+            hash_number(hasher, position.y);
+        }
+        Command::SetVectorSubpathClosed { id, subpath_index, closed } => {
+            hasher.update([18]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(subpath_index.to_be_bytes());
+            hasher.update([u8::from(*closed)]);
+        }
+        Command::InsertVectorPoint { id, subpath_index, after_point_id, point } => {
+            hasher.update([19]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(subpath_index.to_be_bytes());
+            match after_point_id {
+                Some(point_id) => { hasher.update([1]); hasher.update(point_id.0.to_be_bytes()); }
+                None => hasher.update([0]),
+            }
+            hasher.update(point.id.0.to_be_bytes());
+            hash_number(hasher, point.position.x);
+            hash_number(hasher, point.position.y);
+            for handle in [point.handle_in, point.handle_out] {
+                match handle {
+                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    None => hasher.update([0]),
+                }
+            }
+            hasher.update([match point.point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+        }
+        Command::DeleteVectorPoint { id, point_id } => {
+            hasher.update([20]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(point_id.0.to_be_bytes());
+        }
+        Command::SplitVectorSegment { id, subpath_index, after_point_id, t, point_id } => {
+            hasher.update([23]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(subpath_index.to_be_bytes());
+            hasher.update(after_point_id.0.to_be_bytes());
+            hash_number(hasher, *t);
+            hasher.update(point_id.0.to_be_bytes());
+        }
+        Command::ConnectVectorEndpoints { id, first_subpath_index, first_point_id, second_subpath_index, second_point_id } => {
+            hasher.update([25]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(first_subpath_index.to_be_bytes());
+            hasher.update(first_point_id.0.to_be_bytes());
+            hasher.update(second_subpath_index.to_be_bytes());
+            hasher.update(second_point_id.0.to_be_bytes());
+        }
+        Command::SetVectorPointHandles { id, point_id, handle_in, handle_out, point_type } => {
+            hasher.update([21]);
+            hasher.update(id.0.to_be_bytes());
+            hasher.update(point_id.0.to_be_bytes());
+            for handle in [handle_in, handle_out] {
+                match handle {
+                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    None => hasher.update([0]),
+                }
+            }
+            hasher.update([match point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+        }
         Command::SetNodeAsset { id, asset_id } => {
             hasher.update([12]);
             hasher.update(id.0.to_be_bytes());
@@ -3402,6 +5007,11 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update([11]);
             hasher.update(id.0.to_be_bytes());
             hash_text_properties(hasher, properties);
+        }
+        Command::SetAutoLayout { id, layout } => {
+            hasher.update([25]);
+            hasher.update(id.0.to_be_bytes());
+            hash_auto_layout(hasher, layout);
         }
         Command::SetNodePosition { id, position } => {
             hasher.update([13]);
@@ -3497,7 +5107,51 @@ fn valid_geometry(kind: &NodeKind, geometry: Geometry) -> bool {
 }
 
 fn can_contain_children(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Frame | NodeKind::Group | NodeKind::Section)
+    matches!(kind, NodeKind::Frame | NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section)
+}
+
+fn is_structural_container(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Group | NodeKind::BooleanOperation)
+}
+
+/// Slice is an editing/export boundary, not an invisible shape.  Its world
+/// geometry, parent transform, visibility and lock state are meaningful, while
+/// every paint-bearing field stays at a transparent/default value. Keeping this
+/// invariant in Core prevents a newer client from accidentally turning a Slice
+/// into a paintable rectangle that older projections would silently omit.
+fn valid_slice_appearance(appearance: &Appearance) -> bool {
+    matches!(&appearance.fill, Paint::Solid(color) if color.alpha == 0.0)
+        && matches!(&appearance.stroke, Paint::Solid(color) if color.alpha == 0.0)
+        && appearance.fills.is_empty()
+        && appearance.strokes.is_empty()
+        && appearance.stroke_width == 0.0
+        && appearance.stroke_cap_start == StrokeCap::None
+        && appearance.stroke_cap_end == StrokeCap::None
+        && appearance.stroke_join == StrokeJoin::Miter
+        && appearance.stroke_miter_limit == DEFAULT_STROKE_MITER_LIMIT
+        && appearance.stroke_dash_pattern.is_empty()
+        && appearance.stroke_weights.is_empty()
+        && appearance.stroke_align == StrokeAlign::Inside
+        && appearance.arc_data.is_none()
+        && appearance.parametric_shape.is_none()
+        && valid_relative_transform(appearance.relative_transform)
+        && appearance.opacity == 1.0
+        && appearance.blend_mode == BlendMode::Normal
+        && appearance.drop_shadow.is_none()
+        && appearance.effect_stack.is_empty()
+        && appearance.corner_radius == 0.0
+        && appearance.corner_radii.is_empty()
+        && appearance.corner_smoothing == 0.0
+        && !appearance.contents_hidden
+        && appearance.clips_content == Some(false)
+}
+
+fn valid_slice_node(node: &Node) -> bool {
+    valid_slice_appearance(&appearance_for_node(node))
+        && node.vector_path.is_none()
+        && node.boolean_operation.is_none()
+        && node.text.is_empty()
+        && !is_alpha_mask(node)
 }
 
 fn geometry_for_constraints(parent_before: Geometry, parent_after: Geometry, child: Geometry, constraints: Constraints, kind: &NodeKind) -> Result<Geometry, CommandError> {
@@ -3566,8 +5220,12 @@ fn appearance_for_node(node: &Node) -> Appearance {
         stroke_weights: node.stroke_weights.clone(),
         stroke_align: node.stroke_align,
         arc_data: node.arc_data,
+        parametric_shape: node.parametric_shape,
         relative_transform: node.relative_transform,
         opacity: node.opacity,
+        blend_mode: node.blend_mode,
+        drop_shadow: node.drop_shadow,
+        effect_stack: node.effect_stack.clone(),
         corner_radius: node.corner_radius,
         corner_radii: node.corner_radii.clone(),
         corner_smoothing: node.corner_smoothing,
@@ -3591,7 +5249,10 @@ fn valid_appearance(appearance: &Appearance) -> bool {
         && valid_dash_pattern(&appearance.stroke_dash_pattern)
         && valid_stroke_weights(&appearance.stroke_weights)
         && appearance.arc_data.is_none_or(valid_arc_data)
+        && appearance.parametric_shape.is_none_or(valid_parametric_shape_value)
         && valid_relative_transform(appearance.relative_transform)
+        && appearance.drop_shadow.is_none_or(valid_drop_shadow)
+        && valid_effect_stack(&appearance.effect_stack, appearance.drop_shadow)
         && appearance.opacity.is_finite()
         && (0.0..=1.0).contains(&appearance.opacity)
         && appearance.corner_radius.is_finite()
@@ -3599,6 +5260,43 @@ fn valid_appearance(appearance: &Appearance) -> bool {
         && valid_corner_radii(&appearance.corner_radii)
         && appearance.corner_smoothing.is_finite()
         && (0.0..=1.0).contains(&appearance.corner_smoothing)
+}
+
+fn valid_drop_shadow(shadow: DropShadow) -> bool {
+    shadow.offset_x.is_finite()
+        && shadow.offset_y.is_finite()
+        && (-10_000.0..=10_000.0).contains(&shadow.offset_x)
+        && (-10_000.0..=10_000.0).contains(&shadow.offset_y)
+        && shadow.blur_radius.is_finite()
+        && (0.0..=1_024.0).contains(&shadow.blur_radius)
+        && shadow.spread.is_finite()
+        && (-10_000.0..=10_000.0).contains(&shadow.spread)
+        && shadow.color.is_valid()
+}
+
+/// Bounded independently from derived rendering surfaces (ADR 0031).
+const MAX_EFFECTS_PER_NODE: usize = 8;
+
+fn effect_stack_bytes(effects: &[Effect]) -> usize {
+    effects.len() * std::mem::size_of::<Effect>()
+}
+
+fn first_effect_drop_shadow(effects: &[Effect]) -> Option<DropShadow> {
+    match effects.first() {
+        Some(Effect::DropShadow(shadow)) => Some(*shadow),
+        _ => None,
+    }
+}
+
+fn valid_effect_stack(effects: &[Effect], legacy_shadow: Option<DropShadow>) -> bool {
+    effects.len() <= MAX_EFFECTS_PER_NODE
+        && effects.iter().all(|effect| match effect {
+            Effect::DropShadow(shadow) => valid_drop_shadow(*shadow),
+            Effect::LayerBlur(blur) => blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius),
+            Effect::InnerShadow(shadow) => valid_drop_shadow(DropShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: shadow.color, visible: shadow.visible }),
+            Effect::BackgroundBlur(blur) => blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius),
+        })
+        && (effects.is_empty() || first_effect_drop_shadow(effects) == legacy_shadow)
 }
 
 fn hash_constraints(hasher: &mut Sha256, constraints: Option<Constraints>) {
@@ -3656,6 +5354,130 @@ fn valid_arc_data(arc: ArcData) -> bool {
         && arc.ending_angle.is_finite()
         && arc.inner_radius.is_finite()
         && (0.0..1.0).contains(&arc.inner_radius)
+}
+
+const MIN_PARAMETRIC_POINTS: u32 = 3;
+const MAX_PARAMETRIC_POINTS: u32 = 100;
+
+fn valid_parametric_shape_value(shape: ParametricShape) -> bool {
+    match shape {
+        ParametricShape::Polygon { point_count } => {
+            (MIN_PARAMETRIC_POINTS..=MAX_PARAMETRIC_POINTS).contains(&point_count)
+        }
+        ParametricShape::Star { point_count, inner_ratio } => {
+            (MIN_PARAMETRIC_POINTS..=MAX_PARAMETRIC_POINTS).contains(&point_count)
+                && inner_ratio.is_finite()
+                && (0.05..=0.95).contains(&inner_ratio)
+        }
+    }
+}
+
+fn valid_parametric_shape(kind: &NodeKind, shape: Option<ParametricShape>) -> bool {
+    match (kind, shape) {
+        (NodeKind::Polygon, Some(ParametricShape::Polygon { .. }))
+        | (NodeKind::Star, Some(ParametricShape::Star { .. })) => {
+            shape.is_some_and(valid_parametric_shape_value)
+        }
+        (NodeKind::Polygon | NodeKind::Star, None) => false,
+        (_, None) => true,
+        _ => false,
+    }
+}
+
+const MAX_VECTOR_SUBPATHS: usize = 64;
+const MAX_VECTOR_POINTS: usize = 8_192;
+const MAX_VECTOR_PATH_BYTES: usize = 1_024 * 1_024;
+
+fn valid_vector_path(path: &VectorPath) -> bool {
+    if path.subpaths.len() > MAX_VECTOR_SUBPATHS || path.estimated_bytes() > MAX_VECTOR_PATH_BYTES {
+        return false;
+    }
+    let mut ids = BTreeSet::new();
+    let mut total = 0usize;
+    for subpath in &path.subpaths {
+        if subpath.points.is_empty() || (subpath.closed && subpath.points.len() < 3) {
+            return false;
+        }
+        if subpath.points.windows(2).any(|pair| pair[0].position == pair[1].position)
+            || (subpath.closed
+                && subpath.points.len() > 1
+                && subpath.points.first().is_some_and(|first| {
+                    subpath.points.last().is_some_and(|last| first.position == last.position)
+                }))
+        {
+            return false;
+        }
+        total = total.saturating_add(subpath.points.len());
+        for point in &subpath.points {
+            if !ids.insert(point.id)
+                || ![point.position.x, point.position.y]
+                    .into_iter()
+                    .chain(point.handle_in.into_iter().flat_map(|handle| [handle.x, handle.y]))
+                    .chain(point.handle_out.into_iter().flat_map(|handle| [handle.x, handle.y]))
+                    .all(f64::is_finite)
+            {
+                return false;
+            }
+        }
+    }
+    total <= MAX_VECTOR_POINTS
+}
+
+fn valid_vector_path_for_kind(kind: &NodeKind, path: Option<&VectorPath>) -> bool {
+    match (kind, path) {
+        (NodeKind::Vector, Some(path)) => valid_vector_path(path),
+        (NodeKind::Vector, None) => false,
+        (_, None) => true,
+        _ => false,
+    }
+}
+
+fn valid_boolean_operation(kind: &NodeKind, operation: Option<BooleanOperation>) -> bool {
+    match kind {
+        NodeKind::BooleanOperation => operation.is_some(),
+        _ => operation.is_none(),
+    }
+}
+
+fn is_alpha_mask(node: &Node) -> bool {
+    node.extensions
+        .get(ALPHA_MASK_EXTENSION_KEY)
+        .is_some_and(|value| value.as_slice() == [1])
+}
+
+fn hash_vector_path(hasher: &mut Sha256, path: &VectorPath) {
+    hasher.update([match path.fill_rule { FillRule::NonZero => 0, FillRule::EvenOdd => 1 }]);
+    hash_len(hasher, path.subpaths.len());
+    for subpath in &path.subpaths {
+        hasher.update([u8::from(subpath.closed)]);
+        hash_len(hasher, subpath.points.len());
+        for point in &subpath.points {
+            hasher.update(point.id.0.to_be_bytes());
+            hash_number(hasher, point.position.x);
+            hash_number(hasher, point.position.y);
+            for handle in [point.handle_in, point.handle_out] {
+                match handle {
+                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    None => hasher.update([0]),
+                }
+            }
+            hasher.update([match point.point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+        }
+    }
+}
+
+fn hash_parametric_shape(hasher: &mut Sha256, shape: ParametricShape) {
+    match shape {
+        ParametricShape::Polygon { point_count } => {
+            hasher.update([0]);
+            hasher.update(point_count.to_be_bytes());
+        }
+        ParametricShape::Star { point_count, inner_ratio } => {
+            hasher.update([1]);
+            hasher.update(point_count.to_be_bytes());
+            hash_number(hasher, inner_ratio);
+        }
+    }
 }
 
 fn valid_relative_transform(transform: Option<AffineTransform>) -> bool {
@@ -3748,8 +5570,14 @@ mod tests {
             stroke_weights: Vec::new(),
             stroke_align: Default::default(),
             arc_data: None,
+            parametric_shape: None,
+            vector_path: None,
+            boolean_operation: None,
             relative_transform: None,
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
             corner_radius: 0.0,
             corner_radii: Vec::new(),
             corner_smoothing: 0.0,
@@ -3784,6 +5612,578 @@ mod tests {
         assert_eq!(result, Err(CommandError::MissingNode { id: NodeId(2) }));
         assert_eq!(document.nodes().count(), 0);
         assert_eq!(document.revision, 0);
+    }
+
+    #[test]
+    fn auto_layout_fixed_horizontal_positions_children_and_undoes_exactly() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.x = 10.0;
+        frame.y = 20.0;
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 30.0;
+        first.height = 20.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 40.0;
+        second.height = 20.0;
+        let layout = AutoLayout {
+            mode: LayoutMode::Horizontal,
+            padding: [10.0, 20.0, 30.0, 40.0],
+            item_spacing: 8.0,
+            counter_alignment: LayoutAlignment::Center,
+            ..AutoLayout::default()
+        };
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()),
+            Command::Create(first.clone()),
+            Command::Create(second.clone()),
+            Command::SetAutoLayout { id: frame.id, layout },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((50.0, 50.0)));
+        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((88.0, 50.0)));
+        let hash = document.canonical_hash();
+        document.undo().unwrap();
+        assert!(document.node(first.id).is_none());
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), hash);
+        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((88.0, 50.0)));
+    }
+
+    #[test]
+    fn auto_layout_fill_distributes_remaining_primary_space_and_stretches_counter_axis() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut fixed = node(2);
+        fixed.kind = NodeKind::Rectangle;
+        fixed.parent_id = Some(frame.id);
+        fixed.width = 30.0;
+        fixed.height = 20.0;
+        let mut fill = node(3);
+        fill.kind = NodeKind::Rectangle;
+        fill.parent_id = Some(frame.id);
+        fill.width = 1.0;
+        fill.height = 1.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()),
+            Command::Create(fixed.clone()),
+            Command::Create(fill.clone()),
+            Command::SetAutoLayout {
+                id: frame.id,
+                layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() },
+            },
+            Command::SetAutoLayout {
+                id: fill.id,
+                layout: AutoLayout { primary_sizing: LayoutSizing::Fill, counter_sizing: LayoutSizing::Fill, ..AutoLayout::default() },
+            },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(fixed.id).map(|node| (node.x, node.y, node.width, node.height)), Some((0.0, 0.0, 30.0, 20.0)));
+        assert_eq!(document.node(fill.id).map(|node| (node.x, node.y, node.width, node.height)), Some((40.0, 0.0, 160.0, 100.0)));
+    }
+
+    #[test]
+    fn auto_layout_allows_fixed_children_to_overflow_without_a_fill_constraint() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 40.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.height = 30.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.height = 30.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()),
+            Command::Create(first.clone()),
+            Command::Create(second.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Vertical, padding: [8.0, 0.0, 8.0, 0.0], item_spacing: 6.0, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(second.id).map(|node| node.y), Some(44.0));
+    }
+
+    #[test]
+    fn auto_layout_hug_measures_direct_children_and_applies_frame_min_max() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 30.0;
+        first.height = 20.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 40.0;
+        second.height = 50.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()),
+            Command::Create(first.clone()),
+            Command::Create(second.clone()),
+            Command::SetAutoLayout {
+                id: frame.id,
+                layout: AutoLayout {
+                    mode: LayoutMode::Horizontal,
+                    padding: [2.0, 3.0, 4.0, 5.0],
+                    item_spacing: 6.0,
+                    primary_sizing: LayoutSizing::Hug,
+                    counter_sizing: LayoutSizing::Hug,
+                    min_width: Some(90.0),
+                    max_height: Some(52.0),
+                    ..AutoLayout::default()
+                },
+            },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((90.0, 52.0)));
+        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((5.0, 2.0)));
+        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((41.0, 2.0)));
+    }
+
+    #[test]
+    fn nested_auto_layout_hug_converges_from_inner_frame_to_outer_frame() {
+        let mut document = Document::empty();
+        let outer = node(1);
+        let mut inner = node(2);
+        inner.parent_id = Some(outer.id);
+        inner.width = 1.0;
+        inner.height = 1.0;
+        let mut leaf = node(3);
+        leaf.kind = NodeKind::Rectangle;
+        leaf.parent_id = Some(inner.id);
+        leaf.width = 20.0;
+        leaf.height = 10.0;
+        let hug = AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() };
+        document.submit(transaction(0, vec![
+            Command::Create(outer.clone()),
+            Command::Create(inner.clone()),
+            Command::Create(leaf.clone()),
+            Command::SetAutoLayout { id: outer.id, layout: hug.clone() },
+            Command::SetAutoLayout { id: inner.id, layout: hug },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(inner.id).map(|node| (node.width, node.height, node.x, node.y)), Some((20.0, 10.0, 0.0, 0.0)));
+        assert_eq!(document.node(outer.id).map(|node| (node.width, node.height)), Some((20.0, 10.0)));
+    }
+
+    #[test]
+    fn nested_auto_layout_frame_maps_its_width_and_height_to_the_parent_axes() {
+        let mut document = Document::empty();
+        let mut outer = node(1);
+        outer.width = 200.0;
+        outer.height = 100.0;
+        let mut inner = node(2);
+        inner.parent_id = Some(outer.id);
+        inner.width = 1.0;
+        inner.height = 1.0;
+        let mut leaf = node(3);
+        leaf.kind = NodeKind::Rectangle;
+        leaf.parent_id = Some(inner.id);
+        leaf.width = 20.0;
+        leaf.height = 10.0;
+        document.submit(transaction(0, vec![
+            Command::Create(outer.clone()),
+            Command::Create(inner.clone()),
+            Command::Create(leaf.clone()),
+            Command::SetAutoLayout { id: outer.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+            Command::SetAutoLayout {
+                id: inner.id,
+                layout: AutoLayout {
+                    mode: LayoutMode::Vertical,
+                    // Vertical primary is the inner Frame's height; its
+                    // counter axis is width and should Fill the outer row.
+                    primary_sizing: LayoutSizing::Hug,
+                    counter_sizing: LayoutSizing::Fill,
+                    ..AutoLayout::default()
+                },
+            },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(inner.id).map(|node| (node.width, node.height)), Some((200.0, 10.0)));
+    }
+
+    #[test]
+    fn auto_layout_fill_respects_child_minimum_and_maximum_sizes() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        let mut fixed = node(2);
+        fixed.kind = NodeKind::Rectangle;
+        fixed.parent_id = Some(frame.id);
+        fixed.width = 20.0;
+        let mut capped_fill = node(3);
+        capped_fill.kind = NodeKind::Rectangle;
+        capped_fill.parent_id = Some(frame.id);
+        let mut free_fill = node(4);
+        free_fill.kind = NodeKind::Rectangle;
+        free_fill.parent_id = Some(frame.id);
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(fixed.clone()), Command::Create(capped_fill.clone()), Command::Create(free_fill.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: capped_fill.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(50.0), max_width: Some(80.0), ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: free_fill.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(capped_fill.id).map(|node| (node.x, node.width)), Some((20.0, 80.0)));
+        assert_eq!(document.node(free_fill.id).map(|node| (node.x, node.width)), Some((100.0, 100.0)));
+    }
+
+    #[test]
+    fn auto_layout_rejects_unsatisfiable_fill_minimums_atomically() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        let result = document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: first.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(60.0), ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: second.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(60.0), ..AutoLayout::default() } },
+        ]), Origin::LocalUser);
+        assert_eq!(result, Err(CommandError::InvalidAutoLayout));
+        assert_eq!(document.revision, 0);
+        assert_eq!(document.nodes().count(), 0);
+    }
+
+    #[test]
+    fn auto_layout_wrap_places_fixed_children_on_new_lines() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 40.0;
+        first.height = 20.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 40.0;
+        second.height = 20.0;
+        let mut third = node(4);
+        third.kind = NodeKind::Rectangle;
+        third.parent_id = Some(frame.id);
+        third.width = 40.0;
+        third.height = 20.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()), Command::Create(third.clone()),
+            Command::SetAutoLayout {
+                id: frame.id,
+                layout: AutoLayout { mode: LayoutMode::Horizontal, wrap: true, item_spacing: 10.0, ..AutoLayout::default() },
+            },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((0.0, 0.0)));
+        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((50.0, 0.0)));
+        assert_eq!(document.node(third.id).map(|node| (node.x, node.y)), Some((0.0, 30.0)));
+    }
+
+    #[test]
+    fn auto_layout_rejects_wrap_with_fill_children_atomically() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(frame.id);
+        let result = document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(child.clone()),
+            Command::SetAutoLayout { id: child.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, wrap: true, ..AutoLayout::default() } },
+        ]), Origin::LocalUser);
+        assert_eq!(result, Err(CommandError::AutoLayoutUnsupported));
+        assert_eq!(document.revision, 0);
+        assert_eq!(document.nodes().count(), 0);
+    }
+
+    #[test]
+    fn auto_layout_reflows_the_old_parent_after_a_child_is_reparented() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 20.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 20.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(second.id).map(|node| node.x), Some(30.0));
+        document.submit(transaction(1, vec![Command::SetNodeParent {
+            id: first.id, parent_id: None, position: PositionId { key: 10, actor: ActorId(1) },
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(second.id).map(|node| node.x), Some(0.0));
+    }
+
+    #[test]
+    fn auto_layout_hug_measures_auto_sized_text_in_core() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 1.0;
+        frame.height = 1.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.width = 1.0;
+        text.height = 1.0;
+        text.text = "hello".into();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun { start: 0, end: 5, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
+            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            auto_size: TextAutoSize::WidthAndHeight,
+            fallback_fonts: Vec::new(),
+        };
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(text.clone()),
+            Command::SetTextProperties { id: text.id, properties },
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((30.0, 12.0)));
+        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((30.0, 12.0)));
+    }
+
+    #[test]
+    fn auto_layout_hug_counts_crlf_as_one_paragraph_boundary() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 1.0;
+        frame.height = 1.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.text = "ab\r\n中".into();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
+            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 3.0 },
+            auto_size: TextAutoSize::WidthAndHeight,
+            fallback_fonts: Vec::new(),
+        };
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(text.clone()),
+            Command::SetTextProperties { id: text.id, properties },
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 27.0)));
+        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((12.0, 27.0)));
+    }
+
+    #[test]
+    fn auto_layout_height_auto_text_wraps_at_its_authored_width() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 1.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.width = 12.0;
+        text.text = "ab中d".into();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
+            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            auto_size: TextAutoSize::Height,
+            fallback_fonts: Vec::new(),
+        };
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(text.clone()),
+            Command::SetTextProperties { id: text.id, properties },
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fixed, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 24.0)));
+    }
+
+    #[test]
+    fn auto_layout_height_auto_wrap_keeps_emoji_and_combining_graphemes_intact() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.width = 12.0;
+        text.text = "👩‍💻e\u{301}x".into();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
+            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            auto_size: TextAutoSize::Height,
+            fallback_fonts: Vec::new(),
+        };
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(text.clone()),
+            Command::SetTextProperties { id: text.id, properties },
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fixed, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        // Three graphemes at 6px each form two 12px lines, rather than the
+        // eight Unicode scalars creating four unstable lines.
+        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 24.0)));
+    }
+
+    #[test]
+    fn auto_layout_preserves_absolute_children_outside_the_flow() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        let mut flow = node(2);
+        flow.kind = NodeKind::Rectangle;
+        flow.parent_id = Some(frame.id);
+        flow.width = 20.0;
+        flow.height = 20.0;
+        let mut absolute = node(3);
+        absolute.kind = NodeKind::Rectangle;
+        absolute.parent_id = Some(frame.id);
+        absolute.x = 70.0;
+        absolute.y = 60.0;
+        absolute.width = 10.0;
+        absolute.height = 10.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(flow.clone()), Command::Create(absolute.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, padding: [5.0, 5.0, 5.0, 5.0], ..AutoLayout::default() } },
+            Command::SetAutoLayout { id: absolute.id, layout: AutoLayout { absolute: true, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(flow.id).map(|node| (node.x, node.y)), Some((5.0, 5.0)));
+        assert_eq!(document.node(absolute.id).map(|node| (node.x, node.y, node.width, node.height)), Some((70.0, 60.0, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn three_layer_auto_layout_hug_converges_from_leaf_to_root() {
+        let mut document = Document::empty();
+        let outer = node(1);
+        let mut middle = node(2);
+        middle.parent_id = Some(outer.id);
+        let mut inner = node(3);
+        inner.parent_id = Some(middle.id);
+        let mut leaf = node(4);
+        leaf.kind = NodeKind::Rectangle;
+        leaf.parent_id = Some(inner.id);
+        leaf.width = 24.0;
+        leaf.height = 16.0;
+        let hug = AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() };
+        document.submit(transaction(0, vec![
+            Command::Create(outer.clone()), Command::Create(middle.clone()), Command::Create(inner.clone()), Command::Create(leaf.clone()),
+            Command::SetAutoLayout { id: outer.id, layout: hug.clone() },
+            Command::SetAutoLayout { id: middle.id, layout: hug.clone() },
+            Command::SetAutoLayout { id: inner.id, layout: hug },
+        ]), Origin::LocalUser).unwrap();
+        for id in [outer.id, middle.id, inner.id] {
+            assert_eq!(document.node(id).map(|node| (node.width, node.height)), Some((24.0, 16.0)));
+        }
+    }
+
+    #[test]
+    fn resizing_an_outer_auto_layout_frame_reflows_nested_frame_descendants() {
+        let mut document = Document::empty();
+        let mut outer = node(1);
+        outer.width = 100.0;
+        outer.height = 100.0;
+        let mut inner = node(2);
+        inner.parent_id = Some(outer.id);
+        inner.width = 100.0;
+        inner.height = 40.0;
+        let mut leaf = node(3);
+        leaf.kind = NodeKind::Rectangle;
+        leaf.parent_id = Some(inner.id);
+        leaf.width = 20.0;
+        leaf.height = 20.0;
+        document.submit(transaction(0, vec![
+            Command::Create(outer.clone()), Command::Create(inner.clone()), Command::Create(leaf.clone()),
+            Command::SetAutoLayout { id: outer.id, layout: AutoLayout { mode: LayoutMode::Vertical, ..AutoLayout::default() } },
+            // As a vertical parent's counter-axis child, this horizontal Frame
+            // fills the parent's width. Its own end alignment must be rerun
+            // whenever the parent changes that width.
+            Command::SetAutoLayout { id: inner.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Fill, primary_alignment: LayoutAlignment::End, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(leaf.id).map(|node| node.x), Some(80.0));
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: outer.id, x: 0.0, y: 0.0, width: 200.0, height: 100.0, rotation: 0.0,
+        }]), Origin::LocalUser).unwrap();
+
+        assert_eq!(document.node(inner.id).map(|node| node.width), Some(200.0));
+        assert_eq!(document.node(leaf.id).map(|node| node.x), Some(180.0));
+    }
+
+    #[test]
+    fn auto_layout_reflows_children_after_a_sibling_reorder() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 20.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 20.0;
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::SetNodePosition {
+            id: first.id, position: PositionId { key: 4, actor: ActorId(0) },
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(second.id).map(|node| node.x), Some(0.0));
+        assert_eq!(document.node(first.id).map(|node| node.x), Some(30.0));
+    }
+
+    #[test]
+    fn auto_layout_owns_child_geometry_over_preserved_constraints() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(frame.id);
+        child.width = 20.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Stretch });
+        document.submit(transaction(0, vec![
+            Command::Create(frame.clone()), Command::Create(child.clone()),
+            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
+        ]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: frame.id, x: 0.0, y: 0.0, width: 200.0, height: 200.0, rotation: 0.0,
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!(document.node(child.id).map(|node| (node.x, node.y, node.width, node.height)), Some((0.0, 0.0, 20.0, 20.0)));
+        assert_eq!(document.node(child.id).and_then(|node| node.constraints), child.constraints);
+    }
+
+    #[test]
+    fn auto_layout_mode_is_rejected_on_non_frame_nodes() {
+        let mut document = Document::empty();
+        let mut rectangle = node(1);
+        rectangle.kind = NodeKind::Rectangle;
+        document.submit(transaction(0, vec![Command::Create(rectangle.clone())]), Origin::LocalUser).unwrap();
+        assert_eq!(
+            document.submit(transaction(1, vec![Command::SetAutoLayout {
+                id: rectangle.id,
+                layout: AutoLayout { mode: LayoutMode::Vertical, ..AutoLayout::default() },
+            }]), Origin::LocalUser),
+            Err(CommandError::InvalidAutoLayout),
+        );
     }
 
     #[test]
@@ -3985,8 +6385,12 @@ mod tests {
                             stroke_weights: Vec::new(),
                             stroke_align: Default::default(),
                             arc_data: None,
+                            parametric_shape: None,
                             relative_transform: None,
                             opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            drop_shadow: None,
+            effect_stack: Vec::new(),
                             corner_radius: 0.0,
             corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
@@ -4220,8 +6624,12 @@ mod tests {
                             stroke_weights: Vec::new(),
                             stroke_align: Default::default(),
                             arc_data: None,
+                            parametric_shape: None,
                             relative_transform: None,
                             opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            drop_shadow: None,
+            effect_stack: Vec::new(),
                             corner_radius: 0.0,
             corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
@@ -4332,8 +6740,12 @@ mod tests {
                             stroke_weights: Vec::new(),
                             stroke_align: Default::default(),
                             arc_data: None,
+                            parametric_shape: None,
                             relative_transform: None,
                             opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            drop_shadow: None,
+            effect_stack: Vec::new(),
                             corner_radius: 0.0,
             corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
@@ -4470,15 +6882,13 @@ mod tests {
     #[test]
     fn reparent_is_atomic_hashable_and_undoable_without_moving_world_geometry() {
         let mut document = Document::empty();
-        let mut group = node(1);
-        group.kind = NodeKind::Group;
-        group.name = "Group".into();
+        let parent = node(1);
         let mut child = node(2);
         child.x = 48.0;
         child.y = 72.0;
         document
             .submit(
-                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                transaction(0, vec![Command::Create(parent), Command::Create(child)]),
                 Origin::LocalUser,
             )
             .unwrap();
@@ -4514,23 +6924,11 @@ mod tests {
         let mut document = Document::empty();
         let mut group = node(1);
         group.kind = NodeKind::Group;
-        let child = node(2);
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
         document
             .submit(
                 transaction(0, vec![Command::Create(group), Command::Create(child)]),
-                Origin::LocalUser,
-            )
-            .unwrap();
-        document
-            .submit(
-                transaction(
-                    1,
-                    vec![Command::SetNodeParent {
-                        id: NodeId(2),
-                        parent_id: Some(NodeId(1)),
-                        position: PositionId { key: 2, actor: ActorId(1) },
-                    }],
-                ),
                 Origin::LocalUser,
             )
             .unwrap();
@@ -4538,7 +6936,7 @@ mod tests {
         document
             .submit(
                 transaction(
-                    2,
+                    1,
                     vec![Command::UpdateGeometry {
                         id: NodeId(2),
                         x: 10.0,
@@ -4678,23 +7076,11 @@ mod tests {
         let mut document = Document::empty();
         let mut group = node(1);
         group.kind = NodeKind::Group;
-        let child = node(2);
+        let mut child = node(2);
+        child.parent_id = Some(NodeId(1));
         document
             .submit(
                 transaction(0, vec![Command::Create(group), Command::Create(child)]),
-                Origin::LocalUser,
-            )
-            .unwrap();
-        document
-            .submit(
-                transaction(
-                    1,
-                    vec![Command::SetNodeParent {
-                        id: NodeId(2),
-                        parent_id: Some(NodeId(1)),
-                        position: PositionId { key: 2, actor: ActorId(1) },
-                    }],
-                ),
                 Origin::LocalUser,
             )
             .unwrap();
@@ -4702,7 +7088,7 @@ mod tests {
         document
             .submit(
                 transaction(
-                    2,
+                    1,
                     vec![Command::SetNodeParent {
                         id: NodeId(2),
                         parent_id: None,
@@ -4720,6 +7106,23 @@ mod tests {
         assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), dissolved_hash);
+    }
+
+    #[test]
+    fn transaction_rejects_an_empty_group_without_mutating_document_state() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        group.name = "Empty group".into();
+        let before_hash = document.canonical_hash_hex();
+
+        assert_eq!(
+            document.submit(transaction(0, vec![Command::Create(group)]), Origin::LocalUser),
+            Err(CommandError::EmptyGroup { id: NodeId(1) }),
+        );
+        assert_eq!(document.revision, 0);
+        assert_eq!(document.canonical_hash_hex(), before_hash);
+        assert!(document.node(NodeId(1)).is_none());
     }
 
     #[test]
@@ -4800,8 +7203,12 @@ mod tests {
                             stroke_weights: Vec::new(),
                             stroke_align: Default::default(),
                             arc_data: None,
+                            parametric_shape: None,
                             relative_transform: None,
                             opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            drop_shadow: None,
+            effect_stack: Vec::new(),
                             corner_radius: 0.0,
             corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
@@ -4839,7 +7246,8 @@ mod tests {
             stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
             stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0,
+            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0,
             corner_radii: Vec::new(),
             corner_smoothing: 0.0,
             constraints: None,
@@ -4864,6 +7272,61 @@ mod tests {
     }
 
     #[test]
+    fn alpha_mask_flag_is_hashed_undoable_and_requires_a_following_sibling() {
+        let mut document = Document::empty();
+        let mut mask = node(1);
+        mask.kind = NodeKind::Rectangle;
+        let mut target = node(2);
+        target.kind = NodeKind::Rectangle;
+        document.submit(transaction(0, vec![Command::Create(mask), Command::Create(target)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document.submit(transaction(1, vec![Command::SetMask { id: NodeId(1), enabled: true }]), Origin::LocalUser).unwrap();
+        assert!(is_alpha_mask(document.node(NodeId(1)).unwrap()));
+        let masked = document.canonical_hash_hex();
+        assert_ne!(masked, baseline);
+        document.undo().unwrap();
+        assert!(!is_alpha_mask(document.node(NodeId(1)).unwrap()));
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), masked);
+
+        assert_eq!(document.submit(transaction(4, vec![Command::SetMask { id: NodeId(2), enabled: true }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+    }
+
+    #[test]
+    fn slice_is_non_painting_non_masking_and_cannot_parent_children() {
+        let mut document = Document::empty();
+        let mut slice = node(1);
+        slice.kind = NodeKind::Slice;
+        slice.name = "Export area".into();
+        slice.fill = "#00000000".into();
+        slice.stroke = "#00000000".into();
+        slice.stroke_width = 0.0;
+        slice.stroke_align = StrokeAlign::Inside;
+        let mut target = node(2);
+        target.kind = NodeKind::Rectangle;
+        document.submit(transaction(0, vec![Command::Create(slice), Command::Create(target)]), Origin::LocalUser).unwrap();
+
+        let baseline = document.canonical_hash_hex();
+        let mut painted = appearance_for_node(document.node(NodeId(1)).unwrap());
+        painted.fill = "#ffffff".into();
+        assert_eq!(document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: painted }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        assert_eq!(document.submit(transaction(1, vec![Command::SetMask { id: NodeId(1), enabled: true }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 24.0, y: 12.0, width: 240.0, height: 160.0, rotation: 15.0 }]), Origin::LocalUser).unwrap();
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+
+        let mut child = node(3);
+        child.parent_id = Some(NodeId(1));
+        child.kind = NodeKind::Rectangle;
+        assert_eq!(document.submit(transaction(4, vec![Command::Create(child)]), Origin::LocalUser), Err(CommandError::InvalidParent { id: NodeId(1) }));
+    }
+
+    #[test]
     fn corner_geometry_is_hashed_undoable_and_limited_to_closed_nodes() {
         let mut document = Document::empty();
         let mut frame = node(1);
@@ -4876,7 +7339,8 @@ mod tests {
             stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
             stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0,
+            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0,
             corner_radii: vec![4.0, 8.0, 12.0, 16.0],
             corner_smoothing: 0.65,
             constraints: None,
@@ -4914,7 +7378,8 @@ mod tests {
             fill: "#fff".into(), stroke: "#00000000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 0.0,
             stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None, stroke_join: StrokeJoin::Miter,
             stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT, stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, relative_transform: None, opacity: 1.0, corner_radius: 0.0, corner_radii: Vec::new(), corner_smoothing: 0.0,
+            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0, corner_radii: Vec::new(), corner_smoothing: 0.0,
             constraints: Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Center }), visible: true, locked: false, contents_hidden: false, clips_content: Some(true),
         };
         document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
@@ -4929,7 +7394,9 @@ mod tests {
         let mut group = node(2);
         group.kind = NodeKind::Group;
         group.name = "Group".into();
-        document.submit(transaction(4, vec![Command::Create(group)]), Origin::LocalUser).unwrap();
+        let mut child = node(3);
+        child.parent_id = Some(NodeId(2));
+        document.submit(transaction(4, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
         assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
     }
 
@@ -4972,13 +7439,229 @@ mod tests {
     }
 
     #[test]
-    fn rotated_frame_resize_defers_constraints_until_local_matrix_support_exists() {
+    fn rotated_frame_resize_migrates_legacy_direct_constraints_to_local_matrix_space() {
         let mut document = Document::empty();
         let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
         let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 20.0; child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
         document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
         document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0 }]), Origin::LocalUser).unwrap();
-        assert_eq!((document.node(NodeId(2)).unwrap().x, document.node(NodeId(2)).unwrap().y), (20.0, 20.0));
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!(child.relative_transform.unwrap().e, 120.0);
+        assert_eq!(child.relative_transform.unwrap().f, 120.0);
+        assert_eq!((child.x, child.y), (120.0, 120.0));
+        let constrained_hash = document.canonical_hash_hex();
+        document.undo().unwrap();
+        let child = document.node(NodeId(2)).unwrap();
+        assert!(child.relative_transform.is_none());
+        assert_eq!((child.x, child.y), (20.0, 20.0));
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), constrained_hash);
+    }
+
+    #[test]
+    fn rotated_frame_resize_migrates_an_entire_legacy_group_constraint_subtree() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Legacy group".into();
+        group.parent_id = Some(NodeId(1));
+        group.x = 20.0;
+        group.y = 10.0;
+        group.width = 40.0;
+        group.height = 20.0;
+        let mut child = node(3);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Constrained legacy child".into();
+        child.parent_id = Some(NodeId(2));
+        child.x = 20.0;
+        child.y = 10.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+
+        let group = document.node(NodeId(2)).unwrap();
+        let child = document.node(NodeId(3)).unwrap();
+        assert_eq!((group.relative_transform.unwrap().e, group.relative_transform.unwrap().f), (20.0, 10.0));
+        // The constrained child is (120, 110) in Frame-local space. Its
+        // immediate parent is the migrated Group at (20, 10), so the durable
+        // matrix stores the local delta rather than a stale world coordinate.
+        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (100.0, 100.0));
+        let constrained_hash = document.canonical_hash_hex();
+
+        document.undo().unwrap();
+        assert!(document.node(NodeId(2)).unwrap().relative_transform.is_none());
+        assert!(document.node(NodeId(3)).unwrap().relative_transform.is_none());
+        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (20.0, 10.0));
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), constrained_hash);
+    }
+
+    #[test]
+    fn rotated_frame_resize_migrates_nested_legacy_groups_before_their_constrained_leaf() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut outer = node(2);
+        outer.kind = NodeKind::Group;
+        outer.name = "Outer legacy group".into();
+        outer.parent_id = Some(NodeId(1));
+        outer.x = 40.0;
+        outer.y = 30.0;
+        outer.width = 40.0;
+        outer.height = 20.0;
+        let mut inner = node(3);
+        inner.kind = NodeKind::Group;
+        inner.name = "Inner legacy group".into();
+        inner.parent_id = Some(NodeId(2));
+        inner.x = 40.0;
+        inner.y = 30.0;
+        inner.width = 40.0;
+        inner.height = 20.0;
+        let mut child = node(4);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Nested constrained legacy child".into();
+        child.parent_id = Some(NodeId(3));
+        child.x = 40.0;
+        child.y = 30.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(outer), Command::Create(inner), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+
+        let outer = document.node(NodeId(2)).unwrap();
+        let inner = document.node(NodeId(3)).unwrap();
+        let child = document.node(NodeId(4)).unwrap();
+        assert_eq!((outer.relative_transform.unwrap().e, outer.relative_transform.unwrap().f), (40.0, 30.0));
+        assert_eq!((inner.relative_transform.unwrap().e, inner.relative_transform.unwrap().f), (0.0, 0.0));
+        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (100.0, 100.0));
+    }
+
+    #[test]
+    fn migrated_group_constraints_do_not_drift_across_reentrant_frame_resizes() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Legacy group".into();
+        group.parent_id = Some(NodeId(1));
+        group.x = 20.0;
+        group.y = 10.0;
+        group.width = 40.0;
+        group.height = 20.0;
+        let mut child = node(3);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Max constrained child".into();
+        child.parent_id = Some(NodeId(2));
+        child.x = 20.0;
+        child.y = 10.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (100.0, 100.0));
+
+        document.submit(transaction(2, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 200.0, height: 100.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (0.0, 0.0));
+
+        document.submit(transaction(3, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (100.0, 100.0));
+    }
+
+    #[test]
+    fn group_subtree_migration_stops_at_a_nested_frame_layout_boundary() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Legacy group".into();
+        group.parent_id = Some(NodeId(1));
+        group.x = 40.0;
+        group.y = 30.0;
+        group.width = 80.0;
+        group.height = 60.0;
+        let mut nested_frame = node(3);
+        nested_frame.kind = NodeKind::Frame;
+        nested_frame.name = "Nested frame".into();
+        nested_frame.parent_id = Some(NodeId(2));
+        nested_frame.x = 40.0;
+        nested_frame.y = 30.0;
+        nested_frame.width = 80.0;
+        nested_frame.height = 60.0;
+        let mut nested_child = node(4);
+        nested_child.kind = NodeKind::Rectangle;
+        nested_child.name = "Nested-frame child".into();
+        nested_child.parent_id = Some(NodeId(3));
+        nested_child.x = 50.0;
+        nested_child.y = 40.0;
+        nested_child.width = 20.0;
+        nested_child.height = 10.0;
+        nested_child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(nested_frame), Command::Create(nested_child)]), Origin::LocalUser).unwrap();
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
+        }]), Origin::LocalUser).unwrap();
+
+        // The outer Group becomes Relative-v1, but the nested Frame keeps its
+        // own legacy layout boundary. Its child must not receive the outer
+        // Frame's +100/+100 Max movement.
+        assert!(document.node(NodeId(2)).unwrap().relative_transform.is_some());
+        assert!(document.node(NodeId(3)).unwrap().relative_transform.is_none());
+        assert!(document.node(NodeId(4)).unwrap().relative_transform.is_none());
+        assert_eq!((document.node(NodeId(4)).unwrap().x, document.node(NodeId(4)).unwrap().y), (50.0, 40.0));
+    }
+
+    #[test]
+    fn mirrored_relative_frame_resizes_constraints_in_its_local_axes() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        // Horizontal reflection is intentionally on the containing Frame. The
+        // child's constraints must continue to use its unmirrored local axes.
+        frame.relative_transform = Some(AffineTransform { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: 200.0, f: 0.0 });
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Mirrored frame child".into();
+        child.parent_id = Some(NodeId(1));
+        child.width = 40.0;
+        child.height = 20.0;
+        child.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 20.0, f: 10.0 });
+        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+
+        document.submit(transaction(1, vec![Command::UpdateGeometry {
+            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0,
+        }]), Origin::LocalUser).unwrap();
+
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (120.0, 110.0));
+        assert_eq!((child.width, child.height), (40.0, 20.0));
     }
 
     #[test]
@@ -5152,8 +7835,7 @@ mod tests {
 
         // Reparenting the constrained child into a Group keeps its constraint record verbatim.
         let mut group = node(3); group.kind = NodeKind::Group; group.name = "Group".into();
-        document.submit(transaction(2, vec![Command::Create(group)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(3, vec![Command::SetNodeParent { id: NodeId(2), parent_id: Some(NodeId(3)), position: PositionId { key: 5, actor: ActorId(1) } }]), Origin::LocalUser).unwrap();
+        document.submit(transaction(2, vec![Command::Create(group), Command::SetNodeParent { id: NodeId(2), parent_id: Some(NodeId(3)), position: PositionId { key: 5, actor: ActorId(1) } }]), Origin::LocalUser).unwrap();
         assert_eq!(document.node(NodeId(2)).unwrap().constraints, Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center }));
     }
 
@@ -5214,8 +7896,12 @@ mod tests {
                             stroke_weights: Vec::new(),
                             stroke_align: Default::default(),
                             arc_data: None,
+                            parametric_shape: None,
                             relative_transform: None,
                             opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            drop_shadow: None,
+            effect_stack: Vec::new(),
                             corner_radius: 0.0,
             corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
@@ -5252,8 +7938,9 @@ mod tests {
             fill: "#fff".into(), stroke: "#2563eb".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
             stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
             stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: vec![1.0, 2.0, 3.0, 4.0], stroke_align: StrokeAlign::Outside, arc_data: None, relative_transform: None,
-            opacity: 1.0, corner_radius: 0.0,
+            stroke_dash_pattern: Vec::new(), stroke_weights: vec![1.0, 2.0, 3.0, 4.0], stroke_align: StrokeAlign::Outside, arc_data: None, parametric_shape: None, relative_transform: None,
+            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0,
             corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
             clips_content: Some(false),
         };
@@ -5320,8 +8007,9 @@ mod tests {
             stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
             stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 180.0, inner_radius: 0.4 }), relative_transform: None,
-            opacity: 1.0, corner_radius: 0.0,
+            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 180.0, inner_radius: 0.4 }), parametric_shape: None, relative_transform: None,
+            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0,
             corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
             clips_content: Some(false),
         };
@@ -5345,8 +8033,10 @@ mod tests {
             stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
             arc_data: None,
+            parametric_shape: None,
             relative_transform: Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 40.0, f: 20.0 }),
-            opacity: 1.0, corner_radius: 0.0,
+            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
+            effect_stack: Vec::new(), corner_radius: 0.0,
             corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
             clips_content: Some(false),
         };
@@ -5621,6 +8311,7 @@ mod tests {
                     font_weight: 650,
                     italic: false,
                     letter_spacing: 0.0,
+                    color: None,
                 },
                 TextStyleRun {
                     start: 1,
@@ -5630,6 +8321,7 @@ mod tests {
                     font_weight: 650,
                     italic: false,
                     letter_spacing: 0.0,
+                    color: None,
                 },
                 TextStyleRun {
                     start: 5,
@@ -5639,6 +8331,7 @@ mod tests {
                     font_weight: 650,
                     italic: false,
                     letter_spacing: 0.0,
+                    color: None,
                 },
             ],
             paragraph: ParagraphStyle {
@@ -5719,6 +8412,167 @@ mod tests {
             document.text_properties_for_node(NodeId(13)),
             Some(&properties)
         );
+    }
+
+    #[test]
+    fn rich_text_run_color_is_hashed_undoable_and_validated() {
+        let mut text = node(1);
+        text.kind = NodeKind::Text;
+        text.text = "AB".into();
+        let mut document = Document::empty();
+        document
+            .submit(transaction(0, vec![Command::Create(text)]), Origin::LocalUser)
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 2,
+                font: None,
+                font_size: 16.0,
+                font_weight: 500,
+                italic: false,
+                letter_spacing: 0.0,
+                color: Some(Color::from_srgb_u8([220, 38, 38], 255)),
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(1, vec![Command::SetTextProperties { id: NodeId(1), properties: properties.clone() }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let colored_hash = document.canonical_hash_hex();
+        assert_ne!(colored_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), colored_hash);
+        let mut invalid = properties;
+        invalid.runs[0].color = Some(Color { space: ColorSpace::Srgb, components: [f32::NAN, 0.0, 0.0], alpha: 1.0 });
+        assert_eq!(
+            document.submit(
+                transaction(document.revision, vec![Command::SetTextProperties { id: NodeId(1), properties: invalid }]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties),
+        );
+    }
+
+    #[test]
+    fn drop_shadow_is_hashed_undoable_and_rejects_invalid_or_structural_usage() {
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
+        appearance.drop_shadow = Some(DropShadow {
+            offset_x: 6.0,
+            offset_y: 8.0,
+            blur_radius: 12.0,
+            spread: 2.0,
+            color: Color::from_srgb_u8([15, 23, 42], 96),
+            visible: true,
+        });
+        // New clients persist the ordered stack and retain the first entry in
+        // the legacy field so R3 readers continue to render the same shadow.
+        appearance.effect_stack = vec![Effect::DropShadow(appearance.drop_shadow.unwrap())];
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        let shadowed = document.canonical_hash_hex();
+        assert_ne!(shadowed, baseline);
+        assert_eq!(document.node(NodeId(1)).unwrap().drop_shadow, appearance.drop_shadow);
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, appearance.effect_stack);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), shadowed);
+
+        let mut invalid = appearance.clone();
+        invalid.drop_shadow.as_mut().unwrap().blur_radius = f64::NAN;
+        assert_eq!(document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+
+        let mut conflicting_legacy = appearance.clone();
+        conflicting_legacy.drop_shadow = None;
+        assert_eq!(
+            document.submit(
+                transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: conflicting_legacy }]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidAppearance),
+        );
+
+        let mut multiple_effects = appearance.clone();
+        multiple_effects.effect_stack.push(Effect::DropShadow(DropShadow {
+            offset_x: -2.0,
+            offset_y: 3.0,
+            blur_radius: 4.0,
+            spread: 0.0,
+            color: Color::from_srgb_u8([255, 255, 255], 64),
+            visible: true,
+        }));
+        document.submit(
+            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: multiple_effects.clone() }]),
+            Origin::LocalUser,
+        ).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, multiple_effects.effect_stack);
+
+        let mut layer_blurred = multiple_effects.clone();
+        layer_blurred.effect_stack.push(Effect::LayerBlur(LayerBlur { radius: 24.0, visible: true }));
+        document.submit(
+            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: layer_blurred.clone() }]),
+            Origin::LocalUser,
+        ).unwrap();
+        let blurred_hash = document.canonical_hash_hex();
+        assert_ne!(blurred_hash, shadowed);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, multiple_effects.effect_stack);
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, layer_blurred.effect_stack);
+
+        let mut inner_shadowed = layer_blurred.clone();
+        inner_shadowed.effect_stack.push(Effect::InnerShadow(InnerShadow {
+            offset_x: -3.0, offset_y: 5.0, blur_radius: 10.0, spread: 1.0,
+            color: Color::from_srgb_u8([2, 6, 23], 80), visible: true,
+        }));
+        document.submit(
+            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: inner_shadowed.clone() }]),
+            Origin::LocalUser,
+        ).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, inner_shadowed.effect_stack);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, layer_blurred.effect_stack);
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, inner_shadowed.effect_stack);
+
+        let mut invalid_layer_blur = layer_blurred.clone();
+        invalid_layer_blur.effect_stack.push(Effect::LayerBlur(LayerBlur { radius: 257.0, visible: true }));
+        assert_eq!(
+            document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid_layer_blur }]), Origin::LocalUser),
+            Err(CommandError::InvalidAppearance),
+        );
+
+        let mut too_many_effects = multiple_effects;
+        while too_many_effects.effect_stack.len() <= MAX_EFFECTS_PER_NODE {
+            too_many_effects.effect_stack.push(Effect::DropShadow(appearance.drop_shadow.unwrap()));
+        }
+        assert_eq!(
+            document.submit(
+                transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: too_many_effects }]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidAppearance),
+        );
+
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        let mut child = node(3);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(NodeId(2));
+        document.submit(transaction(document.revision, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        let mut group_appearance = appearance_for_node(document.node(NodeId(2)).unwrap());
+        group_appearance.drop_shadow = appearance.drop_shadow;
+        assert_eq!(document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(2), appearance: group_appearance }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
     }
 
     #[test]
@@ -6142,5 +8996,469 @@ mod tests {
             assert!(document.undo().is_some());
         }
         assert!(document.undo().is_none());
+    }
+
+    #[test]
+    fn parametric_shapes_are_validated_hashed_and_undoable() {
+        let mut document = Document::empty();
+        let mut polygon = node(1);
+        polygon.kind = NodeKind::Polygon;
+        polygon.name = "Polygon".into();
+        polygon.parametric_shape = Some(ParametricShape::Polygon { point_count: 5 });
+        document.submit(transaction(0, vec![Command::Create(polygon)]), Origin::LocalUser).unwrap();
+        let five_points = document.canonical_hash_hex();
+
+        let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
+        appearance.parametric_shape = Some(ParametricShape::Polygon { point_count: 6 });
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance }]), Origin::LocalUser).unwrap();
+        let six_points = document.canonical_hash_hex();
+        assert_ne!(five_points, six_points);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), five_points);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), six_points);
+
+        let mut invalid = appearance_for_node(document.node(NodeId(1)).unwrap());
+        invalid.parametric_shape = Some(ParametricShape::Star { point_count: 5, inner_ratio: 0.5 });
+        assert_eq!(
+            document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid }]), Origin::LocalUser),
+            Err(CommandError::InvalidAppearance),
+        );
+    }
+
+    #[test]
+    fn boolean_operation_kind_requires_a_canonical_operation_and_hashes_it() {
+        let mut union = node(1);
+        union.kind = NodeKind::BooleanOperation;
+        union.boolean_operation = Some(BooleanOperation::Union);
+        let mut subtract = union.clone();
+        subtract.boolean_operation = Some(BooleanOperation::Subtract);
+
+        let operands = || {
+            let mut first = node(4);
+            first.kind = NodeKind::Rectangle;
+            first.parent_id = Some(NodeId(1));
+            first.x = 10.0;
+            first.y = 20.0;
+            let mut second = node(5);
+            second.kind = NodeKind::Ellipse;
+            second.parent_id = Some(NodeId(1));
+            second.x = 80.0;
+            second.y = 50.0;
+            vec![Command::Create(first), Command::Create(second)]
+        };
+
+        let mut union_document = Document::empty();
+        let mut union_commands = vec![Command::Create(union)];
+        union_commands.extend(operands());
+        union_document.submit(transaction(0, union_commands), Origin::LocalUser).unwrap();
+        let mut subtract_document = Document::empty();
+        let mut subtract_commands = vec![Command::Create(subtract)];
+        subtract_commands.extend(operands());
+        subtract_document.submit(transaction(0, subtract_commands), Origin::LocalUser).unwrap();
+        assert_ne!(union_document.canonical_hash_hex(), subtract_document.canonical_hash_hex());
+
+        let mut incomplete = node(6);
+        incomplete.kind = NodeKind::BooleanOperation;
+        incomplete.boolean_operation = Some(BooleanOperation::Union);
+        assert_eq!(
+            Document::empty().submit(transaction(0, vec![Command::Create(incomplete)]), Origin::LocalUser),
+            Err(CommandError::InsufficientBooleanOperands { id: NodeId(6) }),
+        );
+
+        let mut missing_operation = node(2);
+        missing_operation.kind = NodeKind::BooleanOperation;
+        assert_eq!(
+            Document::empty().submit(transaction(0, vec![Command::Create(missing_operation)]), Origin::LocalUser),
+            Err(CommandError::InvalidGeometry),
+        );
+
+        let mut misplaced_operation = node(3);
+        misplaced_operation.boolean_operation = Some(BooleanOperation::Union);
+        assert_eq!(
+            Document::empty().submit(transaction(0, vec![Command::Create(misplaced_operation)]), Origin::LocalUser),
+            Err(CommandError::InvalidGeometry),
+        );
+    }
+
+    #[test]
+    fn live_boolean_operands_are_atomic_and_undoable() {
+        let mut document = Document::empty();
+        let mut first = node(1);
+        first.kind = NodeKind::Rectangle;
+        first.x = 10.0;
+        first.y = 20.0;
+        first.width = 60.0;
+        first.height = 40.0;
+        let mut second = node(2);
+        second.kind = NodeKind::Ellipse;
+        second.x = 80.0;
+        second.y = 50.0;
+        second.width = 30.0;
+        second.height = 70.0;
+        document
+            .submit(
+                transaction(0, vec![Command::Create(first), Command::Create(second)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut boolean = node(3);
+        boolean.kind = NodeKind::BooleanOperation;
+        boolean.name = "Union".into();
+        boolean.boolean_operation = Some(BooleanOperation::Union);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![
+                        Command::Create(boolean),
+                        Command::SetNodeParent {
+                            id: NodeId(1),
+                            parent_id: Some(NodeId(3)),
+                            position: PositionId::for_node(NodeId(1)),
+                        },
+                        Command::SetNodeParent {
+                            id: NodeId(2),
+                            parent_id: Some(NodeId(3)),
+                            position: PositionId::for_node(NodeId(2)),
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let live_hash = document.canonical_hash_hex();
+        let boolean = document.node(NodeId(3)).unwrap();
+        assert_eq!((boolean.x, boolean.y, boolean.width, boolean.height), (10.0, 20.0, 100.0, 100.0));
+
+        assert_eq!(
+            document.submit(
+                transaction(
+                    2,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(1),
+                        parent_id: None,
+                        position: PositionId::for_node(NodeId(1)),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InsufficientBooleanOperands { id: NodeId(3) }),
+        );
+        assert_eq!(document.canonical_hash_hex(), live_hash);
+
+        document.undo().unwrap();
+        // Undo retires the newly allocated Boolean id, so its Canonical hash is
+        // intentionally distinct from the pre-create state even though the two
+        // original operands are restored exactly.
+        assert!(document.node(NodeId(3)).is_none());
+        assert_eq!(document.node(NodeId(1)).unwrap().parent_id, None);
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, None);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), live_hash);
+    }
+
+    #[test]
+    fn boolean_operation_selector_is_undoable_without_rewriting_operands() {
+        let mut boolean = node(1);
+        boolean.kind = NodeKind::BooleanOperation;
+        boolean.boolean_operation = Some(BooleanOperation::Union);
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(NodeId(1));
+        let mut second = node(3);
+        second.kind = NodeKind::Ellipse;
+        second.parent_id = Some(NodeId(1));
+        let mut document = Document::empty();
+        document.submit(
+            transaction(0, vec![Command::Create(boolean), Command::Create(first), Command::Create(second)]),
+            Origin::LocalUser,
+        ).unwrap();
+        let union = document.canonical_hash_hex();
+
+        document.submit(
+            transaction(1, vec![Command::SetBooleanOperation { id: NodeId(1), operation: BooleanOperation::Subtract }]),
+            Origin::LocalUser,
+        ).unwrap();
+        let subtract = document.canonical_hash_hex();
+        assert_ne!(union, subtract);
+        assert_eq!(document.node(NodeId(1)).unwrap().boolean_operation, Some(BooleanOperation::Subtract));
+        assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
+        assert_eq!(document.node(NodeId(3)).unwrap().parent_id, Some(NodeId(1)));
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), union);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), subtract);
+    }
+
+    #[test]
+    fn vector_path_is_validated_hashed_and_undoable() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                points: vec![
+                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint { id: PointId(2), position: Point { x: 100.0, y: 0.0 }, handle_in: None, handle_out: Some(Point { x: 8.0, y: 0.0 }), point_type: VectorPointType::Asymmetric },
+                    VectorPoint { id: PointId(3), position: Point { x: 50.0, y: 100.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                ],
+            }],
+        };
+        let mut vector = node(1);
+        vector.kind = NodeKind::Vector;
+        vector.name = "Triangle".into();
+        vector.vector_path = Some(path.clone());
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        let mut updated = path.clone();
+        updated.fill_rule = FillRule::EvenOdd;
+        document.submit(transaction(1, vec![Command::SetVectorPath { id: NodeId(1), path: updated }]), Origin::LocalUser).unwrap();
+        let changed = document.canonical_hash_hex();
+        assert_ne!(changed, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), changed);
+
+        let duplicate = VectorPath { fill_rule: FillRule::NonZero, subpaths: vec![VectorSubpath { closed: false, points: vec![
+            VectorPoint { id: PointId(9), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+            VectorPoint { id: PointId(9), position: Point { x: 20.0, y: 20.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+        ] }] };
+        assert_eq!(document.submit(transaction(4, vec![Command::SetVectorPath { id: NodeId(1), path: duplicate }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+
+        let mut degenerate = path;
+        degenerate.subpaths[0].points[1].position = degenerate.subpaths[0].points[0].position;
+        assert_eq!(document.submit(transaction(4, vec![Command::SetVectorPath { id: NodeId(1), path: degenerate }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+    }
+
+    #[test]
+    fn named_vector_point_commands_are_validated_hashed_and_undoable() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                points: vec![
+                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint { id: PointId(2), position: Point { x: 100.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint { id: PointId(3), position: Point { x: 50.0, y: 100.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                ],
+            }],
+        };
+        let mut vector = node(1);
+        vector.kind = NodeKind::Vector;
+        vector.vector_path = Some(path);
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document.submit(
+            transaction(1, vec![Command::MoveVectorPoint {
+                id: NodeId(1),
+                point_id: PointId(2),
+                position: Point { x: 120.0, y: 10.0 },
+            }]),
+            Origin::LocalUser,
+        ).unwrap();
+        let moved = document.canonical_hash_hex();
+        assert_ne!(moved, baseline);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[1].position,
+            Point { x: 120.0, y: 10.0 },
+        );
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), moved);
+
+        document.submit(
+            transaction(document.revision, vec![Command::SetVectorSubpathClosed {
+                id: NodeId(1),
+                subpath_index: 0,
+                closed: false,
+            }]),
+            Origin::LocalUser,
+        ).unwrap();
+        let open = document.canonical_hash_hex();
+        assert_ne!(open, moved);
+        assert!(!document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].closed);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), moved);
+
+        document.submit(
+            transaction(document.revision, vec![Command::SetVectorPointHandles {
+                id: NodeId(1),
+                point_id: PointId(2),
+                handle_in: Some(Point { x: -12.0, y: 4.0 }),
+                handle_out: Some(Point { x: 18.0, y: -6.0 }),
+                point_type: VectorPointType::Asymmetric,
+            }]),
+            Origin::LocalUser,
+        ).unwrap();
+        let point = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[1];
+        assert_eq!(point.handle_in, Some(Point { x: -12.0, y: 4.0 }));
+        assert_eq!(point.point_type, VectorPointType::Asymmetric);
+
+        assert_eq!(
+            document.submit(
+                transaction(document.revision, vec![Command::MoveVectorPoint {
+                    id: NodeId(1),
+                    point_id: PointId(99),
+                    position: Point { x: 10.0, y: 10.0 },
+                }]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidGeometry),
+        );
+        assert_eq!(
+            document.submit(
+                transaction(document.revision, vec![Command::SetVectorSubpathClosed {
+                    id: NodeId(1),
+                    subpath_index: 99,
+                    closed: false,
+                }]),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidGeometry),
+        );
+
+        document.submit(
+            transaction(document.revision, vec![Command::InsertVectorPoint {
+                id: NodeId(1),
+                subpath_index: 0,
+                after_point_id: Some(PointId(2)),
+                point: VectorPoint { id: PointId(4), position: Point { x: 80.0, y: 40.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+            }]),
+            Origin::LocalUser,
+        ).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[2].id, PointId(4));
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points.len(), 3);
+
+        document.submit(
+            transaction(document.revision, vec![Command::SetVectorSubpathClosed { id: NodeId(1), subpath_index: 0, closed: false }]),
+            Origin::LocalUser,
+        ).unwrap();
+        document.submit(
+            transaction(document.revision, vec![Command::DeleteVectorPoint { id: NodeId(1), point_id: PointId(2) }]),
+            Origin::LocalUser,
+        ).unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points.len(), 2);
+    }
+
+    #[test]
+    fn blend_mode_is_hashed_and_undoable() {
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+        let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
+        appearance.blend_mode = BlendMode::Multiply;
+
+        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance }]), Origin::LocalUser).unwrap();
+        let blended = document.canonical_hash_hex();
+        assert_eq!(document.node(NodeId(1)).unwrap().blend_mode, BlendMode::Multiply);
+        assert_ne!(blended, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().blend_mode, BlendMode::Normal);
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), blended);
+    }
+
+    #[test]
+    fn split_vector_segment_preserves_cubic_curve_and_undo_redo_hash() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                points: vec![
+                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: Some(Point { x: 0.0, y: 10.0 }), point_type: VectorPointType::Asymmetric },
+                    VectorPoint { id: PointId(2), position: Point { x: 10.0, y: 0.0 }, handle_in: Some(Point { x: 0.0, y: 10.0 }), handle_out: None, point_type: VectorPointType::Asymmetric },
+                ],
+            }],
+        };
+        let mut vector = node(1);
+        vector.kind = NodeKind::Vector;
+        vector.vector_path = Some(path);
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document.submit(transaction(1, vec![Command::SplitVectorSegment {
+            id: NodeId(1), subpath_index: 0, after_point_id: PointId(1), t: 0.5, point_id: PointId(3),
+        }]), Origin::LocalUser).unwrap();
+        let split = document.canonical_hash_hex();
+        let points = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points;
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].handle_out, Some(Point { x: 0.0, y: 5.0 }));
+        assert_eq!(points[1], VectorPoint { id: PointId(3), position: Point { x: 5.0, y: 7.5 }, handle_in: Some(Point { x: -2.5, y: 0.0 }), handle_out: Some(Point { x: 2.5, y: 0.0 }), point_type: VectorPointType::Asymmetric });
+        assert_eq!(points[2].handle_in, Some(Point { x: 0.0, y: 5.0 }));
+        assert_ne!(split, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), split);
+        assert_eq!(document.submit(transaction(document.revision, vec![Command::SplitVectorSegment {
+            id: NodeId(1), subpath_index: 0, after_point_id: PointId(3), t: 1.0, point_id: PointId(4),
+        }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+    }
+
+    #[test]
+    fn connect_vector_endpoints_merges_open_subpaths_and_preserves_undo() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![
+                VectorSubpath { closed: false, points: vec![
+                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint { id: PointId(2), position: Point { x: 10.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                ] },
+                VectorSubpath { closed: false, points: vec![
+                    VectorPoint { id: PointId(3), position: Point { x: 20.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint { id: PointId(4), position: Point { x: 30.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                ] },
+            ],
+        };
+        let mut vector = node(1);
+        vector.kind = NodeKind::Vector;
+        vector.vector_path = Some(path);
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document.submit(transaction(1, vec![Command::ConnectVectorEndpoints {
+            id: NodeId(1), first_subpath_index: 0, first_point_id: PointId(2), second_subpath_index: 1, second_point_id: PointId(3),
+        }]), Origin::LocalUser).unwrap();
+        let subpaths = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths;
+        assert_eq!(subpaths.len(), 1);
+        assert_eq!(subpaths[0].points.iter().map(|point| point.id).collect::<Vec<_>>(), vec![PointId(1), PointId(2), PointId(3), PointId(4)]);
+        assert!(!subpaths[0].closed);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths.len(), 1);
+    }
+
+    #[test]
+    fn connect_vector_endpoints_closes_opposite_ends_of_one_subpath() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath { closed: false, points: vec![
+                VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                VectorPoint { id: PointId(2), position: Point { x: 20.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                VectorPoint { id: PointId(3), position: Point { x: 10.0, y: 20.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+            ] }],
+        };
+        let mut vector = node(1);
+        vector.kind = NodeKind::Vector;
+        vector.vector_path = Some(path);
+        let mut document = Document::empty();
+        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+
+        document.submit(transaction(1, vec![Command::ConnectVectorEndpoints {
+            id: NodeId(1), first_subpath_index: 0, first_point_id: PointId(1), second_subpath_index: 0, second_point_id: PointId(3),
+        }]), Origin::LocalUser).unwrap();
+        assert!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].closed);
     }
 }

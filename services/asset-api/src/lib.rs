@@ -15,7 +15,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, options, post, put},
+    routing::{delete, get, options, post, put},
 };
 use makefigma_asset_service::{
     AssetKind, AssetService, AssetServiceError, Id, TrustedPrincipal, UploadRequest,
@@ -67,6 +67,18 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/documents/{document_id}/assets/{asset_id}",
             put(attach_asset).options(preflight),
+        )
+        .route(
+            "/v1/documents/{document_id}/assets/{asset_id}/attach-from-document",
+            post(attach_asset_from_document).options(preflight),
+        )
+        .route(
+            "/v1/documents/{document_id}/assets/{asset_id}/clipboard-attachment",
+            delete(detach_clipboard_asset).options(preflight),
+        )
+        .route(
+            "/v1/documents/{document_id}/assets/{asset_id}/clipboard-attachment/commit",
+            post(finalize_clipboard_asset).options(preflight),
         )
         .route(
             "/v1/documents/{document_id}/assets/{asset_id}/download-grants",
@@ -347,6 +359,81 @@ async fn attach_asset(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachFromDocumentBody {
+    source_document_id: String,
+}
+
+async fn attach_asset_from_document(
+    State(state): State<ApiState>,
+    Path((document_id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<AttachFromDocumentBody>,
+) -> Response {
+    let (principal, source_document_id, target_document_id, asset_id) = match (
+        principal(&headers),
+        parse_id(&body.source_document_id),
+        parse_id(&document_id),
+        parse_id(&asset_id),
+    ) {
+        (Ok(principal), Ok(source_document_id), Ok(target_document_id), Ok(asset_id)) => {
+            (principal, source_document_id, target_document_id, asset_id)
+        }
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => return error_response(error),
+    };
+    match state.service.attach_asset_from_document(
+        principal,
+        source_document_id,
+        target_document_id,
+        asset_id,
+    ) {
+        Ok(created) => empty_response(if created { StatusCode::CREATED } else { StatusCode::NO_CONTENT }),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn detach_clipboard_asset(
+    State(state): State<ApiState>,
+    Path((document_id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (principal, document_id, asset_id) = match (
+        principal(&headers),
+        parse_id(&document_id),
+        parse_id(&asset_id),
+    ) {
+        (Ok(principal), Ok(document_id), Ok(asset_id)) => (principal, document_id, asset_id),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return error_response(error),
+    };
+    match state.service.detach_clipboard_asset_from_document(principal, document_id, asset_id) {
+        Ok(_) => empty_response(StatusCode::NO_CONTENT),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn finalize_clipboard_asset(
+    State(state): State<ApiState>,
+    Path((document_id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (principal, document_id, asset_id) = match (
+        principal(&headers),
+        parse_id(&document_id),
+        parse_id(&asset_id),
+    ) {
+        (Ok(principal), Ok(document_id), Ok(asset_id)) => (principal, document_id, asset_id),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return error_response(error),
+    };
+    match state.service.finalize_clipboard_asset_attachment(principal, document_id, asset_id) {
+        Ok(()) => empty_response(StatusCode::NO_CONTENT),
+        Err(error) => error_response(error),
+    }
+}
+
 async fn issue_download_grant(
     State(state): State<ApiState>,
     Path((document_id, asset_id)): Path<(String, String)>,
@@ -527,7 +614,7 @@ fn response_with(status: StatusCode, body: Vec<u8>, content_type: &str) -> Respo
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, PUT, OPTIONS"),
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
     );
     headers.insert(
         "access-control-allow-private-network",
@@ -697,7 +784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_http_reopen_retains_attached_asset_delivery() {
+    async fn durable_http_reopen_retains_authorized_clipboard_asset_delivery() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("asset-api.sqlite");
         let first = durable_app(&database);
@@ -736,28 +823,55 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let document = id_hex(3);
-        let writer = headers(Request::put(format!("/v1/documents/{document}/writers")))
+        let source_document = id_hex(3);
+        let target_document = id_hex(4);
+        let source_writer = headers(Request::put(format!("/v1/documents/{source_document}/writers")))
             .body(Body::empty())
             .unwrap();
         assert_eq!(
-            first.clone().oneshot(writer).await.unwrap().status(),
+            first.clone().oneshot(source_writer).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
-        let attach = headers(Request::put(format!(
-            "/v1/documents/{document}/assets/{asset_id}"
+        let target_writer = headers(Request::put(format!("/v1/documents/{target_document}/writers")))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            first.clone().oneshot(target_writer).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let attach_source = headers(Request::put(format!(
+            "/v1/documents/{source_document}/assets/{asset_id}"
         )))
         .body(Body::empty())
         .unwrap();
         assert_eq!(
-            first.clone().oneshot(attach).await.unwrap().status(),
+            first.clone().oneshot(attach_source).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let attach_target = headers(Request::post(format!(
+            "/v1/documents/{target_document}/assets/{asset_id}/attach-from-document"
+        )))
+        .header(header::CONTENT_TYPE, JSON)
+        .body(Body::from(format!("{{\"sourceDocumentId\":\"{source_document}\"}}")))
+        .unwrap();
+        assert_eq!(
+            first.clone().oneshot(attach_target).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let finalize = headers(Request::post(format!(
+            "/v1/documents/{target_document}/assets/{asset_id}/clipboard-attachment/commit"
+        )))
+        .body(Body::empty())
+        .unwrap();
+        assert_eq!(
+            first.clone().oneshot(finalize).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
         drop(first);
 
         let restarted = durable_app(&database);
         let grant = headers(Request::post(format!(
-            "/v1/documents/{document}/assets/{asset_id}/download-grants"
+            "/v1/documents/{target_document}/assets/{asset_id}/download-grants"
         )))
         .header(header::CONTENT_TYPE, JSON)
         .body(Body::from("{\"lifetimeSeconds\":60}"))
