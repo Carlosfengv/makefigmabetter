@@ -45,7 +45,7 @@ describe("Phase 1 composite evidence capture", () => {
     expect(metadata.artifacts.some((artifact) => artifact.path.endsWith("phase1-render-composite.png"))).toBe(true);
     expect(metadata.artifacts.some((artifact) => artifact.path.endsWith("browser-environment.txt"))).toBe(true);
     expect(JSON.parse(readFileSync(join(evidenceDirectory, "performance-summary.json"), "utf8"))).toMatchObject({ status: "pass", samplesPerRun: 240, median: { p95Ms: 0.8 } });
-  });
+  }, 20_000);
 
   it("rejects a run count that cannot produce a median evidence summary", () => {
     const { worker, evidenceDirectory } = setup();

@@ -72,7 +72,7 @@ wait_for_snapshot() {
   local expression="$2"
   for attempt in $(seq 1 80); do
     snapshot "$name"
-    if rg -q -- "$expression" "$evidence_dir/$name"; then return 0; fi
+    if grep -Eq -- "$expression" "$evidence_dir/$name"; then return 0; fi
     sleep 0.2
   done
   return 1
@@ -81,7 +81,7 @@ draw_rectangle() {
   local label="$1"
   local tool_ref
   snapshot "$label-before.snapshot.txt"
-  tool_ref="$(sed -nE 's/.*button "Rectangle \(R\)".*\[ref=(e[0-9]+)\].*/\1/p' "$evidence_dir/$label-before.snapshot.txt" | head -n 1)"
+  tool_ref="$(sed -nE 's/.*button "Rectangle \(R\)[^"]*".*\[ref=(e[0-9]+)\].*/\1/p' "$evidence_dir/$label-before.snapshot.txt" | head -n 1)"
   if [[ -z "$tool_ref" ]]; then
     echo "Could not resolve Rectangle toolbar control." >&2
     return 1
@@ -108,7 +108,11 @@ if ! wait_for_http "http://127.0.0.1:$web_port"; then
   exit 1
 fi
 
-"$pwcli" --session "$session" open "http://127.0.0.1:$web_port" 2>&1 | tee "$evidence_dir/open.log"
+# The workspace root is intentionally a catalogue. Enter a stable catalogue
+# document so this isolated Document API run can bootstrap its own durable
+# record without relying on the main development database.
+document_id="c46e30b5-4e63-4ec4-83ba-6b0fa3c9a7df"
+"$pwcli" --session "$session" open "http://127.0.0.1:$web_port/workspace/design-lab-2026/design/$document_id" 2>&1 | tee "$evidence_dir/open.log"
 "$pwcli" --session "$session" resize 1440 960 2>&1 | tee "$evidence_dir/resize.log"
 if ! wait_for_snapshot "ready.snapshot.txt" "Rust/WASM bridge ready.*remote document (created|loaded|verified)"; then
   echo "Timed out waiting for a connected Document API session." >&2
@@ -123,7 +127,7 @@ fi
 
 "$pwcli" --session "$session" network-state-set offline 2>&1 | tee "$evidence_dir/network-offline.log"
 draw_rectangle "offline"
-if ! wait_for_snapshot "offline.snapshot.txt" "remote sync retrying"; then
+if ! wait_for_snapshot "offline.snapshot.txt" "(remote sync retrying|offline · recovery resumes when network returns)"; then
   echo "The offline operation was not retained for retry." >&2
   exit 1
 fi
@@ -146,15 +150,15 @@ fi
 
 hash_probe='(async () => { const evidence = document.querySelector(`[aria-label="Canonical document hash"]`); if (!evidence) throw new Error("Canonical hash evidence is missing"); const documentId = evidence.dataset.documentId; const browserRevision = evidence.dataset.documentRevision; const browserHash = evidence.dataset.documentHash; const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(`/document-api/v1/documents/${encodeURIComponent(documentId ?? "")}/snapshot`, { signal: controller.signal, headers: { "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": "00000000-0000-0000-0000-000000000007" } }); const serverRevision = response.headers.get("x-makefigma-document-revision"); const serverHash = response.headers.get("x-makefigma-document-hash"); const contentLength = Number(response.headers.get("content-length")); return { matches: response.ok && browserRevision === "2" && serverRevision === "2" && browserHash?.toLowerCase() === serverHash?.toLowerCase(), browserRevision, browserHash, serverRevision, serverHash, snapshotBytes: Number.isSafeInteger(contentLength) && contentLength >= 0 ? contentLength : undefined }; } finally { clearTimeout(timer); } })()'
 "$pwcli" --session "$session" eval "$hash_probe" 2>&1 | tee "$evidence_dir/hash-comparison.json"
-if ! rg -q '"matches"[[:space:]]*:[[:space:]]*true' "$evidence_dir/hash-comparison.json"; then
+if ! grep -Eq '"matches"[[:space:]]*:[[:space:]]*true' "$evidence_dir/hash-comparison.json"; then
   echo "The recovered browser and service Snapshot did not converge at revision 2." >&2
   exit 1
 fi
 
 "$pwcli" --session "$session" screenshot --filename "$evidence_dir/phase1-operation-recovery.png" 2>&1 | tee "$evidence_dir/screenshot.log"
 "$pwcli" --session "$session" console 2>&1 | tee "$evidence_dir/console.txt"
-expected_transport_errors='^\[ERROR\] Failed to load resource: the server responded with a status of (404|500) \((Not Found|Internal Server Error)\) @ http://127\.0\.0\.1:'"$web_port"'/document-api/v1/documents/00000000-0000-0000-0000-000000000000/snapshot:0$'
-unexpected_console_errors="$(rg '^\[ERROR\]' "$evidence_dir/console.txt" | rg -v -- "$expected_transport_errors" || true)"
+expected_transport_errors='^\[ERROR\] Failed to load resource: the server responded with a status of (404|500) \((Not Found|Internal Server Error)\) @ http://127\.0\.0\.1:'"$web_port"'/document-api/v1/documents/'"$document_id"'/snapshot:0$'
+unexpected_console_errors="$(grep -E '^\[ERROR\]' "$evidence_dir/console.txt" | grep -Ev -- "$expected_transport_errors" || true)"
 if [[ -n "$unexpected_console_errors" ]]; then
   printf '%s\n' "$unexpected_console_errors" >&2
   echo "Operation recovery evidence emitted unexpected browser console errors." >&2

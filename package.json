@@ -22,7 +22,10 @@
     "evidence:phase1-gates": "node scripts/capture-phase1-gate-report.mjs",
     "evidence:phase1-stability": "bash scripts/capture-phase1-stability-evidence.sh",
     "evidence:phase2-common-nodes": "bash scripts/capture-phase2-common-nodes-evidence.sh",
+    "evidence:phase2-professional-composite": "bash scripts/capture-phase2-professional-composite-evidence.sh",
+    "evidence:phase2-professional-composite-stability": "bash scripts/capture-phase2-professional-composite-stability-evidence.sh",
     "evidence:phase2-common-nodes-stability": "bash scripts/capture-phase2-common-nodes-stability-evidence.sh",
+    "evidence:phase2-inspector-a11y": "bash scripts/capture-phase2-inspector-a11y-evidence.sh",
     "check:boundaries": "node scripts/check-frontend-boundaries.mjs",
     "check:compatibility": "node scripts/check-compatibility-matrix.mjs",
     "check:phase1-text-fixture": "node scripts/verify-phase1-text-fixture.mjs",
@@ -31,6 +34,7 @@
     "check:phase1-asset-hostile-fixture": "node scripts/verify-phase1-asset-hostile-fixture.mjs",
     "check:phase1-render-composite-fixture": "node scripts/verify-phase1-render-composite-fixture.mjs",
     "check:phase2-common-nodes-fixture": "node scripts/verify-phase2-common-nodes-fixture.mjs",
+    "check:phase2-professional-composite-golden": "node scripts/verify-phase2-professional-composite-golden.mjs",
     "check:phase1-snapshot-fixtures": "node scripts/verify-phase1-snapshot-fixtures.mjs",
     "mock:backend": "node services/mock-backend/server.mjs",
     "mock:backend:check": "node services/mock-backend/check.mjs",
@@ -41,7 +45,7 @@
     "asset:api": "cargo run -p makefigma-asset-api",
     "asset:api:check": "cargo test -p makefigma-asset-api",
     "start": "next start",
-    "lint": "eslint .",
+    "lint": "eslint src scripts services packages next.config.ts --no-error-on-unmatched-pattern",
     "test": "vitest run"
   },
   "dependencies": {

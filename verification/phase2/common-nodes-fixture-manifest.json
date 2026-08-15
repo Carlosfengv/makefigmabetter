@@ -2,5 +2,5 @@
   "format": "makefigma-phase2-common-nodes-manifest-v1",
   "fixture": "fixtures/documents/phase2-common-nodes.fixture.json",
   "fixtureName": "F-PHASE2-COMMON-NODES",
-  "fixtureSha256": "1aa99d33c43a0e5192b6304fbb96f7639303de7dd63b7b08b0bac6b89af92417"
+  "fixtureSha256": "0d1e79460a7e9d56b4dac0d56ef22e3d61a323fa6f1d5b3b70978c5d62eb4428"
 }

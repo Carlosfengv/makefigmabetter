@@ -40,7 +40,7 @@ capture_case() {
   local ready=0
   for attempt in $(seq 1 3); do
     timeout 20 "$pwcli" -s="$session" snapshot > "$snapshot" 2>&1 || true
-    if rg -Fq "Rust/WASM bridge ready" "$snapshot" && rg -Fq "$expected" "$snapshot"; then
+    if grep -Fq "Rust/WASM bridge ready" "$snapshot" && grep -Fq "$expected" "$snapshot"; then
       printf 'GPU loss %s reached expected state after %s snapshot attempt(s).\n' "$losses" "$attempt" | tee "$evidence_dir/gpu-loss-$losses.readiness.log"
       ready=1
       break
@@ -54,7 +54,7 @@ capture_case() {
     exit 1
   fi
   "$pwcli" -s="$session" console error | tee "$evidence_dir/gpu-loss-$losses.console.txt"
-  if ! rg -q "Errors: 0" "$evidence_dir/gpu-loss-$losses.console.txt"; then
+  if ! grep -Eq "Errors: 0" "$evidence_dir/gpu-loss-$losses.console.txt"; then
     "$pwcli" -s="$session" close >/dev/null 2>&1 || true
     echo "GPU recovery case $losses emitted console errors." >&2
     exit 1

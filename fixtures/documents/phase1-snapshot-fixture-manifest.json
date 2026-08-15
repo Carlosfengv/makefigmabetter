@@ -1,6 +1,6 @@
 {
   "format": "makefigma-phase1-snapshot-fixture-manifest-v1",
-  "currentSchemaVersion": 19,
+  "currentSchemaVersion": 20,
   "fixtures": [
     {
       "schemaVersion": 13,
@@ -23,26 +23,32 @@
     {
       "schemaVersion": 16,
       "fixture": "fixtures/documents/phase2-snapshot-v16.fixture.json",
-      "sourceSha256": "cef2666a5e3485176f7dada8eae82ff1ac735356631cfef937e6213d211b0391",
-      "expectedCanonicalHash": "4e87b90c55bb672013acd0e1a0baf62d4f35e80b6967ee75feee168fc1c81e05"
+      "sourceSha256": "f84193777349a8e4ab5a665ed0ad88dd4d2868e32b91b95a2aec6d7ad5080bd0",
+      "expectedCanonicalHash": "8664fbdb26dac860a74a33f2025fbe393728afbf1946e3dee90bfa1d71b7c6dc"
     },
     {
       "schemaVersion": 17,
       "fixture": "fixtures/documents/phase2-snapshot-v17.fixture.json",
-      "sourceSha256": "5c76ea65690048b89a4f5d54c5df313bcbf6de4205e70ee8fb6406ff6bac94c2",
-      "expectedCanonicalHash": "e4100f2040c3448b463f4a21f48fc0766046dafe929256dc9f9971ba3279a893"
+      "sourceSha256": "fa3563629b3d3e7c6b6fc383e8f6a3cbbcae9821aa3b68b829fd6ac631396f08",
+      "expectedCanonicalHash": "3155ab4d92590a80dc7d16e8ff8c7d10d8b2e6369f0e57e1f0d5340f53008cec"
     },
     {
       "schemaVersion": 18,
       "fixture": "fixtures/documents/phase2-snapshot-v18.fixture.json",
-      "sourceSha256": "efc66f81b2799772a72900241f7c45850404b6a8ed8bbb6a088f51b55314c006",
-      "expectedCanonicalHash": "634b5aafcefab752d41cca06a2464ba6624070346a012786e2e34f94868a93dc"
+      "sourceSha256": "b7a5109038063ef3fc63c8a848365d8cd16d4e56e86e5a8fab2ffa82e1639ea7",
+      "expectedCanonicalHash": "f000b0641aaaf974ca1fd6f0150966fcbc5e4ce91a66ddf6ee93c305e38a0004"
     },
     {
       "schemaVersion": 19,
       "fixture": "fixtures/documents/phase2-snapshot-v19.fixture.json",
-      "sourceSha256": "fd7c18ec9a3f3ac8eebab3990893829835e0ee3e08f69603677fa957aabe6b77",
-      "expectedCanonicalHash": "9f3f4e0e3eb78fdb388f9991d1eb84e2b8352f66eeb31a48f7a0b8eee5ab3da8"
+      "sourceSha256": "a421eb9f843a784055acdfe163d7caa2638962b97be72fac711799f839761f82",
+      "expectedCanonicalHash": "0551e71ca4ba776f558cb3200915be9943c9115fe6c256ad1b6eb4a20cccf51f"
+    },
+    {
+      "schemaVersion": 20,
+      "fixture": "fixtures/documents/phase2-snapshot-v20.fixture.json",
+      "sourceSha256": "38fbc380ba8321213609e8368941f6520e4a04e440a723d78ee88232f8f0041b",
+      "expectedCanonicalHash": "433c7599a939e437ac9775b982923fb91baab084edfbc5915022921d9884496a"
     }
   ]
 }

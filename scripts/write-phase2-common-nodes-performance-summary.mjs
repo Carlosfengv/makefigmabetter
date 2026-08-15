@@ -28,7 +28,7 @@ export function parsePhase2CommonNodesPerformanceRun(value) {
 
 function median(values) { return [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)]; }
 
-export function summarizePhase2CommonNodesPerformance(runs, warmupSeconds) {
+export function summarizePhase2CommonNodesPerformance(runs, warmupSeconds, format = PHASE2_COMMON_NODES_PERFORMANCE_FORMAT) {
   if (!Number.isInteger(warmupSeconds) || warmupSeconds < 0) throw new Error("Warmup seconds must be a non-negative integer.");
   if (runs.length < 3) throw new Error("Phase 2 performance evidence requires at least three runs.");
   if (runs.some((run) => !valid(run.metrics))) throw new Error("A Phase 2 performance run did not contain complete input and render metrics.");
@@ -43,7 +43,7 @@ export function summarizePhase2CommonNodesPerformance(runs, warmupSeconds) {
     inputBacklogP95Ms: median(runs.map((run) => run.metrics.input.p95Ms)),
   };
   return {
-    format: PHASE2_COMMON_NODES_PERFORMANCE_FORMAT,
+    format,
     // This records a reproducible local candidate only. The 60-minute Gate is
     // separately required before Phase 2 may be declared complete.
     status: "local-candidate",
@@ -61,7 +61,7 @@ export function summarizePhase2CommonNodesPerformance(runs, warmupSeconds) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const [evidenceDirectory, rawWarmup] = process.argv.slice(2);
+  const [evidenceDirectory, rawWarmup, format] = process.argv.slice(2);
   if (!evidenceDirectory || !/^\d+$/.test(rawWarmup ?? "")) {
     console.error("Usage: write-phase2-common-nodes-performance-summary.mjs <evidence-directory> <warmup-seconds>");
     process.exitCode = 64;
@@ -72,7 +72,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       .sort()
       .map((file) => ({ file, metrics: parsePhase2CommonNodesPerformanceRun(readFileSync(resolve(directory, file), "utf8")) }));
     try {
-      writeFileSync(resolve(directory, "performance-summary.json"), `${JSON.stringify(summarizePhase2CommonNodesPerformance(runs, Number(rawWarmup)), null, 2)}\n`);
+      writeFileSync(resolve(directory, "performance-summary.json"), `${JSON.stringify(summarizePhase2CommonNodesPerformance(runs, Number(rawWarmup), format || PHASE2_COMMON_NODES_PERFORMANCE_FORMAT), null, 2)}\n`);
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Unable to summarize Phase 2 performance evidence.");
       process.exitCode = 1;

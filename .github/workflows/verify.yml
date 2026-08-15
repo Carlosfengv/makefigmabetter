@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+# Explicitly select `bash`, which GitHub Actions runs as `bash --noprofile
+# --norc -eo pipefail {0}`. The implicit default (`bash -e {0}`) has no
+# pipefail, so a failing command upstream of a `| tee …` pipe would be masked
+# by tee's success and the step would pass green (P3-2).
+defaults:
+  run:
+    shell: bash
+
 jobs:
   web:
     name: web
@@ -114,11 +122,12 @@ jobs:
           pnpm --version
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
-      - name: Verify Document API, Asset API, and mock backend
+      - name: Verify Document API, Asset API, workspace API, and mock backend
         run: |
           mkdir -p ci-artifacts
           pnpm document:api:check 2>&1 | tee ci-artifacts/document-api.log
           pnpm asset:api:check 2>&1 | tee ci-artifacts/asset-api.log
+          pnpm workspace:api:check 2>&1 | tee ci-artifacts/workspace-api.log
           pnpm mock:backend:check 2>&1 | tee ci-artifacts/mock-backend.log
       - name: Upload service logs
         if: always()
@@ -218,5 +227,38 @@ jobs:
           path: |
             ci-artifacts/
             verification/phase1/1.11/*-fixture-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  phase2-common-nodes-fixture:
+    name: phase2-common-nodes-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Confirm pnpm version
+        run: |
+          required="$(node -p "require('./package.json').packageManager.slice('pnpm@'.length)")"
+          test -n "$required"
+          test "$(pnpm --version)" = "$required"
+          pnpm --version
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify Phase 2 Common Nodes fixture contract
+        run: |
+          mkdir -p ci-artifacts
+          pnpm check:phase2-common-nodes-fixture 2>&1 | tee ci-artifacts/phase2-common-nodes-fixture.log
+      - name: Upload Phase 2 fixture manifest and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-common-nodes-fixture-${{ github.sha }}
+          path: |
+            ci-artifacts/
+            verification/phase2/common-nodes-fixture-manifest.json
           if-no-files-found: warn
           retention-days: 30

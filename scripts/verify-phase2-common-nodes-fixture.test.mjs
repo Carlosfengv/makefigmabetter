@@ -13,7 +13,7 @@ function fixtureRoot() {
   const fixturePath = join(root, "fixture.json");
   const sourceFixture = readFileSync(join(process.cwd(), "fixtures/documents/phase2-common-nodes.fixture.json"));
   writeFileSync(fixturePath, sourceFixture);
-  writeFileSync(manifestPath, JSON.stringify({ format: "makefigma-phase2-common-nodes-manifest-v1", fixture: "fixture.json", fixtureName: "F-PHASE2-COMMON-NODES", fixtureSha256: "1aa99d33c43a0e5192b6304fbb96f7639303de7dd63b7b08b0bac6b89af92417" }));
+  writeFileSync(manifestPath, JSON.stringify({ format: "makefigma-phase2-common-nodes-manifest-v1", fixture: "fixture.json", fixtureName: "F-PHASE2-COMMON-NODES", fixtureSha256: "0d1e79460a7e9d56b4dac0d56ef22e3d61a323fa6f1d5b3b70978c5d62eb4428" }));
   return { root, manifestPath, fixturePath };
 }
 
@@ -22,7 +22,7 @@ afterEach(() => { directories.splice(0).forEach((directory) => rmSync(directory,
 describe("Phase 2 common-nodes fixture verifier", () => {
   it("freezes the exact hierarchy and specialized node cases", () => {
     const { root, manifestPath } = fixtureRoot();
-    expect(verifyPhase2CommonNodesFixture({ root, manifestPath })).toMatchObject({ status: "pass", nodeCount: 9 });
+    expect(verifyPhase2CommonNodesFixture({ root, manifestPath })).toMatchObject({ status: "pass", nodeCount: 10 });
   });
 
   it("reports a fixture change before an evidence capture can run", () => {

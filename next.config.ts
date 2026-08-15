@@ -30,7 +30,7 @@ const nextConfig: NextConfig = {
   // The local editor and its evidence browser both use the loopback host.
   // Declare it explicitly so Next development HMR is not rejected as a
   // cross-origin request on newer Next versions.
-  allowedDevOrigins: ["127.0.0.1"],
+  allowedDevOrigins: ["127.0.0.1", "localhost", "192.168.31.93"],
   async rewrites() {
     // The desktop in-app browser can enforce stricter private-network rules
     // than a normal Chrome tab. Keep Asset API calls same-origin and proxy them

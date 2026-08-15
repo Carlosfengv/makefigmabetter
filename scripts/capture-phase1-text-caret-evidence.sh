@@ -33,7 +33,7 @@ wait_for_eval() {
   local expected="$3"
   for attempt in $(seq 1 40); do
     "$pwcli" --session "$session" eval "$expression" > "$evidence_dir/$name" 2>&1 || true
-    if rg -Fq "$expected" "$evidence_dir/$name"; then return 0; fi
+    if grep -Fq "$expected" "$evidence_dir/$name"; then return 0; fi
     sleep 0.2
   done
   cat "$evidence_dir/$name" >&2
@@ -70,7 +70,7 @@ fi
 # one-code-unit boundary after the composition exercise.
 keyboard_navigation='(() => { const editor = document.querySelector("[aria-label=\"Canvas text content\"]"); if (!editor) throw new Error("Canvas text editor unavailable"); const offsetAt = (node, offset) => { const before = document.createRange(); before.selectNodeContents(editor); before.setEnd(node, offset); return before.toString().length; }; const pointAt = (target) => { const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT); let remaining = target; let node = walker.nextNode(); while (node) { const length = node.textContent.length; if (remaining <= length) return { node, offset: remaining }; remaining -= length; node = walker.nextNode(); } throw new Error("Selection target not found"); }; const read = () => { const selection = window.getSelection(); return { anchor: offsetAt(selection.anchorNode, selection.anchorOffset), focus: offsetAt(selection.focusNode, selection.focusOffset), selected: selection.toString() }; }; const beforeCjk = editor.innerText.indexOf("中"); if (beforeCjk < 0) throw new Error("Composition text missing"); const start = pointAt(beforeCjk); window.getSelection().setBaseAndExtent(start.node, start.offset, start.node, start.offset); editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" })); const afterRight = read(); editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowLeft", shiftKey: true })); const afterShiftLeft = read(); return "rust-keyboard-ok|before=" + beforeCjk + "|right=" + afterRight.anchor + ":" + afterRight.focus + "|shift=" + afterShiftLeft.anchor + ":" + afterShiftLeft.focus + ":" + afterShiftLeft.selected; })()'
 "$pwcli" --session "$session" eval "$keyboard_navigation" 2>&1 | tee "$evidence_dir/keyboard-navigation.log"
-if ! rg -Fq 'rust-keyboard-ok|before=20|right=21:21|shift=21:20:中' "$evidence_dir/keyboard-navigation.log"; then
+if ! grep -Fq 'rust-keyboard-ok|before=20|right=21:21|shift=21:20:中' "$evidence_dir/keyboard-navigation.log"; then
   echo "Rust caret keyboard navigation did not preserve the expected legal CJK boundary." >&2
   exit 1
 fi
@@ -87,7 +87,7 @@ fi
 
 emoji_backspace='(() => { const editor = document.querySelector("[aria-label=\"Canvas text content\"]"); if (!editor) throw new Error("Canvas text editor unavailable"); const pointAt = (target) => { const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT); let remaining = target; let node = walker.nextNode(); while (node) { const length = node.textContent.length; if (remaining <= length) return { node, offset: remaining }; remaining -= length; node = walker.nextNode(); } throw new Error("Selection target not found"); }; const afterEmoji = pointAt(3); window.getSelection().setBaseAndExtent(afterEmoji.node, afterEmoji.offset, afterEmoji.node, afterEmoji.offset); const accepted = editor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "deleteContentBackward" })); return "rust-backspace-dispatch=" + accepted; })()'
 "$pwcli" --session "$session" eval "$emoji_backspace" 2>&1 | tee "$evidence_dir/emoji-backspace.log"
-if ! rg -Fq 'rust-backspace-dispatch=false' "$evidence_dir/emoji-backspace.log"; then
+if ! grep -Fq 'rust-backspace-dispatch=false' "$evidence_dir/emoji-backspace.log"; then
   echo "Rust caret Backspace was not accepted at the beforeinput boundary." >&2
   exit 1
 fi
@@ -98,7 +98,7 @@ fi
 
 selection_replacement='(() => { const editor = document.querySelector("[aria-label=\"Canvas text content\"]"); if (!editor) throw new Error("Canvas text editor unavailable"); const pointAt = (target) => { const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT); let remaining = target; let node = walker.nextNode(); while (node) { const length = node.textContent.length; if (remaining <= length) return { node, offset: remaining }; remaining -= length; node = walker.nextNode(); } throw new Error("Selection target not found"); }; const start = pointAt(1); const end = pointAt(2); window.getSelection().setBaseAndExtent(start.node, start.offset, end.node, end.offset); const accepted = editor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: "B" })); return "rust-replacement-dispatch=" + accepted; })()'
 "$pwcli" --session "$session" eval "$selection_replacement" 2>&1 | tee "$evidence_dir/selection-replacement.log"
-if ! rg -Fq 'rust-replacement-dispatch=false' "$evidence_dir/selection-replacement.log"; then
+if ! grep -Fq 'rust-replacement-dispatch=false' "$evidence_dir/selection-replacement.log"; then
   echo "Rust caret selected-range replacement was not accepted at beforeinput." >&2
   exit 1
 fi
@@ -108,7 +108,7 @@ if ! wait_for_eval "selection-replacement-ready.txt" '(() => { const editor = do
 fi
 
 "$pwcli" --session "$session" console 2>&1 | tee "$evidence_dir/console.txt"
-if ! rg -Fq "Errors: 0" "$evidence_dir/console.txt"; then
+if ! grep -Fq "Errors: 0" "$evidence_dir/console.txt"; then
   echo "Text caret evidence emitted browser console errors." >&2
   exit 1
 fi

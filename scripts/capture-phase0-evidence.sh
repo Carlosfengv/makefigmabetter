@@ -32,7 +32,7 @@ esac
 fixture_ready=0
 for attempt in $(seq 1 50); do
   "$pwcli" --session makefigma-phase0-evidence snapshot | tee "$evidence_dir/snapshot.txt"
-  if rg -q "Rust/WASM bridge ready" "$evidence_dir/snapshot.txt" && rg -q "fixed Phase 0 fixture loaded" "$evidence_dir/snapshot.txt"; then
+  if grep -Eq "Rust/WASM bridge ready" "$evidence_dir/snapshot.txt" && grep -Eq "fixed Phase 0 fixture loaded" "$evidence_dir/snapshot.txt"; then
     printf 'Fixture ready after %s snapshot attempt(s).\n' "$attempt" | tee "$evidence_dir/readiness.log"
     fixture_ready=1
     break

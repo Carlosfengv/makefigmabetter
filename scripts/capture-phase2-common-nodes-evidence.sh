@@ -29,7 +29,7 @@ session="makefigma-phase2-common-nodes-${RANDOM}${RANDOM}"
 ready=0
 for attempt in $(seq 1 50); do
   "$pwcli" --session "$session" snapshot > "$evidence_dir/snapshot.txt" 2>&1 || true
-  if rg -Fq "Rust/WASM bridge ready" "$evidence_dir/snapshot.txt" && rg -Fq "fixed Phase 2 common-nodes fixture loaded" "$evidence_dir/snapshot.txt"; then
+  if grep -Fq "Rust/WASM bridge ready" "$evidence_dir/snapshot.txt" && grep -Fq "fixed Phase 2 common-nodes fixture loaded" "$evidence_dir/snapshot.txt"; then
     printf 'Phase 2 common-nodes fixture ready after %s snapshot attempt(s).\n' "$attempt" | tee "$evidence_dir/readiness.log"
     ready=1
     break
@@ -43,7 +43,7 @@ fi
 "$pwcli" --session "$session" screenshot --filename "$evidence_dir/phase2-common-nodes.png" | tee "$evidence_dir/screenshot.log"
 "$pwcli" --session "$session" eval 'JSON.stringify({ userAgent: navigator.userAgent, viewport: { width: window.innerWidth, height: window.innerHeight }, dpr: window.devicePixelRatio, webgpu: Boolean(navigator.gpu), hardwareConcurrency: navigator.hardwareConcurrency ?? null })' | tee "$evidence_dir/browser-environment.txt"
 "$pwcli" --session "$session" console | tee "$evidence_dir/console.txt"
-if ! rg -Fq "Errors: 0" "$evidence_dir/console.txt"; then
+if ! grep -Fq "Errors: 0" "$evidence_dir/console.txt"; then
   echo "Phase 2 common-nodes evidence capture emitted browser console errors." >&2
   exit 1
 fi

@@ -39,9 +39,9 @@ capture_case() {
   for attempt in $(seq 1 50); do
     "$pwcli" --session "$session" snapshot > "$case_dir/snapshot.txt" 2>&1 || true
     "$pwcli" --session "$session" eval '(() => document.querySelector("[aria-label=\"Render evidence\"]")?.getAttribute("data-render-diagnostics") ?? "")()' > "$case_dir/diagnostics.json" 2>&1 || true
-    if rg -Fq "Rust/WASM bridge ready" "$case_dir/snapshot.txt" \
-      && rg -Fq "$expected_code" "$case_dir/diagnostics.json" \
-      && rg -Fq "$expected_scene" "$case_dir/snapshot.txt"; then
+    if grep -Fq "Rust/WASM bridge ready" "$case_dir/snapshot.txt" \
+      && grep -Fq "$expected_code" "$case_dir/diagnostics.json" \
+      && grep -Fq "$expected_scene" "$case_dir/snapshot.txt"; then
       matched=1
       break
     fi
@@ -55,7 +55,7 @@ capture_case() {
   fi
   "$pwcli" --session "$session" screenshot --filename "$case_dir/phase1-gpu-fault-$fault.png" 2>&1 | tee "$case_dir/screenshot.log"
   "$pwcli" --session "$session" console 2>&1 | tee "$case_dir/console.txt"
-  if ! rg -Fq "Errors: 0" "$case_dir/console.txt"; then
+  if ! grep -Fq "Errors: 0" "$case_dir/console.txt"; then
     echo "GPU fault $fault emitted browser console errors." >&2
     exit 1
   fi

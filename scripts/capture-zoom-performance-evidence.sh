@@ -36,7 +36,7 @@ wait_for_fixture() {
   for attempt in $(seq 1 150); do
     # Navigation can briefly make the CLI snapshot command unavailable. Treat
     # that as a readiness miss and keep polling instead of abandoning runs 2/3.
-    if pw snapshot > "$snapshot_path" 2>&1 && rg -q "Rust/WASM bridge ready" "$snapshot_path"; then
+    if pw snapshot > "$snapshot_path" 2>&1 && grep -Eq "Rust/WASM bridge ready" "$snapshot_path"; then
       printf 'Fixture ready after %s snapshot attempt(s).\n' "$attempt"
       return 0
     fi

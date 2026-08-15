@@ -125,7 +125,7 @@ run_browser_code() {
   local status=0
   output="$("$pwcli" --session "$session" run-code "$1" 2>&1)" || status=$?
   printf '%s\n' "$output"
-  if [[ "$status" -ne 0 ]] || rg -q '^(### Error|TimeoutError:)' <<< "$output"; then return 1; fi
+  if [[ "$status" -ne 0 ]] || grep -Eq '^(### Error|TimeoutError:)' <<< "$output"; then return 1; fi
 }
 json_literal() {
   node -p 'JSON.stringify(process.argv[1])' "$1"
@@ -153,7 +153,7 @@ wait_for_ui_expression() {
   local expression="$2"
   for attempt in $(seq 1 40); do
     capture_ui_state "$file"
-    if rg -q -- "$expression" "$evidence_dir/$file"; then return 0; fi
+    if grep -Eq -- "$expression" "$evidence_dir/$file"; then return 0; fi
     sleep 0.25
   done
   return 1
@@ -326,7 +326,7 @@ if [[ "${MAKEFIGMA_STABILITY_TRACE_DOCUMENT_OPERATIONS:-0}" == "1" ]]; then inst
 ready=0
 for attempt in $(seq 1 80); do
   capture_ui_state "ready.ui.json"
-  if rg -Fq '"bridgeReady":true' "$evidence_dir/ready.ui.json"; then ready=1; break; fi
+  if grep -Fq '"bridgeReady":true' "$evidence_dir/ready.ui.json"; then ready=1; break; fi
   sleep 0.25
 done
 if [[ "$ready" -ne 1 ]]; then
@@ -389,7 +389,7 @@ done
 
 read_hash "final-hash.json"
 read_runtime "final-runtime.json"
-if ! rg -q '"workerRecoveries"[[:space:]]*:[[:space:]]*[1-9]' "$evidence_dir/final-runtime.json"; then
+if ! grep -Eq '"workerRecoveries"[[:space:]]*:[[:space:]]*[1-9]' "$evidence_dir/final-runtime.json"; then
   echo "The controlled Engine Worker crash did not reach a confirmed recovery." >&2
   exit 1
 fi
@@ -397,7 +397,7 @@ fi
 "$pwcli" --session "$session" console 2>&1 | tee "$evidence_dir/console.txt"
 
 expected_bootstrap_error='^\[ERROR\] Failed to load resource: the server responded with a status of 404 \(Not Found\) @ http://127\.0\.0\.1:'"$web_port"'/document-api/v1/documents/00000000-0000-0000-0000-000000000000/snapshot:0$'
-unexpected_console_errors="$(rg '^\[ERROR\]' "$evidence_dir/console.txt" | rg -v -- "$expected_bootstrap_error" || true)"
+unexpected_console_errors="$(grep -E '^\[ERROR\]' "$evidence_dir/console.txt" | grep -Ev -- "$expected_bootstrap_error" || true)"
 if [[ -n "$unexpected_console_errors" ]]; then
   printf '%s\n' "$unexpected_console_errors" >&2
   echo "Stability capture emitted unexpected browser console errors." >&2

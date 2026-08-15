@@ -9,18 +9,17 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixturePath = "fixtures/documents/phase2-common-nodes.fixture.json";
 const manifestPath = "verification/phase2/common-nodes-fixture-manifest.json";
 
-export function phase2CommonNodesEvidence({ evidenceDirectory, evidenceUrl, capturedAt = new Date().toISOString() }) {
+export function phase2Evidence({ format, evidenceDirectory, evidenceUrl, fixturePaths, artifactPattern, capturedAt = new Date().toISOString() }) {
   const artifact = (path) => existsSync(resolve(root, path)) ? { path, sha256: sha256(readFileSync(resolve(root, path))) } : undefined;
   const artifacts = readdirSync(evidenceDirectory)
-    .filter((name) => /^(?:open|resize|snapshot|readiness|performance-warmup|screenshot-(?:start|end)|cycles|stability-summary)(?:-|\.)|^performance-run-\d+\.txt$|^(phase2-common-nodes(?:-(?:start|end))?\.png|screenshot\.log|console\.txt|browser-environment\.txt|performance-summary\.json)$/.test(name))
+    .filter((name) => artifactPattern.test(name))
     .map((name) => artifact(relative(root, resolve(evidenceDirectory, name))))
     .filter(Boolean);
   return {
-    format: "makefigma-phase2-common-nodes-evidence-v1",
+    format,
     capturedAt,
     evidenceUrl,
-    fixture: artifact(fixturePath),
-    fixtureManifest: artifact(manifestPath),
+    fixtures: fixturePaths.map(artifact).filter(Boolean),
     artifacts,
     ...(readEmbeddedJson(resolve(evidenceDirectory, "browser-environment.txt")) ? { browserEnvironment: readEmbeddedJson(resolve(evidenceDirectory, "browser-environment.txt")) } : {}),
     golden: {
@@ -34,6 +33,19 @@ export function phase2CommonNodesEvidence({ evidenceDirectory, evidenceUrl, capt
       },
     },
   };
+}
+
+export function phase2CommonNodesEvidence({ evidenceDirectory, evidenceUrl, capturedAt = new Date().toISOString() }) {
+  const result = phase2Evidence({
+    format: "makefigma-phase2-common-nodes-evidence-v1",
+    evidenceDirectory,
+    evidenceUrl,
+    fixturePaths: [fixturePath, manifestPath],
+    artifactPattern: /^(?:open|resize|snapshot|readiness|performance-warmup|screenshot-(?:start|end)|cycles|stability-summary)(?:-|\.)|^performance-run-\d+\.txt$|^(phase2-common-nodes(?:-(?:start|end))?\.png|screenshot\.log|console\.txt|browser-environment\.txt|performance-summary\.json)$/,
+    capturedAt,
+  });
+  const [fixture, fixtureManifest] = result.fixtures;
+  return { ...result, fixture, fixtureManifest, fixtures: undefined };
 }
 
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }

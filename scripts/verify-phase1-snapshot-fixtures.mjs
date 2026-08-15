@@ -6,11 +6,11 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const manifestPath = "fixtures/documents/phase1-snapshot-fixture-manifest.json";
-const expectedVersions = [13, 14, 15, 16, 17, 18, 19];
+const expectedVersions = [13, 14, 15, 16, 17, 18, 19, 20];
 // The current durable projection version emitted by snapshot_json(). The
 // manifest's currentSchemaVersion must equal it so a bump on either side that
 // forgets the other fails verification (P0-4).
-const CURRENT_SCHEMA_VERSION = 19;
+const CURRENT_SCHEMA_VERSION = 20;
 
 export function verifyPhase1SnapshotFixtures({ root = process.cwd() } = {}) {
   const manifest = readJson(root, manifestPath);

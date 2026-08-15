@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 19,
+  "schemaVersion": 20,
   "documentId": "00000000-0000-4000-8000-000000000010",
   "revision": 9,
   "canUndo": false,
@@ -13,7 +13,7 @@
     { "assetId": "00000000-0000-4000-8000-000000000201", "contentHash": "1111111111111111111111111111111111111111111111111111111111111111", "mediaType": "image/png", "byteLength": 256, "pixelWidth": 16, "pixelHeight": 16 }
   ],
   "nodes": [
-    { "id": "00000000-0000-4000-8000-000000000101", "name": "Root frame", "kind": "frame", "x": 0, "y": 0, "width": 600, "height": 400, "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000101:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "cornerRadius": 0, "text": "", "visible": true, "locked": false },
+    { "id": "00000000-0000-4000-8000-000000000101", "name": "Root frame", "kind": "frame", "x": 0, "y": 0, "width": 600, "height": 400, "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000101:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "cornerRadius": 0, "text": "", "visible": true, "locked": false, "autoLayout": { "mode": "horizontal", "padding": [10, 12, 14, 16], "itemSpacing": 8, "wrap": false, "primaryAlignment": "start", "counterAlignment": "center", "primarySizing": "fixed", "counterSizing": "fixed", "absolute": false } },
     { "id": "00000000-0000-4000-8000-000000000102", "name": "Arrowed line", "kind": "line", "x": 640, "y": 0, "width": 400, "height": 0, "fill": "#00000000", "stroke": "#111111", "strokeWidth": 4, "strokeCapStart": "round", "strokeCapEnd": "arrowLines", "strokeJoin": "round", "strokeMiterLimit": 8, "positionId": "00000000000000000000000000000102:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "cornerRadius": 0, "text": "", "visible": true, "locked": false },
     { "id": "00000000-0000-4000-8000-000000000103", "parentId": "00000000-0000-4000-8000-000000000101", "name": "Stacked panel", "kind": "rectangle", "x": 24, "y": 24, "width": 300, "height": 180, "fill": "#e6edff", "stroke": "#204080", "strokeWidth": 3, "fills": [ { "css": "#e6edff" }, { "css": "#ffcc0080" } ], "strokes": [ { "css": "#204080" }, { "css": "#ff000040" } ], "cornerRadius": 12, "cornerRadii": [4, 8, 16, 24], "cornerSmoothing": 0.6, "positionId": "00000000000000000000000000000103:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "opacity": 1, "text": "", "visible": true, "locked": false },
     { "id": "00000000-0000-4000-8000-000000000104", "parentId": "00000000-0000-4000-8000-000000000101", "name": "Image reference", "kind": "image", "x": 40, "y": 40, "width": 160, "height": 100, "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0, "positionId": "00000000000000000000000000000104:00000000000000000000000000000000", "pageId": "00000000-0000-0000-0000-000000000001", "assetId": "00000000-0000-4000-8000-000000000201", "opacity": 1, "cornerRadius": 8, "text": "", "visible": true, "locked": false },

@@ -16,6 +16,7 @@ const expectedNodes = [
   ["Independent-cap Arrow", "line"],
   ["Section", "section"],
   ["Fixture label", "text"],
+  ["Rotated Export Slice", "slice"],
 ];
 
 /** Validates the fixed Phase 2 browser evidence input before any Golden or
@@ -45,6 +46,8 @@ export function verifyPhase2CommonNodesFixture({ manifestPath = defaultManifest,
   if (!card || JSON.stringify(card.cornerRadii) !== JSON.stringify([18, 4, 26, 10]) || JSON.stringify(card.strokeWeights) !== JSON.stringify([2, 6, 3, 5])) return failed("INVALID_RECTANGLE_CASE", { fixture: manifest.fixture });
   const ellipse = fixture.nodes.find((node) => node.name === "Outside Ellipse");
   if (!ellipse || ellipse.arcData !== undefined || ellipse.strokeAlign !== "outside" || ellipse.strokeWidth !== 6) return failed("INVALID_ELLIPSE_STROKE_ALIGN_CASE", { fixture: manifest.fixture });
+  const slice = fixture.nodes.find((node) => node.name === "Rotated Export Slice");
+  if (!slice || slice.kind !== "slice" || slice.strokeWidth !== 0 || slice.fill !== "transparent" || slice.stroke !== "transparent" || !Number.isFinite(slice.rotation) || !slice.relativeTransform) return failed("INVALID_SLICE_CASE", { fixture: manifest.fixture });
   return { status: "pass", fixture: manifest.fixture, fixtureSha256, nodeCount: fixture.nodes.length };
 }
 

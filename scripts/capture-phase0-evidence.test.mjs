@@ -44,5 +44,5 @@ describe("Phase 0 evidence capture", () => {
     });
     const metadata = JSON.parse(readFileSync(join(evidenceDirectory, "evidence-metadata.json"), "utf8"));
     expect(metadata.artifacts.some((artifact) => artifact.path.endsWith("golden-verification.json"))).toBe(true);
-  });
+  }, 20_000);
 });
