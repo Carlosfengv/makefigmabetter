@@ -102,4 +102,4 @@
 | 完整同源 Stroke Geometry | Line、直角/圆角/独立圆角/Corner Smoothing 的统一 Weight Frame/Rectangle、以及直角四边 Weight 的 Rust/WASM Mesh 均已有专项验证；完整 Ellipse 的环形实例和 SVG 对齐描边也有覆盖。 | **未完成**：圆角或 Corner Smoothing 的四边 Weight、图片与所有导出目标尚未由同一 Rust Outline/Tessellation 完全驱动。 |
 | Mixed Inspector 能力矩阵 | 通用 Geometry、Opacity、Visible、Lock、全 Line Stroke、Frame/Rectangle 边 Stroke、Ellipse Stroke Align、Constraints 和 Paint Stack 的主要路径均有实现与 Fixture 证据。 | **未完成**：需要对每种多选组合形成完整的 NotApplicable 可访问性矩阵及端到端验收。 |
 | Golden 与性能 | 短时本地候选与源码冻结的 60 分钟候选（183 轮、console 0 error、Render P95 `1.01ms`、Input-to-render P95 `19ms`、输入队列 P95 `16.99ms`）均已固定 Fixture/manifest 哈希、截图、环境和性能记录。 | **未完成**：采集后已继续改进统一 Rectangle/Frame Stroke 网格，因此最终源码冻结后必须重跑 60 分钟采集；结果仍需由独立审核者冻结 Golden/性能候选。 |
-| 前端独立部署边界 | `pnpm check:boundaries` 仍拒绝 `src/app/api/workspaces/[workspaceKey]/route.ts`。 | **未完成**：工作区目录服务需迁移到独立后端，或由架构决策批准调整边界规则；不得以放宽检查掩盖问题。 |
+| 前端独立部署边界 | `pnpm check:boundaries` 已通过（258 个前端源文件）；工作区目录服务已迁入独立的 `services/workspace-api/`，前端仅经同源代理调用。 | 已完成候选；保持现有边界规则，最终冻结源码时随其余 R0 检查复跑。 |
