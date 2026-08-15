@@ -1,9 +1,12 @@
 node_modules/
 .next/
+.next-*/
 .local/
 target/
 .playwright-cli/
+.playwright-mcp/
 output/
+tmp/
 *.tsbuildinfo
 .DS_Store
 .env*
