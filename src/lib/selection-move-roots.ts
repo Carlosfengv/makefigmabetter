@@ -21,6 +21,17 @@ export function movableSelectionIds(nodes: readonly CanvasNode[], selection: rea
   });
   const movable = new Set<string>();
   const visited = new Set<string>();
+  const selected = new Set(selection);
+  const hasSelectedAncestor = (id: string) => {
+    const visitedAncestors = new Set<string>([id]);
+    let parentId = byId.get(id)?.parentId;
+    while (parentId && !visitedAncestors.has(parentId)) {
+      if (selected.has(parentId)) return true;
+      visitedAncestors.add(parentId);
+      parentId = byId.get(parentId)?.parentId;
+    }
+    return false;
+  };
   const visit = (id: string, parentMoves: boolean) => {
     if (visited.has(id)) return;
     visited.add(id);
@@ -29,6 +40,10 @@ export function movableSelectionIds(nodes: readonly CanvasNode[], selection: rea
     if (!(parentMoves && node.relativeTransform)) movable.add(id);
     children.get(id)?.forEach((child) => visit(child.id, true));
   };
-  selection.forEach((id) => visit(id, false));
+  // A selected Group owns the relative-v1 movement of its selected descendants.
+  // Resolve that hierarchy before walking the tree: otherwise [child, group]
+  // moves the child once directly and once through the Group, while
+  // [group, child] happens to work only because of iteration order.
+  selection.filter((id) => !hasSelectedAncestor(id)).forEach((id) => visit(id, false));
   return movable;
 }

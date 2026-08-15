@@ -2,6 +2,12 @@ import type { AffineMatrix } from "./scene-transform";
 
 export type CanvasResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
+/** Corner handles have a distinct canvas gesture: they rotate the selection.
+ * Edge-centre handles remain resize-only. */
+export function isCornerResizeHandle(handle: CanvasResizeHandle): boolean {
+  return handle === "nw" || handle === "ne" || handle === "se" || handle === "sw";
+}
+
 export type ResizeGeometry = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type ResizePoint = Readonly<{ x: number; y: number }>;
 export type FlipResizeGeometry = ResizeGeometry & Readonly<{

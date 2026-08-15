@@ -29,6 +29,9 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
       if (index >= 0) planned[index] = { ...planned[index], ...canvasNode(node), id: planned[index].id, kind: planned[index].kind };
       return { type: "update", node };
     }
+    if (command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles") {
+      return { ...command };
+    }
     if (command.type === "reparent") {
       const parentIds = command.parentIds.map((entry) => {
         const index = planned.findIndex((node) => node.id === entry.id);
@@ -58,6 +61,6 @@ function canvasNode(node: CoreProjectionNode): CanvasNode {
     width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fills: node.fills,
     fillGradient: node.fillGradient, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokes: node.strokes,
     strokeGradient: node.strokeGradient, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, radius: node.cornerRadius, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity,
-    text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked,
+    text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked, isMask: node.isMask,
   };
 }

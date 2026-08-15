@@ -228,9 +228,11 @@ export function translateNodeWorldPatch(
 }
 
 /**
- * Recomputes Group rectangles from their direct children without changing any
- * child's world transform. This is the matrix-native counterpart to Figma's
- * content-fitting Group bounds:
+ * Recomputes structural-container rectangles from their direct children without
+ * changing any child's world transform. This is the matrix-native counterpart
+ * to Figma's content-fitting Group bounds. BooleanOperation currently uses the
+ * operand union as its conservative bound until the shared clipping engine
+ * supplies the exact derived outline:
  *
  *   group' = group × translate(left, top)
  *   child' = translate(-left, -top) × child
@@ -260,7 +262,7 @@ export function normalizeGroupBounds(
     return value;
   };
   const groupIds = next
-    .filter((node) => node.kind === "group" && !options.excludeGroupIds?.has(node.id))
+    .filter((node) => (node.kind === "group" || node.kind === "booleanOperation") && !options.excludeGroupIds?.has(node.id))
     .sort((left, right) => depth(right.id) - depth(left.id))
     .map((node) => node.id);
 
@@ -281,12 +283,21 @@ export function normalizeGroupBounds(
       const local = world && nodePropsForWorldTransform(world, groupWorld, child.width, child.height);
       if (!local) return undefined;
       const index = next.findIndex((node) => node.id === child.id);
-      next[index] = { ...next[index], ...local };
+      // Auto Layout Frames use the legacy local x/y/rotation projection in
+      // Core; a Relative-v1 matrix on the container is intentionally rejected.
+      // They can still be children of a Group, so retain the equivalent local
+      // scalar geometry without writing the matrix back during normalization.
+      next[index] = {
+        ...next[index],
+        ...local,
+        ...(isAutoLayoutFrame(next[index]) ? { relativeTransform: undefined } : {}),
+      };
     }
 
     const localChildren = next.filter((node) => node.parentId === group.id);
     const localBounds = localChildren.flatMap((child) => {
-      const local = child.relativeTransform;
+      const local = child.relativeTransform
+        ?? nodePropsForWorldTransform(worldTransformForNode(next, child.id)!, groupWorld, child.width, child.height)?.relativeTransform;
       if (!local) return [];
       return [
         transformPoint(local, { x: 0, y: 0 }),
@@ -315,7 +326,9 @@ export function normalizeGroupBounds(
     const inverseShift = { ...IDENTITY_AFFINE, e: -left, f: -top };
     for (const child of localChildren) {
       const childIndex = next.findIndex((node) => node.id === child.id);
-      const relativeTransform = child.relativeTransform && multiplyAffine(inverseShift, child.relativeTransform);
+      const childLocal = child.relativeTransform
+        ?? nodePropsForWorldTransform(worldTransformForNode(next, child.id)!, groupWorld, child.width, child.height)?.relativeTransform;
+      const relativeTransform = childLocal && multiplyAffine(inverseShift, childLocal);
       if (!relativeTransform) return undefined;
       const patch = nodePropsForWorldTransform(
         multiplyAffine(movedGroupWorld, relativeTransform),
@@ -324,10 +337,18 @@ export function normalizeGroupBounds(
         child.height,
       );
       if (!patch) return undefined;
-      next[childIndex] = { ...next[childIndex], ...patch };
+      next[childIndex] = {
+        ...next[childIndex],
+        ...patch,
+        ...(isAutoLayoutFrame(next[childIndex]) ? { relativeTransform: undefined } : {}),
+      };
     }
   }
   return next;
+}
+
+function isAutoLayoutFrame(node: CanvasNode | undefined) {
+  return node?.kind === "frame" && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
 }
 
 function isInvertibleAffine(matrix: AffineMatrix) {

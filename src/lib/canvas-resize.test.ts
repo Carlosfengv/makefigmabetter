@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { hasCommittedResize, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry } from "./canvas-resize";
+import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle } from "./canvas-resize";
 
 describe("canvas corner resize", () => {
   const geometry = { x: 10, y: 20, width: 100, height: 60 };
+
+  it("identifies the four corner handles used for rotation", () => {
+    const corners: CanvasResizeHandle[] = ["nw", "ne", "se", "sw"];
+    const edges: CanvasResizeHandle[] = ["n", "e", "s", "w"];
+    expect(corners.every(isCornerResizeHandle)).toBe(true);
+    expect(edges.some(isCornerResizeHandle)).toBe(false);
+  });
 
   it("keeps the opposite corner fixed for every handle", () => {
     expect(resizeGeometryFromCorner(geometry, "se", { x: 20, y: 10 })).toEqual({ x: 10, y: 20, width: 120, height: 70 });

@@ -10,7 +10,7 @@ import { layerTreeRows } from "@/lib/layer-tree";
 const MAX_LAYER_DOM_ROWS = 150;
 
 function icon(kind: CanvasNode["kind"]) {
-  return kind === "ellipse" ? "○" : kind === "line" ? "／" : kind === "text" ? "T" : kind === "frame" ? "#" : kind === "section" ? "§" : kind === "group" ? "◇" : kind === "image" ? "▧" : "□";
+  return kind === "ellipse" ? "○" : kind === "polygon" ? "⬠" : kind === "star" ? "☆" : kind === "line" ? "／" : kind === "text" ? "T" : kind === "frame" ? "#" : kind === "section" ? "§" : kind === "group" ? "◇" : kind === "slice" ? "▣" : kind === "image" ? "▧" : "□";
 }
 
 export function VirtualLayerList({ nodes, selectedIds, canEdit, onSelect, onDrop, onNest, onRename }: {
@@ -27,6 +27,7 @@ export function VirtualLayerList({ nodes, selectedIds, canEdit, onSelect, onDrop
   const [draggedId, setDraggedId] = useState<string>();
   const [dropTarget, setDropTarget] = useState<{ id: string; inside: boolean }>();
   const [renaming, setRenaming] = useState<{ id: string; draft: string }>();
+  const renamingRef = useRef<{ id: string; draft: string } | undefined>(undefined);
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectedId = selectedIds[0];
   const treeNodes = useMemo(() => layerTreeRows(nodes, collapsedIds), [nodes, collapsedIds]);
@@ -100,19 +101,32 @@ export function VirtualLayerList({ nodes, selectedIds, canEdit, onSelect, onDrop
     onSelect(target);
     requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>(`button[data-layer-id="${target}"]`)?.focus());
   };
+  const focusLayerRow = (id: string) => requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>(`button[data-layer-id="${id}"]`)?.focus());
+  const finishRename = (node: CanvasNode, save: boolean, restoreFocus: boolean) => {
+    const current = renamingRef.current;
+    // Enter causes the input to unmount, which can immediately emit blur. Use a
+    // ref as the one-shot ownership token so that blur cannot enqueue the same
+    // rename a second time.
+    if (!current || current.id !== node.id) return;
+    renamingRef.current = undefined;
+    setRenaming(undefined);
+    if (save) {
+      const name = current.draft.trim();
+      if (name && name !== node.name) onRename(node.id, name);
+    }
+    // A pointer-initiated blur should keep the pointer's new focus target. The
+    // keyboard paths must instead return focus to their virtualized row.
+    if (restoreFocus) focusLayerRow(node.id);
+  };
   const beginRename = (event: React.KeyboardEvent<HTMLButtonElement>, node: CanvasNode) => {
     if (event.key !== "F2" || !canEdit) return false;
     event.preventDefault();
     event.stopPropagation();
-    setRenaming({ id: node.id, draft: node.name });
+    const next = { id: node.id, draft: node.name };
+    renamingRef.current = next;
+    setRenaming(next);
     requestAnimationFrame(() => listRef.current?.querySelector<HTMLInputElement>(`input[data-layer-rename="${node.id}"]`)?.focus());
     return true;
-  };
-  const commitRename = (node: CanvasNode) => {
-    if (renaming?.id !== node.id) return;
-    const name = renaming.draft.trim();
-    setRenaming(undefined);
-    if (name && name !== node.name) onRename(node.id, name);
   };
   const toggleCollapsed = (id: string) => setCollapsedIds((current) => {
     const next = new Set(current);
@@ -127,7 +141,12 @@ export function VirtualLayerList({ nodes, selectedIds, canEdit, onSelect, onDrop
     const { node, depth, hasChildren, collapsed } = row;
     rows.push(
       <div key={node.id} role="listitem" aria-setsize={treeNodes.length} aria-posinset={virtualIndex + 1}>
-      {hasChildren && <button type="button" className="layer-collapse" style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, left: `${8 + depth * 16}px` }} aria-label={`${collapsed ? "Expand" : "Collapse"} ${node.name}`} aria-expanded={!collapsed} onClick={() => toggleCollapsed(node.id)}>{collapsed ? "›" : "⌄"}</button>}{renaming?.id === node.id ? <input data-layer-rename={node.id} className="layer-row layer-row-rename" style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, paddingLeft: `${hasChildren ? 28 + depth * 16 : 12 + depth * 16}px` }} autoFocus maxLength={100} aria-label={`Rename ${node.name}`} value={renaming.draft} onChange={(event) => setRenaming((current) => current?.id === node.id ? { ...current, draft: event.target.value } : current)} onBlur={() => commitRename(node)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitRename(node); } if (event.key === "Escape") { event.preventDefault(); setRenaming(undefined); } }} /> : <button data-layer-id={node.id} draggable={canEdit} className={`layer-row ${selectedIds.includes(node.id) ? "selected" : ""} ${dropTarget?.id === node.id ? dropTarget.inside ? "drop-inside" : "drop-before" : ""} ${draggedId === node.id ? "dragging" : ""}`} style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, paddingLeft: `${hasChildren ? 28 + depth * 16 : 12 + depth * 16}px` }} onClick={(event) => onSelect(node.id, { additive: event.shiftKey || event.metaKey || event.ctrlKey })} onKeyDown={(event) => { if (!beginRename(event, node)) moveKeyboardFocus(event, row); }} onDragStart={(event) => {
+      {hasChildren && <button type="button" className="layer-collapse" style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, left: `${8 + depth * 16}px` }} aria-label={`${collapsed ? "Expand" : "Collapse"} ${node.name}`} aria-expanded={!collapsed} onClick={() => toggleCollapsed(node.id)}>{collapsed ? "›" : "⌄"}</button>}{renaming?.id === node.id ? <input data-layer-rename={node.id} className="layer-row layer-row-rename" style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, paddingLeft: `${hasChildren ? 28 + depth * 16 : 12 + depth * 16}px` }} autoFocus maxLength={100} aria-label={`Rename ${node.name}`} value={renaming.draft} onChange={(event) => setRenaming((current) => {
+        if (current?.id !== node.id) return current;
+        const next = { ...current, draft: event.target.value };
+        renamingRef.current = next;
+        return next;
+      })} onBlur={() => finishRename(node, true, false)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); finishRename(node, true, true); } if (event.key === "Escape") { event.preventDefault(); finishRename(node, false, true); } }} /> : <button data-layer-id={node.id} draggable={canEdit} className={`layer-row ${selectedIds.includes(node.id) ? "selected" : ""} ${dropTarget?.id === node.id ? dropTarget.inside ? "drop-inside" : "drop-before" : ""} ${draggedId === node.id ? "dragging" : ""}`} style={{ transform: `translateY(${virtualIndex * LAYER_ROW_HEIGHT}px)`, paddingLeft: `${hasChildren ? 28 + depth * 16 : 12 + depth * 16}px` }} onClick={(event) => onSelect(node.id, { additive: event.shiftKey || event.metaKey || event.ctrlKey })} onKeyDown={(event) => { if (!beginRename(event, node)) moveKeyboardFocus(event, row); }} onDragStart={(event) => {
         if (!canEdit) { event.preventDefault(); return; }
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", node.id);

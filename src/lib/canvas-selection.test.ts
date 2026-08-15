@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { resolveCanvasObjectSelection, resolveGroupSelectionTarget } from "./canvas-selection";
+import { resolveCanvasObjectSelection, resolveNestedKeyboardTarget, resolveNestedSelectionTarget } from "./canvas-selection";
 import type { CanvasNode } from "./editor-protocol";
 
 const groupTree: CanvasNode[] = [
   { id: "outer", name: "Outer", kind: "group", x: 0, y: 0, width: 100, height: 100, rotation: 0, fill: "transparent", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
   { id: "inner", parentId: "outer", name: "Inner", kind: "group", x: 10, y: 10, width: 50, height: 50, rotation: 0, fill: "transparent", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
   { id: "child", parentId: "inner", name: "Child", kind: "rectangle", x: 15, y: 15, width: 20, height: 20, rotation: 0, fill: "#fff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
+];
+
+const frameTree: CanvasNode[] = [
+  { id: "frame", name: "Frame", kind: "frame", x: 0, y: 0, width: 100, height: 100, rotation: 0, fill: "#fff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
+  { id: "nested-frame", parentId: "frame", name: "Nested frame", kind: "frame", x: 10, y: 10, width: 80, height: 80, rotation: 0, fill: "#fff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
+  { id: "frame-child", parentId: "nested-frame", name: "Frame child", kind: "rectangle", x: 20, y: 20, width: 20, height: 20, rotation: 0, fill: "#fff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
 ];
 
 describe("canvas object selection", () => {
@@ -23,21 +29,32 @@ describe("canvas object selection", () => {
   });
 
   it("selects the outer Group and drills through each nested boundary one level at a time", () => {
-    expect(resolveGroupSelectionTarget(groupTree, "child", false)?.id).toBe("outer");
-    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["outer"])?.id).toBe("outer");
-    expect(resolveGroupSelectionTarget(groupTree, "child", true, ["outer"])?.id).toBe("inner");
-    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["inner"])?.id).toBe("inner");
-    expect(resolveGroupSelectionTarget(groupTree, "child", true, ["inner"])?.id).toBe("child");
-    expect(resolveGroupSelectionTarget(groupTree, "child", true)?.id).toBe("child");
+    expect(resolveNestedSelectionTarget(groupTree, "child", false)?.id).toBe("outer");
+    expect(resolveNestedSelectionTarget(groupTree, "child", false, ["outer"])?.id).toBe("outer");
+    expect(resolveNestedSelectionTarget(groupTree, "child", true, ["outer"])?.id).toBe("inner");
+    expect(resolveNestedSelectionTarget(groupTree, "child", false, ["inner"])?.id).toBe("inner");
+    expect(resolveNestedSelectionTarget(groupTree, "child", true, ["inner"])?.id).toBe("child");
+    expect(resolveNestedSelectionTarget(groupTree, "child", true)?.id).toBe("child");
+  });
+
+  it("treats Frames as the same nested selection boundary and supports deep select", () => {
+    expect(resolveNestedSelectionTarget(frameTree, "frame-child", false)?.id).toBe("frame");
+    expect(resolveNestedSelectionTarget(frameTree, "frame-child", true, ["frame"])?.id).toBe("nested-frame");
+    expect(resolveNestedSelectionTarget(frameTree, "frame-child", false, [], true)?.id).toBe("frame-child");
+  });
+
+  it("moves a nested selection with Enter and Shift+Enter", () => {
+    expect(resolveNestedKeyboardTarget(frameTree, ["frame"], "child")?.id).toBe("nested-frame");
+    expect(resolveNestedKeyboardTarget(frameTree, ["nested-frame"], "parent")?.id).toBe("frame");
   });
 
   it("keeps a deeply selected child selected when beginning a canvas drag", () => {
-    expect(resolveGroupSelectionTarget(groupTree, "child", false, ["child"])?.id).toBe("child");
+    expect(resolveNestedSelectionTarget(groupTree, "child", false, ["child"])?.id).toBe("child");
   });
 
   it("keeps a directly hit Group and tolerates malformed parent cycles", () => {
-    expect(resolveGroupSelectionTarget(groupTree, "inner", false)?.id).toBe("inner");
+    expect(resolveNestedSelectionTarget(groupTree, "inner", false)?.id).toBe("inner");
     const cyclic = [{ ...groupTree[2], parentId: "child" }];
-    expect(resolveGroupSelectionTarget(cyclic, "child", false)?.id).toBe("child");
+    expect(resolveNestedSelectionTarget(cyclic, "child", false)?.id).toBe("child");
   });
 });

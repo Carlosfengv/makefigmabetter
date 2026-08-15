@@ -28,4 +28,20 @@ describe("worldVisualBoundsForNode", () => {
     const frame = { ...rectangle, id: "frame", kind: "frame" as const, strokeWeights: undefined };
     expect(worldVisualBoundsForNode([frame], frame)).toEqual({ left: 2, top: 12, right: 118, bottom: 88 });
   });
+
+  it("includes a visible Drop Shadow in the culling and export envelope", () => {
+    const rectangle = {
+      ...createNode("rectangle", 10, 20), id: "shadow", width: 100, height: 60,
+      dropShadow: { offsetX: 8, offsetY: 12, blurRadius: 10, spread: 2, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true },
+    };
+    expect(worldVisualBoundsForNode([rectangle], rectangle)).toEqual({ left: 6, top: 20, right: 130, bottom: 104 });
+  });
+
+  it("unions every visible Effect Stack shadow into the culling envelope", () => {
+    const first = { offsetX: 8, offsetY: 12, blurRadius: 10, spread: 2, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true };
+    const second = { offsetX: -30, offsetY: -10, blurRadius: 4, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true };
+    const rectangle = { ...createNode("rectangle", 10, 20), id: "stack", width: 100, height: 60, dropShadow: first, effectStack: [{ dropShadow: first }, { dropShadow: second }] };
+
+    expect(worldVisualBoundsForNode([rectangle], rectangle)).toEqual({ left: -24, top: 6, right: 130, bottom: 104 });
+  });
 });

@@ -1,5 +1,6 @@
 import type { AssetRejection } from "./untrusted-asset";
 import type { RasterDecodeMetadata, RasterDimensions, RasterOrientation } from "./raster-decode-policy";
+import { createId } from "./editor-protocol";
 
 type DecodeResponse =
   | { type: "result"; requestId: string; bitmap: ImageBitmap; metadata: RasterDecodeMetadata }
@@ -22,7 +23,7 @@ export function decodeRasterInWorker(
       return;
     }
     const worker = new Worker(new URL("../workers/asset-decode.worker.ts", import.meta.url));
-    const requestId = crypto.randomUUID();
+    const requestId = createId();
     const state: { timer?: ReturnType<typeof globalThis.setTimeout>; finished: boolean } = { finished: false };
     const finish = () => {
       if (state.finished) return false;

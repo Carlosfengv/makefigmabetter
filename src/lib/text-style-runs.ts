@@ -6,9 +6,13 @@ export type RenderTextStyle = {
   fontWeight: number;
   italic: boolean;
   letterSpacing: number;
+  color?: DocumentTextProperties["runs"][number]["color"];
 };
 
 export type StyledTextSpan = { text: string; start: number; end: number; style: RenderTextStyle };
+export type TextVisualRun = { start: number; end: number; direction: "ltr" | "rtl" };
+/** A style span split at the UAX #9 run boundary and ordered left-to-right for painting. */
+export type VisualStyledTextSpan = StyledTextSpan & { direction: TextVisualRun["direction"] };
 
 const defaultStyle: RenderTextStyle = {
   fontSize: 31,
@@ -46,7 +50,37 @@ export function styledTextSpans(text: string, start: number, end: number, proper
         fontWeight: run.fontWeight,
         italic: run.italic,
         letterSpacing: run.letterSpacing,
+        color: run.color,
       } : defaultStyle,
     };
   }).filter((span) => span.text.length > 0);
+}
+
+/**
+ * Intersects Canonical style runs with already-validated UAX #9 visual runs.
+ * Canvas paints independently positioned chunks from physical left to right,
+ * so RTL runs reverse their logical style pieces while retaining each piece's
+ * source range and shaping direction. This lets complex-script lines keep
+ * colour, weight and font changes instead of drawing the entire line using
+ * its first style.
+ */
+export function styledTextVisualSpans(text: string, start: number, end: number, properties: DocumentTextProperties | undefined, visualRuns: readonly TextVisualRun[]): VisualStyledTextSpan[] {
+  const bytes = new TextEncoder().encode(text);
+  const logical = styledTextSpans(text, start, end, properties);
+  const visual: VisualStyledTextSpan[] = [];
+  for (const run of visualRuns) {
+    const runStart = Math.max(start, run.start);
+    const runEnd = Math.min(end, run.end);
+    if (runStart >= runEnd) continue;
+    const pieces = logical.flatMap((span) => {
+      const pieceStart = Math.max(runStart, span.start);
+      const pieceEnd = Math.min(runEnd, span.end);
+      if (pieceStart >= pieceEnd) return [];
+      const piece = new TextDecoder().decode(bytes.slice(pieceStart, pieceEnd));
+      return piece ? [{ text: piece, start: pieceStart, end: pieceEnd, style: span.style, direction: run.direction }] : [];
+    });
+    if (run.direction === "rtl") pieces.reverse();
+    visual.push(...pieces);
+  }
+  return visual;
 }

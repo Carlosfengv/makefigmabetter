@@ -1,6 +1,7 @@
-import { createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type EditorClipboard, type EditorCommand } from "./editor-protocol";
+import { createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type EditorClipboard, type EditorCommand } from "./editor-protocol";
+import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
-import { nodePropsForWorldTransform, worldBoundsForNode, worldTransformForNode } from "./scene-transform";
+import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
 
 export type { CoreBatchCommand, CoreProjectionNode } from "./editor-protocol";
 export type ResolvedCoreBatch = {
@@ -14,13 +15,242 @@ export type ResolvedCoreBatch = {
 };
 
 export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
-  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, relativeTransform: node.relativeTransform, opacity: node.opacity, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, assetId: node.assetId, extensions: node.extensions };
+  // Keep the legacy R3 field synchronized with the first ordered effect so
+  // older snapshots and render paths remain lossless while the Inspector edits
+  // the whole stack.
+  const effectStack = node.effectStack?.length
+    ? node.effectStack[0].dropShadow && node.dropShadow && !sameDropShadow(node.effectStack[0].dropShadow, node.dropShadow)
+      ? [{ dropShadow: node.dropShadow }, ...node.effectStack.slice(1)]
+      : node.effectStack
+    : node.dropShadow ? [{ dropShadow: node.dropShadow }] : [];
+  const dropShadow = effectStack[0]?.dropShadow ?? node.dropShadow;
+  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: node.autoLayout, relativeTransform: node.relativeTransform, opacity: node.opacity, blendMode: node.blendMode ?? "normal", dropShadow, effectStack, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, isMask: Boolean(node.isMask), assetId: node.assetId, extensions: node.extensions };
+}
+
+function sameDropShadow(left: CanvasNode["dropShadow"], right: CanvasNode["dropShadow"]) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+export type FlattenedBooleanPath = Readonly<{
+  subpaths: readonly {
+    closed: boolean;
+    points: readonly { x: number; y: number }[];
+  }[];
+}>;
+
+export type ResolvedFlattenBooleanBatch = Readonly<{
+  batch: CoreBatchCommand[];
+  replacement: CanvasNode;
+}>;
+
+export type ResolvedOutlineStrokeBatch = Readonly<{
+  batch: CoreBatchCommand[];
+  outlined: CanvasNode;
+}>;
+
+export type ResolvedLineOutlineStrokeBatch = Readonly<{
+  batch: CoreBatchCommand[];
+  outlined: CanvasNode;
+}>;
+
+export type ResolvedParametricToVectorBatch = Readonly<{
+  batch: CoreBatchCommand[];
+  replacement: CanvasNode;
+}>;
+
+/** Turns one valid live Boolean subtree into the Vector result produced by the
+ * Rust geometry bridge. The replacement is created before deleting the wrapper
+ * and takes the wrapper's old layer position, so Core records the entire
+ * conversion as exactly one undoable transaction. */
+export function resolveFlattenBooleanBatch(
+  nodes: readonly CanvasNode[],
+  booleanId: string,
+  path: FlattenedBooleanPath,
+  createId: () => string = generateId,
+): ResolvedFlattenBooleanBatch | undefined {
+  const boolean = nodes.find((node) => node.id === booleanId);
+  const operands = boolean && sortNodesByLayerOrder(nodes.filter((node) => node.parentId === boolean.id));
+  const source = operands?.[0];
+  if (!boolean || boolean.kind !== "booleanOperation" || !source || operands.length < 2 || operands.some((node) => node.kind !== "vector" || !node.vectorPath)) return undefined;
+  const replacementId = createId();
+  const replacement: CanvasNode = {
+    ...source,
+    id: replacementId,
+    kind: "vector",
+    name: `${boolean.name} flattened`,
+    pageId: boolean.pageId,
+    parentId: boolean.parentId,
+    x: boolean.x,
+    y: boolean.y,
+    width: boolean.width,
+    height: boolean.height,
+    rotation: boolean.rotation,
+    relativeTransform: boolean.relativeTransform,
+    positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
+    vectorPath: {
+      fillRule: "nonZero",
+      subpaths: path.subpaths.map((subpath) => ({
+        closed: subpath.closed,
+        points: subpath.points.map((point) => ({ id: createId(), x: point.x, y: point.y, pointType: "corner" as const })),
+      })),
+    },
+  };
+  return {
+    replacement,
+    batch: [
+      { type: "create", node: coreProjectionNode(replacement) },
+      // Core deliberately rejects parent deletion while its live Boolean
+      // operands still exist. Delete children first, then the wrapper, within
+      // this one atomic transaction so Undo restores the whole structure.
+      { type: "delete", ids: operands.map((operand) => operand.id) },
+      { type: "delete", ids: [boolean.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: boolean.positionId ?? replacement.positionId! }] },
+    ],
+  };
+}
+
+/** Replaces a Vector's paint stroke with the closed fill contours derived by
+ * Rust's shared stroke tessellation. Keeping its ID turns Outline Stroke into
+ * one normal Vector update, with exact Core undo/redo semantics. */
+export function resolveOutlineStrokeBatch(
+  nodes: readonly CanvasNode[],
+  vectorId: string,
+  path: FlattenedBooleanPath,
+  createId: () => string = generateId,
+): ResolvedOutlineStrokeBatch | undefined {
+  const vector = nodes.find((node) => node.id === vectorId);
+  if (!vector || vector.kind !== "vector" || !vector.vectorPath || vector.strokeWidth <= 0 || vector.strokeDashPattern?.length || !path.subpaths.length || path.subpaths.some((subpath) => !subpath.closed || subpath.points.length < 3)) return undefined;
+  const outlined: CanvasNode = {
+    ...vector,
+    name: `${vector.name} outlined`,
+    fill: vector.stroke,
+    fillColor: vector.strokeColor,
+    fillGradient: vector.strokeGradient,
+    fills: vector.strokes && structuredClone(vector.strokes),
+    stroke: "transparent",
+    strokeColor: undefined,
+    strokeGradient: undefined,
+    strokes: undefined,
+    strokeWidth: 0,
+    strokeCapStart: "none",
+    strokeCapEnd: "none",
+    strokeDashPattern: [],
+    vectorPath: {
+      fillRule: "nonZero",
+      subpaths: path.subpaths.map((subpath) => ({
+        closed: true,
+        points: subpath.points.map((point) => ({ id: createId(), x: point.x, y: point.y, pointType: "corner" as const })),
+      })),
+    },
+  };
+  return { outlined, batch: [{ type: "update", node: coreProjectionNode(outlined) }] };
+}
+
+/** Converts a solid, matching-cap Line into the same Rust-derived closed
+ * contours used for Vector outlining. Node kinds are immutable in Core, so a
+ * Line needs one create/delete/reposition transaction instead of a Vector's
+ * same-ID update. The replacement's affine maps its path's local origin to
+ * the original line endpoint, preserving rotation and Relative-v1 parents. */
+export function resolveLineOutlineStrokeBatch(
+  nodes: readonly CanvasNode[],
+  lineId: string,
+  path: FlattenedBooleanPath,
+  createId: () => string = generateId,
+): ResolvedLineOutlineStrokeBatch | undefined {
+  const line = nodes.find((node) => node.id === lineId);
+  if (!line || line.kind !== "line" || line.strokeWidth <= 0 || line.strokeDashPattern?.length || !path.subpaths.length || path.subpaths.some((subpath) => !subpath.closed || subpath.points.length < 3)) return undefined;
+  const points = path.subpaths.flatMap((subpath) => subpath.points);
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  if (![width, height].every(Number.isFinite) || width <= 0 || height <= 0) return undefined;
+  const world = worldTransformForNode(nodes, line.id);
+  const parentWorld = line.parentId ? worldTransformForNode(nodes, line.parentId) : undefined;
+  const transform = world && nodePropsForWorldTransform(world, parentWorld, width, height);
+  if (!transform) return undefined;
+  const replacementId = createId();
+  const outlined: CanvasNode = {
+    ...line,
+    ...transform,
+    id: replacementId,
+    kind: "vector",
+    name: `${line.name} outlined`,
+    width,
+    height,
+    positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
+    fill: line.stroke,
+    fillColor: line.strokeColor,
+    fillGradient: line.strokeGradient,
+    fills: line.strokes && structuredClone(line.strokes),
+    stroke: "transparent",
+    strokeColor: undefined,
+    strokeGradient: undefined,
+    strokes: undefined,
+    strokeWidth: 0,
+    strokeCapStart: "none",
+    strokeCapEnd: "none",
+    strokeDashPattern: [],
+    vectorPath: {
+      fillRule: "nonZero",
+      subpaths: path.subpaths.map((subpath) => ({
+        closed: true,
+        points: subpath.points.map((point) => ({ id: createId(), x: point.x, y: point.y, pointType: "corner" as const })),
+      })),
+    },
+  };
+  return {
+    outlined,
+    batch: [
+      { type: "create", node: coreProjectionNode(outlined) },
+      { type: "delete", ids: [line.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: line.positionId ?? outlined.positionId! }] },
+    ],
+  };
+}
+
+/** Replaces one regular parametric shape with the exact derived closed path in
+ * one Core transaction. The replacement keeps the source transform, paints and
+ * layer position; its new identity lets Core undo restore the original NodeKind
+ * and its editable parameters without a special-case history record. */
+export function resolveParametricShapeToVectorBatch(
+  nodes: readonly CanvasNode[],
+  shapeId: string,
+  points: readonly { x: number; y: number }[],
+  createId: () => string = generateId,
+): ResolvedParametricToVectorBatch | undefined {
+  const shape = nodes.find((node) => node.id === shapeId);
+  if (!shape || (shape.kind !== "polygon" && shape.kind !== "star") || !shape.parametricShape || points.length < 3 || points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return undefined;
+  const replacementId = createId();
+  const replacement: CanvasNode = {
+    ...shape,
+    id: replacementId,
+    kind: "vector",
+    name: `${shape.name} vector`,
+    positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
+    parametricShape: undefined,
+    vectorPath: {
+      fillRule: "nonZero",
+      subpaths: [{
+        closed: true,
+        points: points.map((point) => ({ id: createId(), x: point.x, y: point.y, pointType: "corner" as const })),
+      }],
+    },
+  };
+  return {
+    replacement,
+    batch: [
+      { type: "create", node: coreProjectionNode(replacement) },
+      { type: "delete", ids: [shape.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: shape.positionId ?? replacement.positionId! }] },
+    ],
+  };
 }
 
 /** Resolves UI-level partial patches to the concrete Core commands accepted by WASM.
  * A failed resolution returns nothing and deliberately leaves the caller's projection
  * untouched, matching Rust's all-or-nothing transaction boundary. */
-export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[], createId: () => string = () => crypto.randomUUID()): ResolvedCoreBatch | undefined {
+export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[], createId: () => string = generateId): ResolvedCoreBatch | undefined {
   const nextNodes = structuredClone(nodes);
   const batch: CoreBatchCommand[] = [];
   const createdIds: string[] = [];
@@ -43,10 +273,179 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const node = { ...previous, ...command.patch, id: previous.id, kind: previous.kind };
       if ("fill" in command.patch) { node.fillColor = documentColorFromCssHex(node.fill); node.fillGradient = undefined; }
       if ("stroke" in command.patch) { node.strokeColor = documentColorFromCssHex(node.stroke); node.strokeGradient = undefined; }
+      const enablesAutoLayout = previous.kind === "frame"
+        && (previous.autoLayout?.mode ?? "none") === "none"
+        && (node.autoLayout?.mode === "horizontal" || node.autoLayout?.mode === "vertical");
+      // Figma converts a Frame's ordinary children into layout children when
+      // Auto Layout is added. Relative-v1 matrices are valid under a manual
+      // Frame but intentionally invalid for a flow child, whose geometry is
+      // now owned by the layout engine. Normalize those direct flow children
+      // first in the same transaction; absolute children retain their matrix.
+      if (enablesAutoLayout) {
+        nextNodes.forEach((child, childIndex) => {
+          if (child.parentId !== previous.id || !child.relativeTransform || child.autoLayout?.absolute) return;
+          const normalized = { ...child, relativeTransform: undefined };
+          nextNodes[childIndex] = normalized;
+          batch.push({ type: "update", node: coreProjectionNode(normalized) });
+        });
+      }
       nextNodes[index] = node;
-      if (node.kind === "group") affectedGroupIds.add(node.id);
-      groupAncestorIds(nextNodes, node.parentId).forEach((id) => affectedGroupIds.add(id));
+      if (updateAffectsGroupBounds(command.patch)) {
+        if (node.kind === "group" || node.kind === "booleanOperation") affectedGroupIds.add(node.id);
+        groupAncestorIds(nextNodes, node.parentId).forEach((id) => affectedGroupIds.add(id));
+      }
       batch.push({ type: "update", node: coreProjectionNode(node) });
+      continue;
+    }
+    if (command.type === "moveVectorPoint") {
+      if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const point = path.subpaths.flatMap((subpath) => subpath.points).find((candidate) => candidate.id === command.pointId);
+      if (!point) return undefined;
+      point.x = command.x;
+      point.y = command.y;
+      if (path.subpaths.some((subpath) => subpath.points.some((candidate, pointIndex) => pointIndex > 0 && candidate.x === subpath.points[pointIndex - 1].x && candidate.y === subpath.points[pointIndex - 1].y) || (subpath.closed && subpath.points.length > 1 && subpath.points[0].x === subpath.points[subpath.points.length - 1].x && subpath.points[0].y === subpath.points[subpath.points.length - 1].y))) return undefined;
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ type: "moveVectorPoint", id: command.id, pointId: command.pointId, x: command.x, y: command.y });
+      continue;
+    }
+    if (command.type === "setVectorSubpathClosed") {
+      if (!Number.isInteger(command.subpathIndex) || command.subpathIndex < 0) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const subpath = path.subpaths[command.subpathIndex];
+      if (!subpath || (command.closed && subpath.points.length < 3)) return undefined;
+      subpath.closed = command.closed;
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ type: "setVectorSubpathClosed", id: command.id, subpathIndex: command.subpathIndex, closed: command.closed });
+      continue;
+    }
+    if (command.type === "insertVectorPoint") {
+      if (!Number.isInteger(command.subpathIndex) || command.subpathIndex < 0 || ![command.point.x, command.point.y, command.point.handleIn?.x, command.point.handleIn?.y, command.point.handleOut?.x, command.point.handleOut?.y].every((value) => value === undefined || Number.isFinite(value))) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath || node.vectorPath.subpaths.flatMap((subpath) => subpath.points).some((point) => point.id === command.point.id)) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const subpath = path.subpaths[command.subpathIndex];
+      if (!subpath) return undefined;
+      const insertionIndex = command.afterPointId === undefined ? 0 : subpath.points.findIndex((point) => point.id === command.afterPointId) + 1;
+      if (insertionIndex === 0 && command.afterPointId !== undefined) return undefined;
+      subpath.points.splice(insertionIndex, 0, structuredClone(command.point));
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ type: "insertVectorPoint", id: command.id, subpathIndex: command.subpathIndex, afterPointId: command.afterPointId, point: structuredClone(command.point) });
+      continue;
+    }
+    if (command.type === "splitVectorSegment") {
+      if (!Number.isInteger(command.subpathIndex) || command.subpathIndex < 0 || !Number.isFinite(command.t) || command.t <= 0 || command.t >= 1) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath || node.vectorPath.subpaths.flatMap((subpath) => subpath.points).some((point) => point.id === command.pointId)) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const subpath = path.subpaths[command.subpathIndex];
+      const afterIndex = subpath?.points.findIndex((point) => point.id === command.afterPointId) ?? -1;
+      const nextIndex = afterIndex + 1 < (subpath?.points.length ?? 0) ? afterIndex + 1 : subpath?.closed ? 0 : -1;
+      if (!subpath || afterIndex < 0 || nextIndex < 0) return undefined;
+      const from = subpath.points[afterIndex];
+      const to = subpath.points[nextIndex];
+      const controlFrom = from.handleOut ? { x: from.x + from.handleOut.x, y: from.y + from.handleOut.y } : { x: from.x, y: from.y };
+      const controlTo = to.handleIn ? { x: to.x + to.handleIn.x, y: to.y + to.handleIn.y } : { x: to.x, y: to.y };
+      const lerp = (left: { x: number; y: number }, right: { x: number; y: number }) => ({ x: left.x + (right.x - left.x) * command.t, y: left.y + (right.y - left.y) * command.t });
+      const first = lerp(from, controlFrom); const second = lerp(controlFrom, controlTo); const third = lerp(controlTo, to);
+      const fourth = lerp(first, second); const fifth = lerp(second, third); const position = lerp(fourth, fifth);
+      const curved = Boolean(from.handleOut || to.handleIn);
+      subpath.points[afterIndex].handleOut = curved ? { x: first.x - from.x, y: first.y - from.y } : undefined;
+      subpath.points[nextIndex].handleIn = curved ? { x: third.x - to.x, y: third.y - to.y } : undefined;
+      subpath.points.splice(afterIndex + 1, 0, { id: command.pointId, x: position.x, y: position.y, handleIn: curved ? { x: fourth.x - position.x, y: fourth.y - position.y } : undefined, handleOut: curved ? { x: fifth.x - position.x, y: fifth.y - position.y } : undefined, pointType: curved ? "asymmetric" : "corner" });
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ ...command });
+      continue;
+    }
+    if (command.type === "connectVectorEndpoints") {
+      if (![command.firstSubpathIndex, command.secondSubpathIndex].every((index) => Number.isInteger(index) && index >= 0)) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const first = path.subpaths[command.firstSubpathIndex];
+      const second = path.subpaths[command.secondSubpathIndex];
+      const endpoint = (subpath: typeof first, pointId: string) => {
+        if (!subpath || subpath.closed || !subpath.points.length) return undefined;
+        if (subpath.points[0].id === pointId) return "start" as const;
+        if (subpath.points.at(-1)?.id === pointId) return "end" as const;
+        return undefined;
+      };
+      const firstEndpoint = endpoint(first, command.firstPointId);
+      const secondEndpoint = endpoint(second, command.secondPointId);
+      if (!first || !second || !firstEndpoint || !secondEndpoint) return undefined;
+      if (command.firstSubpathIndex === command.secondSubpathIndex) {
+        if (command.firstPointId === command.secondPointId || firstEndpoint === secondEndpoint || first.points.length < 3) return undefined;
+        first.closed = true;
+      } else {
+        const reverse = (subpath: typeof first) => {
+          subpath.points.reverse();
+          subpath.points.forEach((point) => {
+            const handleIn = point.handleIn;
+            point.handleIn = point.handleOut;
+            point.handleOut = handleIn;
+          });
+        };
+        const merged = structuredClone(first);
+        const other = structuredClone(second);
+        if (firstEndpoint === "start") reverse(merged);
+        if (secondEndpoint === "end") reverse(other);
+        if (merged.points.at(-1) && other.points[0] && merged.points.at(-1)!.x === other.points[0].x && merged.points.at(-1)!.y === other.points[0].y) {
+          const joined = other.points.shift()!;
+          const last = merged.points.at(-1)!;
+          last.handleOut = joined.handleOut;
+          last.pointType = last.handleIn || last.handleOut ? "asymmetric" : "corner";
+        }
+        merged.points.push(...other.points);
+        const insertionIndex = Math.min(command.firstSubpathIndex, command.secondSubpathIndex);
+        path.subpaths.splice(Math.max(command.firstSubpathIndex, command.secondSubpathIndex), 1);
+        path.subpaths.splice(insertionIndex, 1, merged);
+      }
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ ...command });
+      continue;
+    }
+    if (command.type === "setMask") {
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || ["group", "section"].includes(node.kind)) return undefined;
+      nextNodes[index] = { ...node, isMask: command.enabled };
+      batch.push({ ...command });
+      continue;
+    }
+    if (command.type === "deleteVectorPoint") {
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const subpath = path.subpaths.find((candidate) => candidate.points.some((point) => point.id === command.pointId));
+      if (!subpath || subpath.points.length <= (subpath.closed ? 3 : 1)) return undefined;
+      subpath.points.splice(subpath.points.findIndex((point) => point.id === command.pointId), 1);
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ type: "deleteVectorPoint", id: command.id, pointId: command.pointId });
+      continue;
+    }
+    if (command.type === "setVectorPointHandles") {
+      if (![command.handleIn?.x, command.handleIn?.y, command.handleOut?.x, command.handleOut?.y].every((value) => value === undefined || Number.isFinite(value))) return undefined;
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || node.kind !== "vector" || !node.vectorPath) return undefined;
+      const path = structuredClone(node.vectorPath);
+      const point = path.subpaths.flatMap((subpath) => subpath.points).find((candidate) => candidate.id === command.pointId);
+      if (!point) return undefined;
+      point.handleIn = command.handleIn && structuredClone(command.handleIn);
+      point.handleOut = command.handleOut && structuredClone(command.handleOut);
+      point.pointType = command.pointType;
+      nextNodes[index] = { ...node, vectorPath: path };
+      batch.push({ ...command, handleIn: command.handleIn && structuredClone(command.handleIn), handleOut: command.handleOut && structuredClone(command.handleOut) });
       continue;
     }
     if (command.type === "delete") {
@@ -84,7 +483,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (selected.length !== command.ids.length) return undefined;
       const target = command.parentId ? nextNodes.find((node) => node.id === command.parentId) : undefined;
-      if (command.parentId && (!target || !["frame", "group", "section"].includes(target.kind))) return undefined;
+      if (command.parentId && (!target || !["frame", "group", "booleanOperation", "section"].includes(target.kind))) return undefined;
       const pageId = selected[0].pageId;
       if (selected.some((node) => node.pageId !== pageId || (target && node.pageId !== target.pageId))) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -104,6 +503,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       const parentWorld = command.parentId ? worldTransformForNode(nextNodes, command.parentId) : undefined;
       if (command.parentId && !parentWorld) return undefined;
+      const targetOwnsAutoLayout = target?.kind === "frame" && target.autoLayout?.mode !== undefined && target.autoLayout.mode !== "none";
       const siblingNodes = nextNodes.filter((node) => node.pageId === pageId && node.parentId === command.parentId && !selectedIds.has(node.id));
       const reparented: CanvasNode[] = [];
       for (const node of sortNodesByLayerOrder(roots)) {
@@ -113,7 +513,11 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         const positionId = orderNewLayerAtFront([...siblingNodes, ...reparented], node.id);
         if (!positionId) return undefined;
         const index = nextNodes.findIndex((candidate) => candidate.id === node.id);
-        nextNodes[index] = { ...nextNodes[index], ...local, parentId: command.parentId, positionId };
+        // A layout Frame chooses its flow children’s position on the Core side.
+        // Do not carry the world-preserving Relative-v1 matrix into that scope:
+        // it would make the child incompatible with Auto Layout before the
+        // reflow transaction gets a chance to place it.
+        nextNodes[index] = { ...nextNodes[index], ...local, ...(targetOwnsAutoLayout ? { relativeTransform: undefined } : {}), parentId: command.parentId, positionId };
         reparented.push(nextNodes[index]);
       }
       // Core applies an Update against the node's current parent. Move the
@@ -124,7 +528,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
       continue;
     }
-    if (command.type === "group") {
+    if (command.type === "group" || command.type === "boolean") {
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (!selected.length || new Set(command.ids).size !== command.ids.length || selected.length !== command.ids.length) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -133,12 +537,12 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // nested Group. Independent selected Groups remain normal roots and can
       // be wrapped together with sibling shapes or other Groups.
       const roots = sortNodesByLayerOrder(selected.filter((node) => !hasSelectedAncestor(nextNodes, node, selectedIds)));
-      if (!roots.length) return undefined;
+      if (!roots.length || (command.type === "boolean" && roots.length < 2)) return undefined;
       const pageId = selected[0].pageId;
       if (roots.some((node) => node.pageId !== pageId)) return undefined;
       const parentId = nearestCommonParentId(nextNodes, roots);
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
-      if (parentId && (!parent || !["frame", "group", "section"].includes(parent.kind))) return undefined;
+      if (parentId && (!parent || !["frame", "group", "booleanOperation", "section"].includes(parent.kind))) return undefined;
       const id = createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
@@ -148,7 +552,6 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const top = Math.min(...resolvedBounds.map((bound) => bound.top));
       const right = Math.max(...resolvedBounds.map((bound) => bound.right));
       const bottom = Math.max(...resolvedBounds.map((bound) => bound.bottom));
-      const siblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId);
       const width = Math.max(1, right - left);
       const height = Math.max(1, bottom - top);
       const parentWorld = parentId ? worldTransformForNode(nextNodes, parentId) : undefined;
@@ -160,8 +563,9 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
       const groupPositionId = `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`;
+      const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.autoLayout ? "frame" : "group";
       const group = {
-        ...createNode("group", left, top),
+        ...createNode(wrapperKind, left, top),
         ...groupTransform,
         id,
         pageId,
@@ -169,6 +573,13 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         width,
         height,
         positionId: groupPositionId,
+        ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
+        ...(command.type === "group" && command.autoLayout ? { autoLayout: structuredClone(command.autoLayout) } : {}),
+        // Core deliberately keeps Auto Layout Frames on legacy local geometry:
+        // Relative-v1 matrices are not a supported layout-container transform.
+        // `groupTransform` already resolved equivalent x/y/rotation values in
+        // the common parent's coordinate space, so clear only the matrix.
+        ...(command.type === "group" && command.autoLayout ? { relativeTransform: undefined } : {}),
       };
       nextNodes.push(group);
       const groupWorld = worldTransformForNode(nextNodes, group.id);
@@ -183,15 +594,29 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
           : orderNewLayerAtFront(reparented, node.id);
         if (!positionId) return;
         const index = nextNodes.findIndex((candidate) => candidate.id === node.id);
-        nextNodes[index] = { ...nextNodes[index], ...local, parentId: id, positionId };
+        // The newly created Auto Layout Frame determines flow-child placement
+        // during Core reflow. A legacy matrix would freeze the child at its
+        // former canvas position until the next edit.
+        nextNodes[index] = { ...nextNodes[index], ...local, ...(command.type === "group" && command.autoLayout ? { relativeTransform: undefined } : {}), parentId: id, positionId };
         reparented.push(nextNodes[index]);
       });
       if (reparented.length !== roots.length) return undefined;
-      batch.push({ type: "create", node: coreProjectionNode(group) });
+      // A Core Reparent validates its target container immediately. Creating
+      // this Frame with Auto Layout already active would therefore reject the
+      // selected roots before their legacy Relative-v1 matrices have been
+      // cleared below. Create the ordinary Frame first, move and normalize the
+      // children atomically, then enable Auto Layout as the last command.
+      const wrapperAtCreation = command.type === "group" && command.autoLayout
+        ? { ...group, autoLayout: undefined }
+        : group;
+      batch.push({ type: "create", node: coreProjectionNode(wrapperAtCreation) });
       batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: id, positionId: node.positionId! })) });
       // The child matrices above are local to the newly created Group. Their
       // geometry must therefore be updated only after that parent link exists.
       reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
+      if (command.type === "group" && command.autoLayout) {
+        batch.push({ type: "update", node: coreProjectionNode(group) });
+      }
       createdIds.push(id);
       selectionIds = [id];
       affectedGroupIds.add(id);
@@ -271,11 +696,19 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
             const siblings = nextNodes.filter((node) => node.pageId === source.pageId && node.parentId === source.parentId);
             const positionId = orderNewLayerAtFront(siblings, id);
             if (!positionId) return undefined;
-            copy = { ...copy, name: `${source.name} copy`, positionId, ...duplicateRootOffset(sourceDocument, source) };
+            copy = { ...copy, name: `${source.name} copy`, positionId, ...duplicateRootOffset(sourceDocument, source, source.parentId) };
           } else if (!source.relativeTransform) {
             // Legacy descendants retain world-space geometry. Relative-v1
             // descendants inherit the translated copied ancestor instead.
             copy = { ...copy, x: source.x + 24, y: source.y + 24 };
+          }
+          // A flow child is positioned by its destination Auto Layout Frame.
+          // Keeping a legacy Relative-v1 matrix turns an otherwise valid
+          // Command-D copy into an unsupported layout transaction; absolute
+          // children intentionally retain their independent geometry.
+          const destinationParent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
+          if (destinationParent?.kind === "frame" && destinationParent.autoLayout?.mode !== "none" && !source.autoLayout?.absolute) {
+            copy = { ...copy, relativeTransform: undefined };
           }
           nextNodes.push(copy);
           batch.push({ type: "create", node: coreProjectionNode(copy) });
@@ -286,7 +719,71 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
     }
     return undefined;
   }
-  return batch.length ? { batch, nextNodes, createdIds, selectionIds, affectedGroupIds: [...affectedGroupIds] } : undefined;
+  if (!batch.length) return undefined;
+  // Relative-v1 structural containers deliberately skip Core's legacy AABB
+  // rebasing. Resolve their affected subtree at this shared boundary, then
+  // replace (rather than append after) any preliminary node updates with the
+  // complete parent-before-child projection in the same Core transaction.
+  // This keeps a child Inspector edit, its derived Group bounds and history
+  // replay inseparable rather than relying on an individual canvas gesture to
+  // remember a follow-up Group update.
+  if (affectedGroupIds.size) {
+    const excludedGroupIds = new Set(nextNodes
+      .filter((node) => (node.kind === "group" || node.kind === "booleanOperation") && !affectedGroupIds.has(node.id))
+      .map((node) => node.id));
+    const normalized = normalizeGroupBounds(nextNodes, { excludeGroupIds: excludedGroupIds });
+    if (!normalized) return undefined;
+    const beforeById = new Map(nextNodes.map((node) => [node.id, node]));
+    const changed = normalized.filter((node) => {
+      const before = beforeById.get(node.id);
+      return before && hasGroupNormalizationChange(before, node);
+    }).sort((left, right) => nodeDepth(normalized, left.id) - nodeDepth(normalized, right.id));
+    if (changed.length) {
+      nextNodes.splice(0, nextNodes.length, ...normalized);
+      const changedIds = new Set(changed.map((node) => node.id));
+      // A child geometry edit starts as an Update and may then move while its
+      // Group is re-based. Sending both forms of that child in one batch is
+      // redundant and, in browser WASM, can re-enter the exported mutable
+      // reducer. Keep only the final normalized record for each changed node.
+      const firstChangedUpdate = batch.findIndex((entry) => entry.type === "update" && changedIds.has(entry.node.id));
+      const retained = batch.filter((entry) => entry.type !== "update" || !changedIds.has(entry.node.id));
+      const insertionIndex = firstChangedUpdate < 0
+        ? retained.length
+        : batch.slice(0, firstChangedUpdate).filter((entry) => entry.type !== "update" || !changedIds.has(entry.node.id)).length;
+      retained.splice(insertionIndex, 0, ...changed.map((node) => ({ type: "update" as const, node: coreProjectionNode(node) })));
+      batch.splice(0, batch.length, ...retained);
+    }
+  }
+  return { batch, nextNodes, createdIds, selectionIds, affectedGroupIds: [...affectedGroupIds] };
+}
+
+function hasGroupNormalizationChange(before: CanvasNode, after: CanvasNode) {
+  return before.x !== after.x
+    || before.y !== after.y
+    || before.width !== after.width
+    || before.height !== after.height
+    || before.rotation !== after.rotation
+    || JSON.stringify(before.relativeTransform) !== JSON.stringify(after.relativeTransform);
+}
+
+/** Appearance-only edits (including effects) do not alter a Group's geometric
+ * bounds. Keeping them out of the normalization batch avoids rewriting every
+ * descendant for an Inspector change that leaves its transforms untouched. */
+function updateAffectsGroupBounds(patch: Extract<EditorCommand, { type: "update" }>["patch"]) {
+  return ["x", "y", "width", "height", "rotation", "relativeTransform", "vectorPath", "strokeWidth", "strokeWeights", "strokeAlign", "strokeCapStart", "strokeCapEnd", "strokeJoin", "strokeMiterLimit", "strokeDashPattern", "arcData", "cornerRadii", "radius"].some((key) => key in patch);
+}
+
+function nodeDepth(nodes: readonly CanvasNode[], id: string) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const visited = new Set<string>([id]);
+  let depth = 0;
+  let parentId = byId.get(id)?.parentId;
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    depth += 1;
+    parentId = byId.get(parentId)?.parentId;
+  }
+  return depth;
 }
 
 function hasSelectedAncestor(nodes: readonly CanvasNode[], node: CanvasNode, selectedIds: ReadonlySet<string>) {
@@ -310,7 +807,7 @@ function groupAncestorIds(nodes: readonly CanvasNode[], parentId: string | undef
     visited.add(current);
     const node = byId.get(current);
     if (!node) break;
-    if (node.kind === "group") result.push(node.id);
+    if (node.kind === "group" || node.kind === "booleanOperation") result.push(node.id);
     current = node.parentId;
   }
   return result;
@@ -359,10 +856,14 @@ function subtreeNodes(nodes: readonly CanvasNode[], rootId: string): CanvasNode[
 }
 
 /** Applies Figma-style duplicate displacement without breaking Relative-v1 roots. */
-function duplicateRootOffset(nodes: readonly CanvasNode[], source: CanvasNode): Pick<CanvasNode, "x" | "y" | "rotation" | "relativeTransform"> {
+function duplicateRootOffset(nodes: readonly CanvasNode[], source: CanvasNode, targetParentId: string | undefined): Pick<CanvasNode, "x" | "y" | "rotation" | "relativeTransform"> {
   if (!source.relativeTransform) return { x: source.x + 24, y: source.y + 24, rotation: source.rotation, relativeTransform: undefined };
+  if (!targetParentId) {
+    const projected = worldSpaceProjectionNode(nodes, source);
+    if (projected) return { x: projected.x + 24, y: projected.y + 24, rotation: projected.rotation, relativeTransform: undefined };
+  }
   const world = worldTransformForNode(nodes, source.id);
-  const parentWorld = source.parentId ? worldTransformForNode(nodes, source.parentId) : undefined;
+  const parentWorld = targetParentId ? worldTransformForNode(nodes, targetParentId) : undefined;
   const translated = world && { ...world, e: world.e + 24, f: world.f + 24 };
   const offset = translated && nodePropsForWorldTransform(translated, parentWorld, source.width, source.height);
   return offset ?? { x: source.x + 24, y: source.y + 24, rotation: source.rotation, relativeTransform: source.relativeTransform };
@@ -389,8 +890,19 @@ export function captureClipboard(nodes: readonly CanvasNode[], ids: readonly str
       captured.push(structuredClone(node));
     }
   }
-  const assetIds = [...new Set(captured.filter((node) => node.kind === "image" && node.assetId).map((node) => node.assetId!))];
+  // Image and font resources are document-authorized independently. Carry both
+  // IDs so cross-document paste cannot retain a text FontId that the target
+  // document has not explicitly attached.
+  const assetIds = referencedAssetIds(captured);
   return { schemaVersion, rootIds: roots.map((root) => root.id), nodes: captured, assetIds };
+}
+
+function referencedAssetIds(nodes: readonly CanvasNode[]) {
+  return [...new Set(nodes.flatMap((node) => [
+    ...(node.kind === "image" && node.assetId ? [node.assetId] : []),
+    ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),
+    ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? []),
+  ]))];
 }
 
 /** Resolves a clipboard into concrete Core create commands under a target
@@ -404,12 +916,16 @@ export function resolvePasteBatch(
   clipboard: EditorClipboard,
   target: { pageId?: string; parentId?: string },
   availableAssetIds: ReadonlySet<string>,
-  createId: () => string = () => crypto.randomUUID(),
+  createId: () => string = generateId,
+  expectedSchemaVersion?: number,
+  availableAssetContentHashes?: ReadonlyMap<string, string>,
 ): ResolvedCoreBatch | undefined {
-  if (!clipboard.rootIds.length || !clipboard.nodes.length) return undefined;
+  if (validateClipboardCapture(clipboard, expectedSchemaVersion)) return undefined;
+  if (!isValidPasteTarget(nodes, target)) return undefined;
   // A paste into a document missing a referenced image asset must fail wholesale
   // rather than instantiate a dangling reference.
   if (clipboard.assetIds.some((assetId) => !availableAssetIds.has(assetId))) return undefined;
+  if (clipboard.assetContentHashes && (!availableAssetContentHashes || clipboard.assetIds.some((assetId) => availableAssetContentHashes.get(assetId) !== clipboard.assetContentHashes?.[assetId]))) return undefined;
   const source = structuredClone(clipboard.nodes);
   const sourceById = new Map(source.map((node) => [node.id, node]));
   const capturedIds = new Set(source.map((node) => node.id));
@@ -439,13 +955,51 @@ export function resolvePasteBatch(
       const siblings = nextNodes.filter((node) => node.pageId === target.pageId && node.parentId === target.parentId);
       const positionId = orderNewLayerAtFront(siblings, id);
       if (!positionId) return undefined;
-      copy = { ...copy, positionId, ...duplicateRootOffset(source, sourceById.get(original.id)!) };
+      copy = { ...copy, positionId, ...duplicateRootOffset(source, sourceById.get(original.id)!, target.parentId) };
     } else if (!original.relativeTransform) {
       copy = { ...copy, x: original.x + 24, y: original.y + 24 };
+    }
+    // Core owns the geometry of a flow child under an Auto Layout Frame. A
+    // copied Relative-v1 matrix would make that otherwise valid child
+    // unsupported during the transaction's layout reflow. Keep matrices for
+    // absolute children, whose geometry is intentionally outside the flow.
+    const sourceParent = original.parentId ? sourceById.get(original.parentId) : undefined;
+    const destinationParent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
+    if ((sourceParent?.kind === "frame" && sourceParent.autoLayout?.mode !== "none" || destinationParent?.kind === "frame" && destinationParent.autoLayout?.mode !== "none") && !original.autoLayout?.absolute) {
+      copy = { ...copy, relativeTransform: undefined };
     }
     nextNodes.push(copy);
     batch.push({ type: "create", node: coreProjectionNode(copy) });
     if (isRoot) createdIds.push(copy.id);
   }
   return batch.length ? { batch, nextNodes, createdIds, selectionIds: createdIds, affectedGroupIds: [] } : undefined;
+}
+
+/** Legacy projections could encode both an Auto Layout frame and its flow
+ * children with Relative-v1 matrices. Core deliberately rejects that state
+ * because the layout reducer owns their geometry. Normalize it at the browser
+ * bridge boundary while retaining matrices for ordinary and absolute children. */
+export function normalizeAutoLayoutProjection(nodes: readonly CanvasNode[]): CanvasNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  return nodes.map((node) => {
+    const parent = node.parentId ? byId.get(node.parentId) : undefined;
+    const ownsLayout = node.kind === "frame" && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
+    const isFlowChild = parent?.kind === "frame" && parent.autoLayout?.mode !== undefined && parent.autoLayout.mode !== "none" && !node.autoLayout?.absolute;
+    if (!ownsLayout && !isFlowChild) return node;
+    // Core owns active layout frames and their flow-child positions in legacy
+    // world space. Materialize the Relative-v1 matrix before removing it:
+    // clearing the matrix alone leaves local x/y interpreted as page x/y and
+    // visibly offsets nested layouts after hydration or export.
+    return worldSpaceProjectionNode(nodes, node) ?? { ...node, relativeTransform: undefined };
+  });
+}
+
+/** Pasting may only re-home roots beneath a real container from the current
+ * document. This prevents an untrusted clipboard envelope from creating a
+ * dangling parent relation even before the Core validates the create batch. */
+function isValidPasteTarget(nodes: readonly CanvasNode[], target: { pageId?: string; parentId?: string }) {
+  if (!target.parentId) return true;
+  const parent = nodes.find((node) => node.id === target.parentId);
+  if (!parent || !["frame", "group", "section"].includes(parent.kind)) return false;
+  return !target.pageId || (parent.pageId ?? undefined) === target.pageId;
 }

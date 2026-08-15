@@ -2,16 +2,37 @@ import type { EditorErrorCode } from "./editor-error";
 
 export type { EditorErrorCode } from "./editor-error";
 
-export type ToolKind = "select" | "frame" | "section" | "rectangle" | "ellipse" | "line" | "arrow" | "text" | "hand";
-export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" | "line" | "text" | "image";
+export type ToolKind = "select" | "frame" | "section" | "rectangle" | "ellipse" | "polygon" | "star" | "vector" | "pen" | "line" | "arrow" | "text" | "slice" | "hand";
+export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" | "polygon" | "star" | "vector" | "booleanOperation" | "slice" | "line" | "text" | "image";
 /** Canonical Figma-compatible endpoint decoration for open paths. */
 export type StrokeCap = "none" | "round" | "square" | "arrowLines" | "arrowEquilateral" | "diamondFilled" | "triangleFilled" | "circleFilled";
 /** Figma-compatible corner treatment for stroked paths. */
 export type StrokeJoin = "miter" | "bevel" | "round";
 export type StrokeAlign = "center" | "inside" | "outside";
+/** E1's first cross-renderer compositing subset. */
+export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten";
 /** Per-axis Figma Frame resize behavior; absence retains legacy no-constraint semantics. */
 export type ConstraintType = "min" | "center" | "max" | "stretch" | "scale";
 export interface DocumentConstraints { horizontal: ConstraintType; vertical: ConstraintType; }
+/** Canonical Frame auto-layout configuration. Absence retains legacy manual positioning. */
+export type AutoLayoutMode = "none" | "horizontal" | "vertical";
+export type AutoLayoutAlignment = "start" | "center" | "end" | "spaceBetween";
+export type AutoLayoutSizing = "fixed" | "hug" | "fill";
+export interface DocumentAutoLayout {
+  mode: AutoLayoutMode;
+  padding: [number, number, number, number];
+  itemSpacing: number;
+  wrap: boolean;
+  primaryAlignment: AutoLayoutAlignment;
+  counterAlignment: AutoLayoutAlignment;
+  primarySizing: AutoLayoutSizing;
+  counterSizing: AutoLayoutSizing;
+  minWidth?: number;
+  maxWidth?: number;
+  minHeight?: number;
+  maxHeight?: number;
+  absolute: boolean;
+}
 /** Stable line-height for text records that predate an explicit paragraph value. */
 export const DEFAULT_TEXT_LINE_HEIGHT = 20;
 /** A deterministic capture may opt out of the otherwise automatic WebGPU spike. */
@@ -32,6 +53,24 @@ export interface DocumentLinearGradient {
   end: [number, number];
   stops: Array<{ position: number; color: DocumentColor }>;
 }
+
+/** Legacy compatibility projection of the first Drop Shadow effect. */
+export interface DocumentDropShadow {
+  offsetX: number;
+  offsetY: number;
+  blurRadius: number;
+  spread: number;
+  color: DocumentColor;
+  visible: boolean;
+}
+/** A blur of the node's isolated source surface, in document pixels. */
+export interface DocumentLayerBlur { radius: number; visible: boolean; }
+/** A shadow that is clipped to the node's isolated source alpha. */
+export type DocumentInnerShadow = DocumentDropShadow;
+/** A blur of already-composited backdrop pixels inside the source alpha. */
+export interface DocumentBackgroundBlur { radius: number; visible: boolean; }
+/** E1's ordered effect storage. Exactly one effect payload is present. */
+export type DocumentEffect = { dropShadow: DocumentDropShadow; layerBlur?: never; innerShadow?: never; backgroundBlur?: never } | { layerBlur: DocumentLayerBlur; dropShadow?: never; innerShadow?: never; backgroundBlur?: never } | { innerShadow: DocumentInnerShadow; dropShadow?: never; layerBlur?: never; backgroundBlur?: never } | { backgroundBlur: DocumentBackgroundBlur; dropShadow?: never; layerBlur?: never; innerShadow?: never };
 /** One ordered paint layer. `css` is the deterministic Canvas fallback while
  * `color`/`gradient` retain the canonical projection for round-tripping. */
 export interface DocumentPaint {
@@ -40,6 +79,25 @@ export interface DocumentPaint {
   gradient?: DocumentLinearGradient;
 }
 export interface EllipseArcData { startingAngle: number; endingAngle: number; innerRadius: number; }
+/** Canonical source for generated regular-shape outlines (ADR 0026). */
+export type DocumentParametricShape = { kind: "polygon"; pointCount: number } | { kind: "star"; pointCount: number; innerRatio: number };
+/** ADR 0028's durable selector; operands remain the Boolean node's children. */
+export type DocumentBooleanOperation = "union" | "intersect" | "subtract" | "exclude";
+/** Canonical editable path coordinates are local to their Vector node. */
+export interface DocumentVectorPath {
+  fillRule: "nonZero" | "evenOdd";
+  subpaths: Array<{
+    closed: boolean;
+    points: Array<{
+      id: string;
+      x: number;
+      y: number;
+      handleIn?: { x: number; y: number };
+      handleOut?: { x: number; y: number };
+      pointType: "corner" | "mirrored" | "asymmetric";
+    }>;
+  }>;
+}
 export interface RelativeTransform { a: number; b: number; c: number; d: number; e: number; f: number; }
 
 /** A content-addressed font face; font bytes are held by the Asset Service. */
@@ -59,6 +117,8 @@ export interface DocumentTextProperties {
     fontWeight: number;
     italic: boolean;
     letterSpacing: number;
+    /** Omission inherits the Text node's fill. */
+    color?: DocumentColor;
   }>;
   paragraph: {
     alignment: "left" | "center" | "right" | "justify";
@@ -110,15 +170,25 @@ export interface CanvasNode {
   strokeWeights?: [number, number, number, number];
   strokeAlign?: StrokeAlign;
   arcData?: EllipseArcData;
+  parametricShape?: DocumentParametricShape;
+  vectorPath?: DocumentVectorPath;
+  booleanOperation?: DocumentBooleanOperation;
   /** Frame/Rectangle/Section-only TL/TR/BR/BL radii; absence uses `radius`. */
   cornerRadii?: [number, number, number, number];
   /** Frame/Rectangle/Section-only continuous-corner factor in [0, 1]. */
   cornerSmoothing?: number;
   constraints?: DocumentConstraints;
+  autoLayout?: DocumentAutoLayout;
   /** Dual-read WP3 migration field. Absence retains legacy world x/y/rotation. */
   relativeTransform?: RelativeTransform;
   radius: number;
   opacity: number;
+  /** Defaults to normal/source-over for documents authored before E1. */
+  blendMode?: BlendMode;
+  /** Optional Canonical base effect. Absence means no shadow. */
+  dropShadow?: DocumentDropShadow;
+  /** Empty retains the legacy base effect; otherwise this ordered stack wins. */
+  effectStack?: DocumentEffect[];
   text?: string;
   /** Optional canonical text style record; omission means the stable default. */
   textProperties?: DocumentTextProperties;
@@ -130,6 +200,8 @@ export interface CanvasNode {
   contentsHidden?: boolean;
   /** Frame-only. Omission retains Figma's default: descendants are clipped. */
   clipsContent?: boolean;
+  /** G4 alpha mask source for following siblings in the same container. */
+  isMask?: boolean;
   /** Forward-compatibility payloads owned by newer engine versions. The browser
    * treats this as an opaque read-only pass-through: bytes are preserved verbatim
    * across every snapshot and operation boundary and never surfaced in the
@@ -156,12 +228,23 @@ export interface DocumentAsset {
 /** A fully resolved Core mutation. It is intentionally byte-free so a pending
  * remote operation can be reapplied to a newer canonical snapshot after a
  * rejected base revision. */
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "cornerRadii" | "cornerSmoothing" | "constraints" | "relativeTransform" | "opacity" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
+  /** An Asset Service-admitted resource may be registered in the same Core
+   * transaction as nodes that first reference it (cross-document paste). */
+  | { type: "registerAsset"; asset: DocumentAsset }
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
   | { type: "update"; node: CoreProjectionNode }
+  | { type: "moveVectorPoint"; id: string; pointId: string; x: number; y: number }
+  | { type: "setVectorSubpathClosed"; id: string; subpathIndex: number; closed: boolean }
+  | { type: "insertVectorPoint"; id: string; subpathIndex: number; afterPointId?: string; point: DocumentVectorPath["subpaths"][number]["points"][number] }
+  | { type: "splitVectorSegment"; id: string; subpathIndex: number; afterPointId: string; t: number; pointId: string }
+  | { type: "connectVectorEndpoints"; id: string; firstSubpathIndex: number; firstPointId: string; secondSubpathIndex: number; secondPointId: string }
+  | { type: "setMask"; id: string; enabled: boolean }
+  | { type: "deleteVectorPoint"; id: string; pointId: string }
+  | { type: "setVectorPointHandles"; id: string; pointId: string; handleIn?: { x: number; y: number }; handleOut?: { x: number; y: number }; pointType: DocumentVectorPath["subpaths"][number]["points"][number]["pointType"] }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   | { type: "reparent"; parentIds: Array<{ id: string; parentId?: string; positionId: string }> }
   | { type: "delete"; ids: string[] };
@@ -179,6 +262,14 @@ export interface EditorClipboard {
   nodes: CanvasNode[];
   /** Distinct image AssetIds the capture references, for paste re-validation. */
   assetIds: string[];
+  /** Present only after decoding the transferable v1 envelope. It binds every
+   * referenced AssetId/FontId to its source content hash; the target Worker
+   * compares it with its own Resource Index before creating any nodes. */
+  assetContentHashes?: Record<string, string>;
+  /** Byte-free Asset Service metadata carried only by a validated external
+   * clipboard envelope. It permits the target to request an explicit document
+   * attachment before the same Core transaction registers and references it. */
+  resourceAssets?: DocumentAsset[];
 }
 
 export interface Viewport {
@@ -245,7 +336,9 @@ export type CoreJournalOperation =
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   | { type: "reparent"; ids: string[]; parentId?: string }
-  | { type: "group"; ids: string[] }
+  | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
+  /** Wraps two or more selected hierarchy roots in a live Boolean container. */
+  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
   | { type: "ungroup"; id: string }
   | { type: "delete"; ids: string[] }
   | { type: "move"; updates: Array<Pick<CanvasNode, "id" | "x" | "y" | "width" | "height">> }
@@ -318,6 +411,9 @@ export interface LegacyProjectionSnapshot {
   format: "legacy-projection-v0";
   nodes: CanvasNode[];
   viewport: Viewport;
+  /** Fixture-only Resource Index records admitted before legacy nodes hydrate.
+   * Raw bytes remain transient and are delivered separately to the Worker. */
+  assets?: DocumentAsset[];
 }
 
 /** A deterministic stress fixture. It validates in Core but is not persisted as
@@ -337,7 +433,7 @@ export interface EditorSnapshot {
   /** SHA-256 of the Core semantic state, excluding UI projection and history caches. */
   documentHash?: string;
   memory?: { nodeCount: number; nodeBytes: number; maxDocumentBytes: number; undoItems: number; undoBytes: number; redoItems: number; redoBytes: number; dedupeItems: number; dedupeBytes: number; operationDedupeItems: number; operationDedupeBytes: number };
-  resources?: { documentNodes: number; maxDocumentNodes: number; documentBytes: number; maxDocumentBytes: number; wasmHeapBytes: number; maxWasmHeapBytes: number; renderSurfaceBytes: number; maxRenderSurfaceBytes: number; gpuSceneBytes: number; maxGpuSceneBytes: number; gpuSceneWithinBudget: boolean };
+  resources?: { documentNodes: number; maxDocumentNodes: number; documentBytes: number; maxDocumentBytes: number; wasmHeapBytes: number; maxWasmHeapBytes: number; renderSurfaceBytes: number; maxRenderSurfaceBytes: number; gpuSceneBytes: number; maxGpuSceneBytes: number; gpuEffectTextureBytes: number; maxGpuEffectTextureBytes: number; gpuSceneWithinBudget: boolean };
   /** Ephemeral, privacy-safe Engine Worker evidence; it never enters the document snapshot. */
   diagnostics?: { total: number; recent: readonly DiagnosticEvent[] };
   performance?: RenderPerformanceSummary;
@@ -361,6 +457,8 @@ export interface EditorSnapshot {
     developmentSimulation?: { requestedLosses: number; completedLosses: number };
   };
   documentCore: "Starting Rust/WASM bridge" | "Rust/WASM bridge ready" | "TypeScript document prototype";
+  /** Correlates a presentation-only hydrate completion with its initiating UI request. */
+  hydrationRequestId?: string;
   localSnapshot?: CoreLocalSnapshot;
   localJournalEntry?: LocalJournalEntry;
 }
@@ -370,10 +468,26 @@ export type EditorCommand =
   | { type: "select-page"; id: string }
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
+  | { type: "moveVectorPoint"; id: string; pointId: string; x: number; y: number }
+  | { type: "setVectorSubpathClosed"; id: string; subpathIndex: number; closed: boolean }
+  | { type: "insertVectorPoint"; id: string; subpathIndex: number; afterPointId?: string; point: DocumentVectorPath["subpaths"][number]["points"][number] }
+  | { type: "splitVectorSegment"; id: string; subpathIndex: number; afterPointId: string; t: number; pointId: string }
+  | { type: "connectVectorEndpoints"; id: string; firstSubpathIndex: number; firstPointId: string; secondSubpathIndex: number; secondPointId: string }
+  | { type: "setMask"; id: string; enabled: boolean }
+  | { type: "deleteVectorPoint"; id: string; pointId: string }
+  | { type: "setVectorPointHandles"; id: string; pointId: string; handleIn?: { x: number; y: number }; handleOut?: { x: number; y: number }; pointType: DocumentVectorPath["subpaths"][number]["points"][number]["pointType"] }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   /** Move selected hierarchy roots under a new parent while preserving world space. */
   | { type: "reparent"; ids: string[]; parentId?: string }
-  | { type: "group"; ids: string[] }
+  | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
+  /** Resolves selected roots into one live BooleanOperation container. */
+  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
+  /** Replaces a live Boolean structure with its current Rust-derived VectorPath. */
+  | { type: "flattenBoolean"; id: string }
+  /** Replaces a Vector's paint stroke with the Rust-derived editable fill path. */
+  | { type: "outlineStroke"; id: string }
+  /** Replaces a Polygon or Star with its current closed editable VectorPath. */
+  | { type: "convertParametricToVector"; id: string }
   | { type: "ungroup"; id: string }
   | { type: "select"; ids: string[] }
   | { type: "delete"; ids: string[] }
@@ -390,7 +504,7 @@ export type EditorCommand =
   | { type: "undo" }
   | { type: "redo" }
   | { type: "reset" }
-  | { type: "hydrate"; snapshot: LocalDocumentSnapshot };
+  | { type: "hydrate"; snapshot: LocalDocumentSnapshot; requestId?: string };
 
 /** A user intent. Core-edit batches are resolved in the Engine Worker and committed
  * atomically by Rust; selection, viewport and control commands stay out-of-band. */
@@ -403,7 +517,7 @@ export interface EditorTransaction {
 /** High-frequency browser input carried in a transferable binary batch. */
 export type EditorInputEvent =
   /** Read-only followers may point-select and pan, but must never begin a document mutation. */
-  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; altKey: boolean; button: number; readOnly?: true; /** A repeated press selects through a Group instead of its container. */ drillDown?: true; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number }
+  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; altKey: boolean; button: number; readOnly?: true; /** A repeated press selects through a Frame or Group instead of its container. */ drillDown?: true; /** Command/Ctrl-click directly selects the painted nested layer. */ deepSelect?: true; /** A repeated press on a selected Vector segment requests an exact Core split. */ splitVectorSegment?: true; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number }
   | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number };
 
 export type MainToWorker =
@@ -424,6 +538,9 @@ export type MainToWorker =
   /** Commits an already admitted, document-attached AssetId into the canonical
    * Resource Index and queues its own opaque remote operation. */
   | { type: "register-asset"; transactionId: string; asset: DocumentAsset }
+  /** Browser-decoded external clipboard data. The Worker validates it again
+   * before replacing its fast-path clipboard. */
+  | { type: "set-clipboard"; clipboard: EditorClipboard; sourceDocumentId?: string }
   /** Browser-owned bytes may seed a freshly imported image bitmap. They are
    * transient and are never retained in a document snapshot. */
   | { type: "asset-bytes"; assetId: string; mediaType: string; bytes: ArrayBuffer; decodedBitmap?: ImageBitmap }
@@ -471,7 +588,25 @@ export type WorkerToMain =
   | { type: "ack"; transactionId: string; acceptedRevision?: number; errorCode?: "REVISION_CONFLICT" | "INVALID_TRANSACTION" | "RESOURCE_LIMIT" }
   | { type: "error"; code: EditorErrorCode; safeMessage: string; retryable: boolean; documentRevision: number; diagnosticId: number; transactionId?: string };
 
-export const createId = () => crypto.randomUUID();
+/** Generates an RFC 4122 v4 UUID in both secure and plain-HTTP development
+ * contexts. `crypto.randomUUID` is preferred; a LAN test URL is not a secure
+ * context in every browser, so retain the same UUID format with getRandomValues
+ * (and a last-resort non-cryptographic development fallback) instead of
+ * preventing the editor Worker from booting. */
+const nativeRandomUuid = typeof globalThis.crypto?.randomUUID === "function"
+  ? globalThis.crypto.randomUUID.bind(globalThis.crypto)
+  : undefined;
+
+export function createId() {
+  if (nativeRandomUuid) return nativeRandomUuid();
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === "function") globalThis.crypto.getRandomValues(bytes);
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 /** Parses only the legacy hex syntax accepted by the Rust/WASM projection bridge. */
 export function documentColorFromCssHex(value: string): DocumentColor | undefined {
@@ -496,10 +631,18 @@ export function createNode(kind: NodeKind, x: number, y: number): CanvasNode {
     section: { name: "Section", width: 640, height: 360, fill: "#f8fafc", stroke: "#94a3b8", radius: 12 },
     rectangle: { name: "Rectangle", width: 180, height: 120, fill: "#e6edff", stroke: "#0048FF", radius: 12 },
     ellipse: { name: "Ellipse", width: 140, height: 140, fill: "#ffd8b7", stroke: "#bd6332", radius: 0 },
+    polygon: { name: "Polygon", width: 140, height: 140, fill: "#d9f99d", stroke: "#4d7c0f", radius: 0 },
+    star: { name: "Star", width: 160, height: 160, fill: "#fde68a", stroke: "#b45309", radius: 0 },
+    vector: { name: "Vector", width: 160, height: 120, fill: "#dbeafe", stroke: "#2563eb", radius: 0 },
+    booleanOperation: { name: "Boolean", width: 1, height: 1, fill: "transparent", stroke: "transparent", radius: 0 },
+    slice: { name: "Slice", width: 320, height: 220, fill: "transparent", stroke: "transparent", radius: 0 },
     line: { name: "Line", width: 160, height: 0, fill: "transparent", stroke: "#0048FF", radius: 0 },
     text: { name: "Text", width: 220, height: 44, fill: "#23251f", stroke: "transparent", radius: 0, text: "Type something" },
     image: { name: "Image", width: 320, height: 220, fill: "#e6edff", stroke: "#0048FF", radius: 10 },
   };
   const preset = presets[kind];
-  return { id: createId(), kind, x, y, rotation: 0, strokeWidth: 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, visible: true, ...preset, fillColor: documentColorFromCssHex(preset.fill) };
+  const parametricShape = kind === "polygon" ? { kind: "polygon" as const, pointCount: 5 } : kind === "star" ? { kind: "star" as const, pointCount: 5, innerRatio: 0.5 } : undefined;
+  const vectorPath = kind === "vector" ? { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: createId(), x: 80, y: 0, pointType: "corner" as const }, { id: createId(), x: 160, y: 120, pointType: "corner" as const }, { id: createId(), x: 0, y: 120, pointType: "corner" as const }] }] } : undefined;
+  const booleanOperation = kind === "booleanOperation" ? "union" as const : undefined;
+  return { id: createId(), kind, x, y, rotation: 0, strokeWidth: kind === "slice" ? 0 : 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, blendMode: "normal", visible: true, ...preset, parametricShape, vectorPath, booleanOperation, fillColor: documentColorFromCssHex(preset.fill) };
 }

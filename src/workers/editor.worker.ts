@@ -2,18 +2,22 @@
 
 import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
-import { findTopmostHit } from "@/lib/hit-test";
+import { findTopmostCanvasSelectionCandidate, findTopmostHit } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
 import { admitRenderSurface, MAX_RENDER_SURFACE_BYTES } from "@/lib/render-surface-budget";
+import { admitAlphaMaskSurface } from "@/lib/alpha-mask-budget";
+import { admitEffectSurfacePool } from "@/lib/effect-surface-budget";
 import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
-import { createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
-import { sampleLinearGradientForCanvas } from "@/lib/color-rendering";
+import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
+import { colorToSrgbCss, sampleLinearGradientForCanvas } from "@/lib/color-rendering";
 import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
-import { styledTextSpans, type RenderTextStyle } from "@/lib/text-style-runs";
-import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
+import { styledTextSpans, styledTextVisualSpans, type RenderTextStyle } from "@/lib/text-style-runs";
+import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { captureClipboard, coreProjectionNode, resolveCoreBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { validateClipboardCapture } from "@/lib/editor-clipboard";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
+import { sha256Bytes } from "../lib/sha256";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
 import { classifyEditorError, editorError, type EditorErrorCode } from "@/lib/editor-error";
 import { resetDocumentProjection } from "@/lib/document-reset";
@@ -24,13 +28,16 @@ import { insetRoundedRectRadii, outsetRoundedRectRadii } from "@/lib/aligned-rou
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "@/lib/corner-smoothing";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
-import { gpuLayerPrefix } from "@/lib/gpu-layer-prefix";
+import { gpuLayerPrefix, requiresCanvasEffectOrBlend } from "@/lib/gpu-layer-prefix";
 import { exceedsMarqueeDragThreshold, lineSelectionBounds, marqueeRect, resolveMarqueeSelection, rotatedNodeBounds } from "@/lib/marquee-selection";
 import { resolveMultiResizeSelection, type MultiResizeSelection } from "@/lib/multi-selection";
 import { worldLineVisualBounds } from "@/lib/line-world-bounds";
 import { selectionDimensions } from "@/lib/selection-label";
-import { resolveCanvasObjectSelection, resolveGroupSelectionTarget } from "@/lib/canvas-selection";
+import { resolveCanvasObjectSelection, resolveNestedKeyboardTarget, resolveNestedSelectionTarget } from "@/lib/canvas-selection";
+import { normalizePageSelection } from "@/lib/page-selection";
+import { withManualAutoLayoutSizing } from "@/lib/auto-layout-sizing";
 import { movableSelectionIds } from "@/lib/selection-move-roots";
+import { resolveSelectionNudge } from "@/lib/selection-nudge";
 import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
 import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
@@ -42,43 +49,76 @@ import { MAX_RASTER_DECODED_BYTES } from "@/lib/untrusted-asset";
 import { FontFaceRegistry } from "@/lib/font-face-registry";
 import { cssLineBoxBaseline as resolveCssLineBoxBaseline } from "@/lib/text-baseline";
 import { parseRustGpuSceneBatch } from "@/lib/rust-gpu-batch";
-import { parseRustTextLayout, type RustTextLayout } from "@/lib/rust-text-layout";
+import { hasMissingRustTextGlyph, parseRustTextLayout, type RustTextLayout, type RustTextVisualRun } from "@/lib/rust-text-layout";
 import { parseRustTextCaretLayout } from "@/lib/rust-text-caret";
 import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { orderNodesByRustRenderCommands, parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
-import { hasCommittedResize, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
+import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
 import { hasCommittedLineEndpointResize, lineEndpoints, resizeLegacyLineEndpoint, type LineEndpoint } from "@/lib/line-endpoint-resize";
 import { resizeRelativeLineEndpointFromWorldGesture } from "@/lib/relative-line-endpoint-resize";
-import { editorKeyCommand } from "@/lib/editor-key-command";
+import { editorKeyCommand, keyboardNudgeDelta, shouldClearCanvasSelection } from "@/lib/editor-key-command";
 import { isEffectivelyLocked } from "@/lib/hierarchy-lock";
 import { createKeyboardToolNode } from "@/lib/keyboard-node-create";
 import { solidLineStrokeOutline } from "@/lib/line-stroke-outline";
 import { decorativeCapMesh, isDecorativeCap } from "@/lib/decorative-cap-mesh";
 import { hasCommittedSelectionResize, scaleLegacySelectionGeometry } from "@/lib/selection-resize";
 import { hasCommittedSelectionTransform, scaleSelectionTransforms, type SelectionTransformPatch } from "@/lib/selection-transform-resize";
+import { parametricShapePoints as fallbackParametricShapePoints } from "@/lib/parametric-shape";
+import { traceVectorPath } from "@/lib/vector-path";
+import { rotateSelectionAroundWorldPoint, type SelectionRotationPatch } from "@/lib/selection-rotation";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
 import { orderNewLayerAtFront, sortNodesByLayerOrder } from "@/lib/layer-order";
 import { planPendingOperationReconciliation } from "@/lib/pending-operation-reconciliation";
 import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
 import { fullStateReplayBatch, historyReplayBatch } from "@/lib/history-replay-batch";
+import { canvasNodeFromWasmProjection } from "@/lib/wasm-projection-node";
 import { visibleNodesOnPage } from "@/lib/hierarchy-visibility";
+import { isFullyClippedForSelection } from "@/lib/selection-clip";
 import { invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode, type AffineMatrix } from "@/lib/scene-transform";
 import { worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
 import { closedShapeStrokeLocalBounds } from "@/lib/closed-shape-stroke-bounds";
 import { ellipseStrokeRing } from "@/lib/ellipse-stroke-ring";
+import { frameDropTargetAtPoint, frameExitTargetAtPoint } from "@/lib/frame-drop-target";
+import { autoLayoutArrowReorder, autoLayoutDropReorder } from "@/lib/auto-layout-reorder";
+import { joinCrossVectorEndpoints } from "@/lib/vector-cross-connect";
 
 declare const self: DedicatedWorkerGlobalScope;
 
 type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
-  | { mode: "move"; startX: number; startY: number; before: CanvasNode[]; initial: Set<string> }
+  | { mode: "move"; startX: number; startY: number; currentX: number; currentY: number; before: CanvasNode[]; initial: Set<string>; dropTargetId?: string }
   | { mode: "resize"; id: string; handle: CanvasResizeHandle; start: { x: number; y: number }; node: CanvasNode; before: CanvasNode[] }
   | { mode: "multi-resize"; handle: CanvasResizeHandle; start: { x: number; y: number }; bounds: ResizeGeometry; before: CanvasNode[]; ids: string[]; requiresAffine: boolean }
+  | { mode: "rotate"; start: { x: number; y: number }; pivot: { x: number; y: number }; before: CanvasNode[]; ids: string[] }
   | { mode: "line-resize"; id: string; endpoint: LineEndpoint; node: CanvasNode; before: CanvasNode[] }
+  | { mode: "vector-point"; id: string; pointId: string; before: CanvasNode[] }
+  | { mode: "vector-handle"; id: string; pointId: string; handle: "handleIn" | "handleOut"; before: CanvasNode[] }
+  | { mode: "pen-point"; id: string; pointId: string; start: { x: number; y: number } }
   | { mode: "pan"; startX: number; startY: number }
   | { mode: "select"; startX: number; startY: number; currentX: number; currentY: number; startScreenX: number; startScreenY: number; marqueeStarted: boolean; initialSelection: string[]; additive: boolean };
+type VectorPoint = NonNullable<CanvasNode["vectorPath"]>["subpaths"][number]["points"][number];
+type PenCommitCommand = Extract<EditorCommand, { type: "insertVectorPoint" | "setVectorSubpathClosed" | "connectVectorEndpoints" }>;
+type PenConnectTarget =
+  | { kind: "same-vector"; subpathIndex: number; pointId: string }
+  | { kind: "cross-vector"; nodeId: string; subpathIndex: number; pointId: string };
+type PenDraft = {
+  kind: "create" | "extend";
+  node: CanvasNode;
+  lastPointId: string;
+  previousSelection: string[];
+  originalVectorPath?: NonNullable<CanvasNode["vectorPath"]>;
+  subpathIndex?: number;
+  endpoint?: "start" | "end";
+  insertedPoints: VectorPoint[];
+  closeOnFinish?: boolean;
+  connectTarget?: PenConnectTarget;
+  // Cursor-only geometry for the next Pen segment. It deliberately lives
+  // outside the canonical VectorPath: moving the pointer must not create a
+  // transaction, alter undo history, or leak an unfinished point to peers.
+  previewWorld?: { x: number; y: number };
+};
 type WasmProjectionNode = CoreProjectionNode;
 type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; nodes: WasmProjectionNode[] };
 type WasmDocumentEngine = {
@@ -106,7 +146,9 @@ type WasmDocumentEngine = {
   load_snapshot_protobuf(bytes: Uint8Array): bigint;
   load_snapshot_json(value: string): bigint;
   seed_batch_json(value: string): bigint;
+  seed_assets_json(value: string): void;
 };
+type WasmRuntime = typeof import("@/wasm/generated/editor_wasm");
 
 let canvas: OffscreenCanvas | undefined;
 const defaultPageId = "00000000-0000-0000-0000-000000000001";
@@ -121,6 +163,9 @@ let renderQuality: RenderQualityState = { tier: "settled", zoomBucket: "normal" 
 let renderQualityTimer: ReturnType<typeof setTimeout> | undefined;
 let tool: ToolKind = "select";
 let nodes: CanvasNode[] = starterNodes();
+/** A Pen gesture remains projection-only until Enter or closing the subpath,
+ * so each completed path becomes one canonical Create history item. */
+let penDraft: PenDraft | undefined;
 let assets: DocumentAsset[] = [];
 /** The Worker-owned copy/cut clipboard. It carries subtree projections by value
  * and image references by AssetId only (never raw bytes), so paste re-validates
@@ -129,6 +174,8 @@ let assets: DocumentAsset[] = [];
  * clipboard so a stale cross-tab payload can be rejected on paste (P0-1). */
 let documentSchemaVersion = 19;
 let clipboard: EditorClipboard | undefined;
+let clipboardSourceDocumentId: string | undefined;
+let pasteInFlight = false;
 const imageBitmaps = new ImageBitmapCache<ImageBitmap>(MAX_RASTER_DECODED_BYTES);
 const imageLoads = new Set<string>();
 const fontFaces = new FontFaceRegistry();
@@ -136,6 +183,11 @@ let nodeById = new Map(nodes.map((node) => [node.id, node]));
 let nodeBoundsById = new Map(nodes.map((node) => [node.id, boundsForNode(node)]));
 let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
 let selectedIds: string[] = [nodes[0].id];
+/** Page owns the transient selection. It is deliberately not Canonical state,
+ * history, or a collaboration operation. */
+const selectionByPage = new Map<string, string[]>();
+/** Vector anchor selection is transient editing state, never Canonical data. */
+let selectedVectorPoints: Array<{ id: string; pointId: string }> = [];
 let viewport = { x: 0, y: 0, zoom: 1 };
 type LocalHistoryEntry = { nodes: CanvasNode[]; advancesRevision: boolean };
 const history: LocalHistoryEntry[] = [];
@@ -152,12 +204,13 @@ let editingTextNodeId: string | undefined;
 let documentCore: EditorSnapshot["documentCore"] = "Starting Rust/WASM bridge";
 let wasmDocument: WasmDocumentEngine | undefined;
 let bridgeLoadSequence = 0;
+let hydrationCompletionRequestId: string | undefined;
 let ephemeralBenchmarkProjection = false;
 let remoteBootstrapPending = false;
 let remoteResetPending = false;
 const localDevActorId = "00000000-0000-0000-0000-000000000007";
 const assetApiUrl = new URL("/asset-api", self.location.origin).toString().replace(/\/$/, "");
-const remoteSessionId = crypto.randomUUID();
+const remoteSessionId = createId();
 let remoteClientSequence = 0n;
 let remoteOperationQueue = Promise.resolve();
 let gpuStatus: NonNullable<EditorSnapshot["gpu"]>["webgpu"] = "checking";
@@ -172,10 +225,12 @@ let simulateGpuLossAfterImage = false;
 let simulatedGpuFault: SimulatedGpuFault | undefined;
 let simulatedGpuFaultReported = false;
 let gpuSceneBytes = 0;
+let gpuEffectTextureBytes = 0;
 let gpuSceneWithinBudget = true;
 let gpuSceneLimitReported = false;
 let textAtlasStatsSignature = "";
 let imageTextureStatsSignature = "";
+let effectTextureStatsSignature = "";
 let rustRenderGraphFailureSignature = "";
 type RustGpuScene = { revision: number; pageId: string; transientSceneVersion: number; instances: Float32Array; renderedNodeIds: ReadonlySet<string> };
 let rustGpuScene: RustGpuScene | undefined;
@@ -183,20 +238,38 @@ const MAX_RUST_GPU_INSTANCE_NODES = 20_000;
 type RustTextLayoutProjection = { revision: number; key: string; layout: RustTextLayout };
 const rustTextLayouts = new Map<string, RustTextLayoutProjection>();
 const rustTextLayoutLoads = new Set<string>();
+/** Explicit-font shaping cannot safely decide line breaks once browser font
+ * fallback participates. Remember that expected fallback per revision so an
+ * ordinary render does not repeatedly request the same unusable layout. */
+const rustTextLayoutFallbacks = new Map<string, Omit<RustTextLayoutProjection, "layout">>();
 type RustGpuTextProjection = { revision: number; key: string; glyphs: readonly WebGpuTextGlyph[] };
 const rustGpuTextGlyphs = new Map<string, RustGpuTextProjection>();
 const rustGpuTextLoads = new Set<string>();
 const MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE = 4_096;
 let renderSurfaceBytes = 0;
+let alphaMaskLimitReported = false;
+let effectSurfaceLimitReported = false;
+type EffectSurfaces = { source: OffscreenCanvas; sourceContext: OffscreenCanvasRenderingContext2D; shadow: OffscreenCanvas; shadowContext: OffscreenCanvasRenderingContext2D };
+let effectSurfaces: EffectSurfaces | undefined;
+type AlphaMaskSurface = { surface: OffscreenCanvas; context: OffscreenCanvasRenderingContext2D };
+// A mask run only needs one surface at each live nesting depth. Reusing the
+// pair avoids allocating a full-canvas bitmap for every masked sibling run on
+// every frame, while retaining G4's two-level composition limit.
+let alphaMaskSurfaces: Array<AlphaMaskSurface | undefined> = [];
 let wasmMemory: WebAssembly.Memory | undefined;
 let wasmRuntimePromise: Promise<typeof import("@/wasm/generated/editor_wasm")> | undefined;
-let wasmRuntime: typeof import("@/wasm/generated/editor_wasm") | undefined;
+let wasmRuntime: WasmRuntime | undefined;
 let wasmHeapOverBudget = false;
 type StrokeMeshPoint = Readonly<{ x: number; y: number }>;
 type StrokeMeshTriangle = readonly [StrokeMeshPoint, StrokeMeshPoint, StrokeMeshPoint];
 type StrokeMesh = readonly StrokeMeshTriangle[];
 const canonicalStrokeMeshes = new Map<string, StrokeMesh | null>();
 const canonicalPerSideStrokeMeshes = new Map<string, readonly StrokeMesh[] | null>();
+const canonicalParametricOutlines = new Map<string, readonly StrokeMeshPoint[] | null>();
+const canonicalParametricStrokeBounds = new Map<string, { min: StrokeMeshPoint; max: StrokeMeshPoint } | null>();
+type FlattenedVectorPath = Readonly<{ subpaths: readonly { closed: boolean; points: readonly StrokeMeshPoint[] }[]; bounds?: { min: StrokeMeshPoint; max: StrokeMeshPoint } }>;
+const canonicalVectorPaths = new Map<string, FlattenedVectorPath | null>();
+const canonicalBooleanPaths = new Map<string, FlattenedVectorPath | null>();
 // Drag positions are intentionally not committed to the document revision until
 // pointer-up, but the GPU scene must still redraw them on every pointer move.
 let transientSceneVersion = 0;
@@ -213,6 +286,44 @@ function starterNodes(): CanvasNode[] {
 }
 
 function cloneDocument() { return structuredClone(nodes); }
+function storeActivePageSelection() {
+  selectedIds = normalizePageSelection(nodes, activePageId, selectedIds, defaultPageId);
+  selectionByPage.set(activePageId, [...selectedIds]);
+}
+/** Viewport-only updates can arrive once per input frame. Remembering the
+ * already-normalized transient selection here avoids rebuilding a node index
+ * during every pan, zoom, or hover repaint. Structural snapshots still call
+ * `storeActivePageSelection` above. */
+function rememberActivePageSelection() {
+  selectionByPage.set(activePageId, [...selectedIds]);
+}
+function restorePageSelection(pageId: string) {
+  selectedIds = normalizePageSelection(nodes, pageId, selectionByPage.get(pageId) ?? [], defaultPageId);
+}
+/** Undo/Redo replaces the Canonical projection, but it should not make a
+ * surviving layer disappear from the editor's keyboard selection. Structural
+ * changes still naturally drop IDs that no longer exist on the active page. */
+function retainExistingSelection() {
+  const currentIds = new Set(nodes
+    .filter((node) => (node.pageId ?? defaultPageId) === activePageId)
+    .map((node) => node.id));
+  selectedIds = selectedIds.filter((id) => currentIds.has(id));
+}
+function scaleVectorPath(path: NonNullable<CanvasNode["vectorPath"]>, scaleX: number, scaleY: number): NonNullable<CanvasNode["vectorPath"]> {
+  return {
+    ...path,
+    subpaths: path.subpaths.map((subpath) => ({
+      ...subpath,
+      points: subpath.points.map((point) => ({
+        ...point,
+        x: point.x * scaleX,
+        y: point.y * scaleY,
+        handleIn: point.handleIn && { x: point.handleIn.x * scaleX, y: point.handleIn.y * scaleY },
+        handleOut: point.handleOut && { x: point.handleOut.x * scaleX, y: point.handleOut.y * scaleY },
+      })),
+    })),
+  };
+}
 function activeNodes() {
   const visible = visibleNodesOnPage(nodes, activePageId, defaultPageId);
   return sortNodesByLayerOrder(visible.map((node) => worldSpaceProjectionNode(nodes, node) ?? node));
@@ -234,8 +345,34 @@ function boundsForNode(node: CanvasNode) {
     const visual = worldVisualBoundsForNode(nodes, node);
     if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
   }
+  if (node.kind === "vector") {
+    const vectorBounds = canonicalVectorPath(node)?.bounds;
+    if (vectorBounds) return worldVectorBounds(node, vectorBounds);
+  }
+  if ((node.kind === "polygon" || node.kind === "star") && node.parametricShape) {
+    const bounds = canonicalParametricVisualBounds(node);
+    if (bounds) return worldVectorBounds(node, bounds);
+  }
   const bounds = nativeAffineForNode(node) ? worldBoundsForNode(nodes, node) : undefined;
   return bounds ? { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top } : rotatedNodeBounds(node);
+}
+function worldVectorBounds(node: CanvasNode, bounds: NonNullable<FlattenedVectorPath["bounds"]>) {
+  const corners = [
+    { x: bounds.min.x, y: bounds.min.y }, { x: bounds.max.x, y: bounds.min.y },
+    { x: bounds.max.x, y: bounds.max.y }, { x: bounds.min.x, y: bounds.max.y },
+  ];
+  const affine = nativeAffineForNode(node);
+  const world = affine
+    ? corners.map((point) => transformPoint(affine, point))
+    : corners.map((point) => {
+      const radians = node.rotation * Math.PI / 180;
+      const cos = Math.cos(radians); const sin = Math.sin(radians);
+      const dx = point.x - node.width / 2; const dy = point.y - node.height / 2;
+      return { x: node.x + node.width / 2 + cos * dx - sin * dy, y: node.y + node.height / 2 + sin * dx + cos * dy };
+    });
+  const xs = world.map((point) => point.x); const ys = world.map((point) => point.y);
+  const left = Math.min(...xs); const top = Math.min(...ys);
+  return { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top };
 }
 function applyNativeAffine(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   const affine = nativeAffineForNode(node);
@@ -247,7 +384,90 @@ function applyNativeAffine(ctx: OffscreenCanvasRenderingContext2D, node: CanvasN
   ctx.transform(affine.a, affine.b, affine.c, affine.d, origin.x, origin.y);
   return true;
 }
+function canonicalVectorContainsWorldPoint(node: CanvasNode, point: { x: number; y: number }): boolean | undefined {
+  if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath) return undefined;
+  const affine = nativeAffineForNode(node);
+  let local: { x: number; y: number };
+  if (affine) {
+    const inverse = invertAffine(affine);
+    if (!inverse) return false;
+    local = transformPoint(inverse, point);
+  } else {
+    const radians = node.rotation * Math.PI / 180;
+    const cos = Math.cos(radians); const sin = Math.sin(radians);
+    const dx = point.x - (node.x + node.width / 2);
+    const dy = point.y - (node.y + node.height / 2);
+    local = { x: cos * dx + sin * dy + node.width / 2, y: -sin * dx + cos * dy + node.height / 2 };
+  }
+  try {
+    const pathJson = JSON.stringify(node.vectorPath);
+    if (wasmRuntime.vector_path_contains_json(pathJson, local.x, local.y, .25)) return true;
+    const cap = canvasStrokeCap(node.strokeCapStart);
+    if (hasVisibleStroke(node) && cap && node.strokeCapEnd === node.strokeCapStart) {
+      return wasmRuntime.vector_path_stroke_contains_json(pathJson, local.x, local.y, .25, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10);
+    }
+    return false;
+  } catch {
+    return undefined;
+  }
+}
+function canonicalParametricContainsWorldPoint(node: CanvasNode, point: { x: number; y: number }): boolean | undefined {
+  if (!wasmRuntime || (node.kind !== "polygon" && node.kind !== "star") || !node.parametricShape) return undefined;
+  const affine = nativeAffineForNode(node);
+  let local: { x: number; y: number };
+  if (affine) {
+    const inverse = invertAffine(affine);
+    if (!inverse) return false;
+    local = transformPoint(inverse, point);
+  } else {
+    const radians = node.rotation * Math.PI / 180;
+    const cos = Math.cos(radians); const sin = Math.sin(radians);
+    const dx = point.x - (node.x + node.width / 2);
+    const dy = point.y - (node.y + node.height / 2);
+    local = { x: cos * dx + sin * dy + node.width / 2, y: -sin * dx + cos * dy + node.height / 2 };
+  }
+  try {
+    return wasmRuntime.parametric_shape_contains_point_json(node.width, node.height, JSON.stringify(node.parametricShape), local.x, local.y);
+  } catch {
+    return undefined;
+  }
+}
+function canonicalBooleanContainsWorldPoint(node: CanvasNode, point: { x: number; y: number }): boolean | undefined {
+  const path = canonicalBooleanPath(node);
+  const world = node.kind === "booleanOperation" ? worldTransformForNode(nodes, node.id) : undefined;
+  const inverse = world && invertAffine(world);
+  if (!path || !inverse || !wasmRuntime) return undefined;
+  const local = transformPoint(inverse, point);
+  let pointIndex = 0;
+  const projection = {
+    fillRule: "nonZero",
+    subpaths: path.subpaths.map((subpath) => ({
+      closed: subpath.closed,
+      points: subpath.points.map((candidate) => ({
+        id: `00000000-0000-4000-8000-${(pointIndex++).toString(16).padStart(12, "0")}`,
+        x: candidate.x,
+        y: candidate.y,
+        pointType: "corner",
+      })),
+    })),
+  };
+  try {
+    return wasmRuntime.vector_path_contains_json(JSON.stringify(projection), local.x, local.y, .25);
+  } catch {
+    return undefined;
+  }
+}
+function isRenderedBooleanOperand(node: CanvasNode) {
+  const parent = node.parentId ? nodes.find((candidate) => candidate.id === node.parentId) : undefined;
+  return Boolean(parent && parent.kind === "booleanOperation" && canonicalBooleanPath(parent));
+}
 function containsWorldPoint(node: CanvasNode, point: { x: number; y: number }) {
+  const booleanContains = canonicalBooleanContainsWorldPoint(node, point);
+  if (booleanContains !== undefined) return booleanContains;
+  const vectorContains = canonicalVectorContainsWorldPoint(node, point);
+  if (vectorContains !== undefined) return vectorContains;
+  const parametricContains = canonicalParametricContainsWorldPoint(node, point);
+  if (parametricContains !== undefined) return parametricContains;
   const affine = nativeAffineForNode(node);
   if (!affine) return findTopmostHit([node], point) === node;
   const inverse = invertAffine(affine);
@@ -255,20 +475,30 @@ function containsWorldPoint(node: CanvasNode, point: { x: number; y: number }) {
   const local = transformPoint(inverse, point);
   return findTopmostHit([{ ...node, x: 0, y: 0, rotation: 0, relativeTransform: undefined }], local) !== undefined;
 }
-/** Frame clipping is structural: an object remains a child even when only a
- * portion of it is visible. Keep this test beside hit testing so no pointer
- * target can escape a clipped ancestor. Groups and Sections intentionally do
- * not create a clip. */
+/** Frame clipping and G4 alpha masks are structural visibility gates. Keep
+ * this test beside hit testing so targets outside either source are never
+ * selected even if their own geometry contains the pointer. */
 function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number }) {
   const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]));
   const visited = new Set<string>();
-  let parentId = node.parentId;
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
+  let current: CanvasNode | undefined = node;
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    const pageId = current.pageId ?? defaultPageId;
+    const siblings = sortNodesByLayerOrder(nodes.filter((candidate) => (candidate.pageId ?? defaultPageId) === pageId && candidate.parentId === current!.parentId));
+    const index = siblings.findIndex((candidate) => candidate.id === current!.id);
+    if (index < 0) return false;
+    const maskIndex = siblings.slice(0, index).map((candidate, offset) => candidate.isMask ? offset : -1).reduce((latest, candidate) => Math.max(latest, candidate), -1);
+    if (!current.isMask && maskIndex >= 0) {
+      const mask = siblings[maskIndex];
+      if (mask.visible === false || !containsWorldPoint(mask, point)) return false;
+    }
+    const parentId = current.parentId;
+    if (!parentId) return true;
     const parent = byId.get(parentId);
     if (!parent) return false;
     if (parent.kind === "frame" && parent.clipsContent !== false && !containsWorldPoint(parent, point)) return false;
-    parentId = parent.parentId;
+    current = parent;
   }
   return true;
 }
@@ -282,13 +512,20 @@ function rebuildNodeIndex() {
   nodeBoundsById = new Map(projected.map((node) => [node.id, boundsForNode(node)]));
   spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
 }
-function emit(message: WorkerToMain) { self.postMessage(message); }
+function emit(message: WorkerToMain) {
+  if (message.type === "snapshot" && hydrationCompletionRequestId) {
+    message.snapshot.hydrationRequestId = hydrationCompletionRequestId;
+    hydrationCompletionRequestId = undefined;
+  }
+  self.postMessage(message);
+}
 function emitError(error: unknown, code?: EditorErrorCode, transactionId?: string) {
   const classified = code ? editorError(code) : classifyEditorError(error);
   const diagnostic = diagnostics.record({ category: "lifecycle", code: `ENGINE_${classified.code}`, documentRevision: revision, details: { errorCode: classified.code } });
   emit({ type: "error", ...classified, documentRevision: revision, diagnosticId: diagnostic.sequence, transactionId });
 }
 function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true) {
+  storeActivePageSelection();
   const documentHash = wasmDocument?.canonical_hash();
   const localSnapshot = persistable && !ephemeralBenchmarkProjection && wasmDocument ? { format: "rust-core-v1", coreRevision: Number(wasmDocument.revision), coreSnapshot: wasmDocument.snapshot_json(), ...(documentHash ? { documentHash } : {}), viewport: { ...viewport }, presentation: nodes.map(presentationNode) } satisfies CoreLocalSnapshot : undefined;
   const memory = wasmDocument ? JSON.parse(wasmDocument.memory_stats_json()) as EditorSnapshot["memory"] : undefined;
@@ -299,7 +536,7 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
   const fontAvailability = Object.fromEntries(assets.filter((asset) => asset.mediaType.startsWith("font/")).map((asset) => [asset.assetId, fontFaces.statusFor(asset.assetId)]));
-  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
+  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuEffectTextureBytes, maxGpuEffectTextureBytes: MAX_GPU_EFFECT_TEXTURE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
 }
 function emitRemoteBootstrap() {
   if (!wasmDocument || documentCore !== "Rust/WASM bridge ready") return;
@@ -318,7 +555,11 @@ function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
     future = [];
     undoOrder.length = 0;
     redoOrder = [];
-    selectedIds = [];
+    // A remote Snapshot can arrive just after a user has made a local
+    // selection (especially during a newly-created document's first sync).
+    // Selection is presentation state, not Canonical document state: retain
+    // IDs that still exist after hydration, while naturally dropping deleted
+    // layers through `syncProjectionFromWasm` below.
     syncProjectionFromWasm(false);
     if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
     rebuildNodeIndex();
@@ -350,7 +591,7 @@ function queueRemoteOperation(transactionId: string, baseRevision: number, batch
 async function buildPendingRemoteOperation(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string, replay?: PendingOperationReplay): Promise<PendingRemoteOperation> {
   const documentForOperation = documentId;
   const clientSequence = ++remoteClientSequence;
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(payload).buffer));
+  const digest = await sha256Bytes(payload);
   const envelope = await encodeOperationPayloadEnvelope({
     documentId: documentForOperation,
     operationId: transactionId,
@@ -430,7 +671,7 @@ async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: Pending
       blockedOperationIds.push(operation.operationId);
       break;
     }
-    const replacementId = crypto.randomUUID();
+    const replacementId = createId();
     let replayed: ReturnType<typeof applyPendingReplay>;
     try {
       replayed = applyPendingReplay(replay, replacementId);
@@ -488,6 +729,7 @@ function emitViewportCheckpoint() {
   emit({ type: "viewport-checkpoint", viewport: { ...viewport }, documentHash: wasmDocument.canonical_hash(), coreRevision: Number(wasmDocument.revision) });
 }
 function emitViewState(viewportChanged = false) {
+  rememberActivePageSelection();
   emit({ type: "view-state", viewport: { ...viewport }, selectedIds: [...selectedIds], performance: renderPerformance.summary(), viewportChanged });
 }
 function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: number) {
@@ -507,6 +749,10 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: 
   if (canvas && (canvas.width !== admission.pixelWidth || canvas.height !== admission.pixelHeight)) {
     canvas.width = Math.max(1, admission.pixelWidth);
     canvas.height = Math.max(1, admission.pixelHeight);
+    effectSurfaces = undefined;
+    alphaMaskSurfaces = [];
+    alphaMaskLimitReported = false;
+    effectSurfaceLimitReported = false;
   }
   return true;
 }
@@ -536,6 +782,7 @@ async function probeGpuDevice(recovery = false) {
     gpuRenderer?.destroy();
     gpuRenderer = undefined;
     gpuSceneBytes = 0;
+    gpuEffectTextureBytes = 0;
     gpuSceneWithinBudget = true;
     gpuStatus = "unavailable";
     diagnostics.record({ category: "renderer", code: "WEBGPU_DISABLED_FOR_CAPTURE" });
@@ -562,10 +809,12 @@ async function probeGpuDevice(recovery = false) {
       } else emitSnapshot(undefined, false);
     });
     gpuSceneBytes = 0;
+    gpuEffectTextureBytes = 0;
     gpuSceneWithinBudget = true;
     gpuSceneLimitReported = false;
     textAtlasStatsSignature = "";
     imageTextureStatsSignature = "";
+    effectTextureStatsSignature = "";
     gpuStatus = "ready";
     diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_READY" });
     // The first draw uploads the derived instance scene. It is renderer startup,
@@ -582,6 +831,7 @@ async function probeGpuDevice(recovery = false) {
     gpuRenderer?.destroy();
     gpuRenderer = undefined;
     gpuSceneBytes = 0;
+    gpuEffectTextureBytes = 0;
     gpuStatus = "unavailable";
     const code = classifyWebGpuRendererFailure(error);
     diagnostics.record({ category: "renderer", code, documentRevision: revision, details: { errorKind: code } });
@@ -600,8 +850,10 @@ function handleGpuDeviceLoss(renderer: WebGpuSceneRenderer) {
   if (gpuRenderer !== renderer) return;
   gpuRenderer = undefined;
   gpuSceneBytes = 0;
+  gpuEffectTextureBytes = 0;
   textAtlasStatsSignature = "";
   imageTextureStatsSignature = "";
+  effectTextureStatsSignature = "";
   if (gpuRecoveryAttempts >= 1) {
     gpuStatus = "unavailable";
     diagnostics.record({ category: "renderer", code: "WEBGPU_RECOVERY_EXHAUSTED" });
@@ -656,7 +908,7 @@ function maybeSimulateGpuFault() {
 function presentationNode(node: CanvasNode): PresentationNode {
   return { id: node.id };
 }
-function journalEntry(operation: CoreJournalOperation, baseRevision: number, id = crypto.randomUUID()): LocalJournalEntry | undefined {
+function journalEntry(operation: CoreJournalOperation, baseRevision: number, id = createId()): LocalJournalEntry | undefined {
   if (!wasmDocument || ephemeralBenchmarkProjection) return undefined;
   return {
     format: "rust-core-operation-v1",
@@ -673,18 +925,15 @@ function rememberProjection(nodesToRemember = nodes) {
   nodesToRemember.forEach((node) => preservedProjectionNodes.set(node.id, presentationNode(node)));
 }
 function canvasNodeFromProjection(node: WasmProjectionNode): CanvasNode {
-  return {
-    id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
-    rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId,
-    stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, strokeJoin: node.strokeJoin, strokeMiterLimit: node.strokeMiterLimit, strokeDashPattern: node.strokeDashPattern, strokeWeights: node.strokeWeights?.length === 4 ? [node.strokeWeights[0], node.strokeWeights[1], node.strokeWeights[2], node.strokeWeights[3]] : undefined, strokeAlign: node.strokeAlign, arcData: node.arcData, relativeTransform: node.relativeTransform, clipsContent: node.clipsContent,
-    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, opacity: node.opacity, text: node.text, textProperties: node.textProperties, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden, extensions: node.extensions,
-  };
+  return canvasNodeFromWasmProjection(node);
 }
 function syncProjectionFromWasm(rememberExisting = true) {
   if (!wasmDocument) return;
   if (rememberExisting) rememberProjection();
   const snapshot = JSON.parse(wasmDocument.snapshot_json()) as WasmProjectionSnapshot;
-  documentId = snapshot.documentId ?? documentId;
+  const nextDocumentId = snapshot.documentId ?? documentId;
+  if (nextDocumentId !== documentId) selectionByPage.clear();
+  documentId = nextDocumentId;
   documentSchemaVersion = snapshot.schemaVersion;
   pages = snapshot.pages?.length ? snapshot.pages : pages;
   assets = snapshot.resourceIndex ?? [];
@@ -696,7 +945,7 @@ function syncProjectionFromWasm(rememberExisting = true) {
     preservedProjectionNodes.set(projected.id, presentationNode(projected));
     return projected;
   });
-  selectedIds = selectedIds.filter((id) => nodes.some((node) => node.id === id));
+  selectedIds = normalizePageSelection(nodes, activePageId, selectedIds, defaultPageId);
   rebuildNodeIndex();
   revision = snapshot.revision;
   refreshRustGpuScene();
@@ -718,12 +967,15 @@ function syncProjectionFromWasm(rememberExisting = true) {
  * A drag deliberately invalidates it and uses the local projection until the
  * resulting move transaction is accepted and projected again. */
 function refreshRustGpuScene() {
-  if (!wasmDocument || nodes.length > MAX_RUST_GPU_INSTANCE_NODES) {
+  if (!wasmDocument || !wasmRuntime || nodes.length > MAX_RUST_GPU_INSTANCE_NODES) {
     rustGpuScene = undefined;
     return;
   }
   try {
-    const payload = parseRustGpuSceneBatch(wasmDocument.gpu_scene_instances_json(activePageId));
+    const payload = parseRustGpuSceneBatch(wasmRuntime.gpu_scene_instances_from_snapshot_json(
+      wasmDocument.snapshot_json(),
+      activePageId,
+    ));
     if (!payload) throw new Error("INVALID_RUST_GPU_BATCH");
     rustGpuScene = {
       revision,
@@ -797,13 +1049,16 @@ function refreshRustTextLayouts() {
     const request = rustTextLayoutRequest(node);
     if (!request) return;
     active.add(node.id);
-    if (rustTextLayouts.get(node.id)?.key === request.key || rustTextLayoutLoads.has(request.key)) return;
+    if (rustTextLayouts.get(node.id)?.key === request.key || rustTextLayoutFallbacks.get(node.id)?.key === request.key || rustTextLayoutLoads.has(request.key)) return;
     if (fontFaces.statusFor(request.font.assetId) !== "ready") return;
     rustTextLayoutLoads.add(request.key);
     void loadRustTextLayout(node.id, request);
   });
   [...rustTextLayouts].forEach(([nodeId, cached]) => {
     if (!active.has(nodeId) || cached.revision !== revision) rustTextLayouts.delete(nodeId);
+  });
+  [...rustTextLayoutFallbacks].forEach(([nodeId, cached]) => {
+    if (!active.has(nodeId) || cached.revision !== revision) rustTextLayoutFallbacks.delete(nodeId);
   });
 }
 
@@ -828,6 +1083,11 @@ async function loadRustTextLayout(
     if (!layout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
     const currentNode = nodes.find((node) => node.id === nodeId);
     if (!currentNode || rustTextLayoutRequest(currentNode)?.key !== request.key) return;
+    if (hasMissingRustTextGlyph(layout)) {
+      rustTextLayoutFallbacks.set(nodeId, { revision, key: request.key });
+      return;
+    }
+    rustTextLayoutFallbacks.delete(nodeId);
     rustTextLayouts.set(nodeId, { revision, key: request.key, layout });
     refreshRustGpuTextGlyphs();
     render();
@@ -867,7 +1127,7 @@ function rustGpuTextRequest(node: CanvasNode) {
   // The current instance format expresses glyph-local geometry. Keep node
   // rotation, non-left alignment, synthetic styling and paragraph gaps on the
   // Canvas path until the Text Pass has the equivalent line transform model.
-  if (node.rotation !== 0 || properties?.paragraph.alignment !== "left" || (properties?.paragraph.paragraphSpacing ?? 0) !== 0 || run?.italic || (run?.letterSpacing ?? 0) !== 0 || run?.fontWeight !== 400) return undefined;
+  if (node.rotation !== 0 || properties?.paragraph.alignment !== "left" || (properties?.paragraph.paragraphSpacing ?? 0) !== 0 || properties?.runs.some((candidate) => candidate.color) || run?.italic || (run?.letterSpacing ?? 0) !== 0 || run?.fontWeight !== 400) return undefined;
   if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE) return undefined;
   const pixelSize = Math.min(512, Math.max(8, Math.ceil(layoutRequest.fontSize)));
   const key = JSON.stringify([layoutRequest.key, pixelSize, node.x, node.y, node.rotation, node.fill, node.opacity, node.textProperties?.paragraph.lineHeight, node.textProperties?.paragraph.paragraphSpacing]);
@@ -1077,7 +1337,7 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
   try {
     if (entry.baseRevision !== Number(engine.revision)) throw new Error("JOURNAL_REVISION_CONFLICT");
     const operation = entry.operation;
-    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "ungroup" || operation.type === "delete") {
+    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "boolean" || operation.type === "ungroup" || operation.type === "delete") {
       const currentNodes = (JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot).nodes.map(canvasNodeFromProjection);
       const resolved = resolveCoreBatch(currentNodes, [operation]);
       if (!resolved) throw new Error("INVALID_JOURNAL_OPERATION");
@@ -1090,7 +1350,7 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
     engine.load_snapshot_json(entry.fallbackCoreSnapshot);
   }
 }
-async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkProjection = false) {
+async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkProjection = false, seedAssets: readonly DocumentAsset[] = [], hydrationRequestId?: string) {
   const loadSequence = ++bridgeLoadSequence;
   renderPerformance.reset();
   try {
@@ -1113,6 +1373,8 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
         if (migrated !== current) engine.load_snapshot_json(migrated);
       }
     } else {
+      if (seedAssets.length) engine.seed_assets_json(JSON.stringify(seedAssets));
+      nodes = normalizeAutoLayoutProjection(nodes);
       for (const batchNodes of wasmHydrationBatches(nodes)) {
         const hydrated = resolveCoreBatch([], batchNodes.map((node) => ({ type: "create" as const, node })));
         if (!hydrated) throw new Error("INVALID_LEGACY_PROJECTION");
@@ -1158,7 +1420,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
       // empty Rust document instead; the already-requested remote bootstrap then
       // restores the service-owned Protobuf snapshot through the same Core codec.
       diagnostics.record({ category: "recovery", code: "LOCAL_CORE_SNAPSHOT_REJECTED", details: { errorKind: localSnapshotFailureKind(error) } });
-      void loadDocumentBridge(undefined, benchmarkProjection);
+      void loadDocumentBridge(undefined, benchmarkProjection, [], hydrationRequestId);
       return;
     }
     documentCore = "TypeScript document prototype";
@@ -1172,6 +1434,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     diagnostics.record({ category: "recovery", code: "WASM_BRIDGE_FALLBACK", details: { errorKind } });
     renderPerformance.start();
   }
+  if (hydrationRequestId) hydrationCompletionRequestId = hydrationRequestId;
   emitSnapshot();
   if (remoteResetPending && wasmDocument && documentCore === "Rust/WASM bridge ready") {
     remoteResetPending = false;
@@ -1204,7 +1467,7 @@ async function loadWasmRuntime(): Promise<typeof import("@/wasm/generated/editor
   }
 }
 function normalizeIds(snapshotNodes: CanvasNode[]) {
-  return snapshotNodes.map((node) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(node.id) ? node : { ...node, id: crypto.randomUUID() });
+  return snapshotNodes.map((node) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(node.id) ? node : { ...node, id: createId() });
 }
 function admitToWasm(command: EditorCommand) {
   if (!wasmDocument) return true;
@@ -1216,18 +1479,18 @@ function admitToWasm(command: EditorCommand) {
       // reducer and the service reducer byte-for-byte equivalent.
       const resolved = resolveCoreBatch(nodes, [command]);
       if (!resolved) throw new Error("INVALID_TRANSACTION");
-      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
+      wasmDocument.apply_transaction_json(createId(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
     if (command.type === "update") {
       const resolved = resolveCoreBatch(nodes, [command]);
       if (!resolved) throw new Error("INVALID_TRANSACTION");
-      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify(resolved.batch));
+      wasmDocument.apply_transaction_json(createId(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
     if (command.type === "delete") {
-      wasmDocument.delete_nodes(crypto.randomUUID(), wasmDocument.revision, command.ids.join(","));
+      wasmDocument.delete_nodes(createId(), wasmDocument.revision, command.ids.join(","));
     }
     if (command.type === "reposition") {
-      wasmDocument.apply_transaction_json(crypto.randomUUID(), wasmDocument.revision, JSON.stringify([{ type: "reposition", positionIds: command.positionIds }]));
+      wasmDocument.apply_transaction_json(createId(), wasmDocument.revision, JSON.stringify([{ type: "reposition", positionIds: command.positionIds }]));
     }
     return true;
   } catch (error) {
@@ -1253,10 +1516,12 @@ function resetDocumentToStarterNodes() {
   ephemeralBenchmarkProjection = false;
   rustGpuScene = undefined;
   rustTextLayouts.clear();
+  rustTextLayoutFallbacks.clear();
   documentCore = "Starting Rust/WASM bridge";
   const reset = resetDocumentProjection(starterNodes());
   nodes = reset.nodes;
   rebuildNodeIndex();
+  selectionByPage.clear();
   selectedIds = reset.selectedIds;
   viewport = reset.viewport;
   history.length = 0;
@@ -1277,7 +1542,7 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
   // A journal entry and its remote envelope describe the same user intent.
   // Keeping one ID across both stores gives the reconciler a durable join key
   // instead of trying to infer intent from a later Core snapshot.
-  const remoteOperationId = appliedByWasm && remoteCommand ? crypto.randomUUID() : undefined;
+  const remoteOperationId = appliedByWasm && remoteCommand ? createId() : undefined;
   if (!appliedByWasm) {
     history.push({ nodes: cloneDocument(), advancesRevision });
     if (history.length > 100) {
@@ -1338,16 +1603,29 @@ function hitFrameName(screenX: number, screenY: number) {
     return isFrameNameHit(context!, node, screenX, screenY);
   });
 }
-function hit(worldX: number, worldY: number, drillDown = false) {
+function paintedHit(worldX: number, worldY: number) {
   const point = { x: worldX, y: worldY };
   const active = activeNodes();
   const nodesById = new Map(active.map((node) => [node.id, node]));
-  const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
-  // Groups are the normal selection boundary; a repeated press drills through
-  // that boundary to the painted child below it.
-  const paintedNode = candidates.find((candidate) => candidate.kind !== "group") ?? candidates[0];
-  const node = paintedNode && resolveGroupSelectionTarget(active, paintedNode.id, drillDown, selectedIds);
+  const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
+  // Slices are export-only regions. The shared selector keeps them available
+  // from Layers while direct canvas clicks reach painted content underneath.
+  return { active, node: findTopmostCanvasSelectionCandidate(candidates) };
+}
+function hit(worldX: number, worldY: number, drillDown = false, deepSelect = false) {
+  const { active, node: paintedNode } = paintedHit(worldX, worldY);
+  // Frame and Group are selection boundaries; repeated clicks enter one level,
+  // while Command/Ctrl-click selects the painted descendant directly.
+  const node = paintedNode && resolveNestedSelectionTarget(active, paintedNode.id, drillDown, selectedIds, deepSelect);
   if (node) return node;
+  const screen = toScreen(worldX, worldY);
+  return hitFrameName(screen.x, screen.y);
+}
+function hoverHit(worldX: number, worldY: number) {
+  // Figma previews the actual layer under the pointer, not the parent that a
+  // normal click would select. Container fallback retains Frame-name hover.
+  const paintedNode = paintedHit(worldX, worldY).node;
+  if (paintedNode) return paintedNode;
   const screen = toScreen(worldX, worldY);
   return hitFrameName(screen.x, screen.y);
 }
@@ -1371,7 +1649,6 @@ function paintStyle(ctx: OffscreenCanvasRenderingContext2D, fallback: string, gr
   return cssGradient;
 }
 function fillStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) { return paintStyle(ctx, node.fill, node.fillGradient, width, height); }
-function strokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) { return paintStyle(ctx, node.stroke, node.strokeGradient, width, height); }
 function paintStackStyle(ctx: OffscreenCanvasRenderingContext2D, paint: NonNullable<CanvasNode["fills"]>[number], width: number, height: number) { return paintStyle(ctx, paint.css, paint.gradient, width, height); }
 function activeFills(node: CanvasNode): NonNullable<CanvasNode["fills"]> { return node.fills?.length ? node.fills : [{ css: node.fill, color: node.fillColor, gradient: node.fillGradient }]; }
 function activeStrokes(node: CanvasNode): NonNullable<CanvasNode["strokes"]> { return node.strokes?.length ? node.strokes : [{ css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient }]; }
@@ -1397,6 +1674,19 @@ function fillCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: C
     ctx.fill();
   });
 }
+function fillScaledCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, mesh: StrokeMesh, width: number, height: number, scale: number) {
+  ctx.beginPath();
+  mesh.forEach(([a, b, c]) => {
+    ctx.moveTo(a.x * scale, a.y * scale);
+    ctx.lineTo(b.x * scale, b.y * scale);
+    ctx.lineTo(c.x * scale, c.y * scale);
+    ctx.closePath();
+  });
+  activeStrokes(node).forEach((paint) => {
+    ctx.fillStyle = paintStackStyle(ctx, paint, width, height);
+    ctx.fill();
+  });
+}
 function canvasStrokeCap(cap: CanvasNode["strokeCapStart"]): "butt" | "round" | "square" | undefined {
   if (!cap || cap === "none") return "butt";
   if (cap === "round" || cap === "square") return cap;
@@ -1405,6 +1695,282 @@ function canvasStrokeCap(cap: CanvasNode["strokeCapStart"]): "butt" | "round" | 
 function meshPoint(value: unknown): StrokeMeshPoint | undefined {
   if (!Array.isArray(value) || value.length !== 2 || !value.every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))) return undefined;
   return { x: value[0], y: value[1] };
+}
+function canonicalParametricOutline(node: CanvasNode, shapeWidth: number, shapeHeight: number): readonly StrokeMeshPoint[] {
+  if ((node.kind !== "polygon" && node.kind !== "star") || !node.parametricShape) return [];
+  const shapeJson = JSON.stringify(node.parametricShape);
+  const key = `${node.id}:${shapeWidth}:${shapeHeight}:${shapeJson}`;
+  const cached = canonicalParametricOutlines.get(key);
+  if (cached !== undefined) return cached ?? fallbackParametricShapePoints(shapeWidth, shapeHeight, node.parametricShape);
+  let outline: readonly StrokeMeshPoint[] | undefined;
+  if (wasmRuntime) {
+    try {
+      const result: unknown = JSON.parse(wasmRuntime.parametric_shape_outline_json(shapeWidth, shapeHeight, shapeJson));
+      const points = typeof result === "object" && result !== null && "points" in result && Array.isArray((result as { points?: unknown }).points)
+        ? (result as { points: unknown[] }).points.map(meshPoint)
+        : undefined;
+      if (points?.every((point): point is StrokeMeshPoint => Boolean(point))) outline = points;
+    } catch { /* The deterministic TypeScript formula remains a boot fallback until WASM is ready. */ }
+  }
+  const resolved = outline ?? fallbackParametricShapePoints(shapeWidth, shapeHeight, node.parametricShape);
+  if (canonicalParametricOutlines.size >= 2_048) canonicalParametricOutlines.clear();
+  canonicalParametricOutlines.set(key, resolved);
+  return resolved;
+}
+/** Uses the Rust-generated regular-shape outline as the sole input to Rust's
+ * closed-polyline tessellator. The mesh stays presentation-only, bounded and
+ * cached alongside the other Canonical stroke meshes. */
+function canonicalParametricStrokeMesh(node: CanvasNode, width: number, height: number): StrokeMesh | undefined {
+  if (!wasmRuntime || (node.kind !== "polygon" && node.kind !== "star") || !node.parametricShape || !hasVisibleStroke(node) || node.strokeWidth <= 0) return undefined;
+  const points = canonicalParametricOutline(node, width, height);
+  if (points.length < 3) return undefined;
+  const strokeWidth = node.strokeWidth * viewport.zoom;
+  const dash = node.strokeDashPattern?.map((segment) => segment * viewport.zoom) ?? [];
+  const join = node.strokeJoin ?? "miter";
+  const key = `${node.id}:parametric-stroke:${width}:${height}:${JSON.stringify(node.parametricShape)}:${strokeWidth}:${dash.join(",")}:${join}:${node.strokeMiterLimit ?? 10}`;
+  const cached = canonicalStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(dash.length
+      ? wasmRuntime.stroke_mesh_for_dashed_polyline_json(JSON.stringify(points.map((point) => [point.x, point.y])), strokeWidth, JSON.stringify(dash), "butt", join, node.strokeMiterLimit ?? 10, true)
+      : wasmRuntime.stroke_mesh_for_polyline_json(JSON.stringify(points.map((point) => [point.x, point.y])), strokeWidth, "butt", join, node.strokeMiterLimit ?? 10, true));
+    const triangles = typeof result === "object" && result !== null && "triangles" in result ? (result as { triangles?: unknown }).triangles : undefined;
+    const mesh = Array.isArray(triangles) ? triangles.map((triangle) => {
+      if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
+      const trianglePoints = triangle.map(meshPoint);
+      return trianglePoints.every((point): point is StrokeMeshPoint => Boolean(point)) ? [trianglePoints[0], trianglePoints[1], trianglePoints[2]] as StrokeMeshTriangle : undefined;
+    }) : [];
+    const resolved = mesh.length > 0 && mesh.every((triangle): triangle is StrokeMeshTriangle => Boolean(triangle)) ? mesh : null;
+    if (canonicalStrokeMeshes.size >= 2_048) canonicalStrokeMeshes.clear();
+    canonicalStrokeMeshes.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** Returns the Fill envelope emitted beside the Core-derived regular-shape
+ * outline. This prevents spatial bounds from reimplementing Polygon/Star math
+ * in the Worker. */
+function canonicalParametricFillBounds(node: CanvasNode): { min: StrokeMeshPoint; max: StrokeMeshPoint } | undefined {
+  if (!wasmRuntime || (node.kind !== "polygon" && node.kind !== "star") || !node.parametricShape) return undefined;
+  const shapeJson = JSON.stringify(node.parametricShape);
+  const key = `${node.id}:parametric-fill-bounds:${node.width}:${node.height}:${shapeJson}`;
+  const cached = canonicalParametricStrokeBounds.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(wasmRuntime.parametric_shape_outline_json(node.width, node.height, shapeJson));
+    const rawBounds = typeof result === "object" && result !== null && "bounds" in result ? (result as { bounds?: unknown }).bounds : undefined;
+    const rawMin = typeof rawBounds === "object" && rawBounds !== null && "min" in rawBounds ? (rawBounds as { min?: unknown }).min : undefined;
+    const rawMax = typeof rawBounds === "object" && rawBounds !== null && "max" in rawBounds ? (rawBounds as { max?: unknown }).max : undefined;
+    const min = meshPoint(rawMin);
+    const max = meshPoint(rawMax);
+    const resolved = min && max && min.x <= max.x && min.y <= max.y ? { min, max } : null;
+    if (canonicalParametricStrokeBounds.size >= 2_048) canonicalParametricStrokeBounds.clear();
+    canonicalParametricStrokeBounds.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** Returns the Core tessellator's local mesh bounds at document scale. This is
+ * deliberately separate from the viewport-scale render cache so spatial hit
+ * broad phase and selection boxes cannot inherit a transient zoom value. */
+function canonicalParametricVisualBounds(node: CanvasNode): { min: StrokeMeshPoint; max: StrokeMeshPoint } | undefined {
+  if (!wasmRuntime || (node.kind !== "polygon" && node.kind !== "star") || !node.parametricShape) return undefined;
+  if (!hasVisibleStroke(node) || node.strokeWidth <= 0) return canonicalParametricFillBounds(node);
+  const points = canonicalParametricOutline(node, node.width, node.height);
+  if (points.length < 3) return canonicalParametricFillBounds(node);
+  const dash = node.strokeDashPattern ?? [];
+  const join = node.strokeJoin ?? "miter";
+  const key = `${node.id}:parametric-bounds:${node.width}:${node.height}:${JSON.stringify(node.parametricShape)}:${node.strokeWidth}:${dash.join(",")}:${join}:${node.strokeMiterLimit ?? 10}`;
+  const cached = canonicalParametricStrokeBounds.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(dash.length
+        ? wasmRuntime.stroke_mesh_for_dashed_polyline_json(JSON.stringify(points.map((point) => [point.x, point.y])), node.strokeWidth, JSON.stringify(dash), "butt", join, node.strokeMiterLimit ?? 10, true)
+        : wasmRuntime.stroke_mesh_for_polyline_json(JSON.stringify(points.map((point) => [point.x, point.y])), node.strokeWidth, "butt", join, node.strokeMiterLimit ?? 10, true));
+    const rawBounds = typeof result === "object" && result !== null && "bounds" in result ? (result as { bounds?: unknown }).bounds : undefined;
+    const rawMin = typeof rawBounds === "object" && rawBounds !== null && "min" in rawBounds ? (rawBounds as { min?: unknown }).min : undefined;
+    const rawMax = typeof rawBounds === "object" && rawBounds !== null && "max" in rawBounds ? (rawBounds as { max?: unknown }).max : undefined;
+    const min = meshPoint(rawMin);
+    const max = meshPoint(rawMax);
+    const resolved = min && max && min.x <= max.x && min.y <= max.y ? { min, max } : null;
+    if (canonicalParametricStrokeBounds.size >= 2_048) canonicalParametricStrokeBounds.clear();
+    canonicalParametricStrokeBounds.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+function canonicalVectorPath(node: CanvasNode): FlattenedVectorPath | undefined {
+  if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath) return undefined;
+  const pathJson = JSON.stringify(node.vectorPath);
+  const key = `${node.id}:${pathJson}`;
+  const cached = canonicalVectorPaths.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(wasmRuntime.vector_path_geometry_json(pathJson, .25));
+    const subpaths = typeof result === "object" && result !== null && "subpaths" in result && Array.isArray((result as { subpaths?: unknown }).subpaths)
+      ? (result as { subpaths: unknown[] }).subpaths.map((subpath) => {
+        if (typeof subpath !== "object" || subpath === null || !("closed" in subpath) || !("points" in subpath) || typeof (subpath as { closed?: unknown }).closed !== "boolean" || !Array.isArray((subpath as { points?: unknown }).points)) return undefined;
+        const points = (subpath as { points: unknown[] }).points.map(meshPoint);
+        return points.every((point): point is StrokeMeshPoint => Boolean(point)) ? { closed: (subpath as { closed: boolean }).closed, points } : undefined;
+    })
+      : undefined;
+    const bounds = typeof result === "object" && result !== null && "bounds" in result && typeof (result as { bounds?: unknown }).bounds === "object" && (result as { bounds?: unknown }).bounds !== null
+      ? (result as { bounds: { min?: unknown; max?: unknown } }).bounds
+      : undefined;
+    const min = bounds ? meshPoint(bounds.min) : undefined;
+    const max = bounds ? meshPoint(bounds.max) : undefined;
+    const path = subpaths?.every((subpath): subpath is { closed: boolean; points: StrokeMeshPoint[] } => Boolean(subpath)) ? { subpaths, ...(min && max ? { bounds: { min, max } } : {}) } : undefined;
+    if (canonicalVectorPaths.size >= 2_048) canonicalVectorPaths.clear();
+    canonicalVectorPaths.set(key, path ?? null);
+    return path;
+  } catch {
+    if (canonicalVectorPaths.size >= 2_048) canonicalVectorPaths.clear();
+    canonicalVectorPaths.set(key, null);
+    return undefined;
+  }
+}
+function booleanOperandNodes(node: CanvasNode) {
+  return sortNodesByLayerOrder(nodes.filter((candidate) => candidate.parentId === node.id));
+}
+function transformBooleanOperand(node: CanvasNode, transform: AffineMatrix) {
+  if (!node.vectorPath) return undefined;
+  return {
+    fillRule: node.vectorPath.fillRule,
+    subpaths: node.vectorPath.subpaths.map((subpath) => ({
+      closed: subpath.closed,
+      points: subpath.points.map((point) => {
+        const anchor = transformPoint(transform, point);
+        const transformHandle = (handle: typeof point.handleIn) => {
+          if (!handle) return undefined;
+          const control = transformPoint(transform, { x: point.x + handle.x, y: point.y + handle.y });
+          return { x: control.x - anchor.x, y: control.y - anchor.y };
+        };
+        return { id: point.id, x: anchor.x, y: anchor.y, handleIn: transformHandle(point.handleIn), handleOut: transformHandle(point.handleOut), pointType: point.pointType };
+      }),
+    })),
+  };
+}
+function canonicalBooleanPath(node: CanvasNode): FlattenedVectorPath | undefined {
+  if (!wasmRuntime || node.kind !== "booleanOperation") return undefined;
+  const operands = booleanOperandNodes(node);
+  if (operands.length < 2 || operands.some((operand) => operand.kind !== "vector" || !operand.vectorPath)) return undefined;
+  const booleanWorld = worldTransformForNode(nodes, node.id);
+  const booleanInverse = booleanWorld && invertAffine(booleanWorld);
+  if (!booleanInverse) return undefined;
+  const localTransforms = operands.map((operand) => {
+    const world = worldTransformForNode(nodes, operand.id);
+    return world && multiplyAffine(booleanInverse, world);
+  });
+  if (localTransforms.some((transform) => !transform)) return undefined;
+  const key = `${node.id}:${node.booleanOperation ?? "union"}:${operands.map((operand, index) => `${operand.id}:${JSON.stringify(operand.vectorPath)}:${JSON.stringify(localTransforms[index])}`).join("|")}`;
+  const cached = canonicalBooleanPaths.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const projected = operands.map((operand, index) => transformBooleanOperand(operand, localTransforms[index]!));
+    if (projected.some((path) => !path)) return undefined;
+    const result: unknown = JSON.parse(wasmRuntime.boolean_vector_paths_json(node.booleanOperation ?? "union", JSON.stringify(projected), .25));
+    const subpaths = typeof result === "object" && result !== null && "subpaths" in result && Array.isArray((result as { subpaths?: unknown }).subpaths)
+      ? (result as { subpaths: unknown[] }).subpaths.map((subpath) => {
+        if (typeof subpath !== "object" || subpath === null || !("closed" in subpath) || !("points" in subpath) || typeof (subpath as { closed?: unknown }).closed !== "boolean" || !Array.isArray((subpath as { points?: unknown }).points)) return undefined;
+        const points = (subpath as { points: unknown[] }).points.map(meshPoint);
+        return points.every((point): point is StrokeMeshPoint => Boolean(point)) ? { closed: (subpath as { closed: boolean }).closed, points } : undefined;
+      })
+      : undefined;
+    const bounds = typeof result === "object" && result !== null && "bounds" in result && typeof (result as { bounds?: unknown }).bounds === "object" && (result as { bounds?: unknown }).bounds !== null
+      ? (result as { bounds: { min?: unknown; max?: unknown } }).bounds
+      : undefined;
+    const min = bounds ? meshPoint(bounds.min) : undefined;
+    const max = bounds ? meshPoint(bounds.max) : undefined;
+    const path = subpaths?.every((subpath): subpath is { closed: boolean; points: StrokeMeshPoint[] } => Boolean(subpath)) ? { subpaths, ...(min && max ? { bounds: { min, max } } : {}) } : undefined;
+    if (canonicalBooleanPaths.size >= 2_048) canonicalBooleanPaths.clear();
+    canonicalBooleanPaths.set(key, path ?? null);
+    return path;
+  } catch {
+    if (canonicalBooleanPaths.size >= 2_048) canonicalBooleanPaths.clear();
+    canonicalBooleanPaths.set(key, null);
+    return undefined;
+  }
+}
+function renderedBooleanOperandIds(orderedNodes: readonly CanvasNode[]) {
+  const ids = new Set<string>();
+  orderedNodes.forEach((node) => {
+    if (canonicalBooleanPath(node)) booleanOperandNodes(node).forEach((operand) => ids.add(operand.id));
+  });
+  return ids;
+}
+function traceFlattenedVectorPath(ctx: Pick<OffscreenCanvasRenderingContext2D, "moveTo" | "lineTo" | "closePath">, path: FlattenedVectorPath, scale: number) {
+  path.subpaths.forEach((subpath) => {
+    const first = subpath.points[0];
+    if (!first) return;
+    ctx.moveTo(first.x * scale, first.y * scale);
+    subpath.points.slice(1).forEach((point) => ctx.lineTo(point.x * scale, point.y * scale));
+    if (subpath.closed) ctx.closePath();
+  });
+}
+function canonicalVectorStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
+  const cap = canvasStrokeCap(node.strokeCapStart);
+  if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath || !cap || node.strokeCapEnd !== node.strokeCapStart || node.strokeWidth <= 0) return undefined;
+  const pathJson = JSON.stringify(node.vectorPath);
+  const key = `${node.id}:vector-stroke:${pathJson}:${node.strokeWidth}:${cap}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}`;
+  const cached = canonicalStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const result: unknown = JSON.parse(wasmRuntime.vector_path_stroke_mesh_json(pathJson, .25, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10));
+    const triangles = typeof result === "object" && result !== null && "triangles" in result ? (result as { triangles?: unknown }).triangles : undefined;
+    const mesh = Array.isArray(triangles) ? triangles.map((triangle) => {
+      if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
+      const points = triangle.map(meshPoint);
+      return points.every((point): point is StrokeMeshPoint => Boolean(point)) ? [points[0], points[1], points[2]] as StrokeMeshTriangle : undefined;
+    }) : [];
+    const resolved = mesh.length > 0 && mesh.every((triangle): triangle is StrokeMeshTriangle => Boolean(triangle)) ? mesh : null;
+    if (canonicalStrokeMeshes.size >= 2_048) canonicalStrokeMeshes.clear();
+    canonicalStrokeMeshes.set(key, resolved);
+    return resolved ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+function canonicalVectorStrokeOutline(node: CanvasNode): FlattenedVectorPath | undefined {
+  const cap = canvasStrokeCap(node.strokeCapStart);
+  if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath || !cap || node.strokeCapEnd !== node.strokeCapStart || node.strokeWidth <= 0) return undefined;
+  try {
+    const result: unknown = JSON.parse(node.strokeDashPattern?.length
+      ? wasmRuntime.vector_path_dashed_outline_json(JSON.stringify(node.vectorPath), .25, node.strokeWidth, JSON.stringify(node.strokeDashPattern), cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10)
+      : wasmRuntime.vector_path_outline_json(JSON.stringify(node.vectorPath), .25, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10));
+    const subpaths = typeof result === "object" && result !== null && "subpaths" in result && Array.isArray((result as { subpaths?: unknown }).subpaths)
+      ? (result as { subpaths: unknown[] }).subpaths.map((subpath) => {
+        if (typeof subpath !== "object" || subpath === null || !("closed" in subpath) || !("points" in subpath) || (subpath as { closed?: unknown }).closed !== true || !Array.isArray((subpath as { points?: unknown }).points)) return undefined;
+        const points = (subpath as { points: unknown[] }).points.map(meshPoint);
+        return points.length >= 3 && points.every((point): point is StrokeMeshPoint => Boolean(point)) ? { closed: true, points } : undefined;
+      })
+      : undefined;
+    return subpaths?.length && subpaths.every((subpath): subpath is { closed: boolean; points: StrokeMeshPoint[] } => Boolean(subpath)) ? { subpaths } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function canonicalLineStrokeOutline(node: CanvasNode): FlattenedVectorPath | undefined {
+  const startCap = canvasStrokeCap(node.strokeCapStart);
+  const dashed = node.strokeDashPattern?.length;
+  if (!wasmRuntime || node.kind !== "line" || node.strokeWidth <= 0 || node.width <= 0 || (dashed && (!startCap || startCap !== canvasStrokeCap(node.strokeCapEnd)))) return undefined;
+  try {
+    const result: unknown = JSON.parse(dashed
+      ? wasmRuntime.dashed_line_outline_json(node.width, node.strokeWidth, JSON.stringify(node.strokeDashPattern), startCap!, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10)
+      : wasmRuntime.line_outline_json(node.width, node.strokeWidth, node.strokeCapStart ?? "none", node.strokeCapEnd ?? "none", node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10));
+    const subpaths = typeof result === "object" && result !== null && "subpaths" in result && Array.isArray((result as { subpaths?: unknown }).subpaths)
+      ? (result as { subpaths: unknown[] }).subpaths.map((subpath) => {
+        if (typeof subpath !== "object" || subpath === null || !("closed" in subpath) || !("points" in subpath) || (subpath as { closed?: unknown }).closed !== true || !Array.isArray((subpath as { points?: unknown }).points)) return undefined;
+        const points = (subpath as { points: unknown[] }).points.map(meshPoint);
+        return points.length >= 3 && points.every((point): point is StrokeMeshPoint => Boolean(point)) ? { closed: true, points } : undefined;
+      })
+      : undefined;
+    return subpaths?.length && subpaths.every((subpath): subpath is { closed: boolean; points: StrokeMeshPoint[] } => Boolean(subpath)) ? { subpaths } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 function canonicalLineStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
   const startCap = canvasStrokeCap(node.strokeCapStart);
@@ -1623,6 +2189,19 @@ function applyStrokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNo
   ctx.miterLimit = node.strokeMiterLimit ?? 10;
   ctx.setLineDash((node.strokeDashPattern ?? []).map((segment) => segment * viewport.zoom));
 }
+function orderedEffects(node: CanvasNode): readonly NonNullable<CanvasNode["effectStack"]>[number][] {
+  return node.effectStack?.length ? node.effectStack : node.dropShadow ? [{ dropShadow: node.dropShadow }] : [];
+}
+function applyDropShadow(ctx: OffscreenCanvasRenderingContext2D, shadow: CanvasNode["dropShadow"]) {
+  if (!shadow?.visible || shadow.color.alpha <= 0) return;
+  ctx.shadowColor = colorToSrgbCss(shadow.color);
+  ctx.shadowOffsetX = shadow.offsetX * viewport.zoom;
+  ctx.shadowOffsetY = shadow.offsetY * viewport.zoom;
+  // Canvas 2D has no native spread field. For the R3 single-shadow slice, a
+  // positive spread deterministically widens the blur kernel; E1's offscreen
+  // pass will replace this with an exact morphology step.
+  ctx.shadowBlur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
+}
 function roundedRectPath(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"], cornerSmoothing?: number) {
   const radii = resolveCornerRadii(width, height, radius, cornerRadii);
   const smoothing = resolveCornerSmoothing(cornerSmoothing);
@@ -1658,8 +2237,139 @@ function outsetCornerRadii(width: number, height: number, radius: number, corner
   return outsetRoundedRectRadii(width, height, radius, cornerRadii, outset);
 }
 function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const effects = orderedEffects(node);
+  if (!effects.length) {
+    ctx.save();
+    ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+    renderNodePaint(ctx, node);
+    ctx.restore();
+    return;
+  }
+  renderNodeWithEffects(ctx, node, effects);
+}
+
+function canvasCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOperation {
+  return mode === "multiply" || mode === "screen" || mode === "overlay" || mode === "darken" || mode === "lighten" ? mode : "source-over";
+}
+
+function acquireEffectSurfaces(): EffectSurfaces | undefined {
+  if (!canvas) return undefined;
+  if (effectSurfaces && effectSurfaces.source.width === canvas.width && effectSurfaces.source.height === canvas.height) return effectSurfaces;
+  const admission = admitEffectSurfacePool(canvas.width, canvas.height, 2);
+  if (!admission.accepted) {
+    if (!effectSurfaceLimitReported) {
+      diagnostics.record({ category: "renderer", code: `EFFECT_SURFACE_${admission.reason.toUpperCase()}`, documentRevision: revision });
+      effectSurfaceLimitReported = true;
+    }
+    return undefined;
+  }
+  const source = new OffscreenCanvas(canvas.width, canvas.height);
+  const shadow = new OffscreenCanvas(canvas.width, canvas.height);
+  const sourceContext = source.getContext("2d");
+  const shadowContext = shadow.getContext("2d");
+  if (!sourceContext || !shadowContext) return undefined;
+  effectSurfaces = { source, sourceContext, shadow, shadowContext };
+  return effectSurfaces;
+}
+
+/** Composites ordered Drop Shadows from a reusable source/shadow surface pair.
+ * The source is painted once, every tinted/blurred shadow is composited behind
+ * it, and the source is finally drawn exactly once to avoid alpha darkening. */
+function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, effects: readonly NonNullable<CanvasNode["effectStack"]>[number][]) {
+  if (node.visible === false || node.kind === "group" || node.kind === "slice") return;
+  const surfaces = acquireEffectSurfaces();
+  if (!surfaces) {
+    // A resource limit remains visible through diagnostics; preserve the R3
+    // compatibility projection instead of allocating an unbounded surface.
+    ctx.save();
+    ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+    renderNodePaint(ctx, node, effects.find((effect) => effect.dropShadow)?.dropShadow);
+    ctx.restore();
+    return;
+  }
+  let source = surfaces.source;
+  let sourceContext = surfaces.sourceContext;
+  let target = surfaces.shadow;
+  let targetContext = surfaces.shadowContext;
+  sourceContext.save(); sourceContext.setTransform(dpr, 0, 0, dpr, 0, 0); sourceContext.clearRect(0, 0, width, height); renderNodePaint(sourceContext, node); sourceContext.restore();
+  for (const effect of effects) {
+    targetContext.save();
+    targetContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    targetContext.clearRect(0, 0, width, height);
+    if (effect.layerBlur) {
+      if (!effect.layerBlur.visible || effect.layerBlur.radius <= 0) { targetContext.drawImage(source, 0, 0, width, height); }
+      else { targetContext.filter = `blur(${effect.layerBlur.radius * viewport.zoom}px)`; targetContext.drawImage(source, 0, 0, width, height); }
+    } else if (effect.dropShadow) {
+      const shadow = effect.dropShadow;
+      if (shadow.visible && shadow.color.alpha > 0) {
+        const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
+        targetContext.filter = `blur(${blur}px)`;
+        targetContext.drawImage(source, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
+        targetContext.filter = "none";
+        targetContext.globalCompositeOperation = "source-in";
+        targetContext.fillStyle = colorToSrgbCss(shadow.color);
+        targetContext.fillRect(0, 0, width, height);
+      }
+      // The blurred, tinted alpha is already in `target`. Put the untouched
+      // source *over* it: `destination-over` puts the source behind the
+      // shadow and lets blur visible beneath the fill read as an inner shadow
+      // whenever Frame clipping selects this Canvas renderer path.
+      targetContext.globalCompositeOperation = "source-over";
+      targetContext.drawImage(source, 0, 0, width, height);
+    } else if (effect.innerShadow) {
+      const shadow = effect.innerShadow;
+      if (shadow.visible && shadow.color.alpha > 0) {
+        const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
+        targetContext.filter = `blur(${blur}px)`;
+        // Invert the offset so the same visual direction is perceived inside
+        // the source boundary rather than outside it.
+        targetContext.drawImage(source, -shadow.offsetX * viewport.zoom, -shadow.offsetY * viewport.zoom, width, height);
+        targetContext.filter = "none";
+        targetContext.globalCompositeOperation = "source-in";
+        targetContext.fillStyle = colorToSrgbCss(shadow.color);
+        targetContext.fillRect(0, 0, width, height);
+        targetContext.globalCompositeOperation = "destination-in";
+        targetContext.drawImage(source, 0, 0, width, height);
+        sourceContext.save();
+        sourceContext.globalCompositeOperation = "source-over";
+        sourceContext.drawImage(target, 0, 0, width, height);
+        sourceContext.restore();
+        targetContext.clearRect(0, 0, width, height);
+      } else targetContext.drawImage(source, 0, 0, width, height);
+    }
+    else if (effect.backgroundBlur) {
+      const blur = effect.backgroundBlur;
+      if (blur.visible && blur.radius > 0) {
+        targetContext.filter = `blur(${blur.radius * viewport.zoom}px)`;
+        targetContext.drawImage(ctx.canvas, 0, 0, width, height);
+        targetContext.filter = "none";
+        targetContext.globalCompositeOperation = "destination-in";
+        targetContext.drawImage(source, 0, 0, width, height);
+        targetContext.globalCompositeOperation = "source-over";
+        targetContext.drawImage(source, 0, 0, width, height);
+      } else targetContext.drawImage(source, 0, 0, width, height);
+    }
+    targetContext.restore();
+    if (!effect.innerShadow || !effect.innerShadow.visible || effect.innerShadow.color.alpha <= 0) {
+      [source, target] = [target, source];
+      [sourceContext, targetContext] = [targetContext, sourceContext];
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+  ctx.drawImage(source, 0, 0, width, height);
+  ctx.restore();
+}
+
+/** Renders one node's source paint, optionally through the legacy/single
+ * shadow path. Multi-shadow composition is performed by the wrapper above. */
+function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow?: CanvasNode["dropShadow"]) {
   if (node.visible === false) return;
-  if (node.kind === "group") return;
+  if (node.kind === "group" || node.kind === "slice") return;
+  if (node.kind === "booleanOperation") {
+    renderBooleanOperation(ctx, node, shadow);
+    return;
+  }
   const point = toScreen(node.x, node.y);
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
@@ -1670,6 +2380,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
       ctx.translate(point.x, point.y);
       ctx.rotate(node.rotation * Math.PI / 180);
     }
+    applyDropShadow(ctx, shadow);
     applyStrokeStyle(ctx, node);
     const mesh = canonicalLineStrokeMesh(node);
     if (mesh) {
@@ -1723,6 +2434,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     ctx.rotate(node.rotation * Math.PI / 180);
     ctx.translate(-w / 2, -h / 2);
   }
+  applyDropShadow(ctx, shadow);
   applyStrokeStyle(ctx, node);
   const paint = fillStyle(ctx, node, w, h);
   if (node.assetId) {
@@ -1789,6 +2501,35 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
         strokePaintStack(ctx, node, w, h);
       }
     }
+  } else if ((node.kind === "polygon" || node.kind === "star") && node.parametricShape) {
+    const points = canonicalParametricOutline(node, w, h);
+    ctx.beginPath();
+    points.forEach((point, index) => index === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+    fillPaintStack(ctx, node, w, h);
+    if (hasVisibleStroke(node)) {
+      const mesh = canonicalParametricStrokeMesh(node, w, h);
+      if (mesh) fillCanonicalStrokeMesh(ctx, node, mesh, w, h);
+      else {
+        ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+        strokePaintStack(ctx, node, w, h);
+      }
+    }
+  } else if (node.kind === "vector" && node.vectorPath) {
+    ctx.beginPath();
+    const flattened = canonicalVectorPath(node);
+    if (flattened) traceFlattenedVectorPath(ctx, flattened, viewport.zoom);
+    else traceVectorPath(ctx, node.vectorPath, viewport.zoom);
+    const fillRule = node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero";
+    activeFills(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(fillRule); });
+    if (hasVisibleStroke(node)) {
+      const mesh = canonicalVectorStrokeMesh(node);
+      if (mesh) fillScaledCanonicalStrokeMesh(ctx, node, mesh, w, h, viewport.zoom);
+      else {
+        ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+        strokePaintStack(ctx, node, w, h);
+      }
+    }
   } else if (node.kind === "ellipse") {
     if (node.arcData) {
       renderEllipseArc(ctx, node, w, h);
@@ -1831,6 +2572,7 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
       fontWeight: primaryStyle.fontWeight,
       italic: primaryStyle.italic,
       letterSpacing: primaryStyle.letterSpacing,
+      color: primaryStyle.color,
     } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
     ctx.fillStyle = paint;
     applyCanvasTextStyle(ctx, primaryRenderStyle);
@@ -1860,23 +2602,36 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
         const lineBaseline = cssLineBoxBaseline(ctx, lineY, lineHeight);
         ctx.direction = line.direction;
         const alignment = node.textProperties?.paragraph.alignment ?? "left";
-        if (line.direction === "rtl" || spans.length <= 1) {
+        if (spans.length <= 1) {
           const style = spans[0]?.style ?? primaryRenderStyle;
           applyCanvasTextStyle(ctx, style);
+          ctx.fillStyle = style.color ? colorToSrgbCss(style.color) : paint;
           ctx.textAlign = alignment === "center" ? "center" : alignment === "right" || line.direction === "rtl" ? "right" : "left";
           const x = alignment === "center" ? textMetrics.width / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width : 0;
           ctx.fillText(line.text, x, lineBaseline);
         } else {
-          ctx.direction = "ltr";
+          const shapedVisualRuns = "visualRuns" in line && Array.isArray(line.visualRuns)
+            ? line.visualRuns as RustTextVisualRun[]
+            : undefined;
+          const visualSpans = shapedVisualRuns
+            ? styledTextVisualSpans(source, line.start, line.end, node.textProperties, shapedVisualRuns)
+            : (line.direction === "rtl"
+              ? [...spans].reverse().map((span) => ({ ...span, direction: "rtl" as const }))
+              : spans.map((span) => ({ ...span, direction: "ltr" as const })));
+          // The parser guarantees complete visual runs for the shaped path;
+          // keep the established logical drawing as a defensive boot fallback.
+          const drawableSpans = visualSpans.length ? visualSpans : spans.map((span) => ({ ...span, direction: line.direction }));
           ctx.textAlign = "left";
-          const measured = spans.map((span) => {
+          const measured = drawableSpans.map((span) => {
             applyCanvasTextStyle(ctx, span.style);
             return ctx.measureText(span.text).width;
           });
           const lineWidth = measured.reduce((sum, width) => sum + width, 0);
-          let x = alignment === "center" ? (textMetrics.width - lineWidth) / 2 : alignment === "right" ? textMetrics.width - lineWidth : 0;
-          spans.forEach((span, index) => {
+          let x = alignment === "center" ? (textMetrics.width - lineWidth) / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width - lineWidth : 0;
+          drawableSpans.forEach((span, index) => {
             applyCanvasTextStyle(ctx, span.style);
+            ctx.direction = span.direction;
+            ctx.fillStyle = span.style.color ? colorToSrgbCss(span.style.color) : paint;
             ctx.fillText(span.text, x, lineBaseline);
             x += measured[index];
           });
@@ -1933,11 +2688,42 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.restore();
 }
 
-/** Paint in structural order whenever a Frame owns visible descendants. A
- * single flat Canvas loop cannot retain a Frame's clip while drawing later
- * child layers. The renderer deliberately falls back from the GPU prefix for
- * this page shape; that preserves both clip and document z-order. */
-function renderFrameClippedTree(ctx: OffscreenCanvasRenderingContext2D, orderedNodes: readonly CanvasNode[]) {
+function renderBooleanOperation(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow?: CanvasNode["dropShadow"]) {
+  const path = canonicalBooleanPath(node);
+  const paintSource = booleanOperandNodes(node)[0];
+  if (!path || !paintSource) return;
+  const point = toScreen(node.x, node.y);
+  const width = node.width * viewport.zoom;
+  const height = node.height * viewport.zoom;
+  ctx.save();
+  ctx.globalAlpha = node.opacity * paintSource.opacity;
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + width / 2, point.y + height / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-width / 2, -height / 2);
+  }
+  applyDropShadow(ctx, shadow);
+  applyStrokeStyle(ctx, paintSource);
+  ctx.beginPath();
+  traceFlattenedVectorPath(ctx, path, viewport.zoom);
+  fillPaintStack(ctx, paintSource, width, height);
+  if (hasVisibleStroke(paintSource)) {
+    ctx.lineWidth = Math.max(1, paintSource.strokeWidth * viewport.zoom);
+    strokePaintStack(ctx, paintSource, width, height);
+  }
+  ctx.restore();
+}
+
+/** Paint in structural order whenever a Frame owns visible descendants or a
+ * G4 alpha mask. A single flat Canvas loop cannot retain either clip while
+ * drawing later child layers. Alpha masks render their sibling run into one
+ * bounded surface, then use Canvas' source alpha exactly once with
+ * `destination-in`; masks never paint as ordinary visible layers. */
+function renderFrameClippedTree(
+  ctx: OffscreenCanvasRenderingContext2D,
+  orderedNodes: readonly CanvasNode[],
+  dragPreviewRootIds: ReadonlySet<string> = new Set(),
+) {
   const ids = new Set(orderedNodes.map((node) => node.id));
   const children = new Map<string, CanvasNode[]>();
   const roots: CanvasNode[] = [];
@@ -1949,19 +2735,102 @@ function renderFrameClippedTree(ctx: OffscreenCanvasRenderingContext2D, orderedN
       children.set(node.parentId, siblings);
     }
   });
-  const renderBranch = (node: CanvasNode) => {
-    renderNode(ctx, node);
-    const descendants = children.get(node.id) ?? [];
-    if (!descendants.length) return;
-    if (node.kind === "frame" && node.clipsContent !== false) {
-      clipFrameContents(ctx, node);
-      descendants.forEach(renderBranch);
-      ctx.restore();
+  const compositeMaskedSiblings = (destination: OffscreenCanvasRenderingContext2D, mask: CanvasNode, targets: readonly CanvasNode[], depth: number) => {
+    if (!targets.length || !canvas) return;
+    const admission = admitAlphaMaskSurface(canvas.width, canvas.height, depth);
+    // A rejected mask must fail closed rather than accidentally paint its
+    // targets unmasked. This keeps a resource-limit event from exposing a
+    // layer the document says is clipped.
+    if (!admission.accepted) {
+      if (!alphaMaskLimitReported) {
+        diagnostics.record({ category: "renderer", code: admission.reason === "nesting" ? "ALPHA_MASK_NESTING_LIMIT" : "ALPHA_MASK_SURFACE_LIMIT", documentRevision: revision });
+        alphaMaskLimitReported = true;
+      }
       return;
     }
-    descendants.forEach(renderBranch);
+    const acquired = acquireAlphaMaskSurface(depth);
+    if (!acquired) return;
+    const { surface, context: surfaceContext } = acquired;
+    // The surface is reused for later sibling runs at this depth. Clear it in
+    // device coordinates before restoring the document-space transform.
+    surfaceContext.setTransform(1, 0, 0, 1, 0, 0);
+    surfaceContext.clearRect(0, 0, surface.width, surface.height);
+    surfaceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderSiblings(targets, surfaceContext, depth + 1);
+    surfaceContext.save();
+    surfaceContext.globalCompositeOperation = "destination-in";
+    renderNode(surfaceContext, mask);
+    surfaceContext.restore();
+    destination.save();
+    // The temporary surface is already in device pixels, unlike the logical
+    // document drawing state maintained by the destination context.
+    destination.setTransform(1, 0, 0, 1, 0, 0);
+    destination.drawImage(surface, 0, 0);
+    destination.restore();
   };
-  roots.forEach(renderBranch);
+  const renderSiblings = (siblings: readonly CanvasNode[], destination = ctx, depth = 0) => {
+    for (let index = 0; index < siblings.length; index += 1) {
+      const node = siblings[index];
+      if (node.isMask) {
+        let end = index + 1;
+        while (end < siblings.length && !siblings[end].isMask) end += 1;
+        compositeMaskedSiblings(destination, node, siblings.slice(index + 1, end), depth);
+        index = end - 1;
+        continue;
+      }
+      renderBranchInto(destination, depth)(node);
+    }
+  };
+  function renderBranchInto(destination: OffscreenCanvasRenderingContext2D, depth: number, detachedPreview = false) {
+    return (node: CanvasNode) => {
+      // A child that has been dragged completely beyond an ancestor Frame's
+      // clip stays visible until pointer-up. Omit it from the clipped document
+      // pass so it can be rendered once as the detached Figma-style preview.
+      if (!detachedPreview && dragPreviewRootIds.has(node.id)) return;
+      // A nested mask uses the same bounded offscreen composition path. The
+      // destination may itself be an offscreen surface, so defer to the shared
+      // sibling renderer rather than painting a mask as an ordinary node.
+      if (node.isMask) return;
+      renderNode(destination, node);
+      if (node.kind === "booleanOperation" && canonicalBooleanPath(node)) return;
+      const descendants = children.get(node.id) ?? [];
+      if (!descendants.length) return;
+      if (node.kind === "frame" && node.clipsContent !== false) {
+        clipFrameContents(destination, node);
+        renderSiblings(descendants, destination, depth);
+        destination.restore();
+        return;
+      }
+      renderSiblings(descendants, destination, depth);
+    };
+  }
+  renderSiblings(roots);
+  // Draw detached preview roots last: this keeps them out of their former
+  // Frame's clip and avoids a duplicate in-Frame paint. Their own descendant
+  // structure (including clips they own) still uses the normal recursion.
+  orderedNodes
+    .filter((node) => dragPreviewRootIds.has(node.id))
+    .forEach((node) => renderBranchInto(ctx, 0, true)(node));
+}
+
+/** This is a presentation-only escape hatch for an active move. The durable
+ * document retains its Frame clipping; only a layer fully outside an ancestor
+ * Frame gets the visible detached preview expected during a Figma drag. */
+function escapedFrameDragPreviewRootIds() {
+  if (drag?.mode !== "move") return new Set<string>();
+  return new Set([...drag.initial].filter((id) => isFullyClippedForSelection(nodes, id, boundsForNode)));
+}
+
+function acquireAlphaMaskSurface(depth: number): AlphaMaskSurface | undefined {
+  if (!canvas) return undefined;
+  const existing = alphaMaskSurfaces[depth];
+  if (existing && existing.surface.width === canvas.width && existing.surface.height === canvas.height) return existing;
+  const surface = new OffscreenCanvas(canvas.width, canvas.height);
+  const context = surface.getContext("2d");
+  if (!context) return undefined;
+  const acquired = { surface, context };
+  alphaMaskSurfaces[depth] = acquired;
+  return acquired;
 }
 
 function clipFrameContents(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
@@ -2100,9 +2969,10 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
   const primaryStyle: RenderTextStyle = primary ? {
     font: primary.font,
     fontSize: primary.fontSize,
-    fontWeight: primary.fontWeight,
-    italic: primary.italic,
-    letterSpacing: primary.letterSpacing,
+      fontWeight: primary.fontWeight,
+      italic: primary.italic,
+      letterSpacing: primary.letterSpacing,
+      color: primary.color,
   } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
   const source = node.text ?? "";
   const sourceBytes = new TextEncoder().encode(source);
@@ -2263,6 +3133,24 @@ function multiResizeHandleAtScreen(screenX: number, screenY: number): { handle: 
   }).filter(({ distance }) => distance <= radius).sort((left, right) => left.distance - right.distance)[0];
   return hit ? { handle: hit.handle, bounds: selection.bounds, ids: selection.ids, requiresAffine: selection.requiresAffine } : undefined;
 }
+function rotateHandleAtScreen(screenX: number, screenY: number): { pivot: { x: number; y: number }; ids: string[] } | undefined {
+  // Corners deliberately take precedence over resize: unlike the edge-centre
+  // handles, they are the visible rotation affordance and keep Group
+  // selections rotatable through their existing multi-selection bounds.
+  const multi = multiResizeHandleAtScreen(screenX, screenY);
+  if (multi && isCornerResizeHandle(multi.handle)) {
+    return {
+      pivot: { x: multi.bounds.x + multi.bounds.width / 2, y: multi.bounds.y + multi.bounds.height / 2 },
+      ids: [...selectedIds],
+    };
+  }
+  const resize = resizeHandleAtScreen(screenX, screenY);
+  if (!resize || !isCornerResizeHandle(resize.handle)) return undefined;
+  return {
+    pivot: resizeHandleWorldPoint(resize.node, resize.node.width / 2, resize.node.height / 2),
+    ids: [resize.node.id],
+  };
+}
 function renderResizeHandles(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   const canonical = nodes.find((candidate) => candidate.id === node.id);
   if (!canonical || !canResizeOnCanvas(node)) return;
@@ -2316,6 +3204,341 @@ function renderLineEndpointHandles(ctx: OffscreenCanvasRenderingContext2D, node:
     ctx.stroke();
   });
   ctx.restore();
+}
+/** Vector anchors and tangent handles are presentation-only overlays. Their
+ * coordinates remain local to the canonical node; the world transform is
+ * applied only for paint. */
+function renderVectorAnchorOverlay(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  if (!canonical || canonical.kind !== "vector" || !canonical.vectorPath || selectedIds.length !== 1) return;
+  const transform = worldTransformForNode(nodes, canonical.id);
+  if (!transform) return;
+  const radius = Math.max(3, canvasDesignTokens.overlay.selectionHandle.side / 2 - 1);
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  canonical.vectorPath.subpaths.forEach((subpath) => subpath.points.forEach((anchor) => {
+    const world = transformPoint(transform, { x: anchor.x, y: anchor.y });
+    const screen = toScreen(world.x, world.y);
+    [anchor.handleIn, anchor.handleOut].forEach((handle) => {
+      if (!handle) return;
+      const handleWorld = transformPoint(transform, { x: anchor.x + handle.x, y: anchor.y + handle.y });
+      const handleScreen = toScreen(handleWorld.x, handleWorld.y);
+      ctx.beginPath();
+      ctx.moveTo(screen.x, screen.y);
+      ctx.lineTo(handleScreen.x, handleScreen.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.rect(handleScreen.x - radius + 1, handleScreen.y - radius + 1, (radius - 1) * 2, (radius - 1) * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    const isSelected = selectedVectorPoints.some((target) => target.id === canonical.id && target.pointId === anchor.id);
+    if (isSelected) ctx.fillStyle = canvasDesignTokens.color.selection;
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (isSelected) ctx.fillStyle = "#ffffff";
+  }));
+  ctx.restore();
+}
+/** Draw the pending Pen segment without adding it to the draft path. This
+ * gives click-click drawing an immediate directional preview while preserving
+ * the invariant that only a deliberate pointer-down produces a PointId. */
+function renderPenDraftPreview(ctx: OffscreenCanvasRenderingContext2D) {
+  const draft = penDraft;
+  const preview = draft?.previewWorld;
+  if (!draft || !preview || !Number.isFinite(preview.x) || !Number.isFinite(preview.y)) return;
+  const subpathIndex = draft.kind === "extend" ? draft.subpathIndex : 0;
+  const point = draft.node.vectorPath?.subpaths[subpathIndex ?? 0]?.points.find((candidate) => candidate.id === draft.lastPointId);
+  const transform = point && worldTransformForNode(nodes, draft.node.id);
+  if (!point || !transform) return;
+  const startWorld = transformPoint(transform, { x: point.x, y: point.y });
+  const start = toScreen(startWorld.x, startWorld.y);
+  const end = toScreen(preview.x, preview.y);
+  const handleOutWorld = point.handleOut
+    ? transformPoint(transform, { x: point.x + point.handleOut.x, y: point.y + point.handleOut.y })
+    : undefined;
+  const handleOut = handleOutWorld && toScreen(handleOutWorld.x, handleOutWorld.y);
+  ctx.save();
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.fillStyle = "#ffffff";
+  ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  // A dragged anchor already owns an outgoing tangent. Preview the next cubic
+  // against that tangent, using the cursor as the unresolved arriving control
+  // point, so the intent is visible before the next PointId exists.
+  if (handleOut) ctx.bezierCurveTo(handleOut.x, handleOut.y, end.x, end.y, end.x, end.y);
+  else ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(end.x, end.y, Math.max(3, canvasDesignTokens.overlay.selectionHandle.side / 2 - 1), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+function vectorAnchorAtScreen(screenX: number, screenY: number): { id: string; pointId: string } | undefined {
+  const selected = selectedIds.length === 1 ? nodes.find((node) => node.id === selectedIds[0]) : undefined;
+  if (!selected || selected.kind !== "vector" || !selected.vectorPath || selected.locked || selected.visible === false) return undefined;
+  const transform = worldTransformForNode(nodes, selected.id);
+  if (!transform) return undefined;
+  const hitRadius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = selected.vectorPath.subpaths
+    .flatMap((subpath) => subpath.points)
+    .map((anchor) => {
+      const world = transformPoint(transform, { x: anchor.x, y: anchor.y });
+      const screen = toScreen(world.x, world.y);
+      return { pointId: anchor.id, distance: Math.hypot(screenX - screen.x, screenY - screen.y) };
+    })
+    .filter(({ distance }) => distance <= hitRadius)
+    .sort((left, right) => left.distance - right.distance)[0];
+  return hit ? { id: selected.id, pointId: hit.pointId } : undefined;
+}
+function vectorHandleAtScreen(screenX: number, screenY: number): { id: string; pointId: string; handle: "handleIn" | "handleOut" } | undefined {
+  const selected = selectedIds.length === 1 ? nodes.find((node) => node.id === selectedIds[0]) : undefined;
+  if (!selected || selected.kind !== "vector" || !selected.vectorPath || selected.locked || selected.visible === false) return undefined;
+  const transform = worldTransformForNode(nodes, selected.id);
+  if (!transform) return undefined;
+  const hitRadius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = selected.vectorPath.subpaths
+    .flatMap((subpath) => subpath.points)
+    .flatMap((anchor) => (["handleIn", "handleOut"] as const).flatMap((handle) => {
+      const offset = anchor[handle];
+      if (!offset) return [];
+      const world = transformPoint(transform, { x: anchor.x + offset.x, y: anchor.y + offset.y });
+      const screen = toScreen(world.x, world.y);
+      return [{ pointId: anchor.id, handle, distance: Math.hypot(screenX - screen.x, screenY - screen.y) }];
+    }))
+    .filter(({ distance }) => distance <= hitRadius)
+    .sort((left, right) => left.distance - right.distance)[0];
+  return hit ? { id: selected.id, pointId: hit.pointId, handle: hit.handle } : undefined;
+}
+function localVectorPointAtWorld(node: CanvasNode, world: { x: number; y: number }) {
+  const transform = worldTransformForNode(nodes, node.id);
+  const inverse = transform && invertAffine(transform);
+  return inverse ? transformPoint(inverse, world) : undefined;
+}
+function vectorSegmentAtScreen(screenX: number, screenY: number): { id: string; subpathIndex: number; afterPointId: string; t: number } | undefined {
+  const selected = selectedIds.length === 1 ? nodes.find((node) => node.id === selectedIds[0]) : undefined;
+  if (!selected || selected.kind !== "vector" || !selected.vectorPath || selected.locked || selected.visible === false || !wasmRuntime) return undefined;
+  const local = localVectorPointAtWorld(selected, toWorld(screenX, screenY));
+  if (!local) return undefined;
+  const maxDistance = canvasDesignTokens.overlay.selectionHandle.hitRadius / Math.max(viewport.zoom, .01);
+  const tolerance = Math.max(.01, Math.min(.25, maxDistance / 4));
+  try {
+    const value: unknown = JSON.parse(wasmRuntime.vector_path_nearest_segment_json(JSON.stringify(selected.vectorPath), local.x, local.y, tolerance, maxDistance));
+    if (typeof value !== "object" || value === null) return undefined;
+    const hit = value as { subpathIndex?: unknown; afterPointIndex?: unknown; t?: unknown };
+    const subpathIndex = typeof hit.subpathIndex === "number" && Number.isInteger(hit.subpathIndex) ? hit.subpathIndex : undefined;
+    const afterPointIndex = typeof hit.afterPointIndex === "number" && Number.isInteger(hit.afterPointIndex) ? hit.afterPointIndex : undefined;
+    const t = typeof hit.t === "number" && Number.isFinite(hit.t) && hit.t > 0 && hit.t < 1 ? hit.t : undefined;
+    if (subpathIndex === undefined || afterPointIndex === undefined || t === undefined) return undefined;
+    const subpath = selected.vectorPath.subpaths[subpathIndex];
+    const afterPoint = subpath?.points[afterPointIndex];
+    return afterPoint ? { id: selected.id, subpathIndex, afterPointId: afterPoint.id, t } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function replacePenDraftNode(node: CanvasNode) {
+  if (!penDraft) return;
+  penDraft.node = node;
+  nodes = nodes.map((candidate) => candidate.id === node.id ? node : candidate);
+  transientSceneVersion += 1;
+  rebuildNodeIndex();
+  render();
+}
+function cancelPenDraft() {
+  if (!penDraft) return false;
+  const { kind, node, originalVectorPath, previousSelection } = penDraft;
+  penDraft = undefined;
+  nodes = kind === "create"
+    ? nodes.filter((candidate) => candidate.id !== node.id)
+    : nodes.map((candidate) => candidate.id === node.id ? { ...candidate, vectorPath: originalVectorPath } : candidate);
+  selectedIds = previousSelection;
+  transientSceneVersion += 1;
+  rebuildNodeIndex();
+  render();
+  emitSnapshot(undefined, false);
+  return true;
+}
+function finishPenDraft() {
+  if (!penDraft) return false;
+  const draft = penDraft;
+  const { kind, node, previousSelection } = draft;
+  const pointCount = node.vectorPath?.subpaths[0]?.points.length ?? 0;
+  if (kind === "create" && pointCount < 2) return cancelPenDraft();
+  penDraft = undefined;
+  nodes = kind === "create"
+    ? nodes.filter((candidate) => candidate.id !== node.id)
+    : nodes.map((candidate) => candidate.id === node.id ? { ...candidate, vectorPath: draft.originalVectorPath } : candidate);
+  selectedIds = previousSelection;
+  transientSceneVersion += 1;
+  rebuildNodeIndex();
+  if (kind === "create") dispatch({ type: "create", node });
+  else if ((draft.insertedPoints.length || draft.connectTarget) && wasmDocument && draft.subpathIndex !== undefined && draft.endpoint) {
+    const connectTarget = draft.connectTarget;
+    if (connectTarget?.kind === "cross-vector") {
+      const source = nodes.find((candidate) => candidate.id === connectTarget.nodeId);
+      const joined = source && joinCrossVectorEndpoints(
+        nodes,
+        node,
+        { subpathIndex: draft.subpathIndex, pointId: draft.lastPointId },
+        source,
+        { subpathIndex: connectTarget.subpathIndex, pointId: connectTarget.pointId },
+      );
+      if (joined) {
+        dispatchTransaction({
+          id: createId(),
+          baseRevision: Number(wasmDocument.revision),
+          commands: [
+            { type: "update", id: node.id, patch: { vectorPath: joined.targetPath } },
+            ...(joined.sourcePath
+              ? [{ type: "update" as const, id: source!.id, patch: { vectorPath: joined.sourcePath } }]
+              : [{ type: "delete" as const, ids: [source!.id] }]),
+          ],
+        });
+      } else { render(); emitViewState(); }
+      return true;
+    }
+    let afterPointId = draft.endpoint === "end"
+      ? draft.originalVectorPath?.subpaths[draft.subpathIndex]?.points.at(-1)?.id
+      : undefined;
+    const workingPoints = node.vectorPath?.subpaths[draft.subpathIndex]?.points ?? [];
+    const commands: PenCommitCommand[] = draft.insertedPoints.flatMap((inserted) => {
+      const point = workingPoints.find((candidate) => candidate.id === inserted.id);
+      if (!point) return [];
+      const command = { type: "insertVectorPoint" as const, id: node.id, subpathIndex: draft.subpathIndex!, afterPointId, point };
+      if (draft.endpoint === "end") afterPointId = point.id;
+      return command;
+    });
+    if (draft.closeOnFinish) commands.push({ type: "setVectorSubpathClosed", id: node.id, subpathIndex: draft.subpathIndex!, closed: true });
+    if (draft.connectTarget?.kind === "same-vector") commands.push({
+      type: "connectVectorEndpoints",
+      id: node.id,
+      firstSubpathIndex: draft.subpathIndex!,
+      firstPointId: draft.lastPointId,
+      secondSubpathIndex: draft.connectTarget.subpathIndex,
+      secondPointId: draft.connectTarget.pointId,
+    });
+    if (commands.length) dispatchTransaction({ id: createId(), baseRevision: Number(wasmDocument.revision), commands });
+    else { render(); emitViewState(); }
+  } else { render(); emitViewState(); }
+  return true;
+}
+function penDraftClosesAtScreen(screenX: number, screenY: number) {
+  const draft = penDraft;
+  if (!draft) return false;
+  const subpathIndex = draft.kind === "extend" ? draft.subpathIndex! : 0;
+  const subpath = draft.node.vectorPath?.subpaths[subpathIndex];
+  if (!subpath || subpath.closed || subpath.points.length < 3) return false;
+  const closePoint = draft.kind === "create"
+    ? subpath.points[0]
+    : draft.endpoint === "start"
+      ? draft.originalVectorPath?.subpaths[subpathIndex]?.points.at(-1)
+      : draft.originalVectorPath?.subpaths[subpathIndex]?.points[0];
+  if (!closePoint) return false;
+  const transform = worldTransformForNode(nodes, draft.node.id);
+  if (!transform) return false;
+  const world = transformPoint(transform, { x: closePoint.x, y: closePoint.y });
+  const screen = toScreen(world.x, world.y);
+  return Math.hypot(screenX - screen.x, screenY - screen.y) <= canvasDesignTokens.overlay.selectionHandle.hitRadius;
+}
+function penDraftConnectsAtScreen(screenX: number, screenY: number) {
+  const draft = penDraft;
+  if (!draft || draft.kind !== "extend") return undefined;
+  const target = vectorOpenEndpointAtScreen(screenX, screenY);
+  if (target?.id === draft.node.id && target.subpathIndex !== draft.subpathIndex && target.pointId !== draft.lastPointId) {
+    return { kind: "same-vector" as const, subpathIndex: target.subpathIndex, pointId: target.pointId };
+  }
+  // The cross-layer join consumes only the clicked source subpath. Any other
+  // source subpaths remain in their original layer; an emptied source is
+  // deleted atomically with the target-path update.
+  const source = vectorOpenEndpointAtScreenForNodes(screenX, screenY, nodes.filter((candidate) => candidate.id !== draft.node.id
+    && candidate.kind === "vector"
+    && candidate.pageId === draft.node.pageId
+    && candidate.parentId === draft.node.parentId
+    && candidate.locked !== true
+    && candidate.visible !== false));
+  return source ? { kind: "cross-vector" as const, nodeId: source.id, subpathIndex: source.subpathIndex, pointId: source.pointId } : undefined;
+}
+function vectorOpenEndpointAtScreenForNodes(screenX: number, screenY: number, candidates: readonly CanvasNode[]): { id: string; subpathIndex: number; endpoint: "start" | "end"; pointId: string } | undefined {
+  const hitRadius = canvasDesignTokens.overlay.selectionHandle.hitRadius;
+  const hit = candidates.flatMap((candidate) => {
+    if (candidate.kind !== "vector" || !candidate.vectorPath || candidate.locked || candidate.visible === false) return [];
+    const transform = worldTransformForNode(nodes, candidate.id);
+    if (!transform) return [];
+    return candidate.vectorPath.subpaths.flatMap((subpath, subpathIndex) => {
+      if (subpath.closed || !subpath.points.length) return [];
+      return (["start", "end"] as const).map((endpoint) => {
+        const point = endpoint === "start" ? subpath.points[0] : subpath.points.at(-1)!;
+        const world = transformPoint(transform, { x: point.x, y: point.y });
+        const screen = toScreen(world.x, world.y);
+        return { id: candidate.id, subpathIndex, endpoint, pointId: point.id, distance: Math.hypot(screenX - screen.x, screenY - screen.y) };
+      });
+    });
+  }).filter(({ distance }) => distance <= hitRadius).sort((left, right) => left.distance - right.distance || left.id.localeCompare(right.id))[0];
+  return hit && { id: hit.id, subpathIndex: hit.subpathIndex, endpoint: hit.endpoint, pointId: hit.pointId };
+}
+function vectorOpenEndpointAtScreen(screenX: number, screenY: number) {
+  const selected = selectedIds.length === 1 ? nodes.find((node) => node.id === selectedIds[0]) : undefined;
+  return selected ? vectorOpenEndpointAtScreenForNodes(screenX, screenY, [selected]) : undefined;
+}
+function beginPenExtension(endpoint: { id: string; subpathIndex: number; endpoint: "start" | "end"; pointId: string }) {
+  const existing = nodes.find((node) => node.id === endpoint.id);
+  if (!existing?.vectorPath) return false;
+  const node = structuredClone(existing);
+  penDraft = {
+    kind: "extend",
+    node,
+    lastPointId: endpoint.pointId,
+    previousSelection: [...selectedIds],
+    originalVectorPath: structuredClone(existing.vectorPath),
+    subpathIndex: endpoint.subpathIndex,
+    endpoint: endpoint.endpoint,
+    insertedPoints: [],
+  };
+  selectedIds = [node.id];
+  render();
+  return true;
+}
+function beginPenPoint(world: { x: number; y: number }) {
+  const snapped = snapCanvasPoint(world);
+  if (!penDraft) {
+    const node = createNode("vector", snapped.x, snapped.y);
+    const pointId = createId();
+    node.name = "Pen";
+    node.width = 1;
+    node.height = 1;
+    node.vectorPath = { fillRule: "nonZero", subpaths: [{ closed: false, points: [{ id: pointId, x: 0, y: 0, pointType: "corner" }] }] };
+    penDraft = { kind: "create", node, lastPointId: pointId, previousSelection: [...selectedIds], insertedPoints: [] };
+    nodes = [...nodes, node];
+    selectedIds = [node.id];
+    transientSceneVersion += 1;
+    rebuildNodeIndex();
+    render();
+    return { id: node.id, pointId, start: snapped } as const;
+  }
+  const local = localVectorPointAtWorld(penDraft.node, snapped);
+  const subpathIndex = penDraft.kind === "extend" ? penDraft.subpathIndex! : 0;
+  const subpath = penDraft.node.vectorPath?.subpaths[subpathIndex];
+  const previous = penDraft.endpoint === "start" ? subpath?.points[0] : subpath?.points.at(-1);
+  if (!local || !subpath || !previous || (local.x === previous.x && local.y === previous.y)) return undefined;
+  const pointId = createId();
+  const node = structuredClone(penDraft.node);
+  const point: VectorPoint = { id: pointId, x: local.x, y: local.y, pointType: "corner" };
+  const points = node.vectorPath!.subpaths[subpathIndex].points;
+  if (penDraft.endpoint === "start") points.unshift(point);
+  else points.push(point);
+  penDraft.lastPointId = pointId;
+  if (penDraft.kind === "extend") penDraft.insertedPoints.push(point);
+  replacePenDraftNode(node);
+  return { id: node.id, pointId, start: snapped } as const;
 }
 function resizeGeometryForCanvasNode(
   node: CanvasNode,
@@ -2407,6 +3630,100 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(outlineX + canvasDesignTokens.stroke.selection.pixelInset, outlineY + canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1)); ctx.setLineDash([]);
   ctx.restore();
   renderResizeHandles(ctx, canonical);
+}
+
+/** Figma-style placement affordance for a drag over an eligible Frame. The
+ * tint sits below the dragged selection, while the label makes the hierarchy
+ * mutation explicit before the user releases the pointer. */
+function renderFrameDropTarget(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, isAutoLayout: boolean) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+  const point = toScreen(canonical.x, canonical.y);
+  const targetWidth = canonical.width * viewport.zoom;
+  const targetHeight = canonical.height * viewport.zoom;
+  ctx.save();
+  if (!applyNativeAffine(ctx, canonical)) {
+    ctx.translate(point.x + targetWidth / 2, point.y + targetHeight / 2);
+    ctx.rotate(canonical.rotation * Math.PI / 180);
+    ctx.translate(-targetWidth / 2, -targetHeight / 2);
+  }
+  ctx.fillStyle = canvasDesignTokens.color.selectionFill;
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([5, 3]);
+  ctx.fillRect(0, 0, targetWidth, targetHeight);
+  ctx.strokeRect(1, 1, Math.max(0, targetWidth - 2), Math.max(0, targetHeight - 2));
+  ctx.restore();
+
+  const world = worldTransformForNode(nodes, canonical.id);
+  if (!world) return;
+  const worldAnchor = transformPoint(world, { x: 0, y: 0 });
+  const anchor = toScreen(worldAnchor.x, worldAnchor.y);
+  const label = `${isAutoLayout ? "Insert into Auto layout" : "Move into Frame"} · ${canonical.name}`;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
+  const labelWidth = Math.ceil(ctx.measureText(label).width) + 14;
+  const labelX = Math.max(0, Math.min(anchor.x, width - labelWidth));
+  const labelY = Math.max(0, anchor.y - 24);
+  renderSelectionDimensions(ctx, label, labelX, labelY, labelWidth, 20, 7, 3);
+  ctx.restore();
+}
+
+/** Shows the exact sibling slot that will be committed when a flow child is
+ * released. This is intentionally calculated from the immutable pre-drag
+ * scene: the transient geometry follows the pointer, while Auto layout itself
+ * owns the final positions after the atomic reposition command. */
+function renderAutoLayoutInsertion(ctx: OffscreenCanvasRenderingContext2D, sourceNodes: readonly CanvasNode[], movingIds: readonly string[], point: { x: number; y: number }) {
+  const reorder = autoLayoutDropReorder(sourceNodes, movingIds, point);
+  if (!reorder?.result) return;
+  const { frame, rootIds, result } = reorder;
+  const moving = new Set(rootIds);
+  const ordered = result.orderedIds;
+  const insertionIndex = ordered.findIndex((id) => moving.has(id));
+  if (insertionIndex < 0) return;
+  const next = ordered.slice(insertionIndex).map((id) => sourceNodes.find((node) => node.id === id)).find((node): node is CanvasNode => Boolean(node) && !moving.has(node!.id));
+  const previous = [...ordered.slice(0, insertionIndex)].reverse().map((id) => sourceNodes.find((node) => node.id === id)).find((node): node is CanvasNode => Boolean(node) && !moving.has(node!.id));
+  const frameWorld = worldTransformForNode(sourceNodes, frame.id);
+  const inverseFrame = frameWorld && invertAffine(frameWorld);
+  if (!frameWorld || !inverseFrame) return;
+  const localBounds = (node: CanvasNode) => {
+    const world = worldTransformForNode(sourceNodes, node.id);
+    if (!world) return undefined;
+    const corners = [
+      transformPoint(inverseFrame, transformPoint(world, { x: 0, y: 0 })),
+      transformPoint(inverseFrame, transformPoint(world, { x: node.width, y: 0 })),
+      transformPoint(inverseFrame, transformPoint(world, { x: node.width, y: node.height })),
+      transformPoint(inverseFrame, transformPoint(world, { x: 0, y: node.height })),
+    ];
+    return { left: Math.min(...corners.map((corner) => corner.x)), right: Math.max(...corners.map((corner) => corner.x)), top: Math.min(...corners.map((corner) => corner.y)), bottom: Math.max(...corners.map((corner) => corner.y)) };
+  };
+  const nextBounds = next && localBounds(next);
+  const previousBounds = previous && localBounds(previous);
+  const [paddingTop, paddingRight, paddingBottom, paddingLeft] = frame.autoLayout!.padding;
+  const horizontal = frame.autoLayout!.mode === "horizontal";
+  const primary = horizontal
+    ? (nextBounds?.left ?? previousBounds?.right ?? paddingLeft)
+    : (nextBounds?.top ?? previousBounds?.bottom ?? paddingTop);
+  const startLocal = horizontal ? { x: primary, y: paddingTop } : { x: paddingLeft, y: primary };
+  const endLocal = horizontal ? { x: primary, y: Math.max(paddingTop, frame.height - paddingBottom) } : { x: Math.max(paddingLeft, frame.width - paddingRight), y: primary };
+  const startWorld = transformPoint(frameWorld, startLocal);
+  const endWorld = transformPoint(frameWorld, endLocal);
+  const start = toScreen(startWorld.x, startWorld.y);
+  const end = toScreen(endWorld.x, endWorld.y);
+  const flowCount = sortNodesByLayerOrder(sourceNodes.filter((node) => node.parentId === frame.id && !node.autoLayout?.absolute)).length;
+  const label = next ? `Insert before ${next.name} · ${insertionIndex + 1} of ${flowCount}` : `Insert at end · ${insertionIndex + 1} of ${flowCount}`;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y); ctx.stroke(); ctx.setLineDash([]);
+  ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
+  const labelWidth = Math.ceil(ctx.measureText(label).width) + 14;
+  const labelX = Math.max(0, Math.min((start.x + end.x) / 2 - labelWidth / 2, width - labelWidth));
+  const labelY = Math.max(0, Math.min((start.y + end.y) / 2 - 10, height - 20));
+  renderSelectionDimensions(ctx, label, labelX, labelY, labelWidth, 20, 7, 3);
+  ctx.restore();
 }
 
 /** Figma keeps a Line's selection rectangle centred on its path. A generic
@@ -2540,8 +3857,63 @@ function renderSelectionDimensions(ctx: OffscreenCanvasRenderingContext2D, dimen
   ctx.textBaseline = "middle";
   ctx.fillText(dimensions, labelX + horizontalInset, labelY + labelHeight / 2);
 }
+
+/** Places the single-selection HUD in the selected rectangle's local axes.
+ * The outline, its title, and its dimensions therefore keep the same visual
+ * relationship while rotating. Multi-selection deliberately remains an
+ * axis-aligned aggregate and continues through the fallback below. */
+function renderRotatedSingleSelectionLabels(
+  ctx: OffscreenCanvasRenderingContext2D,
+  node: CanvasNode,
+  dimensions: string,
+  labelWidth: number,
+  labelHeight: number,
+  horizontalInset: number,
+  cornerRadius: number,
+  offsetY: number,
+) {
+  const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+  const world = worldTransformForNode(nodes, canonical.id);
+  if (!world) return false;
+  const topLeft = toScreen(transformPoint(world, { x: 0, y: 0 }).x, transformPoint(world, { x: 0, y: 0 }).y);
+  const bottomCenter = toScreen(transformPoint(world, { x: canonical.width / 2, y: canonical.height }).x, transformPoint(world, { x: canonical.width / 2, y: canonical.height }).y);
+  // The local Y axis identifies the physical top/bottom sides after rotation
+  // (and works for Relative-v1 descendants too). Keep HUD sizing in screen
+  // pixels; only its anchor and orientation inherit the selection transform.
+  const localYAxisLength = Math.hypot(world.c, world.d);
+  if (!Number.isFinite(localYAxisLength) || localYAxisLength <= 1e-9) return false;
+  const localYAxis = { x: world.c / localYAxisLength, y: world.d / localYAxisLength };
+  const angle = Math.atan2(world.b, world.a);
+  ctx.save();
+  ctx.translate(topLeft.x, topLeft.y);
+  ctx.rotate(angle);
+  if (canonical.kind === "frame" || canonical.kind === "section") {
+    ctx.font = canvasFont(canvasDesignTokens.typography.layerName);
+    ctx.fillStyle = canvasDesignTokens.color.selection;
+    ctx.textBaseline = "bottom";
+    ctx.fillText(canonical.name, 0, -canvasDesignTokens.overlay.frameName.offsetY);
+  }
+  ctx.restore();
+  const bottomAnchor = {
+    x: bottomCenter.x + localYAxis.x * (offsetY + labelHeight / 2),
+    y: bottomCenter.y + localYAxis.y * (offsetY + labelHeight / 2),
+  };
+  ctx.save();
+  ctx.translate(bottomAnchor.x, bottomAnchor.y);
+  ctx.rotate(angle);
+  renderSelectionDimensions(ctx, dimensions, -labelWidth / 2, -labelHeight / 2, labelWidth, labelHeight, horizontalInset, cornerRadius);
+  ctx.restore();
+  return true;
+}
 function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelection?: MultiResizeSelection) {
-  const selectedNodes = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node && node.visible !== false));
+  // Selection remains authoritative for layer-panel and keyboard operations,
+  // while its canvas affordance must not reveal a layer that an ancestor Clip
+  // Frame or alpha mask fully hides. This is the same conservative predicate
+  // used by marquee selection; partially visible nodes deliberately keep their
+  // normal bounds so the editor remains predictable while arranging content.
+  const selectedNodes = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(
+    node && node.visible !== false && !isFullyClippedForSelection(nodes, node.id, boundsForNode),
+  ));
   if (selectedNodes.length === 0) return;
   const screenBounds = multiSelection
     ? (() => {
@@ -2586,11 +3958,13 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelec
   // transform active in the shared Canvas context; never inherit it here.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
-  if (selectedNode?.kind === "frame" || selectedNode?.kind === "section") {
-    renderLayerName(ctx, selectedNode, true);
-  }
   ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
   const labelWidth = Math.ceil(ctx.measureText(dimensions).width) + horizontalInset * 2;
+  if (selectedNode && !multiSelection && renderRotatedSingleSelectionLabels(ctx, selectedNode, dimensions, labelWidth, labelHeight, horizontalInset, cornerRadius, offsetY)) {
+    ctx.restore();
+    return;
+  }
+  if (selectedNode?.kind === "frame" || selectedNode?.kind === "section") renderLayerName(ctx, selectedNode, true);
   // The label is screen-space UI. Its anchor shares the same world-derived
   // selection rectangle as the outline and handles, then sits just below that
   // rectangle instead of inheriting an unprojected x/y or object rotation.
@@ -2605,8 +3979,9 @@ function updateMarqueeSelection(activeDrag: Extract<Drag, { mode: "select" }>, e
   const selection = marqueeRect({ x: activeDrag.startX, y: activeDrag.startY }, { x: endX, y: endY });
   const marqueeIds = selection.width === 0 && selection.height === 0
     ? []
-    : activeNodes().filter((node) => node.visible !== false && boundsIntersect(boundsForNode(node), selection)).map((node) => node.id);
+    : activeNodes().filter((node) => node.visible !== false && !isFullyClippedForSelection(nodes, node.id, boundsForNode) && boundsIntersect(boundsForNode(node), selection)).map((node) => node.id);
   selectedIds = resolveMarqueeSelection(activeDrag.initialSelection, marqueeIds, activeDrag.additive);
+  storeActivePageSelection();
 }
 function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
   if (drag?.mode !== "select") return;
@@ -2664,11 +4039,15 @@ function render(rendersPerInputFrame?: number) {
   const gpuStartedAt = performance.now();
   const pageHasFrameChildren = visibleNodesOnPage(nodes, activePageId, defaultPageId)
     .some((node) => node.parentId && nodes.some((parent) => parent.id === node.parentId && parent.kind === "frame" && parent.clipsContent !== false));
+  const pageHasBooleanOperations = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+    .some((node) => node.kind === "booleanOperation");
+  const pageHasAlphaMasks = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+    .some((node) => Boolean(node.isMask));
   if (gpuRenderer) {
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
-      const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId);
+      const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId && node.kind !== "slice");
       const pageHasRelativeTransform = visibleNodesOnPage(nodes, activePageId, defaultPageId)
         .some((node) => Boolean(node.relativeTransform));
       const decodedImageAssetIds = new Set(pageNodes
@@ -2678,7 +4057,7 @@ function render(rendersPerInputFrame?: number) {
       const gpuTextNodeIds = new Set([...rustGpuTextGlyphs]
         .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
         .map(([nodeId]) => nodeId));
-      const gpuNodes = pageHasFrameChildren ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node));
+      const gpuNodes = pageHasFrameChildren || pageHasBooleanOperations || pageHasAlphaMasks ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node) || requiresCanvasEffectOrBlend(node));
       const currentRustGpuScene = gpuNodes.length === pageNodes.length && rustGpuScene
         && rustGpuScene.revision === revision
         && rustGpuScene.pageId === activePageId
@@ -2702,6 +4081,7 @@ function render(rendersPerInputFrame?: number) {
       gpuUploadBytes = result.gpuUploadBytes;
       imageBitmapMs = result.imageBitmapMs;
       gpuSceneBytes = result.resourceBytes;
+      gpuEffectTextureBytes = result.effectTextures.bytes;
       const imageTextureSignature = `${result.imageTextures.textures}:${result.imageTextures.bytes}`;
       if (imageTextureSignature !== imageTextureStatsSignature) {
         imageTextureStatsSignature = imageTextureSignature;
@@ -2715,17 +4095,34 @@ function render(rendersPerInputFrame?: number) {
       }
       if (result.textAtlas.evictions) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_EVICTED", documentRevision: revision, details: { pages: result.textAtlas.pages, evictions: result.textAtlas.evictions, entries: result.textAtlas.entries } });
       if (result.textAtlas.rejectedNodes) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_NODE_FALLBACK", documentRevision: revision, details: { pages: result.textAtlas.pages, rejectedNodes: result.textAtlas.rejectedNodes } });
+      const effectTextureSignature = `${result.effectTextures.textures}:${result.effectTextures.bytes}`;
+      if (effectTextureSignature !== effectTextureStatsSignature) {
+        effectTextureStatsSignature = effectTextureSignature;
+        diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_STATS", documentRevision: revision, details: {
+          textures: result.effectTextures.textures,
+          bytes: result.effectTextures.bytes,
+          active: result.effectTextures.active,
+          cacheHits: result.effectTextures.cacheHits,
+          allocations: result.effectTextures.allocations,
+          evictions: result.effectTextures.evictions,
+          rejected: result.effectTextures.rejected,
+        } });
+      }
+      if (result.effectTextures.evictions) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_EVICTED", documentRevision: revision, details: { textures: result.effectTextures.textures, evictions: result.effectTextures.evictions, bytes: result.effectTextures.bytes } });
+      if (result.effectTextures.rejected) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_FALLBACK", documentRevision: revision, details: { textures: result.effectTextures.textures, rejected: result.effectTextures.rejected, bytes: result.effectTextures.bytes } });
       gpuSceneWithinBudget = true;
       gpuSceneLimitReported = false;
     } catch (error) {
       if (error instanceof GpuSceneResourceLimitError) {
         gpuSceneBytes = error.admission.resourceBytes;
+        gpuEffectTextureBytes = 0;
         gpuSceneWithinBudget = false;
         if (!gpuSceneLimitReported) diagnostics.record({ category: "renderer", code: "GPU_SCENE_RESOURCE_LIMIT" });
         gpuSceneLimitReported = true;
       } else {
         const code = classifyWebGpuRendererFailure(error);
         gpuSceneBytes = 0;
+        gpuEffectTextureBytes = 0;
         gpuSceneWithinBudget = true;
         gpuRenderer.destroy();
         gpuRenderer = undefined;
@@ -2736,11 +4133,22 @@ function render(rendersPerInputFrame?: number) {
   }
   const gpuPrepareMs = performance.now() - gpuStartedAt;
   const overlayStartedAt = performance.now();
-  if (pageHasFrameChildren) renderFrameClippedTree(context!, renderOrderedNodes);
-  else renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id)) renderNode(context!, node); });
+  const dragPreviewRootIds = escapedFrameDragPreviewRootIds();
+  if (pageHasFrameChildren || pageHasAlphaMasks) renderFrameClippedTree(context!, renderOrderedNodes, dragPreviewRootIds);
+  else {
+    const booleanOperandIds = renderedBooleanOperandIds(renderOrderedNodes);
+    renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id) && !booleanOperandIds.has(node.id)) renderNode(context!, node); });
+  }
   visibleNodes.forEach((node) => renderFrameName(context!, node));
   const hovered = hoveredId ? nodeById.get(hoveredId) : undefined;
   if (hovered && visibleNodeIds.has(hovered.id)) renderHover(context!, hovered);
+  const frameDropTarget = drag?.mode === "move" && drag.dropTargetId ? nodeById.get(drag.dropTargetId) : undefined;
+  if (frameDropTarget?.kind === "frame") {
+    renderFrameDropTarget(context!, frameDropTarget, frameDropTarget.autoLayout?.mode === "horizontal" || frameDropTarget.autoLayout?.mode === "vertical");
+  }
+  if (drag?.mode === "move" && !drag.dropTargetId) {
+    renderAutoLayoutInsertion(context!, drag.before, [...drag.initial], { x: drag.currentX, y: drag.currentY });
+  }
   // The editing DOM layer intentionally replaces only glyph painting. Keep the
   // Canvas selection geometry visible beneath it, so the edit outline remains
   // identical to the hover/selected document bounds rather than using a browser
@@ -2748,27 +4156,177 @@ function render(rendersPerInputFrame?: number) {
   const visibleSelected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(
     node
     && node.visible !== false
+    && (!isFullyClippedForSelection(nodes, node.id, boundsForNode) || dragPreviewRootIds.has(node.id))
     && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds)
     && (visibleNodeIds.has(node.id) || node.id === editingTextNodeId),
   ));
-  const multiSelection = multiResizeSelection();
+  // Multi-selection geometry is an overlay, so construct it from the same
+  // visible subset instead of expanding the outline around fully clipped
+  // layers that remain selected in the Layers panel.
+  const multiSelection = resolveMultiResizeSelection(nodes, visibleSelected.map((node) => node.id));
   const renderedMultiSelection = renderMultiResizeSelection(context!, multiSelection);
   if (!renderedMultiSelection) visibleSelected.forEach((node) => renderSelection(context!, node));
+  if (!renderedMultiSelection) visibleSelected.forEach((node) => renderVectorAnchorOverlay(context!, node));
   if (visibleSelected.length) renderSelectionLabel(context, multiSelection);
+  renderPenDraftPreview(context!);
   renderMarquee(context);
   renderGrid(context);
   renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
   maybeSimulateGpuLoss();
 }
+async function pasteClipboard() {
+  if (!clipboard || pasteInFlight) return;
+  pasteInFlight = true;
+  const createdAttachments: DocumentAsset[] = [];
+  try {
+  const requestedTarget = pasteTarget();
+  // A selected container cannot be the direct destination of its own
+  // clipboard root: that turns an ordinary copy/paste into a recursive layout
+  // insertion. Match normal editor semantics by duplicating the container
+  // beside its source instead.
+  const pastedSource = requestedTarget.parentId && clipboard.rootIds.includes(requestedTarget.parentId)
+    ? nodes.find((node) => node.id === requestedTarget.parentId)
+    : undefined;
+  const target = pastedSource
+    ? { pageId: pastedSource.pageId ?? activePageId, parentId: pastedSource.parentId }
+    : requestedTarget;
+  const existingAssets = new Map(assets.map((asset) => [asset.assetId, asset]));
+  const resourcesToAttach = (clipboard.resourceAssets ?? []).filter((asset) => !existingAssets.has(asset.assetId));
+  if (resourcesToAttach.length) {
+    if (!clipboardSourceDocumentId || clipboardSourceDocumentId === documentId) {
+      emitError(undefined, "INVALID_COMMAND");
+      return;
+    }
+    const headers = { "content-type": "application/json", "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": localDevActorId };
+    for (const asset of resourcesToAttach) {
+      const response = await fetch(`${assetApiUrl}/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(asset.assetId)}/attach-from-document`, {
+        method: "POST", headers, body: JSON.stringify({ sourceDocumentId: clipboardSourceDocumentId }),
+      });
+      if (!response.ok) {
+        throw new Error("ASSET_DOCUMENT_TRANSFER_AUTHORIZATION_FAILED");
+      }
+      if (response.status === 201) createdAttachments.push(asset);
+      existingAssets.set(asset.assetId, asset);
+    }
+  }
+  const availableAssetIds = new Set(existingAssets.keys());
+  const availableAssetContentHashes = new Map([...existingAssets].map(([assetId, asset]) => [assetId, asset.contentHash]));
+  const resolved = resolvePasteBatch(nodes, clipboard, target, availableAssetIds, undefined, documentSchemaVersion, availableAssetContentHashes);
+  if (!resolved) throw new Error("INVALID_COMMAND");
+  const batch: CoreBatchCommand[] = [
+    ...resourcesToAttach.map((asset) => ({ type: "registerAsset" as const, asset })),
+    ...resolved.batch,
+  ];
+  if (!wasmDocument) {
+    commit(() => { nodes = resolved.nextNodes; assets = [...existingAssets.values()]; selectedIds = resolved.createdIds; });
+    return;
+  }
+  const pasteBaseRevision = Number(wasmDocument.revision);
+  const pasteTransactionId = createId();
+  wasmDocument.apply_transaction_json(pasteTransactionId, wasmDocument.revision, JSON.stringify(batch));
+    recordHistory("core");
+    syncProjectionFromWasm(false);
+    selectedIds = resolved.createdIds;
+    rebuildNodeIndex();
+    render();
+    emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pasteBaseRevision, pasteTransactionId));
+    queueRemoteOperation(pasteTransactionId, pasteBaseRevision, batch, wasmDocument.canonical_hash());
+    // The Core transaction is now authoritative, so drop rollback markers.
+    // A failed best-effort cleanup is safe: it cannot corrupt the committed
+    // document, and an eventual retry may finish the housekeeping.
+    for (const asset of createdAttachments) {
+      void fetch(`${assetApiUrl}/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(asset.assetId)}/clipboard-attachment/commit`, {
+        method: "POST",
+        headers: { "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": localDevActorId },
+      }).catch(() => undefined);
+    }
+  } catch (error) {
+    await Promise.allSettled(createdAttachments.map(async (asset) => {
+      const headers = { "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": localDevActorId };
+      await fetch(`${assetApiUrl}/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(asset.assetId)}/clipboard-attachment`, { method: "DELETE", headers });
+    }));
+    emitError(error, error instanceof Error && error.message === "ASSET_DOCUMENT_TRANSFER_AUTHORIZATION_FAILED" ? "AUTHZ_DENIED" : error instanceof Error && error.message === "INVALID_COMMAND" ? "INVALID_COMMAND" : undefined);
+  } finally {
+    pasteInFlight = false;
+  }
+}
+
 function dispatch(command: EditorCommand) {
   command = withResolvedTextAutoSize(command);
+  if (command.type === "update") command = { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
   command = withResolvedLayerPosition(command);
-  if (command.type === "group" || command.type === "ungroup" || command.type === "reparent" || (command.type === "delete" && wasmDocument)) {
+  if (command.type === "flattenBoolean") {
+    if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
+    const boolean = nodes.find((node) => node.id === command.id);
+    const path = boolean && canonicalBooleanPath(boolean);
+    if (!path) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const flattened = resolveFlattenBooleanBatch(nodes, command.id, path, createId);
+    if (!flattened) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const { batch, replacement } = flattened;
+    const replacementId = replacement.id;
+    const baseRevision = Number(wasmDocument.revision);
+    const transactionId = createId();
+    try {
+      wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [replacementId];
+      rebuildNodeIndex(); render();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
+      queueRemoteOperation(transactionId, baseRevision, batch, wasmDocument.canonical_hash());
+    } catch (error) { emitError(error); }
+    return;
+  }
+  if (command.type === "outlineStroke") {
+    if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
+    const subject = nodes.find((node) => node.id === command.id);
+    const path = subject?.kind === "vector" ? canonicalVectorStrokeOutline(subject) : subject?.kind === "line" ? canonicalLineStrokeOutline(subject) : undefined;
+    if (!path) { emitError(undefined, "UNSUPPORTED_FEATURE"); return; }
+    const outlined = subject?.kind === "vector"
+      ? resolveOutlineStrokeBatch(nodes, command.id, path, createId)
+      : subject?.kind === "line"
+        ? resolveLineOutlineStrokeBatch(nodes, command.id, path, createId)
+        : undefined;
+    if (!outlined) { emitError(undefined, "RESOURCE_LIMIT"); return; }
+    const baseRevision = Number(wasmDocument.revision);
+    const transactionId = createId();
+    try {
+      wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(outlined.batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [outlined.outlined.id];
+      rebuildNodeIndex(); render();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
+      queueRemoteOperation(transactionId, baseRevision, outlined.batch, wasmDocument.canonical_hash());
+    } catch (error) { emitError(error); }
+    return;
+  }
+  if (command.type === "convertParametricToVector") {
+    if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
+    const shape = nodes.find((node) => node.id === command.id);
+    const points = shape && canonicalParametricOutline(shape, shape.width, shape.height);
+    if (!points?.length) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const converted = resolveParametricShapeToVectorBatch(nodes, command.id, points, createId);
+    if (!converted) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const baseRevision = Number(wasmDocument.revision);
+    const transactionId = createId();
+    try {
+      wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(converted.batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [converted.replacement.id];
+      rebuildNodeIndex(); render();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
+      queueRemoteOperation(transactionId, baseRevision, converted.batch, wasmDocument.canonical_hash());
+    } catch (error) { emitError(error); }
+    return;
+  }
+  if (command.type === "group" || command.type === "boolean" || command.type === "ungroup" || command.type === "reparent" || (command.type === "delete" && wasmDocument)) {
     if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
     const resolved = resolveCoreBatch(nodes, [command]);
     if (!resolved) { emitError(undefined, "INVALID_COMMAND"); return; }
     const structuralBaseRevision = Number(wasmDocument.revision);
-    const structuralTransactionId = crypto.randomUUID();
+    const structuralTransactionId = createId();
     try {
       wasmDocument.apply_transaction_json(structuralTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
       recordHistory("core");
@@ -2789,9 +4347,10 @@ function dispatch(command: EditorCommand) {
   switch (command.type) {
     case "select-page": {
       if (!pages.some((page) => page.id === command.id)) { emitError(undefined, "INVALID_COMMAND"); break; }
+      storeActivePageSelection();
       activePageId = command.id;
       refreshRustGpuScene();
-      selectedIds = [];
+      restorePageSelection(activePageId);
       hoveredId = undefined;
       rebuildNodeIndex();
       render();
@@ -2802,13 +4361,14 @@ function dispatch(command: EditorCommand) {
       if (!wasmDocument) { emitError(undefined, "INVALID_COMMAND"); break; }
       try {
         const pageBaseRevision = Number(wasmDocument.revision);
-        const pageTransactionId = crypto.randomUUID();
+        const pageTransactionId = createId();
         wasmDocument.create_page(pageTransactionId, wasmDocument.revision, command.id, command.name.trim());
         recordHistory("core");
         syncProjectionFromWasm(false);
+        storeActivePageSelection();
         activePageId = command.id;
         refreshRustGpuScene();
-        selectedIds = [];
+        restorePageSelection(activePageId);
         rebuildNodeIndex();
         render();
         emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pageBaseRevision, pageTransactionId));
@@ -2829,7 +4389,7 @@ function dispatch(command: EditorCommand) {
       const positions = new Map(command.positionIds.map(({ id, positionId }) => [id, positionId]));
       nodes = nodes.map((node) => positions.has(node.id) ? { ...node, positionId: positions.get(node.id)! } : node);
     }, appliedByWasm, appliedByWasm ? { type: "reposition", positionIds: command.positionIds } : undefined, baseRevision, true, command); break;
-    case "select": selectedIds = command.ids; render(); emitViewState(); break;
+    case "select": selectedIds = command.ids; storeActivePageSelection(); render(); emitViewState(); break;
     case "delete": commit(() => { nodes = nodes.filter((node) => !command.ids.includes(node.id)); selectedIds = []; }, appliedByWasm, appliedByWasm ? { type: "delete", ids: command.ids } : undefined, baseRevision, true, command); break;
     case "duplicate": {
       if (!wasmDocument) {
@@ -2841,7 +4401,7 @@ function dispatch(command: EditorCommand) {
       const resolved = resolveCoreBatch(nodes, [command]);
       if (!resolved) { emitError(undefined, "INVALID_COMMAND"); break; }
       const duplicateBaseRevision = Number(wasmDocument.revision);
-      const duplicateTransactionId = crypto.randomUUID();
+      const duplicateTransactionId = createId();
       try {
         wasmDocument.apply_transaction_json(duplicateTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
         recordHistory("core");
@@ -2873,7 +4433,7 @@ function dispatch(command: EditorCommand) {
         break;
       }
       const cutBaseRevision = Number(wasmDocument.revision);
-      const cutTransactionId = crypto.randomUUID();
+      const cutTransactionId = createId();
       try {
         wasmDocument.apply_transaction_json(cutTransactionId, wasmDocument.revision, JSON.stringify(cutResolved.batch));
         recordHistory("core");
@@ -2890,27 +4450,7 @@ function dispatch(command: EditorCommand) {
       break;
     }
     case "paste": {
-      if (!clipboard) break;
-      const target = pasteTarget();
-      const availableAssetIds = new Set(assets.map((asset) => asset.assetId));
-      const resolved = resolvePasteBatch(nodes, clipboard, target, availableAssetIds);
-      if (!resolved) { emitError(undefined, "INVALID_COMMAND"); break; }
-      if (!wasmDocument) {
-        commit(() => { nodes = resolved.nextNodes; selectedIds = resolved.createdIds; });
-        break;
-      }
-      const pasteBaseRevision = Number(wasmDocument.revision);
-      const pasteTransactionId = crypto.randomUUID();
-      try {
-        wasmDocument.apply_transaction_json(pasteTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
-        recordHistory("core");
-        syncProjectionFromWasm(false);
-        selectedIds = resolved.createdIds;
-        rebuildNodeIndex();
-        render();
-        emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, pasteBaseRevision, pasteTransactionId));
-        queueRemoteOperation(pasteTransactionId, pasteBaseRevision, resolved.batch, wasmDocument.canonical_hash());
-      } catch (error) { emitError(error); }
+      void pasteClipboard();
       break;
     }
     case "undo": {
@@ -2922,7 +4462,7 @@ function dispatch(command: EditorCommand) {
         future.push({ nodes: cloneDocument(), advancesRevision: before.advancesRevision });
         redoOrder.push(kind);
         nodes = before.nodes;
-        selectedIds = [];
+        retainExistingSelection();
         if (before.advancesRevision) revision += 1;
         render(); emitSnapshot(); break;
       }
@@ -2930,14 +4470,14 @@ function dispatch(command: EditorCommand) {
       const undoBaseRevision = Number(wasmDocument.revision);
       const undoBeforeHash = wasmDocument.canonical_hash();
       const before = cloneDocument();
-      wasmDocument.undo(); redoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
+      wasmDocument.undo(); redoOrder.push(kind); syncProjectionFromWasm(); retainExistingSelection(); render();
       let batch = historyReplayBatch(before, nodes);
       if (!batch.length && undoBeforeHash !== wasmDocument.canonical_hash()) {
         diagnostics.record({ category: "recovery", code: "HISTORY_REPLAY_DIFF_FALLBACK", documentRevision: revision, details: { direction: "undo", nodeCount: nodes.length } });
         batch = fullStateReplayBatch(nodes);
       }
       if (!batch.length) { emitSnapshot(); break; }
-      const undoTransactionId = crypto.randomUUID();
+      const undoTransactionId = createId();
       emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, undoBaseRevision, undoTransactionId));
       queueRemoteOperation(undoTransactionId, undoBaseRevision, batch, wasmDocument.canonical_hash());
       break;
@@ -2951,7 +4491,7 @@ function dispatch(command: EditorCommand) {
         history.push({ nodes: cloneDocument(), advancesRevision: after.advancesRevision });
         undoOrder.push(kind);
         nodes = after.nodes;
-        selectedIds = [];
+        retainExistingSelection();
         if (after.advancesRevision) revision += 1;
         render(); emitSnapshot(); break;
       }
@@ -2959,14 +4499,14 @@ function dispatch(command: EditorCommand) {
       const redoBaseRevision = Number(wasmDocument.revision);
       const redoBeforeHash = wasmDocument.canonical_hash();
       const before = cloneDocument();
-      wasmDocument.redo(); undoOrder.push(kind); syncProjectionFromWasm(); selectedIds = []; render();
+      wasmDocument.redo(); undoOrder.push(kind); syncProjectionFromWasm(); retainExistingSelection(); render();
       let batch = historyReplayBatch(before, nodes);
       if (!batch.length && redoBeforeHash !== wasmDocument.canonical_hash()) {
         diagnostics.record({ category: "recovery", code: "HISTORY_REPLAY_DIFF_FALLBACK", documentRevision: revision, details: { direction: "redo", nodeCount: nodes.length } });
         batch = fullStateReplayBatch(nodes);
       }
       if (!batch.length) { emitSnapshot(); break; }
-      const redoTransactionId = crypto.randomUUID();
+      const redoTransactionId = createId();
       emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, redoBaseRevision, redoTransactionId));
       queueRemoteOperation(redoTransactionId, redoBaseRevision, batch, wasmDocument.canonical_hash());
       break;
@@ -2976,15 +4516,18 @@ function dispatch(command: EditorCommand) {
       if (command.snapshot.format === "rust-core-v1") {
         ephemeralBenchmarkProjection = false;
         viewport = { ...command.snapshot.viewport };
-        void loadDocumentBridge(command.snapshot);
+        void loadDocumentBridge(command.snapshot, false, [], command.requestId);
       } else {
         ephemeralBenchmarkProjection = command.snapshot.format === "benchmark-projection-v1";
+        const seedAssets = command.snapshot.format === "legacy-projection-v0"
+          ? command.snapshot.assets ?? []
+          : [];
         nodes = normalizeIds(command.snapshot.nodes);
         rebuildNodeIndex();
         viewport = command.snapshot.viewport;
         render();
         emitSnapshot();
-        void loadDocumentBridge(undefined, ephemeralBenchmarkProjection);
+        void loadDocumentBridge(undefined, ephemeralBenchmarkProjection, seedAssets, command.requestId);
       }
       break;
     }
@@ -3011,7 +4554,92 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
     return;
   }
-  const pageScopedCommands = transaction.commands.map((command) => command.type === "create" ? { ...command, node: { ...command.node, pageId: command.node.pageId ?? activePageId } } : command);
+  const coreDocument = wasmDocument;
+  const commitStructuralReplacement = (batch: readonly CoreBatchCommand[], nextSelection: readonly string[]) => {
+    try {
+      const baseRevision = Number(coreDocument.revision);
+      coreDocument.apply_transaction_json(transaction.id, BigInt(transaction.baseRevision), JSON.stringify(batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [...nextSelection];
+      rebuildNodeIndex(); render();
+      diagnostics.record({ category: "transaction", code: "TRANSACTION_ACCEPTED", documentRevision: revision, transactionId: transaction.id, details: { commandCount: 1 } });
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: coreDocument.snapshot_json() }, baseRevision, transaction.id));
+      queueRemoteOperation(transaction.id, baseRevision, batch, coreDocument.canonical_hash());
+      emit({ type: "ack", transactionId: transaction.id, acceptedRevision: revision });
+    } catch (error) {
+      const errorCode = error instanceof Error && error.message.includes("ResourceLimit") ? "RESOURCE_LIMIT" : "INVALID_TRANSACTION";
+      diagnostics.record({ category: "transaction", code: "TRANSACTION_REJECTED", documentRevision: revision, transactionId: transaction.id, details: { errorCode } });
+      emitError(error, errorCode === "RESOURCE_LIMIT" ? "RESOURCE_LIMIT" : "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode });
+    }
+  };
+  if (transaction.commands.length === 1 && transaction.commands[0].type === "flattenBoolean") {
+    const command = transaction.commands[0];
+    const boolean = nodes.find((node) => node.id === command.id);
+    const path = boolean && canonicalBooleanPath(boolean);
+    const flattened = path && resolveFlattenBooleanBatch(nodes, command.id, path, createId);
+    if (!flattened) {
+      emitError(undefined, "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
+      return;
+    }
+    commitStructuralReplacement(flattened.batch, [flattened.replacement.id]);
+    return;
+  }
+  if (transaction.commands.length === 1 && transaction.commands[0].type === "outlineStroke") {
+    const command = transaction.commands[0];
+    const subject = nodes.find((node) => node.id === command.id);
+    const path = subject?.kind === "vector" ? canonicalVectorStrokeOutline(subject) : subject?.kind === "line" ? canonicalLineStrokeOutline(subject) : undefined;
+    const outlined = path && (subject?.kind === "vector"
+      ? resolveOutlineStrokeBatch(nodes, command.id, path, createId)
+      : subject?.kind === "line"
+        ? resolveLineOutlineStrokeBatch(nodes, command.id, path, createId)
+        : undefined);
+    if (!outlined) {
+      emitError(undefined, "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
+      return;
+    }
+    commitStructuralReplacement(outlined.batch, [outlined.outlined.id]);
+    return;
+  }
+  if (transaction.commands.length === 1 && transaction.commands[0].type === "convertParametricToVector") {
+    const command = transaction.commands[0];
+    const shape = nodes.find((node) => node.id === command.id);
+    const points = shape && canonicalParametricOutline(shape, shape.width, shape.height);
+    const converted = points?.length
+      ? resolveParametricShapeToVectorBatch(nodes, command.id, points, createId)
+      : undefined;
+    if (!converted) {
+      emitError(undefined, "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
+      return;
+    }
+    try {
+      const baseRevision = Number(wasmDocument.revision);
+      wasmDocument.apply_transaction_json(transaction.id, BigInt(transaction.baseRevision), JSON.stringify(converted.batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [converted.replacement.id];
+      rebuildNodeIndex(); render();
+      diagnostics.record({ category: "transaction", code: "TRANSACTION_ACCEPTED", documentRevision: revision, transactionId: transaction.id, details: { commandCount: 1 } });
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transaction.id));
+      queueRemoteOperation(transaction.id, baseRevision, converted.batch, wasmDocument.canonical_hash());
+      emit({ type: "ack", transactionId: transaction.id, acceptedRevision: revision });
+    } catch (error) {
+      const errorCode = error instanceof Error && error.message.includes("ResourceLimit") ? "RESOURCE_LIMIT" : "INVALID_TRANSACTION";
+      diagnostics.record({ category: "transaction", code: "TRANSACTION_REJECTED", documentRevision: revision, transactionId: transaction.id, details: { errorCode } });
+      emitError(error, errorCode === "RESOURCE_LIMIT" ? "RESOURCE_LIMIT" : "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode });
+    }
+    return;
+  }
+  const pageScopedCommands = transaction.commands.map((command) => {
+    if (command.type === "create") return { ...command, node: { ...command.node, pageId: command.node.pageId ?? activePageId } };
+    if (command.type === "update") return { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
+    return command;
+  });
   const resolved = resolveCoreBatch(nodes, pageScopedCommands);
   if (!resolved) {
     emitError(undefined, "INVALID_COMMAND", transaction.id);
@@ -3036,9 +4664,91 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     emit({ type: "ack", transactionId: transaction.id, errorCode });
   }
 }
+
+/** Commits a keyboard movement through the same world-to-local conversion and
+ * Core transaction boundary as a pointer drag. In particular, directly
+ * changing x/y would leave a Relative-v1 child visually frozen. */
+function nudgeSelection(delta: { x: number; y: number }) {
+  const resolved = resolveSelectionNudge(nodes, selectedIds, delta);
+  if (!resolved) return;
+  const initial = resolved.movable;
+  const patches = resolved.patches.map(({ id, patch }) => ({ type: "update" as const, id, patch }));
+  if (!patches.length) return;
+  if (wasmDocument) {
+    dispatchTransaction({ id: createId(), baseRevision: Number(wasmDocument.revision), commands: patches });
+    return;
+  }
+  const before = cloneDocument();
+  nodes = nodes.map((node) => {
+    const patch = patches.find((candidate) => candidate.id === node.id)?.patch;
+    return patch ? { ...node, ...patch } : node;
+  });
+  refreshTransientGroupBounds(new Set(nodes.filter((node) => node.kind === "group" && initial.has(node.id)).map((node) => node.id)));
+  history.push({ nodes: before, advancesRevision: true });
+  recordHistory("local");
+  revision += 1;
+  rebuildNodeIndex();
+  render();
+  emitSnapshot();
+}
+
+/** Resolves an Arrow-key world delta through the selected Vector's affine
+ * transform, then submits the same point command used by an anchor drag. */
+function nudgeSelectedVectorPoints(delta: { x: number; y: number }): boolean {
+  const targets = selectedVectorPoints;
+  const nodeId = targets[0]?.id;
+  if (!nodeId || targets.some((target) => target.id !== nodeId)) return false;
+  const node = selectedIds.length === 1 && selectedIds[0] === nodeId
+    ? nodes.find((candidate) => candidate.id === nodeId)
+    : undefined;
+  const points = node?.kind === "vector"
+    ? targets.map((target) => node.vectorPath?.subpaths.flatMap((subpath) => subpath.points).find((candidate) => candidate.id === target.pointId)).filter((point): point is VectorPoint => Boolean(point))
+    : [];
+  const transform = node && worldTransformForNode(nodes, node.id);
+  const inverse = transform && invertAffine(transform);
+  if (!node || points.length !== targets.length || !inverse || !wasmDocument) {
+    selectedVectorPoints = [];
+    render();
+    return false;
+  }
+  const localOrigin = transformPoint(inverse, { x: 0, y: 0 });
+  const localDelta = transformPoint(inverse, delta);
+  dispatchTransaction({
+    id: createId(),
+    baseRevision: Number(wasmDocument.revision),
+    commands: points.map((point) => ({ type: "moveVectorPoint" as const, id: node.id, pointId: point.id, x: point.x + localDelta.x - localOrigin.x, y: point.y + localDelta.y - localOrigin.y })),
+  });
+  return true;
+}
+
+function deleteSelectedVectorPoints(): boolean {
+  const targets = selectedVectorPoints;
+  const nodeId = targets[0]?.id;
+  if (!nodeId || targets.some((target) => target.id !== nodeId)) return false;
+  const node = selectedIds.length === 1 && selectedIds[0] === nodeId
+    ? nodes.find((candidate) => candidate.id === nodeId)
+    : undefined;
+  if (!node || node.kind !== "vector" || !node.vectorPath || !wasmDocument) return false;
+  const pointIds = new Set(targets.map((target) => target.pointId));
+  if (pointIds.size !== targets.length || node.vectorPath.subpaths.some((subpath) => {
+    const selectedCount = subpath.points.filter((point) => pointIds.has(point.id)).length;
+    return selectedCount > 0 && subpath.points.length - selectedCount < (subpath.closed ? 3 : 1);
+  })) return false;
+  selectedVectorPoints = [];
+  dispatchTransaction({
+    id: createId(),
+    baseRevision: Number(wasmDocument.revision),
+    commands: targets.map((target) => ({ type: "deleteVectorPoint" as const, id: node.id, pointId: target.pointId })),
+  });
+  return true;
+}
 function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   const world = toWorld(event.x, event.y);
   if (event.event === "leave") {
+    if (penDraft?.previewWorld) {
+      penDraft.previewWorld = undefined;
+      render();
+    }
     if (!drag && hoveredId !== undefined) {
       hoveredId = undefined;
       render();
@@ -3047,6 +4757,34 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   }
   if (event.event === "down") {
     if (tool === "hand" || event.button === 1) { drag = { mode: "pan", startX: event.x, startY: event.y }; return; }
+    if (tool === "pen") {
+      if (event.readOnly) { render(); emitViewState(); return; }
+      const connectTarget = penDraftConnectsAtScreen(event.x, event.y);
+      if (connectTarget) {
+        penDraft!.connectTarget = connectTarget;
+        finishPenDraft();
+        return;
+      }
+      if (penDraftClosesAtScreen(event.x, event.y)) {
+        if (penDraft!.kind === "create") {
+          const closed = structuredClone(penDraft!.node);
+          closed.vectorPath!.subpaths[0].closed = true;
+          replacePenDraftNode(closed);
+        } else penDraft!.closeOnFinish = true;
+        finishPenDraft();
+        return;
+      }
+      if (!penDraft) {
+        const endpoint = vectorOpenEndpointAtScreen(event.x, event.y);
+        if (endpoint) {
+          beginPenExtension(endpoint);
+          return;
+        }
+      }
+      const point = beginPenPoint(world);
+      if (point) drag = { mode: "pen-point", ...point };
+      return;
+    }
     if (tool !== "select") {
       if (event.readOnly) { render(); emitViewState(); return; }
       const snapped = snapCanvasPoint(world);
@@ -3055,9 +4793,44 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         node.name = "Arrow";
         node.strokeCapEnd = "arrowLines";
       }
-      node.width = 4;
-      node.height = node.kind === "line" ? 0 : 4;
+      if (node.kind !== "vector") {
+        node.width = 4;
+        node.height = node.kind === "line" ? 0 : 4;
+      }
       drag = { mode: "draw", startX: snapped.x, startY: snapped.y, node };
+      return;
+    }
+    const vectorHandle = !event.readOnly && vectorHandleAtScreen(event.x, event.y);
+    if (vectorHandle) {
+      drag = { mode: "vector-handle", ...vectorHandle, before: cloneDocument() };
+      return;
+    }
+    const vectorAnchor = !event.readOnly && vectorAnchorAtScreen(event.x, event.y);
+    if (vectorAnchor) {
+      const alreadySelected = selectedVectorPoints.some((target) => target.id === vectorAnchor.id && target.pointId === vectorAnchor.pointId);
+      if (event.shiftKey) {
+        selectedVectorPoints = alreadySelected
+          ? selectedVectorPoints.filter((target) => target.id !== vectorAnchor.id || target.pointId !== vectorAnchor.pointId)
+          : [...selectedVectorPoints.filter((target) => target.id === vectorAnchor.id), vectorAnchor];
+      } else {
+        selectedVectorPoints = [vectorAnchor];
+        drag = { mode: "vector-point", ...vectorAnchor, before: cloneDocument() };
+      }
+      render();
+      return;
+    }
+    const vectorSegment = !event.readOnly && event.splitVectorSegment && vectorSegmentAtScreen(event.x, event.y);
+    if (vectorSegment && wasmDocument) {
+      dispatchTransaction({
+        id: createId(),
+        baseRevision: Number(wasmDocument.revision),
+        commands: [{ type: "splitVectorSegment", id: vectorSegment.id, subpathIndex: vectorSegment.subpathIndex, afterPointId: vectorSegment.afterPointId, t: vectorSegment.t, pointId: createId() }],
+      });
+      return;
+    }
+    const rotate = !event.readOnly && rotateHandleAtScreen(event.x, event.y);
+    if (rotate) {
+      drag = { mode: "rotate", start: world, pivot: rotate.pivot, before: cloneDocument(), ids: rotate.ids };
       return;
     }
     const resize = !event.readOnly && resizeHandleAtScreen(event.x, event.y);
@@ -3075,24 +4848,39 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       drag = { mode: "multi-resize", handle: multiResize.handle, start: world, bounds: multiResize.bounds, before: cloneDocument(), ids: multiResize.ids, requiresAffine: multiResize.requiresAffine };
       return;
     }
-    const target = hit(world.x, world.y, Boolean(event.drillDown));
+    const target = hit(world.x, world.y, Boolean(event.drillDown), Boolean(event.deepSelect));
     if (!target) {
       drag = { mode: "select", startX: world.x, startY: world.y, currentX: world.x, currentY: world.y, startScreenX: event.x, startScreenY: event.y, marqueeStarted: false, initialSelection: event.shiftKey ? [...selectedIds] : [], additive: event.shiftKey };
-      if (!event.shiftKey) selectedIds = [];
+      if (!event.shiftKey) {
+        selectedIds = [];
+        storeActivePageSelection();
+        selectedVectorPoints = [];
+      }
       render();
       emitViewState();
       return;
     }
     selectedIds = resolveCanvasObjectSelection(selectedIds, target.id, event.shiftKey);
+    storeActivePageSelection();
+    selectedVectorPoints = [];
     if (target && !event.readOnly) {
       const movable = movableSelectionIds(nodes, selectedIds);
-      drag = { mode: "move", startX: world.x, startY: world.y, before: cloneDocument(), initial: new Set(nodes.filter((node) => movable.has(node.id)).map((node) => node.id)) };
+      drag = { mode: "move", startX: world.x, startY: world.y, currentX: world.x, currentY: world.y, before: cloneDocument(), initial: new Set(nodes.filter((node) => movable.has(node.id)).map((node) => node.id)) };
     }
     render(); emitViewState(); return;
   }
   if (!drag) {
     if (event.event === "move") {
-      const nextHoveredId = hit(world.x, world.y)?.id;
+      if (tool === "pen" && penDraft) {
+        const preview = snapCanvasPoint(world);
+        const previous = penDraft.previewWorld;
+        if (!previous || previous.x !== preview.x || previous.y !== preview.y) {
+          penDraft.previewWorld = preview;
+          render();
+        }
+        return;
+      }
+      const nextHoveredId = hoverHit(world.x, world.y)?.id;
       if (nextHoveredId !== hoveredId) {
         hoveredId = nextHoveredId;
         render();
@@ -3104,13 +4892,14 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   if (event.readOnly && activeDrag.mode !== "pan" && activeDrag.mode !== "select") {
     // A lease can expire mid-drag. Restore the pre-drag projection instead of
     // leaving an uncommitted visual move in a follower tab.
-    if ((activeDrag.mode === "move" || activeDrag.mode === "resize" || activeDrag.mode === "line-resize" || activeDrag.mode === "multi-resize") && activeDrag.before) {
+    if ((activeDrag.mode === "move" || activeDrag.mode === "resize" || activeDrag.mode === "line-resize" || activeDrag.mode === "vector-point" || activeDrag.mode === "vector-handle" || activeDrag.mode === "multi-resize" || activeDrag.mode === "rotate") && activeDrag.before) {
       nodes = activeDrag.before;
       transientSceneVersion += 1;
       rebuildNodeIndex();
       render();
       emitSnapshot(undefined, false);
     }
+    if (activeDrag.mode === "pen-point") cancelPenDraft();
     if (event.event === "up") drag = undefined;
     return;
   }
@@ -3139,10 +4928,15 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         activeDrag.node.height = 0;
         activeDrag.node.rotation = Math.atan2(dy, dx) * 180 / Math.PI;
       } else {
+        const previousWidth = activeDrag.node.width;
+        const previousHeight = activeDrag.node.height;
         activeDrag.node.x = Math.min(activeDrag.startX, end.x);
         activeDrag.node.y = Math.min(activeDrag.startY, end.y);
         activeDrag.node.width = Math.max(4, Math.abs(end.x - activeDrag.startX));
         activeDrag.node.height = Math.max(4, Math.abs(end.y - activeDrag.startY));
+        if (activeDrag.node.kind === "vector" && activeDrag.node.vectorPath && previousWidth > 0 && previousHeight > 0) {
+          activeDrag.node.vectorPath = scaleVectorPath(activeDrag.node.vectorPath, activeDrag.node.width / previousWidth, activeDrag.node.height / previousHeight);
+        }
       }
       render();
       renderNode(context!, activeDrag.node);
@@ -3170,12 +4964,20 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       refreshTransientGroupBounds(directlyMovedGroups);
       transientSceneVersion += 1;
       rebuildNodeIndex();
+      const movingIds = [...activeDrag.initial];
+      const dropTarget = frameDropTargetAtPoint(activeDrag.before, movingIds, world);
+      activeDrag.dropTargetId = dropTarget?.frame.id;
+      activeDrag.currentX = world.x;
+      activeDrag.currentY = world.y;
       render();
     }
     if (activeDrag.mode === "resize") {
       const geometry = resizeGeometryForCanvasNode(activeDrag.node, activeDrag.handle, activeDrag.start, world, event.shiftKey, event.altKey);
       if (geometry) {
-        nodes = nodes.map((node) => node.id === activeDrag.id ? { ...node, ...geometry } : node);
+        const vectorPath = activeDrag.node.kind === "vector" && activeDrag.node.vectorPath && activeDrag.node.width > 0 && activeDrag.node.height > 0
+          ? scaleVectorPath(activeDrag.node.vectorPath, geometry.width / activeDrag.node.width, geometry.height / activeDrag.node.height)
+          : undefined;
+        nodes = nodes.map((node) => node.id === activeDrag.id ? { ...node, ...geometry, ...(vectorPath ? { vectorPath } : {}) } : node);
         transientSceneVersion += 1;
         rebuildNodeIndex();
         render();
@@ -3188,6 +4990,55 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         transientSceneVersion += 1;
         rebuildNodeIndex();
         render();
+      }
+    }
+    if (activeDrag.mode === "vector-point") {
+      const vector = activeDrag.before.find((node) => node.id === activeDrag.id);
+      const local = vector && localVectorPointAtWorld(vector, world);
+      if (vector?.vectorPath && local && Number.isFinite(local.x) && Number.isFinite(local.y)) {
+        const vectorPath = structuredClone(vector.vectorPath);
+        const point = vectorPath.subpaths.flatMap((subpath) => subpath.points).find((candidate) => candidate.id === activeDrag.pointId);
+        if (point) {
+          point.x = local.x;
+          point.y = local.y;
+          nodes = activeDrag.before.map((node) => node.id === activeDrag.id ? { ...node, vectorPath } : node);
+          transientSceneVersion += 1;
+          rebuildNodeIndex();
+          render();
+        }
+      }
+    }
+    if (activeDrag.mode === "vector-handle") {
+      const vector = activeDrag.before.find((node) => node.id === activeDrag.id);
+      const local = vector && localVectorPointAtWorld(vector, world);
+      if (vector?.vectorPath && local && Number.isFinite(local.x) && Number.isFinite(local.y)) {
+        const vectorPath = structuredClone(vector.vectorPath);
+        const point = vectorPath.subpaths.flatMap((subpath) => subpath.points).find((candidate) => candidate.id === activeDrag.pointId);
+        if (point) {
+          point[activeDrag.handle] = { x: local.x - point.x, y: local.y - point.y };
+          nodes = activeDrag.before.map((node) => node.id === activeDrag.id ? { ...node, vectorPath } : node);
+          transientSceneVersion += 1;
+          rebuildNodeIndex();
+          render();
+        }
+      }
+    }
+    if (activeDrag.mode === "pen-point" && penDraft?.node.id === activeDrag.id) {
+      const local = localVectorPointAtWorld(penDraft.node, world);
+      const point = penDraft.node.vectorPath?.subpaths[0]?.points.find((candidate) => candidate.id === activeDrag.pointId);
+      if (local && point) {
+        const dx = local.x - point.x;
+        const dy = local.y - point.y;
+        if (Number.isFinite(dx) && Number.isFinite(dy)) {
+          const node = structuredClone(penDraft.node);
+          const draftPoint = node.vectorPath!.subpaths[0].points.find((candidate) => candidate.id === activeDrag.pointId)!;
+          // A dragged Pen point starts as a mirrored pair. It can subsequently
+          // be made asymmetric with the existing point-handle editor.
+          draftPoint.handleOut = { x: dx, y: dy };
+          draftPoint.handleIn = { x: -dx, y: -dy };
+          draftPoint.pointType = "mirrored";
+          replacePenDraftNode(node);
+        }
       }
     }
     if (activeDrag.mode === "multi-resize") {
@@ -3204,6 +5055,16 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         // Scaling a selected Group changes child world transforms; immediately
         // derive its local Bounds so the Group record, selection box and Badge
         // all describe the same transient geometry.
+        refreshTransientGroupBounds();
+        transientSceneVersion += 1;
+        rebuildNodeIndex();
+        render();
+      }
+    }
+    if (activeDrag.mode === "rotate") {
+      const patches = rotateSelectionAroundWorldPoint(activeDrag.before, activeDrag.ids, activeDrag.pivot, activeDrag.start, world, event.shiftKey);
+      if (patches) {
+        nodes = activeDrag.before.map((node) => patches.has(node.id) ? { ...node, ...patches.get(node.id)! } : node);
         refreshTransientGroupBounds();
         transientSceneVersion += 1;
         rebuildNodeIndex();
@@ -3256,11 +5117,35 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       // A normal click selects an object and creates a move drag boundary, but
       // it must not mint a no-op transaction or remote Operation on pointer-up.
       if (!moved) { drag = undefined; render(); emitViewState(); return; }
+      const dropTarget = activeDrag.dropTargetId
+        ? activeDrag.before.find((node) => node.id === activeDrag.dropTargetId && node.kind === "frame")
+        : undefined;
+      const movingIds = [...activeDrag.initial];
+      const exitTarget = !dropTarget
+        ? frameExitTargetAtPoint(activeDrag.before, movingIds, world)
+        : undefined;
+      // A drag that stays within an Auto layout Frame changes sibling position
+      // IDs only. Geometry is owned by layout reflow, so never send the
+      // transient drag matrices into Core for these flow children.
+      const autoLayoutDrop = !dropTarget && !exitTarget
+        ? autoLayoutDropReorder(activeDrag.before, movingIds, world)
+        : undefined;
+      const geometryCommands = autoLayoutDrop
+        ? moveCommands.filter((command) => !movingIds.includes(command.id))
+        : moveCommands;
+      const commands: EditorCommand[] = dropTarget
+        ? [...moveCommands, { type: "reparent", ids: movingIds, parentId: dropTarget.id }]
+        : exitTarget
+          ? [...moveCommands, { type: "reparent", ids: movingIds, parentId: exitTarget.parentId }]
+          : autoLayoutDrop?.result
+            ? [...geometryCommands, { type: "reposition", positionIds: [...autoLayoutDrop.result.positionIds].map(([id, positionId]) => ({ id, positionId })) }]
+            : geometryCommands;
+      if (!commands.length) { drag = undefined; nodes = activeDrag.before; transientSceneVersion += 1; rebuildNodeIndex(); render(); emitViewState(); return; }
       if (wasmDocument) {
         try {
           const baseRevision = Number(wasmDocument.revision);
-          const moveTransactionId = crypto.randomUUID();
-          const resolved = resolveCoreBatch(activeDrag.before, moveCommands);
+          const moveTransactionId = createId();
+          const resolved = resolveCoreBatch(activeDrag.before, commands);
           if (!resolved) { emitError(undefined, "TRANSIENT"); drag = undefined; nodes = activeDrag.before; transientSceneVersion += 1; rebuildNodeIndex(); render(); emitSnapshot(); return; }
           wasmDocument.apply_transaction_json(moveTransactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
           recordHistory("core");
@@ -3276,7 +5161,12 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
           render();
           emitSnapshot();
         }
-      } else { history.push({ nodes: activeDrag.before, advancesRevision: true }); recordHistory("local"); revision += 1; render(); emitSnapshot(); }
+      } else {
+        const resolved = resolveCoreBatch(activeDrag.before, commands);
+        if (!resolved) { drag = undefined; nodes = activeDrag.before; transientSceneVersion += 1; rebuildNodeIndex(); render(); emitSnapshot(); return; }
+        nodes = resolved.nextNodes;
+        history.push({ nodes: activeDrag.before, advancesRevision: true }); recordHistory("local"); revision += 1; render(); emitSnapshot();
+      }
     }
     if (activeDrag.mode === "resize") {
       const resized = nodes.find((node) => node.id === activeDrag.id);
@@ -3300,6 +5190,55 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       if (geometry && (hasCommittedLineEndpointResize(activeDrag.node, geometry) || JSON.stringify(activeDrag.node.relativeTransform) !== JSON.stringify(geometry.relativeTransform))) dispatch({ type: "update", id: activeDrag.id, patch: geometry });
       else { render(); emitViewState(); }
     }
+    if (activeDrag.mode === "vector-point") {
+      const after = nodes.find((node) => node.id === activeDrag.id)?.vectorPath
+        ?.subpaths.flatMap((subpath) => subpath.points)
+        .find((point) => point.id === activeDrag.pointId);
+      const before = activeDrag.before.find((node) => node.id === activeDrag.id)?.vectorPath
+        ?.subpaths.flatMap((subpath) => subpath.points)
+        .find((point) => point.id === activeDrag.pointId);
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (after && before && (after.x !== before.x || after.y !== before.y) && wasmDocument) {
+        dispatchTransaction({
+          id: createId(),
+          baseRevision: Number(wasmDocument.revision),
+          commands: [{ type: "moveVectorPoint", id: activeDrag.id, pointId: activeDrag.pointId, x: after.x, y: after.y }],
+        });
+      } else { render(); emitViewState(); }
+    }
+    if (activeDrag.mode === "vector-handle") {
+      const after = nodes.find((node) => node.id === activeDrag.id)?.vectorPath
+        ?.subpaths.flatMap((subpath) => subpath.points)
+        .find((point) => point.id === activeDrag.pointId);
+      const before = activeDrag.before.find((node) => node.id === activeDrag.id)?.vectorPath
+        ?.subpaths.flatMap((subpath) => subpath.points)
+        .find((point) => point.id === activeDrag.pointId);
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      const changed = after && before && JSON.stringify(after[activeDrag.handle]) !== JSON.stringify(before[activeDrag.handle]);
+      if (changed && after && wasmDocument) {
+        dispatchTransaction({
+          id: createId(),
+          baseRevision: Number(wasmDocument.revision),
+          commands: [{
+            type: "setVectorPointHandles",
+            id: activeDrag.id,
+            pointId: activeDrag.pointId,
+            handleIn: after.handleIn,
+            handleOut: after.handleOut,
+            pointType: after.pointType,
+          }],
+        });
+      } else { render(); emitViewState(); }
+    }
+    if (activeDrag.mode === "pen-point") {
+      // The complete open path remains a transient draft until Enter or a
+      // click on its first anchor. This avoids a history item per anchor.
+      render();
+    }
     if (activeDrag.mode === "multi-resize") {
       const nextNodes = nodes;
       const beforeById = new Map(activeDrag.before.filter((node) => activeDrag.ids.includes(node.id)).map((node) => [node.id, { x: node.x, y: node.y, width: node.width, height: node.height }]));
@@ -3319,10 +5258,34 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       if (!(activeDrag.requiresAffine ? hasCommittedSelectionTransform(activeDrag.before, affinePatches) : hasCommittedSelectionResize(beforeById, afterById))) { render(); emitViewState(); }
       else if (wasmDocument) {
         dispatchTransaction({
-          id: crypto.randomUUID(),
+          id: createId(),
           baseRevision: Number(wasmDocument.revision),
           commands: activeDrag.requiresAffine ? derivedCommands : activeDrag.ids.map((id) => ({ type: "update" as const, id, patch: afterById.get(id)! })),
         });
+      } else {
+        nodes = nextNodes;
+        refreshTransientGroupBounds();
+        history.push({ nodes: activeDrag.before, advancesRevision: true });
+        recordHistory("local");
+        revision += 1;
+        rebuildNodeIndex();
+        render();
+        emitSnapshot();
+      }
+    }
+    if (activeDrag.mode === "rotate") {
+      const nextNodes = nodes;
+      const patches = new Map(nextNodes.flatMap((after) => {
+        const before = activeDrag.before.find((node) => node.id === after.id);
+        if (!before || (before.x === after.x && before.y === after.y && before.rotation === after.rotation && JSON.stringify(before.relativeTransform) === JSON.stringify(after.relativeTransform))) return [];
+        return [[after.id, ({ x: after.x, y: after.y, rotation: after.rotation, relativeTransform: after.relativeTransform }) satisfies SelectionRotationPatch] as const];
+      }));
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (!patches.size) { render(); emitViewState(); }
+      else if (wasmDocument) {
+        dispatchTransaction({ id: createId(), baseRevision: Number(wasmDocument.revision), commands: [...patches].map(([id, patch]) => ({ type: "update" as const, id, patch })) });
       } else {
         nodes = nextNodes;
         refreshTransientGroupBounds();
@@ -3371,7 +5334,10 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
     if (data.type === "init") { documentId = data.documentId ?? documentId; canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
-    else if (data.type === "tool") { tool = data.tool; }
+    else if (data.type === "tool") {
+      if (tool === "pen" && data.tool !== "pen") cancelPenDraft();
+      tool = data.tool;
+    }
     else if (data.type === "checkpoint") emitViewportCheckpoint();
     else if (data.type === "remote-bootstrap") {
       remoteBootstrapPending = true;
@@ -3380,6 +5346,13 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
     else if (data.type === "remote-hydrate") hydrateRemoteSnapshot(data.snapshot);
     else if (data.type === "remote-reconcile") void reconcileRemoteSnapshot(data.snapshot, data.operations);
     else if (data.type === "register-asset") registerAsset(data.transactionId, data.asset);
+    else if (data.type === "set-clipboard") {
+      if (validateClipboardCapture(data.clipboard, documentSchemaVersion)) emitError(undefined, "INVALID_COMMAND");
+      else {
+        clipboard = structuredClone(data.clipboard);
+        clipboardSourceDocumentId = data.sourceDocumentId;
+      }
+    }
     else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes, data.decodedBitmap);
     else if (data.type === "editing-text") { editingTextNodeId = data.nodeId; render(); }
     else if (data.type === "text-caret-layout") void emitRustTextCaretLayout(data);
@@ -3398,6 +5371,26 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
     else if (data.type === "pointer") pointer(data);
     else if (data.type === "wheel") wheel(data);
     else if (data.type === "key") {
+      if (data.key === "Escape" && penDraft) {
+        cancelPenDraft();
+        return;
+      }
+      if (data.key === "Escape" && selectedVectorPoints.length) {
+        selectedVectorPoints = [];
+        render();
+        return;
+      }
+      if (shouldClearCanvasSelection({ ...data, selectedIds })) {
+        selectedIds = [];
+        storeActivePageSelection();
+        render();
+        emitViewState();
+        return;
+      }
+      if (data.key === "Enter" && penDraft && !data.metaKey && !data.shiftKey) {
+        finishPenDraft();
+        return;
+      }
       if (data.key === "Enter" && !data.metaKey && !data.shiftKey) {
         const node = createKeyboardToolNode({ tool, viewport, surface: { width, height } });
         if (node) {
@@ -3405,6 +5398,30 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
           return;
         }
       }
+      if (data.key === "Enter" && !data.metaKey) {
+        const nestedTarget = resolveNestedKeyboardTarget(activeNodes(), selectedIds, data.shiftKey ? "parent" : "child");
+        if (nestedTarget) {
+          selectedIds = [nestedTarget.id];
+          storeActivePageSelection();
+          selectedVectorPoints = [];
+          render();
+          emitViewState();
+          return;
+        }
+      }
+      const nudge = keyboardNudgeDelta({ ...data, selectedIds });
+      if (nudge && nudgeSelectedVectorPoints(nudge)) return;
+      const autoLayoutArrow = autoLayoutArrowReorder(nodes, selectedIds, data.key);
+      if (autoLayoutArrow.handled) {
+        const result = autoLayoutArrow.reorder?.result;
+        if (result) dispatch({ type: "reposition", positionIds: [...result.positionIds].map(([id, positionId]) => ({ id, positionId })) });
+        return;
+      }
+      if (nudge) {
+        nudgeSelection(nudge);
+        return;
+      }
+      if ((data.key === "Backspace" || data.key === "Delete") && !data.metaKey && !data.shiftKey && deleteSelectedVectorPoints()) return;
       const command = editorKeyCommand({ ...data, selectedIds, selectedKinds: selectedIds.map((id) => nodes.find((node) => node.id === id)?.kind) });
       if (command) dispatch(command);
     }

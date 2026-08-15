@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { findTopmostHit, nodeContainsWorldPoint, strokeDashContains } from "./hit-test";
+import { findTopmostCanvasSelectionCandidate, findTopmostHit, nodeContainsWorldPoint, strokeDashContains } from "./hit-test";
 
 describe("Canvas primitive hit testing", () => {
   it("uses local coordinates for a rotated rectangle", () => {
@@ -109,6 +109,24 @@ describe("Canvas primitive hit testing", () => {
     expect(nodeContainsWorldPoint(arc, { x: 50, y: 10 })).toBe(false);
   });
 
+  it("selects a Vector on its filled contour boundary", () => {
+    const vector = {
+      ...createNode("vector", 20, 30), width: 100, height: 80,
+      vectorPath: {
+        fillRule: "nonZero" as const,
+        subpaths: [{ closed: true, points: [
+          { id: "00000000-0000-0000-0000-000000000051", x: 0, y: 0, pointType: "corner" as const },
+          { id: "00000000-0000-0000-0000-000000000052", x: 100, y: 0, pointType: "corner" as const },
+          { id: "00000000-0000-0000-0000-000000000053", x: 100, y: 80, pointType: "corner" as const },
+          { id: "00000000-0000-0000-0000-000000000054", x: 0, y: 80, pointType: "corner" as const },
+        ] }],
+      },
+    };
+
+    expect(nodeContainsWorldPoint(vector, { x: 70, y: 30 })).toBe(true);
+    expect(nodeContainsWorldPoint(vector, { x: 70, y: 29.99 })).toBe(false);
+  });
+
   it("selects a Group through its derived bounds", () => {
     const group = { ...createNode("group", 10, 20), width: 80, height: 40 };
 
@@ -130,5 +148,13 @@ describe("Canvas primitive hit testing", () => {
 
     expect(findTopmostHit([back, locked, top], { x: 20, y: 20 })?.id).toBe("top");
     expect(findTopmostHit([back, { ...top, visible: false }], { x: 20, y: 20 })?.id).toBe("back");
+  });
+
+  it("passes canvas clicks through non-painted Slice export regions", () => {
+    const painted = { ...createNode("rectangle", 0, 0), id: "painted", width: 100, height: 100 };
+    const slice = { ...createNode("slice", 0, 0), id: "slice", width: 100, height: 100 };
+
+    expect(findTopmostCanvasSelectionCandidate([slice, painted])?.id).toBe("painted");
+    expect(findTopmostCanvasSelectionCandidate([slice])).toBeUndefined();
   });
 });

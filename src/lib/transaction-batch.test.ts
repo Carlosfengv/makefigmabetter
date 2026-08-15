@@ -1,13 +1,80 @@
 import { describe, expect, it } from "vitest";
 import { createNode, type CanvasNode } from "./editor-protocol";
 import { transformPoint, translateNodeWorldPatch, worldTransformForNode } from "./scene-transform";
-import { captureClipboard, resolveCoreBatch, resolvePasteBatch } from "./transaction-batch";
+import { captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
+import { createPhase2ProfessionalCompositeFixture } from "./phase2-professional-composite-fixture";
+import fixture from "../../fixtures/documents/phase2-common-nodes.fixture.json";
 
 function rectangle(id: string): CanvasNode {
   return { ...createNode("rectangle", 10, 20), id };
 }
 
 describe("Core transaction batch resolution", () => {
+  it("accepts a Core-derived direct split of a professional-fixture Vector segment", () => {
+    const fixture = createPhase2ProfessionalCompositeFixture();
+    const vector = fixture.nodes.find((node) => node.name === "Outline stroke result");
+    const afterPointId = vector?.vectorPath?.subpaths[0]?.points[0]?.id;
+    expect(vector?.vectorPath).toBeDefined();
+    expect(afterPointId).toBeDefined();
+
+    const resolved = resolveCoreBatch(fixture.nodes, [{
+      type: "splitVectorSegment",
+      id: vector!.id,
+      subpathIndex: 0,
+      afterPointId: afterPointId!,
+      t: .5,
+      pointId: "00000000-0000-4000-8000-000000003099",
+    }]);
+
+    expect(resolved?.batch).toEqual([expect.objectContaining({ type: "splitVectorSegment", id: vector!.id, afterPointId, t: .5 })]);
+    expect(resolved?.nextNodes.find((node) => node.id === vector!.id)?.vectorPath?.subpaths[0]?.points).toHaveLength(5);
+  });
+
+  it("connects two open Vector subpaths as one replayable batch command", () => {
+    const vector = {
+      ...createNode("vector", 0, 0),
+      id: "00000000-0000-4000-8000-000000000001",
+      vectorPath: {
+        fillRule: "nonZero" as const,
+        subpaths: [
+          { closed: false, points: [
+            { id: "00000000-0000-4000-8000-000000000011", x: 0, y: 0, pointType: "corner" as const },
+            { id: "00000000-0000-4000-8000-000000000012", x: 10, y: 0, pointType: "corner" as const },
+          ] },
+          { closed: false, points: [
+            { id: "00000000-0000-4000-8000-000000000013", x: 20, y: 0, pointType: "corner" as const },
+            { id: "00000000-0000-4000-8000-000000000014", x: 30, y: 0, pointType: "corner" as const },
+          ] },
+        ],
+      },
+    };
+    const resolved = resolveCoreBatch([vector], [{
+      type: "connectVectorEndpoints",
+      id: vector.id,
+      firstSubpathIndex: 0,
+      firstPointId: "00000000-0000-4000-8000-000000000012",
+      secondSubpathIndex: 1,
+      secondPointId: "00000000-0000-4000-8000-000000000013",
+    }]);
+
+    expect(resolved?.batch).toEqual([expect.objectContaining({ type: "connectVectorEndpoints", id: vector.id })]);
+    expect(resolved?.nextNodes[0].vectorPath?.subpaths).toHaveLength(1);
+    expect(resolved?.nextNodes[0].vectorPath?.subpaths[0].points.map((point) => point.id)).toEqual([
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+      "00000000-0000-4000-8000-000000000013",
+      "00000000-0000-4000-8000-000000000014",
+    ]);
+  });
+
+  it("keeps Slice geometry editable while retaining its non-painting defaults", () => {
+    const slice = { ...createNode("slice", 10, 20), id: "00000000-0000-4000-8000-000000000001" };
+    const resolved = resolveCoreBatch([slice], [{ type: "update", id: slice.id, patch: { x: 40, y: 60, width: 480, height: 270, rotation: 15 } }]);
+
+    expect(resolved?.nextNodes).toEqual([expect.objectContaining({ kind: "slice", x: 40, y: 60, width: 480, height: 270, rotation: 15, fill: "transparent", stroke: "transparent", strokeWidth: 0 })]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "update", node: { kind: "slice", strokeWidth: 0 } });
+  });
+
   it("resolves sequential partial edits to concrete Core values", () => {
     const first = rectangle("00000000-0000-4000-8000-000000000001");
     const second = rectangle("00000000-0000-4000-8000-000000000002");
@@ -29,6 +96,39 @@ describe("Core transaction batch resolution", () => {
       expect.objectContaining({ id: first.id, name: "Hero", x: 48, stroke: "#000000" }),
       created,
     ]);
+  });
+
+  it("keeps the one-entry Effect Stack synchronized with a later Drop Shadow inspector edit", () => {
+    const first = rectangle("00000000-0000-4000-8000-000000000001");
+    const original = { offsetX: 0, offsetY: 4, blurRadius: 8, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true };
+    const updated = { ...original, blurRadius: 16 };
+    const projected = { ...first, dropShadow: original, effectStack: [{ dropShadow: original }] };
+
+    const resolved = resolveCoreBatch([projected], [{ type: "update", id: first.id, patch: { dropShadow: updated } }]);
+
+    expect(resolved?.batch[0]).toMatchObject({ type: "update", node: { dropShadow: updated, effectStack: [{ dropShadow: updated }] } });
+  });
+
+  it("preserves a reordered Effect Stack and projects its first effect for legacy readers", () => {
+    const first = rectangle("00000000-0000-4000-8000-000000000001");
+    const early = { offsetX: -6, offsetY: 2, blurRadius: 4, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .2 }, visible: true };
+    const late = { offsetX: 8, offsetY: 12, blurRadius: 16, spread: 3, color: { space: "srgb" as const, components: [1, 1, 1] as [number, number, number], alpha: .4 }, visible: true };
+    const projected = { ...first, dropShadow: early, effectStack: [{ dropShadow: early }, { dropShadow: late }] };
+
+    const resolved = resolveCoreBatch([projected], [{ type: "update", id: first.id, patch: { effectStack: [{ dropShadow: late }, { dropShadow: early }], dropShadow: late } }]);
+
+    expect(resolved?.batch[0]).toMatchObject({ type: "update", node: { dropShadow: late, effectStack: [{ dropShadow: late }, { dropShadow: early }] } });
+  });
+
+  it("does not renormalize Group geometry for an Effect Stack-only edit", () => {
+    const group = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000010", width: 200, height: 120, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000011"), parentId: group.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 20 } };
+    const shadow = { offsetX: 0, offsetY: 4, blurRadius: 12, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true };
+
+    const resolved = resolveCoreBatch([group, child], [{ type: "update", id: child.id, patch: { dropShadow: shadow, effectStack: [{ dropShadow: shadow }] } }]);
+
+    expect(resolved?.batch).toHaveLength(1);
+    expect(resolved?.affectedGroupIds).toEqual([]);
   });
 
   it("resolves a multi-selection visual edit as one all-or-nothing Core batch", () => {
@@ -154,6 +254,19 @@ describe("Core transaction batch resolution", () => {
     }
   });
 
+  it("hands a reparented child’s position to an active Auto Layout Frame", () => {
+    const frame = {
+      ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000001",
+      autoLayout: { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false },
+    };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000002"), x: 120, y: 80 };
+    const resolved = resolveCoreBatch([frame, child], [{ type: "reparent", ids: [child.id], parentId: frame.id }]);
+
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["reparent", "update"]);
+    expect(resolved?.nextNodes.find((node) => node.id === child.id)).toMatchObject({ parentId: frame.id, relativeTransform: undefined, rotation: 0 });
+    expect((resolved?.batch[1] as { type: "update"; node: { relativeTransform?: unknown } }).node.relativeTransform).toBeUndefined();
+  });
+
   it("rejects reparenting across pages or into a selected descendant", () => {
     const parent = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000001" };
     const child = { ...rectangle("00000000-0000-4000-8000-000000000002"), parentId: parent.id };
@@ -203,6 +316,21 @@ describe("Core transaction batch resolution", () => {
     expect((resolved?.batch[0] as Extract<NonNullable<typeof resolved>["batch"][number], { type: "create" }>).node.positionId).not.toBe(source.positionId);
   });
 
+  it("duplicates a flow child in its Auto Layout parent without carrying a legacy transform", () => {
+    const frame = {
+      ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000081",
+      autoLayout: { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false },
+    };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000082"), parentId: frame.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 12, f: 8 } };
+    const copyId = "00000000-0000-4000-8000-000000000083";
+
+    const resolved = resolveCoreBatch([frame, child], [{ type: "duplicate", ids: [child.id] }], () => copyId);
+
+    expect(resolved?.createdIds).toEqual([copyId]);
+    expect(resolved?.nextNodes.find((node) => node.id === copyId)).toMatchObject({ parentId: frame.id, name: "Rectangle copy", relativeTransform: undefined });
+    expect(resolved?.batch).toEqual([expect.objectContaining({ type: "create", node: expect.objectContaining({ id: copyId, parentId: frame.id, relativeTransform: undefined }) })]);
+  });
+
   it("duplicates a selected Group as a same-level subtree instead of nesting a new Group inside it", () => {
     const group = { ...createNode("group", 10, 20), id: "00000000-0000-4000-8000-000000000011", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const inner = { ...createNode("group", 15, 25), id: "00000000-0000-4000-8000-000000000012", parentId: group.id, positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };
@@ -235,6 +363,120 @@ describe("Core transaction batch resolution", () => {
     expect(resolved?.nextNodes.find((node) => node.id === first.id)).toMatchObject({ parentId: groupId, x: 0, y: 0, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } });
     expect(transformPoint(worldTransformForNode(resolved!.nextNodes, first.id)!, { x: 0, y: 0 })).toEqual({ x: 10, y: 20 });
     expect(transformPoint(worldTransformForNode(resolved!.nextNodes, second.id)!, { x: 0, y: 0 })).toEqual({ x: 80, y: 50 });
+  });
+
+  it("wraps a multi-selection in a hugging Auto Layout Frame with flow children", () => {
+    const first = { ...rectangle("00000000-0000-4000-8000-000000000091"), x: 10, y: 20, width: 40, height: 30, positionId: "00000000000000000000000000000091:00000000000000000000000000000000" };
+    const second = { ...rectangle("00000000-0000-4000-8000-000000000092"), x: 80, y: 50, width: 20, height: 20, positionId: "00000000000000000000000000000092:00000000000000000000000000000000" };
+    const frameId = "00000000-0000-4000-8000-000000000093";
+    const autoLayout = { mode: "vertical" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "hug" as const, counterSizing: "hug" as const, absolute: false };
+
+    const resolved = resolveCoreBatch([first, second], [{ type: "group", ids: [first.id, second.id], autoLayout }], () => frameId);
+
+    expect(resolved?.createdIds).toEqual([frameId]);
+    expect(resolved?.selectionIds).toEqual([frameId]);
+    expect(resolved?.nextNodes.find((node) => node.id === frameId)).toMatchObject({ kind: "frame", autoLayout });
+    expect(resolved?.nextNodes.filter((node) => node.parentId === frameId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, relativeTransform: undefined }),
+      expect.objectContaining({ id: second.id, relativeTransform: undefined }),
+    ]));
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["create", "reparent", "update", "update", "update"]);
+    expect(resolved?.batch[0]).toEqual(expect.objectContaining({ type: "create", node: expect.objectContaining({ id: frameId, kind: "frame", autoLayout: undefined }) }));
+    expect(resolved?.batch.at(-1)).toEqual(expect.objectContaining({ type: "update", node: expect.objectContaining({ id: frameId, kind: "frame", autoLayout }) }));
+  });
+
+  it("wraps mixed-size fixture layers, including a zero-height Line, in Auto Layout", () => {
+    const source = fixture.nodes as CanvasNode[];
+    const ellipse = source.find((node) => node.name === "Outside Ellipse")!;
+    const line = source.find((node) => node.name === "Independent-cap Arrow")!;
+    const autoLayout = { mode: "vertical" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "hug" as const, counterSizing: "hug" as const, absolute: false };
+
+    const resolved = resolveCoreBatch(source, [{ type: "group", ids: [ellipse.id, line.id], autoLayout }], () => "00000000-0000-4000-8000-000000000099");
+
+    expect(resolved).toBeDefined();
+    expect(resolved?.batch).toHaveLength(8);
+    expect(resolved?.batch[0]).toEqual(expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "frame", relativeTransform: undefined }) }));
+    expect(resolved?.batch.at(-1)).toEqual(expect.objectContaining({ type: "update", node: expect.objectContaining({ autoLayout, relativeTransform: undefined }) }));
+  });
+
+  it("wraps two selected roots in an ordered live Boolean transaction", () => {
+    const first = { ...rectangle("00000000-0000-4000-8000-000000000041"), x: 10, y: 20, width: 40, height: 30, positionId: "00000000000000000000000000000041:00000000000000000000000000000000" };
+    const second = { ...rectangle("00000000-0000-4000-8000-000000000042"), x: 80, y: 50, width: 20, height: 20, positionId: "00000000000000000000000000000042:00000000000000000000000000000000" };
+    const booleanId = "00000000-0000-4000-8000-000000000043";
+    const resolved = resolveCoreBatch([first, second], [{ type: "boolean", ids: [first.id, second.id], operation: "subtract" }], () => booleanId);
+
+    expect(resolved?.createdIds).toEqual([booleanId]);
+    expect(resolved?.selectionIds).toEqual([booleanId]);
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: booleanId, kind: "booleanOperation", booleanOperation: "subtract", x: 10, y: 20, width: 90, height: 50 }) }),
+      { type: "reparent", parentIds: [{ id: first.id, parentId: booleanId, positionId: first.positionId }, { id: second.id, parentId: booleanId, positionId: second.positionId }] },
+      expect.objectContaining({ type: "update", node: expect.objectContaining({ id: first.id, parentId: booleanId }) }),
+      expect.objectContaining({ type: "update", node: expect.objectContaining({ id: second.id, parentId: booleanId }) }),
+    ]);
+    expect(resolveCoreBatch([first], [{ type: "boolean", ids: [first.id], operation: "union" }], () => booleanId)).toBeUndefined();
+  });
+
+  it("flattens a live Vector Boolean in one create-delete-reposition Core batch", () => {
+    const boolean = { ...createNode("booleanOperation", 10, 20), id: "00000000-0000-4000-8000-000000000041", name: "Cutout", width: 90, height: 50, positionId: "00000000000000000000000000000041:00000000000000000000000000000000" };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000042", parentId: boolean.id, positionId: "00000000000000000000000000000042:00000000000000000000000000000000", fill: "#cc3366" };
+    const second = { ...createNode("vector", 10, 0), id: "00000000-0000-4000-8000-000000000043", parentId: boolean.id, positionId: "00000000000000000000000000000043:00000000000000000000000000000000" };
+    const ids = ["00000000-0000-4000-8000-000000000044", "00000000-0000-4000-8000-000000000045", "00000000-0000-4000-8000-000000000046", "00000000-0000-4000-8000-000000000047"];
+    const resolved = resolveFlattenBooleanBatch([boolean, first, second], boolean.id, {
+      subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 90, y: 0 }, { x: 90, y: 50 }]}],
+    }, () => ids.shift()!);
+
+    expect(resolved?.replacement).toMatchObject({ id: "00000000-0000-4000-8000-000000000044", kind: "vector", name: "Cutout flattened", parentId: undefined, x: 10, y: 20, width: 90, height: 50, fill: "#cc3366", vectorPath: { fillRule: "nonZero", subpaths: [{ closed: true, points: [{ id: "00000000-0000-4000-8000-000000000045", x: 0, y: 0, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000046", x: 90, y: 0, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000047", x: 90, y: 50, pointType: "corner" }]}] } });
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000044", kind: "vector" }) }),
+      { type: "delete", ids: [first.id, second.id] },
+      { type: "delete", ids: [boolean.id] },
+      { type: "reposition", positionIds: [{ id: "00000000-0000-4000-8000-000000000044", positionId: boolean.positionId }] },
+    ]);
+  });
+
+  it("outlines a Vector Stroke as one same-ID Vector update", () => {
+    const vector = { ...createNode("vector", 10, 20), id: "00000000-0000-4000-8000-000000000051", name: "Curve", stroke: "#cc3366", strokeWidth: 6, strokeCapStart: "round" as const, strokeCapEnd: "round" as const };
+    const ids = ["00000000-0000-4000-8000-000000000052", "00000000-0000-4000-8000-000000000053", "00000000-0000-4000-8000-000000000054"];
+    const resolved = resolveOutlineStrokeBatch([vector], vector.id, {
+      subpaths: [{ closed: true, points: [{ x: -3, y: -3 }, { x: 163, y: -3 }, { x: 80, y: 123 }]}],
+    }, () => ids.shift()!);
+
+    expect(resolved?.outlined).toMatchObject({ id: vector.id, kind: "vector", name: "Curve outlined", fill: "#cc3366", stroke: "transparent", strokeWidth: 0, strokeCapStart: "none", strokeCapEnd: "none", vectorPath: { fillRule: "nonZero", subpaths: [{ closed: true, points: [{ id: "00000000-0000-4000-8000-000000000052", x: -3, y: -3, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000053", x: 163, y: -3, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000054", x: 80, y: 123, pointType: "corner" }]}] } });
+    expect(resolved?.batch).toEqual([expect.objectContaining({ type: "update", node: expect.objectContaining({ id: vector.id, strokeWidth: 0, fill: "#cc3366" }) })]);
+    expect(resolveOutlineStrokeBatch([{ ...vector, strokeDashPattern: [4, 2] }], vector.id, { subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 2 }]}] })).toBeUndefined();
+  });
+
+  it("outlines a Line through an atomic Vector replacement while preserving its world endpoint", () => {
+    const line = { ...createNode("line", 10, 20), id: "00000000-0000-4000-8000-000000000056", name: "Divider", width: 120, height: 0, rotation: 30, stroke: "#cc3366", strokeWidth: 6, strokeCapStart: "round" as const, strokeCapEnd: "round" as const, positionId: "00000000000000000000000000000056:00000000000000000000000000000000" };
+    const ids = ["00000000-0000-4000-8000-000000000057", "00000000-0000-4000-8000-000000000058", "00000000-0000-4000-8000-000000000059", "00000000-0000-4000-8000-00000000005a", "00000000-0000-4000-8000-00000000005b"];
+    const resolved = resolveLineOutlineStrokeBatch([line], line.id, {
+      subpaths: [{ closed: true, points: [{ x: -3, y: 0 }, { x: 0, y: -3 }, { x: 120, y: -3 }, { x: 123, y: 0 }]}],
+    }, () => ids.shift()!);
+
+    expect(resolved?.outlined).toMatchObject({ id: "00000000-0000-4000-8000-000000000057", kind: "vector", name: "Divider outlined", width: 126, height: 3, fill: "#cc3366", stroke: "transparent", strokeWidth: 0, vectorPath: { subpaths: [expect.objectContaining({ closed: true, points: expect.arrayContaining([expect.objectContaining({ id: "00000000-0000-4000-8000-000000000058", x: -3, y: 0 })]) })] } });
+    expect(resolved?.outlined.relativeTransform).toMatchObject({ a: Math.cos(Math.PI / 6), d: Math.cos(Math.PI / 6), e: 10, f: 20 });
+    expect(resolved?.outlined.relativeTransform?.b).toBeCloseTo(.5);
+    expect(resolved?.outlined.relativeTransform?.c).toBeCloseTo(-.5);
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000057", kind: "vector" }) }),
+      { type: "delete", ids: [line.id] },
+      { type: "reposition", positionIds: [{ id: "00000000-0000-4000-8000-000000000057", positionId: line.positionId }] },
+    ]);
+    expect(resolveLineOutlineStrokeBatch([{ ...line, strokeDashPattern: [4, 2] }], line.id, { subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }]}] })).toBeUndefined();
+  });
+
+  it("converts a Polygon to a closed Vector in one create-delete-reposition Core batch", () => {
+    const polygon = { ...createNode("polygon", 10, 20), id: "00000000-0000-4000-8000-000000000061", name: "Badge", width: 90, height: 50, positionId: "00000000000000000000000000000061:00000000000000000000000000000000", parametricShape: { kind: "polygon" as const, pointCount: 3 } };
+    const ids = ["00000000-0000-4000-8000-000000000062", "00000000-0000-4000-8000-000000000063", "00000000-0000-4000-8000-000000000064", "00000000-0000-4000-8000-000000000065"];
+    const resolved = resolveParametricShapeToVectorBatch([polygon], polygon.id, [{ x: 45, y: 0 }, { x: 90, y: 50 }, { x: 0, y: 50 }], () => ids.shift()!);
+
+    expect(resolved?.replacement).toMatchObject({ id: "00000000-0000-4000-8000-000000000062", kind: "vector", name: "Badge vector", x: 10, y: 20, width: 90, height: 50, parametricShape: undefined, vectorPath: { fillRule: "nonZero", subpaths: [{ closed: true, points: [{ id: "00000000-0000-4000-8000-000000000063", x: 45, y: 0, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000064", x: 90, y: 50, pointType: "corner" }, { id: "00000000-0000-4000-8000-000000000065", x: 0, y: 50, pointType: "corner" }]}] } });
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000062", kind: "vector" }) }),
+      { type: "delete", ids: [polygon.id] },
+      { type: "reposition", positionIds: [{ id: "00000000-0000-4000-8000-000000000062", positionId: polygon.positionId }] },
+    ]);
+    expect(resolveParametricShapeToVectorBatch([polygon], polygon.id, [{ x: 0, y: 0 }, { x: 1, y: 0 }])).toBeUndefined();
   });
 
   it("wraps a single selected layer and makes the wrapper the resolved selection", () => {
@@ -312,6 +554,30 @@ describe("Core transaction batch resolution", () => {
     expect(moved).toBeDefined();
     // The child's world origin actually shifts by the drag delta.
     expect(transformPoint(worldTransformForNode(moved!.nextNodes, first.id)!, { x: 0, y: 0 })).toEqual({ x: 25, y: 15 });
+  });
+
+  it("atomically re-normalizes affected Relative-v1 Group bounds after a child edit", () => {
+    const group = { ...createNode("group", 100, 50), id: "00000000-0000-4000-8000-000000000001", width: 200, height: 120, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 100, f: 50 } };
+    const first = { ...rectangle("00000000-0000-4000-8000-000000000002"), parentId: group.id, width: 40, height: 20, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 30, f: 25 } };
+    const second = { ...rectangle("00000000-0000-4000-8000-000000000003"), parentId: group.id, width: 30, height: 30, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 110, f: 75 } };
+    const source = [group, first, second];
+    const movedPatch = translateNodeWorldPatch(source, first.id, -20, -20)!;
+    const movedOnly = source.map((node) => node.id === first.id ? { ...node, ...movedPatch } : node);
+    const beforeWorld = [first, second].map((node) => worldTransformForNode(movedOnly, node.id)!);
+    const resolved = resolveCoreBatch(source, [{ type: "update", id: first.id, patch: movedPatch }])!;
+
+    expect(resolved.affectedGroupIds).toEqual([group.id]);
+    // The child is emitted exactly once in its final re-based form; the parent
+    // still precedes every child in the atomic Core batch.
+    expect(resolved.batch.map((entry) => entry.type)).toEqual(["update", "update", "update"]);
+    expect(resolved.batch.map((entry) => entry.type === "update" ? entry.node.id : undefined)).toEqual([group.id, first.id, second.id]);
+    expect(resolved.nextNodes.find((node) => node.id === group.id)).toMatchObject({ width: 130, height: 100 });
+    for (const [index, node] of [first, second].entries()) {
+      const after = worldTransformForNode(resolved.nextNodes, node.id)!;
+      for (const point of [{ x: 0, y: 0 }, { x: node.width, y: node.height }]) {
+        expect(transformPoint(after, point)).toEqual(transformPoint(beforeWorld[index], point));
+      }
+    }
   });
 
   it("moves a former child after ungrouping — its committed relativeTransform still translates", () => {
@@ -411,10 +677,39 @@ describe("clipboard capture and paste resolution", () => {
     expect(resolved?.batch[2]).toMatchObject({ node: { parentId: "00000000-0000-4000-8000-000000000042" } });
   });
 
+  it("re-homes an entire pasted subtree onto an explicitly different page", () => {
+    const sourcePageId = "00000000-0000-4000-8000-000000000001";
+    const targetPageId = "00000000-0000-4000-8000-000000000002";
+    const source = subtreeDocument().map((node) => ({ ...node, pageId: sourcePageId }));
+    const clipboard = captureClipboard(source, [frameId], 19)!;
+    const ids = ["00000000-0000-4000-8000-000000000051", "00000000-0000-4000-8000-000000000052", "00000000-0000-4000-8000-000000000053"];
+    const resolved = resolvePasteBatch([], clipboard, { pageId: targetPageId }, new Set(["asset-a"]), () => ids.shift()!);
+
+    expect(resolved?.nextNodes).toEqual([
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000051", pageId: targetPageId, parentId: undefined }),
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000052", pageId: targetPageId, parentId: "00000000-0000-4000-8000-000000000051" }),
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000053", pageId: targetPageId, parentId: "00000000-0000-4000-8000-000000000052" }),
+    ]);
+  });
+
   it("rejects a cross-document paste whose image asset is missing from the target index (P0-1)", () => {
     const clipboard = captureClipboard(subtreeDocument(), [frameId], 19)!;
     expect(resolvePasteBatch([], clipboard, {}, new Set())).toBeUndefined();
     expect(resolvePasteBatch([], clipboard, {}, new Set(["other-asset"]))).toBeUndefined();
+  });
+
+  it("rejects an external asset reference whose target content hash differs", () => {
+    const clipboard = { ...captureClipboard(subtreeDocument(), [frameId], 19)!, assetContentHashes: { "asset-a": "a".repeat(64) } };
+    expect(resolvePasteBatch([], clipboard, {}, new Set(["asset-a"]), undefined, 19, new Map([["asset-a", "b".repeat(64)]]))).toBeUndefined();
+    let sequence = 90;
+    expect(resolvePasteBatch([], clipboard, {}, new Set(["asset-a"]), () => `00000000-0000-4000-8000-${(sequence++).toString().padStart(12, "0")}`, 19, new Map([["asset-a", "a".repeat(64)]]))).toBeDefined();
+  });
+
+  it("rejects a paste target that is missing or cannot own children", () => {
+    const clipboard = captureClipboard(subtreeDocument(), [frameId], 19)!;
+    expect(resolvePasteBatch([], clipboard, { parentId: "missing" }, new Set(["asset-a"]))).toBeUndefined();
+    const leaf = rectangle("00000000-0000-4000-8000-000000000099");
+    expect(resolvePasteBatch([leaf], clipboard, { parentId: leaf.id }, new Set(["asset-a"]))).toBeUndefined();
   });
 
   it("pastes an asset-free subtree into any document regardless of the asset index", () => {
@@ -424,6 +719,75 @@ describe("clipboard capture and paste resolution", () => {
     const pasteId = "00000000-0000-4000-8000-000000000051";
     const resolved = resolvePasteBatch([], clipboard, {}, new Set(), () => pasteId);
     expect(resolved?.createdIds).toEqual([pasteId]);
+  });
+
+  it("captures and pastes Polygon, Star, Vector and Slice nodes", () => {
+    const kinds = ["polygon", "star", "vector", "slice"] as const;
+    const source = kinds.map((kind, index) => ({
+      ...createNode(kind, index * 20, index * 20),
+      id: `00000000-0000-4000-8000-${(index + 61).toString().padStart(12, "0")}`,
+    }));
+    const clipboard = captureClipboard(source, source.map((node) => node.id), 19)!;
+    let sequence = 70;
+    const resolved = resolvePasteBatch([], clipboard, {}, new Set(), () => `00000000-0000-4000-8000-${(sequence++).toString().padStart(12, "0")}`);
+
+    expect(resolved?.batch.map((entry) => (entry as { node: { kind: string } }).node.kind)).toEqual(kinds);
+    expect(resolved?.createdIds).toHaveLength(kinds.length);
+  });
+
+  it("converts Auto Layout flow descendants from Relative-v1 to reflowable geometry", () => {
+    const parent = {
+      ...createNode("frame", 100, 100),
+      id: "00000000-0000-4000-8000-000000000081",
+      autoLayout: { mode: "vertical" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false },
+    };
+    const flow = { ...createNode("rectangle", 8, 8), id: "00000000-0000-4000-8000-000000000082", name: "Flow child", parentId: parent.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 8, f: 8 } };
+    const absolute = { ...createNode("rectangle", 20, 20), id: "00000000-0000-4000-8000-000000000083", name: "Absolute child", parentId: parent.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 20 }, autoLayout: { mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: true } };
+    const clipboard = captureClipboard([parent, flow, absolute], [parent.id], 19)!;
+    let sequence = 84;
+    const resolved = resolvePasteBatch([], clipboard, {}, new Set(), () => `00000000-0000-4000-8000-${(sequence++).toString().padStart(12, "0")}`)!;
+    const pastedFlow = resolved.nextNodes.find((node) => node.name === flow.name);
+    const pastedAbsolute = resolved.nextNodes.find((node) => node.name === absolute.name);
+
+    expect(pastedFlow?.relativeTransform).toBeUndefined();
+    expect(pastedAbsolute?.relativeTransform).toEqual(absolute.relativeTransform);
+  });
+
+  it("converts a pasted root to reflowable geometry when the destination is an Auto Layout frame", () => {
+    const destination = {
+      ...createNode("frame", 100, 100),
+      id: "00000000-0000-4000-8000-000000000086",
+      autoLayout: { mode: "vertical" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false },
+    };
+    const source = { ...createNode("frame", 20, 20), id: "00000000-0000-4000-8000-000000000087", relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 20 } };
+    const clipboard = captureClipboard([destination, source], [source.id], 19)!;
+    const resolved = resolvePasteBatch([destination, source], clipboard, { parentId: destination.id }, new Set(), () => "00000000-0000-4000-8000-000000000088")!;
+
+    expect(resolved.nextNodes.at(-1)?.relativeTransform).toBeUndefined();
+  });
+
+  it("materializes legacy Relative-v1 matrices for Auto Layout frames and their flow children", () => {
+    const layout = { ...createNode("frame", 10, 20), id: "00000000-0000-4000-8000-000000000089", autoLayout: { mode: "vertical" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false }, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 20 } };
+    const flow = { ...createNode("rectangle", 4, 5), id: "00000000-0000-4000-8000-000000000090", parentId: layout.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 4, f: 5 } };
+    const absolute = { ...flow, id: "00000000-0000-4000-8000-000000000094", autoLayout: { ...layout.autoLayout, mode: "none" as const, absolute: true } };
+    const ordinary = { ...createNode("rectangle", 30, 40), id: "00000000-0000-4000-8000-000000000095", relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 30, f: 40 } };
+    const normalized = normalizeAutoLayoutProjection([layout, flow, absolute, ordinary]);
+
+    expect(normalized.map((node) => node.relativeTransform)).toEqual([undefined, undefined, absolute.relativeTransform, ordinary.relativeTransform]);
+    expect(normalized[0]).toMatchObject({ x: 10, y: 20 });
+    expect(normalized[1]).toMatchObject({ x: 14, y: 25 });
+    expect(worldTransformForNode(normalized, flow.id)).toMatchObject({ e: 14, f: 25 });
+  });
+
+  it("re-homes a Relative-v1 pasted root against its destination rather than its source parent", () => {
+    const sourceParent = { ...createNode("frame", 100, 200), id: "00000000-0000-4000-8000-000000000091" };
+    const child = { ...createNode("frame", 20, 30), id: "00000000-0000-4000-8000-000000000092", parentId: sourceParent.id, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 } };
+    const clipboard = captureClipboard([sourceParent, child], [child.id], 19)!;
+    const resolved = resolvePasteBatch([sourceParent, child], clipboard, {}, new Set(), () => "00000000-0000-4000-8000-000000000093")!;
+    const pasted = resolved.nextNodes.at(-1)!;
+
+    expect(pasted.relativeTransform).toBeUndefined();
+    expect(pasted).toMatchObject({ x: 44, y: 54 });
   });
 
   it("captures and pastes all six node kinds and a nested container subtree with distinct fresh IDs", () => {

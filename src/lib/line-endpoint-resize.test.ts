@@ -15,8 +15,18 @@ describe("line endpoint resize", () => {
     expect(lineEndpoints(resized).end.y).toBeCloseTo(20);
   });
 
-  it("retains the Phase 2 minimum Line length", () => {
-    expect(resizeLegacyLineEndpoint(line, "end", { x: 10, y: 20 }).width).toBe(4);
+  it("clamps a short end drag away from the fixed start endpoint", () => {
+    const resized = resizeLegacyLineEndpoint(line, "end", { x: 12, y: 20 });
+    expect(resized.width).toBe(4);
+    expect(lineEndpoints(resized).start).toEqual({ x: 10, y: 20 });
+    expect(lineEndpoints(resized).end).toEqual({ x: 14, y: 20 });
+  });
+
+  it("clamps a zero-length start drag along the pre-drag direction while keeping the end fixed", () => {
+    const resized = resizeLegacyLineEndpoint(line, "start", { x: 110, y: 20 });
+    expect(resized.width).toBe(4);
+    expect(lineEndpoints(resized).start).toEqual({ x: 106, y: 20 });
+    expect(lineEndpoints(resized).end).toEqual({ x: 110, y: 20 });
   });
 
   it("flips the Line basis when a dragged endpoint crosses the opposite endpoint", () => {

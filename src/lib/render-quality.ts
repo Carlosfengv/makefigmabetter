@@ -20,6 +20,10 @@ export function resolveRenderQuality(previous: RenderQualityState, zoom: number,
 export function renderDpr(deviceDpr: number, state: RenderQualityState): number {
   const native = Math.max(.5, Number.isFinite(deviceDpr) ? deviceDpr : 1);
   if (state.tier === "settled") return native;
-  const factor = state.zoomBucket === "far" ? .65 : .75;
+  // Canvas overlays (Mask/Clip/Effect) are the interactive hot path. A 70%
+  // transient backing store keeps their frame budget below the Phase 2 gate at
+  // normal and near zoom; settled rendering restores the native DPR after the
+  // gesture has been idle for 160 ms.
+  const factor = state.zoomBucket === "far" ? .65 : .7;
   return Math.max(.5, Math.min(native, native * factor));
 }

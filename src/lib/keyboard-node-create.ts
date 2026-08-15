@@ -12,7 +12,7 @@ export type KeyboardNodeCreateInput = Readonly<{
  * resulting node remains the same canonical node that a pointer gesture uses.
  */
 export function createKeyboardToolNode(input: KeyboardNodeCreateInput): CanvasNode | undefined {
-  if (input.tool === "select" || input.tool === "hand") return undefined;
+  if (input.tool === "select" || input.tool === "hand" || input.tool === "pen") return undefined;
 
   const worldCenter = {
     x: (input.surface.width / 2 - input.surface.width / 2) / input.viewport.zoom - input.viewport.x,

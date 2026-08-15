@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   editorKeyCommand,
   isAlternativeUngroupShortcut,
+  keyboardNudgeDelta,
+  shouldClearCanvasSelection,
+  shouldClaimKeyboardToolEnter,
   type EditorKeyInput,
 } from "./editor-key-command";
 
@@ -22,6 +25,7 @@ describe("editor keyboard commands", () => {
   it("keeps undo, redo and duplicate semantics deterministic", () => {
     expect(keyCommand({ key: "z", metaKey: true, shiftKey: false, selectedIds: selection })).toEqual({ type: "undo" });
     expect(keyCommand({ key: "z", metaKey: true, shiftKey: true, selectedIds: selection })).toEqual({ type: "redo" });
+    expect(keyCommand({ key: "y", metaKey: true, shiftKey: false, selectedIds: selection })).toEqual({ type: "redo" });
     expect(keyCommand({ key: "D", metaKey: true, shiftKey: false, selectedIds: selection })).toEqual({ type: "duplicate", ids: selection });
   });
 
@@ -74,5 +78,28 @@ describe("editor keyboard commands", () => {
 
   it("does not dispatch a destructive command with no selection", () => {
     expect(keyCommand({ key: "Delete", metaKey: false, shiftKey: false, selectedIds: [] })).toBeUndefined();
+  });
+
+  it("maps arrows to stable 1px and Shift 10px world-space nudges", () => {
+    expect(keyboardNudgeDelta({ key: "ArrowLeft", metaKey: false, shiftKey: false, selectedIds: selection })).toEqual({ x: -1, y: 0 });
+    expect(keyboardNudgeDelta({ key: "ArrowDown", metaKey: false, shiftKey: true, selectedIds: selection })).toEqual({ x: 0, y: 10 });
+    expect(keyboardNudgeDelta({ key: "ArrowUp", metaKey: true, shiftKey: false, selectedIds: selection })).toBeUndefined();
+    expect(keyboardNudgeDelta({ key: "ArrowRight", metaKey: false, shiftKey: false, selectedIds: [] })).toBeUndefined();
+  });
+
+  it("uses unmodified Escape to clear a non-empty canvas selection", () => {
+    expect(shouldClearCanvasSelection({ key: "Escape", metaKey: false, shiftKey: false, selectedIds: selection })).toBe(true);
+    expect(shouldClearCanvasSelection({ key: "Escape", metaKey: true, shiftKey: false, selectedIds: selection })).toBe(false);
+    expect(shouldClearCanvasSelection({ key: "Escape", metaKey: false, shiftKey: true, selectedIds: selection })).toBe(false);
+    expect(shouldClearCanvasSelection({ key: "Escape", metaKey: false, shiftKey: false, selectedIds: [] })).toBe(false);
+  });
+
+  it("claims a creation tool's Enter before its focused toolbar button can activate", () => {
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: false, shiftKey: false, tool: "rectangle" })).toBe(true);
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: false, shiftKey: false, tool: "pen" })).toBe(true);
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: false, shiftKey: false, tool: "select" })).toBe(false);
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: false, shiftKey: false, tool: "hand" })).toBe(false);
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: true, shiftKey: false, tool: "rectangle" })).toBe(false);
+    expect(shouldClaimKeyboardToolEnter({ key: "Enter", modifier: false, shiftKey: true, tool: "rectangle" })).toBe(false);
   });
 });

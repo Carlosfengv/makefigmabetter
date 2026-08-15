@@ -3,11 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  createWorkspaceDocument, createWorkspaceProject, duplicateWorkspaceDocument, fetchWorkspace, flushWorkspaceSave, loadWorkspace, patchWorkspaceDocument, patchWorkspaceProject, resetWorkspaceSaveQueue,
+  createWorkspaceDocument, createWorkspaceProject, duplicateWorkspaceDocument, fetchWorkspace, flushWorkspaceSave, patchWorkspaceDocument, patchWorkspaceProject, resetWorkspaceSaveQueue,
   removeWorkspaceDocument, removeWorkspaceProject, saveWorkspace, type WorkspaceData, type WorkspaceDocument,
 } from "@/lib/workspace-store";
 import { copyLocalDocument, removeLocalDocument } from "@/lib/local-document";
 import { DocumentApiTransport } from "@/lib/document-api-transport";
+import { Dialog } from "@/components/ui/dialog";
+import { Menu } from "@/components/ui/menu";
+import { Toast } from "@/components/ui/toast";
 
 type View = "recent" | "all" | "trash" | `project:${string}`;
 type Sort = "updated-desc" | "updated-asc" | "created-desc" | "created-asc" | "name-asc" | "name-desc";
@@ -19,11 +22,16 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
   const [workspace, setWorkspace] = useState<WorkspaceData>();
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState<View>("recent");
-  const [layout, setLayout] = useState<"grid" | "list">("grid");
+  const [layout, setLayout] = useState<"grid" | "list">(() => {
+    if (typeof window === "undefined") return "grid";
+    return window.localStorage.getItem("makefigma:workspace-view") === "list" ? "list" : "grid";
+  });
+  const [referenceNow] = useState(() => Date.now());
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("updated-desc");
   const [activeMenu, setActiveMenu] = useState<string>();
+  const [menuTrigger, setMenuTrigger] = useState<HTMLElement | null>(null);
   const [dialog, setDialog] = useState<{ kind: "rename" | "move" | "trash" | "purge" | "project" | "project-rename" | "project-delete"; id?: string }>();
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
@@ -31,6 +39,7 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
   const [conflict, setConflict] = useState(false);
   const [savingAction, setSavingAction] = useState(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [dialogTrigger, setDialogTrigger] = useState<HTMLElement | null>(null);
 
   useEffect(() => { let active = true; void fetchWorkspace(workspaceKey).then((next) => { if (active) { setWorkspace(next); setLoaded(true); } }); return () => { active = false; }; }, [workspaceKey]);
   useEffect(() => {
@@ -39,7 +48,6 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
     return () => window.removeEventListener("makefigma:workspace-conflict", onConflict);
   }, [workspaceKey]);
   useEffect(() => { window.localStorage.setItem("makefigma:workspace-view", layout); }, [layout]);
-  useEffect(() => { setLayout((window.localStorage.getItem("makefigma:workspace-view") as "grid" | "list") ?? "grid"); }, []);
   useEffect(() => { debounce.current = setTimeout(() => setQuery(search.trim().toLocaleLowerCase()), 300); return () => { if (debounce.current) clearTimeout(debounce.current); }; }, [search]);
 
   const projectId = view.startsWith("project:") ? view.slice(8) : undefined;
@@ -68,7 +76,14 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
   if (!workspace) return <main className="workspace-error"><span className="workspace-logo">M</span><h1>工作区不存在</h1><p>工作区加载失败，请确认链接是否正确。</p><button className="primary-button" onClick={() => window.location.reload()}>重新加载</button></main>;
   const update = (next: WorkspaceData) => setWorkspace(next);
   const projectName = (id?: string) => workspace.projects.find((project) => project.id === id)?.name ?? "未分组";
-  const openDialog = (kind: NonNullable<typeof dialog>["kind"], id?: string, value = "") => { setActiveMenu(undefined); setDraft(value); setDialog({ kind, id }); };
+  const openDialog = (kind: NonNullable<typeof dialog>["kind"], id?: string, value = "", trigger?: EventTarget | null) => {
+    setDialogTrigger(trigger instanceof HTMLElement
+      ? trigger
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setActiveMenu(undefined);
+    setDraft(value);
+    setDialog({ kind, id });
+  };
   const selected = dialog?.id ? workspace.documents.find((document) => document.id === dialog.id) : undefined;
   const announce = (message: string, undo?: () => void) => { setToast({ message, undo }); window.setTimeout(() => setToast(undefined), 8_000); };
   const persist = async (next: WorkspaceData, successMessage?: string) => {
@@ -150,7 +165,7 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
       <nav aria-label="工作区导航">
         <button className={view === "recent" ? "active" : ""} onClick={() => setView("recent")}>◷ <span>最近编辑</span></button>
         <button className={view === "all" ? "active" : ""} onClick={() => setView("all")}>▦ <span>全部文档</span><em>{workspace.documents.filter((document) => document.status !== "trashed").length}</em></button>
-        <div className="sidebar-section"><span>项目</span><button aria-label="新建项目" onClick={() => openDialog("project")}>＋</button></div>
+        <div className="sidebar-section"><span>项目</span><button aria-label="新建项目" onClick={(event) => openDialog("project", undefined, "", event.currentTarget)}>＋</button></div>
         <div className="project-list">{workspace.projects.map((project) => <button key={project.id} className={view === `project:${project.id}` ? "active" : ""} onClick={() => setView(`project:${project.id}`)}><i /> <span>{project.name}</span><em>{workspace.documents.filter((document) => document.projectId === project.id && document.status !== "trashed").length}</em></button>)}</div>
         <button className={view === "trash" ? "active" : ""} onClick={() => setView("trash")}>⌫ <span>回收站</span></button>
       </nav>
@@ -162,32 +177,28 @@ export function WorkspaceShell({ workspaceKey }: { workspaceKey: string }) {
         <div><p className="eyebrow">{workspace.name}</p><h1>{title}<span>{documents.length}</span></h1></div>
         <div className="toolbar-actions"><label className="workspace-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文档或项目" aria-label="搜索文档或项目" /></label><select value={sort} onChange={(event) => setSort(event.target.value as Sort)} aria-label="排序方式"><option value="updated-desc">最近修改</option><option value="updated-asc">最早修改</option><option value="created-desc">创建时间：最新</option><option value="created-asc">创建时间：最早</option><option value="name-asc">文档名称：A–Z</option><option value="name-desc">文档名称：Z–A</option></select><div className="view-toggle"><button className={layout === "grid" ? "active" : ""} onClick={() => setLayout("grid")} aria-label="卡片视图">▦</button><button className={layout === "list" ? "active" : ""} onClick={() => setLayout("list")} aria-label="列表视图">☷</button></div>{view !== "trash" && <button className="new-document" disabled={creating} onClick={createDocument}>{creating ? "正在创建…" : "＋ 新建设计文档"}</button>}</div>
       </header>
-      {view.startsWith("project:") && <div className="project-context"><span>项目 · {workspace.projects.find((project) => project.id === projectId)?.description || "暂无描述"}</span><button onClick={() => openDialog("project-rename", projectId, title)}>重命名</button><button disabled={projectDocumentCount > 0} title={projectDocumentCount ? "项目中仍有文档，无法删除" : "删除空项目"} onClick={() => openDialog("project-delete", projectId)}>删除项目</button></div>}
-      {documents.length === 0 ? <EmptyState view={view} query={query} onClear={() => setSearch("")} onCreate={() => void createDocument()} /> : <div className={layout === "grid" ? "document-grid" : "document-list"}>{layout === "list" && <div className="document-list-head"><span>文档名称</span><span>所属项目</span><span>创建时间</span><span>最近修改</span><span>状态</span><span /></div>}{documents.map((document) => <DocumentItem key={document.id} document={document} workspaceKey={workspaceKey} projectName={projectName(document.projectId)} layout={layout} menuOpen={activeMenu === document.id} onMenu={(event) => { event.stopPropagation(); setActiveMenu(activeMenu === document.id ? undefined : document.id); }} onAction={(action) => { if (action === "open") window.location.assign(`/workspace/${workspaceKey}/design/${document.id}`); if (action === "restore") void restore(document); if (action === "rename") openDialog("rename", document.id, document.name); if (action === "copy") void duplicate(document); if (action === "move") openDialog("move", document.id, document.projectId ?? ""); if (action === "trash") openDialog("trash", document.id); if (action === "purge") openDialog("purge", document.id); }} />)}</div>}
+      {view.startsWith("project:") && <div className="project-context"><span>项目 · {workspace.projects.find((project) => project.id === projectId)?.description || "暂无描述"}</span><button onClick={(event) => openDialog("project-rename", projectId, title, event.currentTarget)}>重命名</button><button disabled={projectDocumentCount > 0} title={projectDocumentCount ? "项目中仍有文档，无法删除" : "删除空项目"} onClick={(event) => openDialog("project-delete", projectId, "", event.currentTarget)}>删除项目</button></div>}
+      {documents.length === 0 ? <EmptyState view={view} query={query} onClear={() => setSearch("")} onCreate={() => void createDocument()} /> : <div className={layout === "grid" ? "document-grid" : "document-list"}>{layout === "list" && <div className="document-list-head"><span>文档名称</span><span>所属项目</span><span>创建时间</span><span>最近修改</span><span>状态</span><span /></div>}{documents.map((document) => <DocumentItem key={document.id} document={document} workspaceKey={workspaceKey} projectName={projectName(document.projectId)} layout={layout} referenceNow={referenceNow} menuOpen={activeMenu === document.id} menuTrigger={menuTrigger} onCloseMenu={() => setActiveMenu(undefined)} onMenu={(event) => { event.stopPropagation(); setMenuTrigger(event.currentTarget); setActiveMenu(activeMenu === document.id ? undefined : document.id); }} onAction={(action, trigger) => { if (action === "open") window.location.assign(`/workspace/${workspaceKey}/design/${document.id}`); if (action === "restore") void restore(document); if (action === "rename") openDialog("rename", document.id, document.name, trigger); if (action === "copy") void duplicate(document); if (action === "move") openDialog("move", document.id, document.projectId ?? "", trigger); if (action === "trash") openDialog("trash", document.id, "", trigger); if (action === "purge") openDialog("purge", document.id, "", trigger); }} />)}</div>}
     </section>
-    {dialog && <Dialog title={dialog.kind === "trash" ? "移至回收站" : dialog.kind === "purge" ? "永久删除文档" : dialog.kind === "move" ? "移动到项目" : dialog.kind === "project" ? "新建项目" : dialog.kind === "project-delete" ? "删除项目" : "重命名"} onClose={() => setDialog(undefined)}>
+    {dialog && <Dialog title={dialog.kind === "trash" ? "移至回收站" : dialog.kind === "purge" ? "永久删除文档" : dialog.kind === "move" ? "移动到项目" : dialog.kind === "project" ? "新建项目" : dialog.kind === "project-delete" ? "删除项目" : "重命名"} returnFocus={dialogTrigger} onClose={() => setDialog(undefined)}>
       {dialog.kind === "trash" && selected && <p>确定将“{selected.name}”移至回收站吗？所有通过当前工作区链接访问的用户都将无法继续打开该文档。你可以稍后从回收站恢复。</p>}
       {dialog.kind === "purge" && selected && <p>永久删除“{selected.name}”？该操作无法撤销，文档内容也无法恢复。</p>}
-      {dialog.kind === "move" && selected && <select className="dialog-input" value={draft} onChange={(event) => setDraft(event.target.value)}><option value="">未分组</option>{workspace.projects.map((project) => <option key={project.id} value={project.id}>{project.name}{project.id === selected.projectId ? "（当前位置）" : ""}</option>)}</select>}
-      {["rename", "project", "project-rename"].includes(dialog.kind) && <input className="dialog-input" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setDialog(undefined); }} maxLength={dialog.kind === "project" || dialog.kind === "project-rename" ? 50 : 100} />}
+      {dialog.kind === "move" && selected && <select className="dialog-input" data-dialog-initial-focus value={draft} onChange={(event) => setDraft(event.target.value)}><option value="">未分组</option>{workspace.projects.map((project) => <option key={project.id} value={project.id}>{project.name}{project.id === selected.projectId ? "（当前位置）" : ""}</option>)}</select>}
+      {["rename", "project", "project-rename"].includes(dialog.kind) && <input className="dialog-input" data-dialog-initial-focus autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setDialog(undefined); }} maxLength={dialog.kind === "project" || dialog.kind === "project-rename" ? 50 : 100} />}
       <footer><button className="secondary-button" disabled={savingAction} onClick={() => setDialog(undefined)}>取消</button><button disabled={savingAction} className={dialog.kind === "trash" || dialog.kind === "purge" || dialog.kind === "project-delete" ? "danger-button" : "primary-button"} onClick={() => void confirmDialog()}>{savingAction ? "正在保存…" : dialog.kind === "move" ? "完成" : dialog.kind === "trash" ? "移至回收站" : dialog.kind === "purge" ? "永久删除" : dialog.kind === "project-delete" ? "删除项目" : "保存"}</button></footer>
     </Dialog>}
-    {toast && <div className="workspace-toast" role="status">{toast.message}{toast.undo && <button onClick={() => { toast.undo?.(); setToast(undefined); }}>撤销</button>}</div>}
+    {toast && <Toast message={toast.message} action={toast.undo ? { label: "撤销", onClick: () => { toast.undo?.(); setToast(undefined); } } : undefined} />}
   </main>;
 }
 
-function DocumentItem({ document, workspaceKey, projectName, layout, menuOpen, onMenu, onAction }: { document: WorkspaceDocument; workspaceKey: string; projectName: string; layout: "grid" | "list"; menuOpen: boolean; onMenu: (event: React.MouseEvent) => void; onAction: (action: string) => void }) {
+function DocumentItem({ document, workspaceKey, projectName, layout, referenceNow, menuOpen, menuTrigger, onCloseMenu, onMenu, onAction }: { document: WorkspaceDocument; workspaceKey: string; projectName: string; layout: "grid" | "list"; referenceNow: number; menuOpen: boolean; menuTrigger: HTMLElement | null; onCloseMenu: () => void; onMenu: (event: React.MouseEvent<HTMLButtonElement>) => void; onAction: (action: string, trigger?: HTMLElement) => void }) {
   const href = `/workspace/${workspaceKey}/design/${document.id}`;
-  const time = new Intl.RelativeTimeFormat("zh-CN", { numeric: "auto" }).format(Math.round((new Date(document.updatedAt).getTime() - Date.now()) / 3_600_000), "hour");
-  return <article className={`document-item ${layout}`} onDoubleClick={() => document.status !== "trashed" && onAction("open")}><Link href={href} className={`thumbnail ${document.thumbnail}`} aria-label={`打开 ${document.name}`} onClick={(event) => document.status === "trashed" && event.preventDefault()}><span className="canvas-shape one" /><span className="canvas-shape two" /><span className="canvas-shape three" /></Link><div className="document-info"><Link href={href} onClick={(event) => document.status === "trashed" && event.preventDefault()} title={document.name}>{document.name}</Link><span>{projectName}</span>{layout === "list" && <><span>{new Date(document.createdAt).toLocaleDateString("zh-CN")}</span><span>{time}</span><span className={`status ${document.status}`}>{document.status === "trashed" ? "回收站" : document.status === "conflicted" ? "发生冲突" : "已保存"}</span></>}</div><div className="item-actions"><button aria-label={`${document.name} 的更多操作`} onClick={onMenu}>•••</button>{menuOpen && <div className="document-menu" onClick={(event) => event.stopPropagation()}>{document.status === "trashed" ? <><button onClick={() => onAction("restore")}>恢复</button><button className="menu-danger" onClick={() => onAction("purge")}>永久删除</button></> : <><button onClick={() => onAction("open")}>打开</button><a href={href} target="_blank" rel="noreferrer">在新标签页打开</a><button onClick={() => onAction("rename")}>重命名</button><button onClick={() => onAction("copy")}>复制</button><button onClick={() => onAction("move")}>移动到项目</button><hr /><button className="menu-danger" onClick={() => onAction("trash")}>移至回收站</button></>}</div>}</div></article>;
+  const time = new Intl.RelativeTimeFormat("zh-CN", { numeric: "auto" }).format(Math.round((new Date(document.updatedAt).getTime() - referenceNow) / 3_600_000), "hour");
+  return <article className={`document-item ${layout}`} onDoubleClick={() => document.status !== "trashed" && onAction("open")}><Link href={href} className={`thumbnail ${document.thumbnail}`} aria-label={`打开 ${document.name}`} onClick={(event) => document.status === "trashed" && event.preventDefault()}><span className="canvas-shape one" /><span className="canvas-shape two" /><span className="canvas-shape three" /></Link><div className="document-info"><Link href={href} onClick={(event) => document.status === "trashed" && event.preventDefault()} title={document.name}>{document.name}</Link><span>{projectName}</span>{layout === "list" && <><span>{new Date(document.createdAt).toLocaleDateString("zh-CN")}</span><span>{time}</span><span className={`status ${document.status}`}>{document.status === "trashed" ? "回收站" : document.status === "conflicted" ? "发生冲突" : "已保存"}</span></>}</div><div className="item-actions"><button aria-label={`${document.name} 的更多操作`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={onMenu}>•••</button>{menuOpen && <Menu className="document-menu" label={`${document.name} 的更多操作`} returnFocus={menuTrigger} onClose={onCloseMenu}>{document.status === "trashed" ? <><button role="menuitem" onClick={(event) => onAction("restore", event.currentTarget)}>恢复</button><button role="menuitem" className="menu-danger" onClick={(event) => onAction("purge", event.currentTarget)}>永久删除</button></> : <><button role="menuitem" onClick={() => onAction("open")}>打开</button><a role="menuitem" href={href} target="_blank" rel="noreferrer">在新标签页打开</a><button role="menuitem" onClick={(event) => onAction("rename", event.currentTarget)}>重命名</button><button role="menuitem" onClick={() => onAction("copy")}>复制</button><button role="menuitem" onClick={(event) => onAction("move", event.currentTarget)}>移动到项目</button><hr /><button role="menuitem" className="menu-danger" onClick={(event) => onAction("trash", event.currentTarget)}>移至回收站</button></>}</Menu>}</div></article>;
 }
 
 function EmptyState({ view, query, onClear, onCreate }: { view: View; query: string; onClear: () => void; onCreate: () => void }) {
   if (query) return <div className="workspace-empty"><span>⌕</span><h2>没有找到相关设计文档</h2><p>没有找到与“{query}”相关的设计文档。</p><button className="secondary-button" onClick={onClear}>清除搜索</button></div>;
   if (view === "trash") return <div className="workspace-empty"><span>⌫</span><h2>回收站是空的</h2><p>移至回收站的文档会显示在这里。</p></div>;
   return <div className="workspace-empty"><span>＋</span><h2>{view.startsWith("project:") ? "这个项目中还没有设计文档" : "还没有设计文档"}</h2><p>从一个空白画布开始，随时可以继续编辑。</p><button className="primary-button" onClick={onCreate}>新建设计文档</button></div>;
-}
-
-function Dialog({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
-  return <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={onClose}><section className="workspace-dialog" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}><header><h2>{title}</h2><button onClick={onClose} aria-label="关闭">×</button></header>{children}</section></div>;
 }

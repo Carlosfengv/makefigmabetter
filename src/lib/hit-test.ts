@@ -5,6 +5,8 @@ import { dashedLineEndpointPaint, effectiveLineCap, lineLocalBounds } from "./ma
 import { decorativeCapContains, isDecorativeCap } from "./decorative-cap-mesh";
 import { outsetRoundedRectRadii } from "./aligned-rounded-rect";
 import { isEffectivelyLocked } from "./hierarchy-lock";
+import { nodeParametricShape, parametricShapePoints, pointInPolygon } from "./parametric-shape";
+import { vectorPathContains } from "./vector-path";
 
 export type WorldPoint = Readonly<{ x: number; y: number }>;
 
@@ -66,6 +68,9 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boo
     const extent = node.strokeAlign === "outside" ? node.strokeWidth : node.strokeAlign === "center" ? node.strokeWidth / 2 : 0;
     return ellipseContains(local, node.width, node.height, extent);
   }
+  if (node.kind === "vector" && node.vectorPath) return vectorPathContains(node.vectorPath, local);
+  const parametricShape = nodeParametricShape(node);
+  if (parametricShape) return pointInPolygon(local, parametricShapePoints(node.width, node.height, parametricShape));
   if (node.kind === "frame" || node.kind === "rectangle" || node.kind === "section") return roundedRectContains(local, node.width, node.height, node.radius, node.cornerRadii, node.cornerSmoothing);
   return local.x >= 0 && local.x <= node.width && local.y >= 0 && local.y <= node.height;
 }
@@ -101,10 +106,21 @@ export function strokeDashContains(distance: number, pattern: readonly number[] 
 export function findTopmostHit(nodes: readonly CanvasNode[], point: WorldPoint): CanvasNode | undefined {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const hits = [...nodes].reverse().filter((node) => node.visible !== false && !isEffectivelyLocked(nodesById, node.id) && nodeContainsWorldPoint(node, point));
+  return findTopmostCanvasSelectionCandidate(hits);
+}
+
+/**
+ * Resolves the item a direct canvas click should select from candidates that
+ * have already passed the caller's visibility, clipping and geometry checks.
+ * Slices are export regions rather than painted content, so selecting them is
+ * intentionally a Layers-panel action; direct canvas clicks pass through.
+ */
+export function findTopmostCanvasSelectionCandidate(candidates: readonly CanvasNode[]): CanvasNode | undefined {
   // Group has no paint of its own. When its derived bounds overlap a child,
   // target the visible child first; the Group remains directly selectable in
   // blank parts of its bounds and from the Layers panel.
-  return hits.find((node) => node.kind !== "group") ?? hits[0];
+  return candidates.find((node) => node.kind !== "group" && node.kind !== "slice")
+    ?? candidates.find((node) => node.kind !== "slice");
 }
 
 function toLocalPoint(node: CanvasNode, point: WorldPoint): WorldPoint {

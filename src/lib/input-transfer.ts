@@ -9,7 +9,7 @@ const POINTER_EVENT_BY_CODE = { 1: "down", 2: "move", 3: "up", 4: "leave" } as c
 
 /** Bounds both message allocation and the Worker decode loop for one input turn. */
 export const MAX_INPUT_EVENTS_PER_BATCH = 256;
-export const INPUT_TRANSFER_VERSION = 3;
+export const INPUT_TRANSFER_VERSION = 5;
 
 /**
  * Encodes ephemeral browser input as a transferable ArrayBuffer. This is the
@@ -27,7 +27,7 @@ export function encodeInputBatch(events: readonly EditorInputEvent[]): ArrayBuff
     if (event.type === "pointer") {
       view.setUint8(offset, POINTER_KIND);
       view.setUint8(offset + 1, POINTER_EVENT_CODE[event.event]);
-      view.setUint8(offset + 2, (event.shiftKey ? 1 : 0) | (event.readOnly ? 2 : 0) | (event.altKey ? 4 : 0) | (event.drillDown ? 8 : 0));
+      view.setUint8(offset + 2, (event.shiftKey ? 1 : 0) | (event.readOnly ? 2 : 0) | (event.altKey ? 4 : 0) | (event.drillDown ? 8 : 0) | (event.splitVectorSegment ? 16 : 0) | (event.deepSelect ? 32 : 0));
       view.setInt8(offset + 3, event.button);
       view.setFloat64(offset + 4, event.x, true);
       view.setFloat64(offset + 12, event.y, true);
@@ -60,12 +60,12 @@ export function decodeInputBatch(buffer: ArrayBuffer): EditorInputEvent[] | unde
     const flags = view.getUint8(offset + 2);
     const x = view.getFloat64(offset + 4, true);
     const y = view.getFloat64(offset + 12, true);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || flags > (type === POINTER_KIND ? 15 : 1)) return undefined;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || flags > (type === POINTER_KIND ? 63 : 1)) return undefined;
     if (type === POINTER_KIND) {
       const event = POINTER_EVENT_BY_CODE[view.getUint8(offset + 1) as keyof typeof POINTER_EVENT_BY_CODE];
       if (!event) return undefined;
       const occurredAt = readTimestamp(view, offset + 28);
-      events.push({ type: "pointer", event, x, y, shiftKey: (flags & 1) === 1, altKey: (flags & 4) === 4, button: view.getInt8(offset + 3), ...(flags & 2 ? { readOnly: true } : {}), ...(flags & 8 ? { drillDown: true } : {}), ...(occurredAt === undefined ? {} : { occurredAt }) });
+      events.push({ type: "pointer", event, x, y, shiftKey: (flags & 1) === 1, altKey: (flags & 4) === 4, button: view.getInt8(offset + 3), ...(flags & 2 ? { readOnly: true } : {}), ...(flags & 8 ? { drillDown: true } : {}), ...(flags & 16 ? { splitVectorSegment: true } : {}), ...(flags & 32 ? { deepSelect: true } : {}), ...(occurredAt === undefined ? {} : { occurredAt }) });
       continue;
     }
     if (type === WHEEL_KIND) {
@@ -82,7 +82,8 @@ export function decodeInputBatch(buffer: ArrayBuffer): EditorInputEvent[] | unde
 }
 
 // v3 appends an epoch timestamp so a Worker with a different performance time
-// origin can measure browser input-to-render latency without clock skew.
+// origin can measure browser input-to-render latency without clock skew. v4
+// reserves bit 4 for the explicit double-click Vector segment split intent.
 function finiteTimestamp(value: number | undefined) { return Number.isFinite(value) && value! >= 0 ? value! : Number.NaN; }
 function readTimestamp(view: DataView, offset: number) {
   const value = view.getFloat64(offset, true);

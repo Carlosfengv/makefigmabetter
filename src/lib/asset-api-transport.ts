@@ -1,3 +1,5 @@
+import { sha256Hex } from "./sha256";
+
 export type AssetUploadKind = "raster-image" | "font";
 
 export type AssetApiTransportConfig = {
@@ -76,6 +78,33 @@ export class AssetApiTransport {
     if (!response.ok) throw new Error("ASSET_DOCUMENT_ATTACHMENT_FAILED");
   }
 
+  /** Transfers an existing resource only after the Asset Service confirms that
+   * this principal can read the source document and write the destination. */
+  async attachFromDocument(sourceDocumentId: string, targetDocumentId: string, assetId: string): Promise<"created" | "existing"> {
+    const response = await this.request(
+      `/v1/documents/${encodeURIComponent(targetDocumentId)}/assets/${encodeURIComponent(assetId)}/attach-from-document`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceDocumentId }) },
+    );
+    if (!response.ok) throw new Error("ASSET_DOCUMENT_TRANSFER_AUTHORIZATION_FAILED");
+    return response.status === 201 ? "created" : "existing";
+  }
+
+  async detachClipboardAttachment(documentId: string, assetId: string): Promise<void> {
+    const response = await this.request(
+      `/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(assetId)}/clipboard-attachment`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new Error("ASSET_CLIPBOARD_ATTACHMENT_REVERT_FAILED");
+  }
+
+  async finalizeClipboardAttachment(documentId: string, assetId: string): Promise<void> {
+    const response = await this.request(
+      `/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(assetId)}/clipboard-attachment/commit`,
+      { method: "POST" },
+    );
+    if (!response.ok) throw new Error("ASSET_CLIPBOARD_ATTACHMENT_FINALIZE_FAILED");
+  }
+
   /** Local-only bootstrap for the single-user Phase 1 environment. Production
    * authorization must be projected from the authenticated Document service. */
   async grantDocumentWriter(documentId: string): Promise<void> {
@@ -135,10 +164,6 @@ export class AssetApiTransport {
 
 const CHUNK_BYTES = 1024 * 1024;
 
-async function sha256Hex(bytes: Uint8Array) {
-  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException("The asset import was cancelled.", "AbortError");

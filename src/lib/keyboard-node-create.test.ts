@@ -15,8 +15,15 @@ describe("createKeyboardToolNode", () => {
     expect(node).toMatchObject({ kind: "line", name: "Arrow", x: -320, y: 90, width: 160, height: 0, strokeCapEnd: "arrowLines" });
   });
 
-  it("does not create document nodes for navigation tools", () => {
+  it("creates a valid closed VectorPath without entering Pen editing", () => {
+    const node = createKeyboardToolNode({ tool: "vector", viewport, surface });
+    expect(node).toMatchObject({ kind: "vector", x: -320, y: 30, width: 160, height: 120, vectorPath: { fillRule: "nonZero", subpaths: [{ closed: true }] } });
+    expect(node?.vectorPath?.subpaths[0].points).toHaveLength(3);
+  });
+
+  it("does not create document nodes for navigation tools or the interactive Pen", () => {
     expect(createKeyboardToolNode({ tool: "select", viewport, surface })).toBeUndefined();
     expect(createKeyboardToolNode({ tool: "hand", viewport, surface })).toBeUndefined();
+    expect(createKeyboardToolNode({ tool: "pen", viewport, surface })).toBeUndefined();
   });
 });

@@ -1,5 +1,7 @@
 import type { CanvasNode, Viewport } from "./editor-protocol";
 import { closedShapeStrokeLocalBounds } from "./closed-shape-stroke-bounds";
+import { colorToSrgbBytes, colorToSrgbCss } from "./color-rendering";
+import { isGpuDropShadowEffectNode, isGpuInnerShadowEffectNode, isGpuLayerBlurEffectNode, isGpuSimpleEffectNode } from "./gpu-layer-prefix";
 import { resolveInsideRoundedRect } from "./rounded-rect";
 
 const FLOATS_PER_VERTEX = 16;
@@ -9,6 +11,8 @@ const GPU_BUFFER_USAGE_COPY_DST = 0x08;
 const GPU_BUFFER_USAGE_UNIFORM = 0x40;
 const GPU_TEXTURE_USAGE_COPY_DST = 0x02;
 const GPU_TEXTURE_USAGE_TEXTURE_BINDING = 0x04;
+const GPU_TEXTURE_USAGE_COPY_SRC = 0x01;
+const GPU_TEXTURE_USAGE_RENDER_ATTACHMENT = 0x10;
 const RGBA8_BYTES_PER_PIXEL = 4;
 const SWAP_CHAIN_SURFACE_COUNT = 3;
 
@@ -84,6 +88,7 @@ export interface WebGpuSceneRenderResult {
   imageBitmapMs: number;
   imageTextures: WebGpuImageTextureStats;
   textAtlas: WebGpuTextAtlasStats;
+  effectTextures: WebGpuEffectTextureStats;
 }
 
 /** Per-frame cache evidence. These counters are presentation-only and never
@@ -122,7 +127,16 @@ export const GPU_GLYPH_ATLAS_DIMENSION = 1024;
 export const GPU_GLYPH_ATLAS_BYTES = GPU_GLYPH_ATLAS_DIMENSION * GPU_GLYPH_ATLAS_DIMENSION;
 /** A bounded page set keeps a full first atlas from permanently disabling GPU text. */
 export const MAX_GPU_GLYPH_ATLAS_PAGES = 4;
+/**
+ * E1's offscreen effects are allowed two 128 MiB RGBA8 surfaces.  The pool is
+ * renderer-local, never serialized, and makes the budget visible before an
+ * effect pass can allocate an unbounded chain of temporary textures.
+ */
+export const MAX_GPU_EFFECT_TEXTURE_BYTES = 256 * 1024 * 1024;
+export const MAX_GPU_EFFECT_SURFACE_BYTES = 128 * 1024 * 1024;
 const GPU_GLYPH_ATLAS_PADDING = 1;
+const GPU_EFFECT_BLUR_UNIFORM_BYTES = 32;
+const GPU_EFFECT_INNER_SHADOW_UNIFORM_BYTES = 16;
 export interface GpuSceneCacheKey { documentRevision: number; rendererGeneration: number; colorProfile: string; }
 export interface GpuCameraUniform { viewportX: number; viewportY: number; zoom: number; canvasWidth: number; canvasHeight: number; dpr: number; }
 
@@ -137,6 +151,144 @@ type GpuGlyphAtlas = {
   /** Monotonic renderer-local LRU marker. Atlas contents are derived only. */
   lastUsed: number;
 };
+
+type GpuEffectTextureEntry = {
+  texture: GpuTexture;
+  width: number;
+  height: number;
+  bytes: number;
+  /** A texture may never be evicted while a render pass in this frame owns it. */
+  inUse: boolean;
+  /** Renderer-local LRU marker; no document state is retained here. */
+  lastUsed: number;
+};
+
+export interface WebGpuEffectTextureStats {
+  textures: number;
+  bytes: number;
+  active: number;
+  cacheHits: number;
+  allocations: number;
+  evictions: number;
+  rejected: number;
+}
+
+/**
+ * Bounded RGBA8 offscreen surfaces for E1.  The pool is deliberately separate
+ * from the scene/image caches: temporary blur and blend passes have a very
+ * different lifetime, so sharing a cache would make frame-local resources
+ * evict decoded image assets or vice versa.
+ *
+ * `beginFrame` / `endFrame` form a small ownership protocol.  Entries acquired
+ * in a frame stay pinned until `endFrame`; only idle entries can be evicted to
+ * make room for a differently sized surface in a later frame.
+ */
+export class WebGpuEffectTexturePool {
+  private entries: GpuEffectTextureEntry[] = [];
+  private tick = 0;
+  private frameOpen = false;
+  private frameCacheHits = 0;
+  private frameAllocations = 0;
+  private frameEvictions = 0;
+  private frameRejected = 0;
+
+  constructor(private readonly device: GpuDevice, private readonly maxBytes = MAX_GPU_EFFECT_TEXTURE_BYTES) {}
+
+  beginFrame() {
+    if (this.frameOpen) throw new Error("EFFECT_TEXTURE_FRAME_ALREADY_OPEN");
+    this.frameOpen = true;
+    this.frameCacheHits = 0;
+    this.frameAllocations = 0;
+    this.frameEvictions = 0;
+    this.frameRejected = 0;
+  }
+
+  /** Acquires one exact-size RGBA8 surface, or returns undefined on budget rejection. */
+  acquire(width: number, height: number): GpuTexture | undefined {
+    if (!this.frameOpen) throw new Error("EFFECT_TEXTURE_FRAME_NOT_OPEN");
+    const bytes = effectTextureBytes(width, height);
+    if (bytes === undefined || bytes > MAX_GPU_EFFECT_SURFACE_BYTES || bytes > this.maxBytes) {
+      this.frameRejected += 1;
+      return undefined;
+    }
+    const reusable = this.entries.find((entry) => !entry.inUse && entry.width === width && entry.height === height);
+    if (reusable) {
+      reusable.inUse = true;
+      reusable.lastUsed = ++this.tick;
+      this.frameCacheHits += 1;
+      return reusable.texture;
+    }
+    this.evictIdleUntil(bytes);
+    if (this.totalBytes() + bytes > this.maxBytes) {
+      this.frameRejected += 1;
+      return undefined;
+    }
+    const texture = this.device.createTexture({
+      size: { width, height, depthOrArrayLayers: 1 },
+      format: "rgba8unorm",
+      usage: GPU_TEXTURE_USAGE_TEXTURE_BINDING | GPU_TEXTURE_USAGE_COPY_SRC | GPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
+    });
+    this.entries.push({ texture, width, height, bytes, inUse: true, lastUsed: ++this.tick });
+    this.frameAllocations += 1;
+    return texture;
+  }
+
+  endFrame(): WebGpuEffectTextureStats {
+    if (!this.frameOpen) throw new Error("EFFECT_TEXTURE_FRAME_NOT_OPEN");
+    this.entries.forEach((entry) => { entry.inUse = false; });
+    this.frameOpen = false;
+    return this.stats();
+  }
+
+  /** Releases frame ownership after a failed command build without discarding
+   * reusable derived textures. The next frame may safely try again. */
+  cancelFrame() {
+    if (!this.frameOpen) return;
+    this.entries.forEach((entry) => { entry.inUse = false; });
+    this.frameOpen = false;
+  }
+
+  stats(): WebGpuEffectTextureStats {
+    return {
+      textures: this.entries.length,
+      bytes: this.totalBytes(),
+      active: this.entries.filter((entry) => entry.inUse).length,
+      cacheHits: this.frameCacheHits,
+      allocations: this.frameAllocations,
+      evictions: this.frameEvictions,
+      rejected: this.frameRejected,
+    };
+  }
+
+  destroy() {
+    this.entries.forEach((entry) => entry.texture.destroy?.());
+    this.entries = [];
+    this.frameOpen = false;
+  }
+
+  private evictIdleUntil(requiredBytes: number) {
+    while (this.totalBytes() + requiredBytes > this.maxBytes) {
+      const evictionIndex = this.entries
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => !entry.inUse)
+        .sort((a, b) => a.entry.lastUsed - b.entry.lastUsed)[0]?.index;
+      if (evictionIndex === undefined) return;
+      const [evicted] = this.entries.splice(evictionIndex, 1);
+      evicted?.texture.destroy?.();
+      this.frameEvictions += 1;
+    }
+  }
+
+  private totalBytes() {
+    return this.entries.reduce((total, entry) => total + entry.bytes, 0);
+  }
+}
+
+function effectTextureBytes(width: number, height: number) {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined;
+  const bytes = width * height * RGBA8_BYTES_PER_PIXEL;
+  return Number.isSafeInteger(bytes) ? bytes : undefined;
+}
 
 export function buildWebGpuInstances(nodes: readonly CanvasNode[]): { instances: Float32Array; renderedNodeIds: ReadonlySet<string> } {
   const renderable = nodes.filter(isGpuRenderable).filter((node) => Boolean(cssColor(node.fill, node.opacity)));
@@ -261,21 +413,32 @@ export class WebGpuSceneRenderer {
   private readonly format: string;
   private readonly canvas: OffscreenCanvas;
   private readonly pipeline: GpuRenderPipeline;
+  private readonly effectSourcePipeline: GpuRenderPipeline;
   private readonly imagePipeline: GpuRenderPipeline;
   private readonly textPipeline: GpuRenderPipeline;
+  private readonly effectBlurPipeline: GpuRenderPipeline;
+  private readonly effectCompositePipeline: GpuRenderPipeline;
+  private readonly effectInnerShadowPipeline: GpuRenderPipeline;
   private readonly imageSampler: GpuSampler;
   private readonly unitQuadBuffer: GpuBuffer;
   private readonly cameraBuffer: GpuBuffer;
   private readonly cameraBindGroup: GpuBindGroup;
+  private readonly effectSourceCameraBindGroup: GpuBindGroup;
   private readonly imageCameraBindGroup: GpuBindGroup;
   private readonly textCameraBindGroup: GpuBindGroup;
+  private readonly effectBlurUniform: GpuBuffer;
+  private readonly effectInnerShadowUniform: GpuBuffer;
   private instanceBuffer: GpuBuffer | undefined;
   private instanceCapacity = 0;
   private imageInstanceBuffer: GpuBuffer | undefined;
   private imageInstanceCapacity = 0;
   private textInstanceBuffer: GpuBuffer | undefined;
   private textInstanceCapacity = 0;
+  private effectInstanceBuffer: GpuBuffer | undefined;
+  private effectInstanceCapacity = 0;
   private imageTextures = new Map<string, { source: ImageBitmap; width: number; height: number; texture: GpuTexture; bindGroup: GpuBindGroup }>();
+  /** E1 temporary surfaces are renderer-local and are released with the device. */
+  private readonly effectTextures: WebGpuEffectTexturePool;
   /** Derived, device-generation-local glyph cache. It intentionally contains
    * no Canonical document state and is discarded on renderer destruction. */
   private textAtlases: GpuGlyphAtlas[] = [];
@@ -297,9 +460,17 @@ export class WebGpuSceneRenderer {
     this.deviceLost = device.lost;
     device.addEventListener?.("uncapturederror", (event) => this.reportFailure(event.error));
     this.pipeline = createPipeline(device, format);
+    this.effectSourcePipeline = createPipeline(device, "rgba8unorm");
     this.imagePipeline = createImagePipeline(device, format);
     this.textPipeline = createTextPipeline(device, format);
+    // Pool textures are deliberately fixed RGBA8 even when the browser's
+    // preferred swap-chain format is BGRA8, so the blur pass needs its own
+    // attachment format while the final composite targets the swap chain.
+    this.effectBlurPipeline = createEffectBlurPipeline(device, "rgba8unorm");
+    this.effectCompositePipeline = createEffectCompositePipeline(device, format);
+    this.effectInnerShadowPipeline = createEffectInnerShadowPipeline(device, format);
     this.imageSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+    this.effectTextures = new WebGpuEffectTexturePool(device);
     this.unitQuadBuffer = device.createBuffer({ size: UNIT_QUAD.byteLength, usage: GPU_BUFFER_USAGE_VERTEX | GPU_BUFFER_USAGE_COPY_DST });
     this.cameraBuffer = device.createBuffer({ size: GPU_CAMERA_UNIFORM_BYTES, usage: GPU_BUFFER_USAGE_UNIFORM | GPU_BUFFER_USAGE_COPY_DST });
     const cameraEntry = [{ binding: 0, resource: { buffer: this.cameraBuffer } }];
@@ -307,8 +478,11 @@ export class WebGpuSceneRenderer {
     // the Camera declaration is identical, a bind group from the shape
     // pipeline is not compatible with the Image/Text pipelines in WebGPU.
     this.cameraBindGroup = device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: cameraEntry });
+    this.effectSourceCameraBindGroup = device.createBindGroup({ layout: this.effectSourcePipeline.getBindGroupLayout(0), entries: cameraEntry });
     this.imageCameraBindGroup = device.createBindGroup({ layout: this.imagePipeline.getBindGroupLayout(0), entries: cameraEntry });
     this.textCameraBindGroup = device.createBindGroup({ layout: this.textPipeline.getBindGroupLayout(0), entries: cameraEntry });
+    this.effectBlurUniform = device.createBuffer({ size: GPU_EFFECT_BLUR_UNIFORM_BYTES, usage: GPU_BUFFER_USAGE_UNIFORM | GPU_BUFFER_USAGE_COPY_DST });
+    this.effectInnerShadowUniform = device.createBuffer({ size: GPU_EFFECT_INNER_SHADOW_UNIFORM_BYTES, usage: GPU_BUFFER_USAGE_UNIFORM | GPU_BUFFER_USAGE_COPY_DST });
     this.device.queue.writeBuffer(this.unitQuadBuffer, 0, UNIT_QUAD);
   }
 
@@ -338,67 +512,99 @@ export class WebGpuSceneRenderer {
   }
 
   render(input: WebGpuSceneRenderInput): WebGpuSceneRenderResult {
-    const admission = admitWebGpuSceneResources(input);
-    if (!admission.accepted) throw new GpuSceneResourceLimitError(admission);
-    const pixelWidth = Math.max(1, Math.ceil(input.width * input.dpr));
-    const pixelHeight = Math.max(1, Math.ceil(input.height * input.dpr));
-    this.resize(pixelWidth, pixelHeight);
-    const sceneChanged = !this.hasCachedScene || this.cachedSceneKey !== input.sceneKey;
-    const sceneUploadBytes = sceneChanged ? this.uploadScene(input.nodes, input.sceneKey, input.precomputedInstances) : 0;
-    const images = this.uploadImages(input.nodes, input.imageBitmaps);
-    const text = this.uploadTextGlyphs(input.textGlyphs);
-    this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraUniform({ viewportX: input.viewport.x, viewportY: input.viewport.y, zoom: input.viewport.zoom, canvasWidth: input.width, canvasHeight: input.height, dpr: input.dpr }));
-    const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: this.context.getCurrentTexture().createView(),
-        // The main Canvas owns the backdrop and grid. Keeping this auxiliary
-        // scene transparent lets it composite above that background but below
-        // Canvas 2D overlays without obscuring or receiving the grid.
-        clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        loadOp: "clear",
-        storeOp: "store",
-      }],
-    });
-    if (this.cachedInstanceCount) {
-      pass.setPipeline(this.pipeline);
-      pass.setBindGroup(0, this.cameraBindGroup);
-      pass.setVertexBuffer(0, this.unitQuadBuffer);
-      pass.setVertexBuffer(1, this.instanceBuffer!);
-      pass.draw(6, this.cachedInstanceCount);
-    }
-    if (images.instances.length) {
-      pass.setPipeline(this.imagePipeline);
-      pass.setBindGroup(0, this.imageCameraBindGroup);
-      pass.setVertexBuffer(0, this.unitQuadBuffer);
-      for (const image of images.draws) {
-        pass.setBindGroup(1, image.bindGroup);
-        pass.setVertexBuffer(1, this.imageInstanceBuffer!, image.offset, GPU_IMAGE_INSTANCE_BYTES_PER_NODE);
-        pass.draw(6);
+    this.effectTextures.beginFrame();
+    try {
+      const admission = admitWebGpuSceneResources(input);
+      if (!admission.accepted) throw new GpuSceneResourceLimitError(admission);
+      const pixelWidth = Math.max(1, Math.ceil(input.width * input.dpr));
+      const pixelHeight = Math.max(1, Math.ceil(input.height * input.dpr));
+      this.resize(pixelWidth, pixelHeight);
+      // A GPU effect is always the terminal pass of the admitted prefix. Its
+      // source/blur work uses separate offscreen submissions, while ordinary
+      // shapes keep the cached scene buffer and retain their prior ordering.
+      const effectNode = input.nodes.find(isGpuSimpleEffectNode);
+      const normalNodes = effectNode ? input.nodes.filter((node) => node.id !== effectNode.id) : input.nodes;
+      const sceneChanged = !this.hasCachedScene || this.cachedSceneKey !== input.sceneKey;
+      const sceneUploadBytes = sceneChanged ? this.uploadScene(normalNodes, input.sceneKey, effectNode ? undefined : input.precomputedInstances) : 0;
+      const images = this.uploadImages(normalNodes, input.imageBitmaps);
+      const text = this.uploadTextGlyphs(input.textGlyphs);
+      this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraUniform({ viewportX: input.viewport.x, viewportY: input.viewport.y, zoom: input.viewport.zoom, canvasWidth: input.width, canvasHeight: input.height, dpr: input.dpr }));
+      const preparedEffect = effectNode ? this.prepareDropShadowEffects(effectNode, input, pixelWidth, pixelHeight) ?? this.prepareLayerBlurEffect(effectNode, input, pixelWidth, pixelHeight) ?? this.prepareInnerShadowEffect(effectNode, input, pixelWidth, pixelHeight) : undefined;
+      const encoder = this.device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: this.context.getCurrentTexture().createView(),
+          // The main Canvas owns the backdrop and grid. Keeping this auxiliary
+          // scene transparent lets it composite above that background but below
+          // Canvas 2D overlays without obscuring or receiving the grid.
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: "clear",
+          storeOp: "store",
+        }],
+      });
+      if (this.cachedInstanceCount) {
+        pass.setPipeline(this.pipeline);
+        pass.setBindGroup(0, this.cameraBindGroup);
+        pass.setVertexBuffer(0, this.unitQuadBuffer);
+        pass.setVertexBuffer(1, this.instanceBuffer!);
+        pass.draw(6, this.cachedInstanceCount);
       }
-    }
-    if (text.instances.length) {
-      pass.setPipeline(this.textPipeline);
-      pass.setBindGroup(0, this.textCameraBindGroup);
-      pass.setVertexBuffer(0, this.unitQuadBuffer);
-      for (const glyph of text.draws) {
-        pass.setBindGroup(1, glyph.bindGroup);
-        pass.setVertexBuffer(1, this.textInstanceBuffer!, glyph.offset, GPU_TEXT_INSTANCE_BYTES_PER_NODE);
-        pass.draw(6);
+      if (images.instances.length) {
+        pass.setPipeline(this.imagePipeline);
+        pass.setBindGroup(0, this.imageCameraBindGroup);
+        pass.setVertexBuffer(0, this.unitQuadBuffer);
+        for (const image of images.draws) {
+          pass.setBindGroup(1, image.bindGroup);
+          pass.setVertexBuffer(1, this.imageInstanceBuffer!, image.offset, GPU_IMAGE_INSTANCE_BYTES_PER_NODE);
+          pass.draw(6);
+        }
       }
+      if (text.instances.length) {
+        pass.setPipeline(this.textPipeline);
+        pass.setBindGroup(0, this.textCameraBindGroup);
+        pass.setVertexBuffer(0, this.unitQuadBuffer);
+        for (const glyph of text.draws) {
+          pass.setBindGroup(1, glyph.bindGroup);
+          pass.setVertexBuffer(1, this.textInstanceBuffer!, glyph.offset, GPU_TEXT_INSTANCE_BYTES_PER_NODE);
+          pass.draw(6);
+        }
+      }
+      if (preparedEffect) {
+        pass.setPipeline(this.effectCompositePipeline);
+        pass.setVertexBuffer(0, this.unitQuadBuffer);
+        for (const effect of preparedEffect.composites) {
+          pass.setPipeline(effect.pipeline);
+          pass.setBindGroup(0, effect.compositeBindGroup);
+          pass.draw(6);
+        }
+        if (preparedEffect.drawOriginal) {
+          pass.setPipeline(this.pipeline);
+          pass.setBindGroup(0, this.cameraBindGroup);
+          pass.setVertexBuffer(0, this.unitQuadBuffer);
+          pass.setVertexBuffer(1, this.effectInstanceBuffer!);
+          pass.draw(6);
+        }
+      }
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+      const transferStartedAt = performance.now();
+      const bitmap = this.canvas.transferToImageBitmap();
+      return { bitmap, renderedNodeIds: new Set([...this.cachedRenderedNodeIds, ...images.renderedNodeIds, ...text.renderedNodeIds, ...(preparedEffect ? [preparedEffect.nodeId] : [])]), resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + (preparedEffect?.uploadBytes ?? 0) + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt, imageTextures: images.stats, textAtlas: text.stats, effectTextures: this.effectTextures.endFrame() };
+    } catch (error) {
+      this.effectTextures.cancelFrame();
+      throw error;
     }
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
-    const transferStartedAt = performance.now();
-    const bitmap = this.canvas.transferToImageBitmap();
-    return { bitmap, renderedNodeIds: new Set([...this.cachedRenderedNodeIds, ...images.renderedNodeIds, ...text.renderedNodeIds]), resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt, imageTextures: images.stats, textAtlas: text.stats };
   }
 
   destroy() {
     this.releaseInstanceBuffer();
+    this.releaseEffectInstanceBuffer();
     this.releaseImageResources();
+    this.effectTextures.destroy();
     this.unitQuadBuffer.destroy?.();
     this.cameraBuffer.destroy?.();
+    this.effectBlurUniform.destroy?.();
+    this.effectInnerShadowUniform.destroy?.();
     this.device.destroy?.();
   }
 
@@ -440,6 +646,203 @@ export class WebGpuSceneRenderer {
     this.instanceBuffer?.destroy?.();
     this.instanceBuffer = undefined;
     this.instanceCapacity = 0;
+  }
+
+  /** Executes E1's bounded GPU path: every visible Drop Shadow gets an
+   * offset source and blurred pool texture, then all are composited in stack
+   * order before the untouched node. Any pool rejection returns undefined so
+   * Canvas paints the entire node instead of a partial effect stack. */
+  private prepareDropShadowEffects(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
+    if (!isGpuDropShadowEffectNode(node)) return undefined;
+    const stack = node.effectStack?.length ? node.effectStack : (node.dropShadow ? [{ dropShadow: node.dropShadow }] : []);
+    const shadows = stack.flatMap((effect) => {
+      const shadow = effect.dropShadow;
+      return shadow?.visible && shadow.color.alpha > 0 ? [shadow] : [];
+    });
+    const originalInstances = buildWebGpuInstances([node]).instances;
+    if (!shadows.length || originalInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
+    this.ensureEffectInstanceBuffer(originalInstances.byteLength);
+    const composites: Array<{ pipeline: GpuRenderPipeline; compositeBindGroup: GpuBindGroup }> = [];
+    let uploadBytes = originalInstances.byteLength;
+    for (const shadow of shadows) {
+      const source = this.effectTextures.acquire(pixelWidth, pixelHeight);
+      const blurred = this.effectTextures.acquire(pixelWidth, pixelHeight);
+      if (!source || !blurred) return undefined;
+      const shadowNode = {
+        ...node,
+        x: node.x + shadow.offsetX,
+        y: node.y + shadow.offsetY,
+        fill: colorToSrgbCss(shadow.color),
+        stroke: colorToSrgbCss(shadow.color),
+      };
+      const sourceInstances = buildWebGpuInstances([shadowNode]).instances;
+      if (sourceInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
+      this.device.queue.writeBuffer(this.effectInstanceBuffer!, 0, sourceInstances);
+      const sourceEncoder = this.device.createCommandEncoder();
+      const sourcePass = sourceEncoder.beginRenderPass({
+        colorAttachments: [{ view: source.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      });
+      sourcePass.setPipeline(this.effectSourcePipeline);
+      sourcePass.setBindGroup(0, this.effectSourceCameraBindGroup);
+      sourcePass.setVertexBuffer(0, this.unitQuadBuffer);
+      sourcePass.setVertexBuffer(1, this.effectInstanceBuffer!);
+      sourcePass.draw(6);
+      sourcePass.end();
+      const blurRadius = Math.max(0, Math.min(128, shadow.blurRadius * input.viewport.zoom * input.dpr));
+      this.writeEffectBlurUniform(blurRadius, pixelWidth, pixelHeight);
+      const blurBindGroup = this.device.createBindGroup({
+        layout: this.effectBlurPipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: source.createView() }, { binding: 1, resource: this.imageSampler }, { binding: 2, resource: { buffer: this.effectBlurUniform } }],
+      });
+      const blurPass = sourceEncoder.beginRenderPass({
+        colorAttachments: [{ view: blurred.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      });
+      blurPass.setPipeline(this.effectBlurPipeline);
+      blurPass.setBindGroup(0, blurBindGroup);
+      blurPass.setVertexBuffer(0, this.unitQuadBuffer);
+      blurPass.draw(6);
+      blurPass.end();
+      // Queue operations are ordered: submit this source before reusing the
+      // shared instance/uniform buffers for the next ordered shadow.
+      this.device.queue.submit([sourceEncoder.finish()]);
+      composites.push({ pipeline: this.effectCompositePipeline, compositeBindGroup: this.device.createBindGroup({
+        layout: this.effectCompositePipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: blurred.createView() }, { binding: 1, resource: this.imageSampler }],
+      }) });
+      uploadBytes += sourceInstances.byteLength + GPU_EFFECT_BLUR_UNIFORM_BYTES;
+    }
+    this.device.queue.writeBuffer(this.effectInstanceBuffer!, 0, originalInstances);
+    return { nodeId: node.id, composites, uploadBytes, drawOriginal: true };
+  }
+
+  /** A bounded source blur replaces the original node. It intentionally accepts
+   * only one Layer Blur because arbitrary Effect Stack ordering still belongs
+   * to Canvas until the GPU graph can represent every intermediate source. */
+  private prepareLayerBlurEffect(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
+    if (!isGpuLayerBlurEffectNode(node)) return undefined;
+    const blur = node.effectStack?.[0]?.layerBlur;
+    if (!blur) return undefined;
+    const originalInstances = buildWebGpuInstances([node]).instances;
+    if (originalInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
+    const source = this.effectTextures.acquire(pixelWidth, pixelHeight);
+    const blurred = this.effectTextures.acquire(pixelWidth, pixelHeight);
+    if (!source || !blurred) return undefined;
+    this.ensureEffectInstanceBuffer(originalInstances.byteLength);
+    this.device.queue.writeBuffer(this.effectInstanceBuffer!, 0, originalInstances);
+    const sourceEncoder = this.device.createCommandEncoder();
+    const sourcePass = sourceEncoder.beginRenderPass({
+      colorAttachments: [{ view: source.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    });
+    sourcePass.setPipeline(this.effectSourcePipeline);
+    sourcePass.setBindGroup(0, this.effectSourceCameraBindGroup);
+    sourcePass.setVertexBuffer(0, this.unitQuadBuffer);
+    sourcePass.setVertexBuffer(1, this.effectInstanceBuffer!);
+    sourcePass.draw(6);
+    sourcePass.end();
+    const blurRadius = Math.max(0, Math.min(128, blur.radius * input.viewport.zoom * input.dpr));
+    this.writeEffectBlurUniform(blurRadius, pixelWidth, pixelHeight);
+    const blurBindGroup = this.device.createBindGroup({
+      layout: this.effectBlurPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: source.createView() }, { binding: 1, resource: this.imageSampler }, { binding: 2, resource: { buffer: this.effectBlurUniform } }],
+    });
+    const blurPass = sourceEncoder.beginRenderPass({
+      colorAttachments: [{ view: blurred.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    });
+    blurPass.setPipeline(this.effectBlurPipeline);
+    blurPass.setBindGroup(0, blurBindGroup);
+    blurPass.setVertexBuffer(0, this.unitQuadBuffer);
+    blurPass.draw(6);
+    blurPass.end();
+    this.device.queue.submit([sourceEncoder.finish()]);
+    return {
+      nodeId: node.id,
+      composites: [{ pipeline: this.effectCompositePipeline, compositeBindGroup: this.device.createBindGroup({
+        layout: this.effectCompositePipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: blurred.createView() }, { binding: 1, resource: this.imageSampler }],
+      }) }],
+      uploadBytes: originalInstances.byteLength + GPU_EFFECT_BLUR_UNIFORM_BYTES,
+      drawOriginal: false,
+    };
+  }
+
+  /** The Canvas path draws a source shifted by the inverse offset, blurs it,
+   * clips it with the original alpha and then composites the tinted result over
+   * the source. The GPU keeps that exact source/blur relationship in two
+   * budgeted textures; the final shader performs the alpha clip and source-over
+   * merge without allocating a third intermediate surface. */
+  private prepareInnerShadowEffect(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
+    if (!isGpuInnerShadowEffectNode(node)) return undefined;
+    const shadow = node.effectStack?.[0]?.innerShadow;
+    if (!shadow) return undefined;
+    const originalInstances = buildWebGpuInstances([node]).instances;
+    if (originalInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
+    const source = this.effectTextures.acquire(pixelWidth, pixelHeight);
+    const blurred = this.effectTextures.acquire(pixelWidth, pixelHeight);
+    if (!source || !blurred) return undefined;
+    this.ensureEffectInstanceBuffer(originalInstances.byteLength);
+    this.device.queue.writeBuffer(this.effectInstanceBuffer!, 0, originalInstances);
+    const sourceEncoder = this.device.createCommandEncoder();
+    const sourcePass = sourceEncoder.beginRenderPass({
+      colorAttachments: [{ view: source.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    });
+    sourcePass.setPipeline(this.effectSourcePipeline);
+    sourcePass.setBindGroup(0, this.effectSourceCameraBindGroup);
+    sourcePass.setVertexBuffer(0, this.unitQuadBuffer);
+    sourcePass.setVertexBuffer(1, this.effectInstanceBuffer!);
+    sourcePass.draw(6);
+    sourcePass.end();
+    const blurRadius = Math.max(0, Math.min(128, shadow.blurRadius * input.viewport.zoom * input.dpr));
+    // Canvas draws the source at -offset before clipping it back to its own
+    // alpha. Sampling at +offset yields the same reversed interior direction.
+    this.writeEffectBlurUniform(blurRadius, pixelWidth, pixelHeight, shadow.offsetX * input.viewport.zoom * input.dpr, shadow.offsetY * input.viewport.zoom * input.dpr);
+    const blurBindGroup = this.device.createBindGroup({
+      layout: this.effectBlurPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: source.createView() }, { binding: 1, resource: this.imageSampler }, { binding: 2, resource: { buffer: this.effectBlurUniform } }],
+    });
+    const blurPass = sourceEncoder.beginRenderPass({
+      colorAttachments: [{ view: blurred.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    });
+    blurPass.setPipeline(this.effectBlurPipeline);
+    blurPass.setBindGroup(0, blurBindGroup);
+    blurPass.setVertexBuffer(0, this.unitQuadBuffer);
+    blurPass.draw(6);
+    blurPass.end();
+    this.device.queue.submit([sourceEncoder.finish()]);
+    const [red, green, blue] = colorToSrgbBytes(shadow.color);
+    const alpha = Math.round(Math.min(1, Math.max(0, shadow.color.alpha)) * 255) / 255;
+    this.device.queue.writeBuffer(this.effectInnerShadowUniform, 0, new Float32Array([red / 255, green / 255, blue / 255, alpha]));
+    return {
+      nodeId: node.id,
+      composites: [{ pipeline: this.effectInnerShadowPipeline, compositeBindGroup: this.device.createBindGroup({
+        layout: this.effectInnerShadowPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: source.createView() },
+          { binding: 1, resource: blurred.createView() },
+          { binding: 2, resource: this.imageSampler },
+          { binding: 3, resource: { buffer: this.effectInnerShadowUniform } },
+        ],
+      }) }],
+      uploadBytes: originalInstances.byteLength + GPU_EFFECT_BLUR_UNIFORM_BYTES + GPU_EFFECT_INNER_SHADOW_UNIFORM_BYTES,
+      drawOriginal: false,
+    };
+  }
+
+  private writeEffectBlurUniform(radius: number, pixelWidth: number, pixelHeight: number, offsetX = 0, offsetY = 0) {
+    this.device.queue.writeBuffer(this.effectBlurUniform, 0, new Float32Array([radius, 1 / pixelWidth, 1 / pixelHeight, 0, offsetX, offsetY, 0, 0]));
+  }
+
+  private ensureEffectInstanceBuffer(requiredBytes: number) {
+    const capacity = Math.max(requiredBytes, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES);
+    if (this.effectInstanceBuffer && this.effectInstanceCapacity === capacity) return;
+    this.releaseEffectInstanceBuffer();
+    this.effectInstanceCapacity = capacity;
+    this.effectInstanceBuffer = this.device.createBuffer({ size: capacity, usage: GPU_BUFFER_USAGE_VERTEX | GPU_BUFFER_USAGE_COPY_DST });
+  }
+
+  private releaseEffectInstanceBuffer() {
+    this.effectInstanceBuffer?.destroy?.();
+    this.effectInstanceBuffer = undefined;
+    this.effectInstanceCapacity = 0;
   }
 
   private uploadImages(nodes: readonly CanvasNode[], imageBitmaps: WebGpuSceneRenderInput["imageBitmaps"]) {
@@ -910,6 +1313,39 @@ function createTextPipeline(device: GpuDevice, format: string): GpuRenderPipelin
   });
 }
 
+function createEffectBlurPipeline(device: GpuDevice, format: string): GpuRenderPipeline {
+  const shaderModule = device.createShaderModule({ code: EFFECT_BLUR_WGSL });
+  return device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: shaderModule, entryPoint: "vs_main", buffers: [{ arrayStride: 2 * BYTES_PER_FLOAT, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }] }] },
+    // Blur samples an already premultiplied source texture and writes into an
+    // empty target, so blending here would multiply alpha a second time.
+    fragment: { module: shaderModule, entryPoint: "fs_main", targets: [{ format }] },
+    primitive: { topology: "triangle-list" },
+  });
+}
+
+function createEffectCompositePipeline(device: GpuDevice, format: string): GpuRenderPipeline {
+  const shaderModule = device.createShaderModule({ code: EFFECT_COMPOSITE_WGSL });
+  return device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: shaderModule, entryPoint: "vs_main", buffers: [{ arrayStride: 2 * BYTES_PER_FLOAT, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }] }] },
+    // The blurred texture stores premultiplied color from the source pass.
+    fragment: { module: shaderModule, entryPoint: "fs_main", targets: [{ format, blend: { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } } }] },
+    primitive: { topology: "triangle-list" },
+  });
+}
+
+function createEffectInnerShadowPipeline(device: GpuDevice, format: string): GpuRenderPipeline {
+  const shaderModule = device.createShaderModule({ code: EFFECT_INNER_SHADOW_WGSL });
+  return device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: shaderModule, entryPoint: "vs_main", buffers: [{ arrayStride: 2 * BYTES_PER_FLOAT, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }] }] },
+    fragment: { module: shaderModule, entryPoint: "fs_main", targets: [{ format, blend: { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } } }] },
+    primitive: { topology: "triangle-list" },
+  });
+}
+
 const WGSL = /* wgsl */ `
 struct VertexInput {
   @location(0) local: vec2<f32>, @location(1) position_size: vec4<f32>,
@@ -1017,6 +1453,71 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: v
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let alpha = textureSample(glyph_mask, glyph_sampler, input.uv).r * input.color.a;
   return vec4<f32>(input.color.rgb, alpha);
+}
+`;
+
+const EFFECT_BLUR_WGSL = /* wgsl */ `
+struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };
+struct Blur { first: vec4<f32>, offset: vec4<f32>, };
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+@group(0) @binding(2) var<uniform> blur: Blur;
+@vertex fn vs_main(@location(0) local: vec2<f32>) -> VertexOutput {
+  var output: VertexOutput;
+  output.position = vec4<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0, 0.0, 1.0);
+  output.uv = local;
+  return output;
+}
+@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+  // A bounded 5×5 separable-binomial kernel avoids the visibly detached
+  // samples of a sparse blur while remaining one fixed-cost GPU pass. Its
+  // outermost samples reach the declared Canvas-compatible blur radius.
+  let step = vec2<f32>(blur.first.x * 0.5 * blur.first.y, blur.first.x * 0.5 * blur.first.z);
+  var result = vec4<f32>(0.0);
+  for (var y: i32 = -2; y <= 2; y = y + 1) {
+    let ay = abs(y);
+    let wy = select(select(4.0, 1.0, ay == 2), 6.0, ay == 0);
+    for (var x: i32 = -2; x <= 2; x = x + 1) {
+      let ax = abs(x);
+      let wx = select(select(4.0, 1.0, ax == 2), 6.0, ax == 0);
+      result += textureSample(source_texture, source_sampler, input.uv + vec2<f32>(blur.offset.x * blur.first.y, blur.offset.y * blur.first.z) + vec2<f32>(f32(x), f32(y)) * step) * (wx * wy / 256.0);
+    }
+  }
+  return result;
+}
+`;
+
+const EFFECT_COMPOSITE_WGSL = /* wgsl */ `
+struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };
+@group(0) @binding(0) var effect_texture: texture_2d<f32>;
+@group(0) @binding(1) var effect_sampler: sampler;
+@vertex fn vs_main(@location(0) local: vec2<f32>) -> VertexOutput {
+  var output: VertexOutput;
+  output.position = vec4<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0, 0.0, 1.0);
+  output.uv = local;
+  return output;
+}
+@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> { return textureSample(effect_texture, effect_sampler, input.uv); }
+`;
+
+const EFFECT_INNER_SHADOW_WGSL = /* wgsl */ `
+struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };
+struct ShadowColor { value: vec4<f32>, };
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(1) var blurred_texture: texture_2d<f32>;
+@group(0) @binding(2) var effect_sampler: sampler;
+@group(0) @binding(3) var<uniform> shadow_color: ShadowColor;
+@vertex fn vs_main(@location(0) local: vec2<f32>) -> VertexOutput {
+  var output: VertexOutput;
+  output.position = vec4<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0, 0.0, 1.0);
+  output.uv = local;
+  return output;
+}
+@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+  let source = textureSample(source_texture, effect_sampler, input.uv);
+  let inner_alpha = min(1.0, source.a * textureSample(blurred_texture, effect_sampler, input.uv).a * shadow_color.value.a);
+  let inner = vec4<f32>(shadow_color.value.rgb * inner_alpha, inner_alpha);
+  return inner + source * (1.0 - inner_alpha);
 }
 `;
 

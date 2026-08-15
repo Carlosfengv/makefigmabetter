@@ -13,7 +13,7 @@ describe("F-PHASE2-COMMON-NODES fixture", () => {
   it("covers the Phase 2 common-node hierarchy and exact transform cases", () => {
     expect(fixture.format).toBe("makefigma-phase2-common-nodes-fixture-v1");
     expect(fixture.name).toBe("F-PHASE2-COMMON-NODES");
-    expect(nodes.map((node) => node.kind)).toEqual(expect.arrayContaining(["frame", "group", "rectangle", "ellipse", "line", "section", "text"]));
+    expect(nodes.map((node) => node.kind)).toEqual(expect.arrayContaining(["frame", "group", "rectangle", "ellipse", "line", "section", "text", "slice"]));
     const nestedFrame = nodes.find((node) => node.name === "Rotated Frame")!;
     const group = nodes.find((node) => node.name === "Content Group")!;
     const arrow = nodes.find((node) => node.name === "Independent-cap Arrow")!;
@@ -23,6 +23,10 @@ describe("F-PHASE2-COMMON-NODES fixture", () => {
     expect(arrow.strokeCapEnd).toBe("arrowLines");
     expect(worldTransformForNode(nodes, arrow.id)).toBeDefined();
     expect(worldLineVisualBounds(nodes, arrow)).toEqual(expect.objectContaining({ left: expect.any(Number), top: expect.any(Number), right: expect.any(Number), bottom: expect.any(Number) }));
+    const slice = nodes.find((node) => node.name === "Rotated Export Slice")!;
+    expect(slice.kind).toBe("slice");
+    expect(slice.strokeWidth).toBe(0);
+    expect(worldTransformForNode(nodes, slice.id)).toBeDefined();
   });
 
   it("keeps every parent reference within the fixture and supplies valid finite geometry", () => {
@@ -65,6 +69,7 @@ describe("F-PHASE2-COMMON-NODES fixture", () => {
       cornerSmoothing: .5,
       strokeWeights: [2, 6, 3, 5],
     });
+    expect(created.find((node) => node.name === "Asymmetric Card")?.effectStack).toHaveLength(2);
     expect(created.find((node) => node.name === "Independent-cap Arrow")).toMatchObject({
       kind: NodeKind.NODE_KIND_LINE,
       height: 0,
@@ -82,9 +87,10 @@ describe("F-PHASE2-COMMON-NODES fixture", () => {
     expect(created.find((node) => node.name === "Root Frame")?.clipsContent).toBe(true);
     expect(created.find((node) => node.name === "Section")?.contentsHidden).toBe(false);
     expect(created.find((node) => node.name === "Fixture label")?.text).toBe("Phase 2 common nodes");
+    expect(created.find((node) => node.name === "Rotated Export Slice")).toMatchObject({ kind: NodeKind.NODE_KIND_SLICE, strokeWidth: 0, fill: { solid: { alpha: 0 } } });
   });
 });
 
 function kindFor(kind: CanvasNode["kind"]) {
-  return kind === "frame" ? NodeKind.NODE_KIND_FRAME : kind === "group" ? NodeKind.NODE_KIND_GROUP : kind === "section" ? NodeKind.NODE_KIND_SECTION : kind === "rectangle" ? NodeKind.NODE_KIND_RECTANGLE : kind === "ellipse" ? NodeKind.NODE_KIND_ELLIPSE : kind === "line" ? NodeKind.NODE_KIND_LINE : kind === "text" ? NodeKind.NODE_KIND_TEXT : NodeKind.NODE_KIND_IMAGE;
+  return kind === "frame" ? NodeKind.NODE_KIND_FRAME : kind === "group" ? NodeKind.NODE_KIND_GROUP : kind === "section" ? NodeKind.NODE_KIND_SECTION : kind === "rectangle" ? NodeKind.NODE_KIND_RECTANGLE : kind === "ellipse" ? NodeKind.NODE_KIND_ELLIPSE : kind === "polygon" ? NodeKind.NODE_KIND_POLYGON : kind === "star" ? NodeKind.NODE_KIND_STAR : kind === "vector" ? NodeKind.NODE_KIND_VECTOR : kind === "booleanOperation" ? NodeKind.NODE_KIND_BOOLEAN_OPERATION : kind === "slice" ? NodeKind.NODE_KIND_SLICE : kind === "line" ? NodeKind.NODE_KIND_LINE : kind === "text" ? NodeKind.NODE_KIND_TEXT : NodeKind.NODE_KIND_IMAGE;
 }

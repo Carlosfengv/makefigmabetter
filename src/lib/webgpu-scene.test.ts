@@ -1,8 +1,135 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { admitWebGpuSceneResources, buildWebGpuInstances, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
+import { admitWebGpuSceneResources, buildWebGpuInstances, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuEffectTexturePool, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
 
 describe("WebGPU scene vertex projection", () => {
+  it("keeps effect surfaces pinned for a frame, then reuses or evicts only idle textures", () => {
+    const created: Array<{ width: number; height: number }> = [];
+    const destroyed: number[] = [];
+    const device = {
+      createTexture: ({ size }: { size: { width: number; height: number } }) => {
+        created.push(size);
+        return { createView: () => ({}), destroy: () => destroyed.push(1) };
+      },
+    };
+    const pool = new WebGpuEffectTexturePool(device as never, 128);
+    pool.beginFrame();
+    const first = pool.acquire(4, 4);
+    const second = pool.acquire(4, 4);
+    // Both 64-byte textures are pinned, so a third surface cannot evict one.
+    expect(pool.acquire(1, 1)).toBeUndefined();
+    expect(pool.endFrame()).toMatchObject({ textures: 2, bytes: 128, active: 0, allocations: 2, rejected: 1 });
+
+    pool.beginFrame();
+    expect(pool.acquire(4, 4)).toBe(first);
+    expect(pool.acquire(3, 3)).toBeDefined();
+    expect(pool.endFrame()).toMatchObject({ textures: 2, bytes: 100, active: 0, cacheHits: 1, allocations: 1, evictions: 1, rejected: 0 });
+    expect(created).toEqual([
+      { width: 4, height: 4, depthOrArrayLayers: 1 },
+      { width: 4, height: 4, depthOrArrayLayers: 1 },
+      { width: 3, height: 3, depthOrArrayLayers: 1 },
+    ]);
+    expect(second).toBeDefined();
+    expect(destroyed).toEqual([1]);
+    pool.destroy();
+    expect(destroyed).toEqual([1, 1, 1]);
+  });
+
+  it("rejects invalid effect surface sizes before allocating a GPU texture", () => {
+    const pool = new WebGpuEffectTexturePool({ createTexture: () => { throw new Error("must not allocate"); } } as never, 128);
+    pool.beginFrame();
+    expect(pool.acquire(0, 4)).toBeUndefined();
+    expect(pool.acquire(4.5, 4)).toBeUndefined();
+    expect(pool.endFrame()).toMatchObject({ textures: 0, bytes: 0, rejected: 2 });
+  });
+
+  it("returns temporary effect ownership after a failed frame so the next render can reuse it", () => {
+    const texture = { createView: () => ({}), destroy: () => undefined };
+    const pool = new WebGpuEffectTexturePool({ createTexture: () => texture } as never, 128);
+    pool.beginFrame();
+    expect(pool.acquire(4, 4)).toBe(texture);
+    pool.cancelFrame();
+    pool.beginFrame();
+    expect(pool.acquire(4, 4)).toBe(texture);
+    expect(pool.endFrame()).toMatchObject({ textures: 1, bytes: 64, cacheHits: 1, allocations: 0 });
+  });
+
+  it("executes ordered Drop Shadows through bounded source, blur and composite passes", async () => {
+    const draws: number[] = [];
+    const textureSizes: Array<{ width: number; height: number }> = [];
+    const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
+    const device = {
+      lost: new Promise<unknown>(() => undefined),
+      queue: { writeBuffer: () => undefined, writeTexture: () => undefined, copyExternalImageToTexture: () => undefined, submit: () => undefined },
+      createShaderModule: () => ({}),
+      createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
+      createSampler: () => ({}),
+      createTexture: ({ size }: { size: { width: number; height: number } }) => { textureSizes.push(size); return { createView: () => ({}), destroy: () => undefined }; },
+      createBuffer: () => ({ destroy: () => undefined }),
+      createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline: () => undefined, setBindGroup: () => undefined, setVertexBuffer: () => undefined, draw: (count: number) => draws.push(count), end: () => undefined }), finish: () => ({}) }),
+      destroy: () => undefined,
+    };
+    const original = globalThis.OffscreenCanvas;
+    class FakeOffscreenCanvas {
+      width: number;
+      height: number;
+      constructor(width: number, height: number) { this.width = width; this.height = height; }
+      getContext() { return context; }
+      transferToImageBitmap() { return { close: () => undefined } as ImageBitmap; }
+    }
+    Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeOffscreenCanvas });
+    try {
+      const navigatorLike: Parameters<typeof WebGpuSceneRenderer.create>[0] = { gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } };
+      const renderer = await WebGpuSceneRenderer.create(navigatorLike);
+      const shadow = {
+        ...createNode("rectangle", 4, 6), width: 40, height: 20,
+        effectStack: [
+          { dropShadow: { offsetX: -2, offsetY: 1, blurRadius: 3, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .1 }, visible: true } },
+          { dropShadow: { offsetX: 3, offsetY: 4, blurRadius: 8, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true } },
+        ],
+      };
+      const input = { nodes: [shadow], viewport: { x: 0, y: 0, zoom: 1 }, width: 32, height: 16, dpr: 1, sceneKey: "drop-shadow" };
+      const first = renderer.render(input);
+      expect(first.renderedNodeIds).toEqual(new Set([shadow.id]));
+      expect(first.effectTextures).toMatchObject({ textures: 4, bytes: 8_192, allocations: 4, active: 0, rejected: 0 });
+      expect(draws).toEqual([6, 6, 6, 6, 6, 6, 6]);
+      expect(textureSizes).toEqual(Array.from({ length: 4 }, () => ({ width: 32, height: 16, depthOrArrayLayers: 1 })));
+      expect(renderer.render(input).effectTextures).toMatchObject({ textures: 4, cacheHits: 4, allocations: 0, active: 0 });
+      renderer.destroy();
+    } finally {
+      if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+      else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
+    }
+  });
+
+  it("executes one Layer Blur through the same bounded source and blur surfaces without repainting its source", async () => {
+    const draws: number[] = [];
+    const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
+    const device = {
+      lost: new Promise<unknown>(() => undefined),
+      queue: { writeBuffer: () => undefined, writeTexture: () => undefined, copyExternalImageToTexture: () => undefined, submit: () => undefined },
+      createShaderModule: () => ({}), createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }), createBuffer: () => ({ destroy: () => undefined }), createSampler: () => ({}), createBindGroup: () => ({}),
+      createTexture: () => ({ createView: () => ({}), destroy: () => undefined }),
+      createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline: () => undefined, setBindGroup: () => undefined, setVertexBuffer: () => undefined, draw: (count: number) => draws.push(count), end: () => undefined }), finish: () => ({}) }),
+    };
+    const original = globalThis.OffscreenCanvas;
+    class FakeOffscreenCanvas { width = 0; height = 0; getContext() { return context; } transferToImageBitmap() { return {} as ImageBitmap; } }
+    Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeOffscreenCanvas });
+    try {
+      const renderer = await WebGpuSceneRenderer.create({ gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } });
+      const layerBlur = { ...createNode("rectangle", 4, 6), width: 40, height: 20, effectStack: [{ layerBlur: { radius: 8, visible: true } }] };
+      const first = renderer.render({ nodes: [layerBlur], viewport: { x: 0, y: 0, zoom: 1 }, width: 32, height: 16, dpr: 1, sceneKey: "layer-blur" });
+      expect(first.renderedNodeIds).toEqual(new Set([layerBlur.id]));
+      expect(first.effectTextures).toMatchObject({ textures: 2, bytes: 4_096, allocations: 2, active: 0, rejected: 0 });
+      expect(draws).toEqual([6, 6, 6]);
+      renderer.destroy();
+    } finally {
+      if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+      else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
+    }
+  });
+
   it("classifies GPU failures without retaining browser error text", () => {
     expect(classifyWebGpuRendererFailure({ name: "GPUOutOfMemoryError", message: "device allocation exceeded" })).toBe("WEBGPU_OUT_OF_MEMORY");
     expect(classifyWebGpuRendererFailure({ name: "GPUValidationError", message: "queue.writeTexture validation failed" })).toBe("WEBGPU_UPLOAD_FAILED");
@@ -253,6 +380,7 @@ describe("WebGPU scene vertex projection", () => {
       const initial = renderer.render(input);
       expect(initial.renderedNodeIds).toEqual(new Set([first.id, second.id]));
       expect(initial.imageTextures).toEqual({ textures: 1, bytes: 2_048, cacheHits: 1, uploads: 1, releases: 0 });
+      expect(initial.effectTextures).toEqual({ textures: 0, bytes: 0, active: 0, cacheHits: 0, allocations: 0, evictions: 0, rejected: 0 });
       expect(renderer.render(input).gpuUploadBytes).toBe(GPU_CAMERA_UNIFORM_BYTES + 80);
       const released = renderer.render({ ...input, nodes: [], imageBitmaps: new Map(), sceneKey: "images-removed" });
       expect(released.imageTextures).toEqual({ textures: 0, bytes: 0, cacheHits: 0, uploads: 0, releases: 1 });
@@ -313,9 +441,51 @@ describe("WebGPU scene vertex projection", () => {
       renderer.render({ nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 3 });
       renderer.destroy();
 
-      expect(created).toEqual([48, 32, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES]);
-      expect(destroyed).toEqual([MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, 48, 32]);
+      expect(created).toEqual([48, 32, 32, 16, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES]);
+      expect(destroyed).toEqual([MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, 48, 32, 32, 16]);
       expect(clearValues).toEqual([{ r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }, { r: 0, g: 0, b: 0, a: 0 }]);
+    } finally {
+      if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+      else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });
+    }
+  });
+
+  it("executes one zero-spread Inner Shadow through the bounded source/blur pair and composites it with source alpha", async () => {
+    const draws: number[] = [];
+    const blurUniforms: Float32Array[] = [];
+    const innerUniforms: Float32Array[] = [];
+    const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
+    const device = {
+      lost: new Promise<unknown>(() => undefined),
+      queue: {
+        writeBuffer: (_buffer: unknown, _offset: number, data: Float32Array) => {
+          if (data.length === 8) blurUniforms.push(data);
+          if (data.length === 4) innerUniforms.push(data);
+        },
+        writeTexture: () => undefined,
+        copyExternalImageToTexture: () => undefined,
+        submit: () => undefined,
+      },
+      createShaderModule: () => ({}), createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }), createBuffer: () => ({ destroy: () => undefined }), createSampler: () => ({}), createBindGroup: () => ({}),
+      createTexture: () => ({ createView: () => ({}), destroy: () => undefined }),
+      createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline: () => undefined, setBindGroup: () => undefined, setVertexBuffer: () => undefined, draw: (count: number) => draws.push(count), end: () => undefined }), finish: () => ({}) }),
+    };
+    const original = globalThis.OffscreenCanvas;
+    class FakeOffscreenCanvas { width = 0; height = 0; getContext() { return context; } transferToImageBitmap() { return {} as ImageBitmap; } }
+    Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeOffscreenCanvas });
+    try {
+      const renderer = await WebGpuSceneRenderer.create({ gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } });
+      const innerShadow = {
+        ...createNode("rectangle", 4, 6), width: 40, height: 20,
+        effectStack: [{ innerShadow: { offsetX: -2, offsetY: 3, blurRadius: 8, spread: 0, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 }, visible: true } }],
+      };
+      const result = renderer.render({ nodes: [innerShadow], viewport: { x: 0, y: 0, zoom: 1 }, width: 32, height: 16, dpr: 1, sceneKey: "inner-shadow" });
+      expect(result.renderedNodeIds).toEqual(new Set([innerShadow.id]));
+      expect(result.effectTextures).toMatchObject({ textures: 2, bytes: 4_096, allocations: 2, active: 0, rejected: 0 });
+      expect(draws).toEqual([6, 6, 6]);
+      expect(blurUniforms).toContainEqual(new Float32Array([8, 1 / 32, 1 / 16, 0, -2, 3, 0, 0]));
+      expect(innerUniforms).toContainEqual(new Float32Array([0, 0, 0, 64 / 255]));
+      renderer.destroy();
     } finally {
       if (original === undefined) delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
       else Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: original });

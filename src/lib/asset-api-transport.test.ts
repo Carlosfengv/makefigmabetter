@@ -38,7 +38,7 @@ describe("AssetApiTransport", () => {
   });
 
   it("uses the document-scoped writer bootstrap before an attachment", async () => {
-    const fetch = vi.fn(async () => new Response(undefined, { status: 204 }));
+    const fetch = vi.fn(async () => new Response(undefined, { status: 201 }));
     const transport = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch });
     await transport.grantDocumentWriter("document");
     await transport.attachToDocument("document", "asset");
@@ -46,6 +46,38 @@ describe("AssetApiTransport", () => {
       "http://127.0.0.1:8789/v1/documents/document/writers",
       "http://127.0.0.1:8789/v1/documents/document/assets/asset",
     ]);
+  });
+
+  it("asks the Asset Service to authorize a source-to-target document transfer", async () => {
+    const fetch = vi.fn(async () => new Response(undefined, { status: 201 }));
+    const transport = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch });
+
+    await expect(transport.attachFromDocument("source-document", "target-document", "asset")).resolves.toBe("created");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8789/v1/documents/target-document/assets/asset/attach-from-document",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ sourceDocumentId: "source-document" }) }),
+    );
+  });
+
+  it("reverts only a newly created clipboard attachment", async () => {
+    const fetch = vi.fn(async () => new Response(undefined, { status: 204 }));
+    const transport = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch });
+
+    await transport.detachClipboardAttachment("target-document", "asset");
+
+    expect(fetch.mock.calls[0][0]).toContain("/documents/target-document/assets/asset/clipboard-attachment");
+    expect(fetch.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("finalizes a successful clipboard attachment without detaching it", async () => {
+    const fetch = vi.fn(async () => new Response(undefined, { status: 204 }));
+    const transport = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch });
+
+    await transport.finalizeClipboardAttachment("target-document", "asset");
+
+    expect(fetch.mock.calls[0][0]).toContain("/documents/target-document/assets/asset/clipboard-attachment/commit");
+    expect(fetch.mock.calls[0][1]).toMatchObject({ method: "POST" });
   });
 
   it("downloads bytes through a short-lived document-scoped grant", async () => {

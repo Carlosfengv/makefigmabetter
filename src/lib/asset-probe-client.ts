@@ -1,5 +1,6 @@
 import type { AssetProbeResult } from "./asset-probe";
 import type { AssetKind } from "./untrusted-asset";
+import { createId } from "./editor-protocol";
 
 type ProbeMessage = { type: "result"; requestId: string; detectedMime: string; admission: AssetProbeResult["admission"]; rasterDimensions?: AssetProbeResult["rasterDimensions"] } | { type: "cancelled"; requestId: string };
 
@@ -17,7 +18,7 @@ export function probeAssetInWorker(
       return;
     }
     const worker = new Worker(new URL("../workers/asset-probe.worker.ts", import.meta.url));
-    const requestId = crypto.randomUUID();
+    const requestId = createId();
     let finished = false;
     const finish = () => {
       if (finished) return false;

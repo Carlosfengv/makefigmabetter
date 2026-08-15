@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { multiplyAffine, transformPoint } from "./scene-transform";
 import { resizeRelativeLineEndpointFromWorldGesture } from "./relative-line-endpoint-resize";
 
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
@@ -34,5 +35,26 @@ describe("relative Line endpoint resize", () => {
     expect(resized?.relativeTransform.d).toBeCloseTo(-1);
     expect(resized?.relativeTransform.e).toBe(120);
     expect(resized?.relativeTransform.f).toBe(0);
+  });
+
+  it("clamps a short end drag while leaving the fixed world start untouched", () => {
+    const resized = resizeRelativeLineEndpointFromWorldGesture({ width: 100, relativeTransform: identity }, identity, "end", { x: 2, y: 0 });
+
+    expect(resized?.width).toBe(4);
+    expect(transformPoint(resized!.relativeTransform, { x: 0, y: 0 })).toEqual({ x: 0, y: 0 });
+    expect(transformPoint(resized!.relativeTransform, { x: resized!.width, y: 0 })).toEqual({ x: 4, y: 0 });
+  });
+
+  it("clamps a collapsed start drag under a rotated mirrored parent without moving the fixed endpoint", () => {
+    const parent = { a: 0, b: -1, c: -1, d: 0, e: 40, f: 30 };
+    const relative = { a: -1, b: 0, c: 0, d: 1, e: 10, f: 5 };
+    const world = multiplyAffine(parent, relative);
+    const fixedBefore = transformPoint(world, { x: 100, y: 0 });
+    const resized = resizeRelativeLineEndpointFromWorldGesture({ width: 100, relativeTransform: relative }, world, "start", fixedBefore);
+    const nextWorld = multiplyAffine(parent, resized!.relativeTransform);
+
+    expect(resized?.width).toBe(4);
+    expect(transformPoint(nextWorld, { x: resized!.width, y: 0 }).x).toBeCloseTo(fixedBefore.x);
+    expect(transformPoint(nextWorld, { x: resized!.width, y: 0 }).y).toBeCloseTo(fixedBefore.y);
   });
 });

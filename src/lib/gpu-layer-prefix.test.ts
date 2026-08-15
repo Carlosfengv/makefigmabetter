@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gpuLayerPrefix } from "./gpu-layer-prefix";
+import { gpuLayerPrefix, isGpuInnerShadowEffectNode, isGpuLayerBlurEffectNode, requiresCanvasEffectOrBlend } from "./gpu-layer-prefix";
 import type { CanvasNode } from "./editor-protocol";
 
 const node = (id: string, kind: CanvasNode["kind"], assetId?: string): CanvasNode => ({ id, kind, assetId, name: id, x: 0, y: 0, width: 10, height: 10, rotation: 0, fill: "#ffffff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 });
@@ -50,5 +50,29 @@ describe("GPU layer prefix", () => {
   it("keeps the whole suffix in Canvas when an affine-native layer is encountered", () => {
     const nodes = [node("frame", "frame"), node("skewed", "rectangle"), node("later", "rectangle")];
     expect(gpuLayerPrefix(nodes, new Set(), new Set(), (entry) => entry.id !== "skewed").map((entry) => entry.id)).toEqual(["frame"]);
+  });
+
+  it("admits bounded Drop Shadows, one Layer Blur and one zero-spread Inner Shadow while keeping richer E1 effects in Canvas", () => {
+    expect(requiresCanvasEffectOrBlend({ ...node("multiply", "rectangle"), blendMode: "multiply" })).toBe(true);
+    const shadow = { ...node("shadow", "rectangle"), effectStack: [{ dropShadow: { offsetX: 0, offsetY: 2, blurRadius: 6, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .2 }, visible: true } }] };
+    const stackedShadow = { ...shadow, effectStack: [...shadow.effectStack, { dropShadow: { offsetX: -2, offsetY: 1, blurRadius: 3, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .1 }, visible: true } }] };
+    expect(requiresCanvasEffectOrBlend(stackedShadow)).toBe(false);
+    expect(gpuLayerPrefix([node("first", "rectangle"), stackedShadow, node("later", "rectangle")], new Set()).map((entry) => entry.id)).toEqual(["first", "shadow"]);
+    const eightShadows = { ...shadow, effectStack: Array.from({ length: 8 }, (_, index) => ({ dropShadow: { offsetX: index, offsetY: 2, blurRadius: 6, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .2 }, visible: true } })) };
+    expect(requiresCanvasEffectOrBlend(eightShadows)).toBe(false);
+    expect(requiresCanvasEffectOrBlend({ ...eightShadows, effectStack: [...eightShadows.effectStack, eightShadows.effectStack[0]!] })).toBe(true);
+    expect(requiresCanvasEffectOrBlend({ ...shadow, effectStack: [{ dropShadow: { offsetX: 0, offsetY: 2, blurRadius: 6, spread: 1, color: { space: "srgb", components: [0, 0, 0], alpha: .2 }, visible: true } }] })).toBe(true);
+    const layerBlur = { ...node("layer-blur", "rectangle"), effectStack: [{ layerBlur: { radius: 12, visible: true } }] };
+    expect(isGpuLayerBlurEffectNode(layerBlur)).toBe(true);
+    expect(requiresCanvasEffectOrBlend(layerBlur)).toBe(false);
+    expect(gpuLayerPrefix([node("first", "rectangle"), layerBlur, node("later", "rectangle")], new Set()).map((entry) => entry.id)).toEqual(["first", "layer-blur"]);
+    expect(requiresCanvasEffectOrBlend({ ...layerBlur, effectStack: [...layerBlur.effectStack, { dropShadow: { offsetX: 0, offsetY: 2, blurRadius: 6, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .2 }, visible: true } }] })).toBe(true);
+    expect(requiresCanvasEffectOrBlend({ ...node("hidden-blur", "rectangle"), effectStack: [{ layerBlur: { radius: 12, visible: false } }] })).toBe(false);
+    const innerShadow = { ...node("inner-shadow", "rectangle"), effectStack: [{ innerShadow: { offsetX: -2, offsetY: 3, blurRadius: 8, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .25 }, visible: true } }] };
+    expect(isGpuInnerShadowEffectNode(innerShadow)).toBe(true);
+    expect(requiresCanvasEffectOrBlend(innerShadow)).toBe(false);
+    expect(gpuLayerPrefix([node("first", "rectangle"), innerShadow, node("later", "rectangle")], new Set()).map((entry) => entry.id)).toEqual(["first", "inner-shadow"]);
+    expect(requiresCanvasEffectOrBlend({ ...innerShadow, effectStack: [{ innerShadow: { ...innerShadow.effectStack[0]!.innerShadow!, spread: 1 } }] })).toBe(true);
+    expect(requiresCanvasEffectOrBlend({ ...innerShadow, effectStack: [...innerShadow.effectStack, layerBlur.effectStack[0]!] })).toBe(true);
   });
 });

@@ -5,7 +5,7 @@ import type { EditorInputEvent } from "./editor-protocol";
 describe("transferable input batches", () => {
   it("round-trips mixed pointer and wheel input without SharedArrayBuffer", () => {
     const events: EditorInputEvent[] = [
-      { type: "pointer", event: "down", x: 10.5, y: -3.25, shiftKey: true, altKey: true, button: 0, drillDown: true, occurredAt: 123.5 },
+      { type: "pointer", event: "down", x: 10.5, y: -3.25, shiftKey: true, altKey: true, button: 0, drillDown: true, deepSelect: true, splitVectorSegment: true, occurredAt: 123.5 },
       { type: "pointer", event: "move", x: 11.5, y: 4, shiftKey: false, altKey: false, button: -1 },
       { type: "pointer", event: "leave", x: 12, y: 5, shiftKey: false, altKey: false, button: -1 },
       { type: "wheel", x: 12, y: 6, deltaX: -7.5, deltaY: 20.25, ctrlKey: true, occurredAt: 456.25 },

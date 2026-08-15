@@ -21,17 +21,21 @@ export function resizeLegacyLineEndpoint(
   current: LinePoint,
   minLength = MIN_LINE_LENGTH,
 ): LineGeometry {
-  const { start, end } = lineEndpoints(geometry);
-  const nextStart = endpoint === "start" ? current : start;
-  const nextEnd = endpoint === "end" ? current : end;
-  const x = nextStart.x;
-  const y = nextStart.y;
-  const dx = nextEnd.x - nextStart.x;
-  const dy = nextEnd.y - nextStart.y;
+  const { start: originalStart, end } = lineEndpoints(geometry);
+  const fixed = endpoint === "start" ? end : originalStart;
+  const requested = current;
+  const dx = endpoint === "start" ? fixed.x - requested.x : requested.x - fixed.x;
+  const dy = endpoint === "start" ? fixed.y - requested.y : requested.y - fixed.y;
   const distance = Math.hypot(dx, dy);
   const fallback = geometry.rotation * Math.PI / 180;
   const radians = distance > 1e-9 ? Math.atan2(dy, dx) : fallback;
-  return { x, y, width: Math.max(minLength, distance), rotation: radians * 180 / Math.PI };
+  const length = Math.max(minLength, distance);
+  const offsetX = Math.abs(Math.cos(radians) * length) < 1e-12 ? 0 : Math.cos(radians) * length;
+  const offsetY = Math.abs(Math.sin(radians) * length) < 1e-12 ? 0 : Math.sin(radians) * length;
+  const nextStart = endpoint === "start"
+    ? { x: fixed.x - offsetX, y: fixed.y - offsetY }
+    : fixed;
+  return { x: nextStart.x, y: nextStart.y, width: length, rotation: radians * 180 / Math.PI };
 }
 
 export function hasCommittedLineEndpointResize(before: LineGeometry, after: LineGeometry): boolean {

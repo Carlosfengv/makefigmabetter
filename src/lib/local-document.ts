@@ -1,4 +1,6 @@
 import type { CoreLocalSnapshot, LegacyProjectionSnapshot, LocalDocumentSnapshot, LocalJournalEntry, PendingRemoteOperation, ViewportRecord } from "@/lib/editor-protocol";
+import { createId } from "./editor-protocol";
+import { sha256Hex } from "./sha256";
 
 const DATABASE = "makefigma-local";
 const DOCUMENTS = "documents";
@@ -70,8 +72,7 @@ function normalizedSnapshot(snapshot: CoreLocalSnapshot): CoreLocalSnapshot {
 
 async function contentHash(snapshot: CoreLocalSnapshot) {
   const bytes = new TextEncoder().encode(JSON.stringify(normalizedSnapshot(snapshot)));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(bytes);
 }
 
 function storageManager() {
@@ -392,7 +393,7 @@ export async function saveLocalDocument(snapshot: CoreLocalSnapshot, documentId?
   const database = await openDatabase();
   const key = documentKey(documentId);
   const persisted = normalizedSnapshot(snapshot);
-  const id = crypto.randomUUID();
+  const id = createId();
   const hash = await contentHash(persisted);
   const encodedSize = new TextEncoder().encode(JSON.stringify(persisted)).byteLength;
   await ensureStorageCapacity(encodedSize);

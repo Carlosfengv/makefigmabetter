@@ -15,6 +15,6 @@ describe("dynamic render quality", () => {
     expect(resolveRenderQuality(far, .59, true).zoomBucket).toBe("normal");
     const near = resolveRenderQuality({ tier: "interactive", zoomBucket: "near" }, 1, true);
     expect(near.zoomBucket).toBe("near");
-    expect(renderDpr(2, near)).toBe(1.5);
+    expect(renderDpr(2, near)).toBe(1.4);
   });
 });

@@ -8,17 +8,17 @@ type InspectorNodeKind = CanvasNode["kind"];
  * Inspector so the UI never offers a write that has no visual node target.
  */
 export function supportsGenericAppearanceInspector(kind: InspectorNodeKind) {
-  return kind !== "group" && kind !== "line";
+  return kind !== "group" && kind !== "line" && kind !== "slice";
 }
 
 export function supportsPaintStackInspector(kind: InspectorNodeKind) {
-  return kind !== "group" && kind !== "text";
+  return kind !== "group" && kind !== "text" && kind !== "slice";
 }
 
 /** Join, miter and dash belong to every drawable Stroke. Endpoint caps stay
  * Line-only, but closed shapes must not lose their Figma Stroke details. */
 export function supportsStrokeDetailsInspector(kind: InspectorNodeKind) {
-  return kind !== "group" && kind !== "text";
+  return kind !== "group" && kind !== "text" && kind !== "slice";
 }
 
 export function supportsCornerRadiusInspector(kind: InspectorNodeKind) {
@@ -31,6 +31,8 @@ export function supportsCornerRadiusInspector(kind: InspectorNodeKind) {
 export function supportsStrokeAlignInspector(node: Pick<CanvasNode, "kind" | "arcData">) {
   return node.kind === "frame"
     || node.kind === "rectangle"
+    || node.kind === "polygon"
+    || node.kind === "star"
     || (node.kind === "ellipse" && !node.arcData);
 }
 
@@ -55,7 +57,7 @@ export function mixedInspectorCapabilities(nodes: readonly Pick<CanvasNode, "kin
   const every = (predicate: (node: Pick<CanvasNode, "kind" | "arcData">) => boolean) => nodes.length > 0 && nodes.every(predicate);
   return {
     fill: every((node) => supportsGenericAppearanceInspector(node.kind)),
-    strokeWidth: every((node) => node.kind !== "group" && node.kind !== "text"),
+    strokeWidth: every((node) => node.kind !== "group" && node.kind !== "text" && node.kind !== "slice"),
     strokeAlign: supportsMixedStrokeAlignInspector(nodes),
     perSideStroke: every((node) => supportsPerSideStrokeInspector(node.kind)),
     corners: every((node) => supportsCornerRadiusInspector(node.kind)),
@@ -63,5 +65,6 @@ export function mixedInspectorCapabilities(nodes: readonly Pick<CanvasNode, "kin
     lineStroke: every((node) => node.kind === "line"),
     frameClip: every((node) => node.kind === "frame"),
     sectionContents: every((node) => node.kind === "section"),
+    dropShadow: every((node) => node.kind !== "group" && node.kind !== "slice"),
   } as const;
 }

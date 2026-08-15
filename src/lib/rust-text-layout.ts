@@ -28,6 +28,13 @@ export type RustTextLayout = {
   lines: RustTextLayoutLine[];
 };
 
+/** A zero glyph ID means the explicitly selected font cannot draw at least one
+ * source cluster. The browser may resolve that cluster through a fallback font,
+ * whose advance is not safe to combine with a single-font Rust line range. */
+export function hasMissingRustTextGlyph(layout: RustTextLayout): boolean {
+  return layout.lines.some((line) => line.glyphs.some((glyph) => glyph.glyphId === 0));
+}
+
 /** Validates the derived ICU4X/Rustybuzz layout before presentation consumes it.
  * Any malformed worker/WASM value returns undefined so Canvas can retain its
  * explicit browser fallback without allowing an invalid byte range to rewrite text. */

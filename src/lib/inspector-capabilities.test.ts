@@ -33,33 +33,33 @@ describe("Inspector capability boundaries", () => {
   it("only exposes mixed controls that every selected node can accept", () => {
     expect(mixedInspectorCapabilities([])).toEqual({
       fill: false, strokeWidth: false, strokeAlign: false, perSideStroke: false,
-      corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false,
+      corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: false,
     });
     expect(mixedInspectorCapabilities([{ kind: "frame" }, { kind: "rectangle" }])).toEqual({
       fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: true,
-      corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false,
+      corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: true,
     });
     expect(mixedInspectorCapabilities([{ kind: "line" }, { kind: "line" }])).toEqual({
       fill: false, strokeWidth: true, strokeAlign: false, perSideStroke: false,
-      corners: false, strokeDetails: true, lineStroke: true, frameClip: false, sectionContents: false,
+      corners: false, strokeDetails: true, lineStroke: true, frameClip: false, sectionContents: false, dropShadow: true,
     });
     expect(mixedInspectorCapabilities([{ kind: "section" }, { kind: "group" }])).toEqual({
       fill: false, strokeWidth: false, strokeAlign: false, perSideStroke: false,
-      corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false,
+      corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: false,
     });
     expect(mixedInspectorCapabilities([{ kind: "ellipse" }, { kind: "ellipse", arcData: { startingAngle: 0, endingAngle: 180, innerRadius: 0 } }]).strokeAlign).toBe(false);
   });
 
   it("covers every common-node single selection and hostile mixed boundaries", () => {
     const expected = {
-      frame: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: true, corners: true, strokeDetails: true, lineStroke: false, frameClip: true, sectionContents: false },
-      rectangle: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: true, corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false },
-      ellipse: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false },
-      line: { fill: false, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: true, frameClip: false, sectionContents: false },
-      section: { fill: true, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: true },
-      image: { fill: true, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false },
-      text: { fill: true, strokeWidth: false, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false },
-      group: { fill: false, strokeWidth: false, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false },
+      frame: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: true, corners: true, strokeDetails: true, lineStroke: false, frameClip: true, sectionContents: false, dropShadow: true },
+      rectangle: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: true, corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: true },
+      ellipse: { fill: true, strokeWidth: true, strokeAlign: true, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: true },
+      line: { fill: false, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: true, frameClip: false, sectionContents: false, dropShadow: true },
+      section: { fill: true, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: true, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: true, dropShadow: true },
+      image: { fill: true, strokeWidth: true, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: true, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: true },
+      text: { fill: true, strokeWidth: false, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: true },
+      group: { fill: false, strokeWidth: false, strokeAlign: false, perSideStroke: false, corners: false, strokeDetails: false, lineStroke: false, frameClip: false, sectionContents: false, dropShadow: false },
     } as const;
     Object.entries(expected).forEach(([kind, capabilities]) => {
       expect(mixedInspectorCapabilities([{ kind: kind as keyof typeof expected }])).toEqual(capabilities);
