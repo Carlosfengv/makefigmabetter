@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_SANDBOX_ATTRIBUTE, pluginSandboxSrcDoc } from "./plugin-sandbox-frame";
+import { validatePluginManifest } from "../../runtime/plugin-sandbox";
 
 describe("plugin sandbox fixture", () => {
   it("keeps plugins opaque-origin and self-contained", () => {
@@ -17,5 +18,17 @@ describe("plugin sandbox fixture", () => {
     expect(document).toContain("form-action 'none'");
     expect(document).toContain("\\u003cplugin>");
     expect(document).not.toContain('src="http');
+  });
+
+  it("derives its network CSP only from a validated plugin manifest", () => {
+    const manifest = validatePluginManifest({ id: "com.example.network", name: "Network fixture", apiVersion: 1, permissions: ["network"], networkDomains: ["api.example.com"] });
+    expect(pluginSandboxSrcDoc("network", manifest)).toContain("connect-src https://api.example.com");
+  });
+
+  it("loads a validated plugin bundle through the isolated bootstrap", () => {
+    const manifest = validatePluginManifest({ id: "com.example.bundle", name: "Bundle fixture", apiVersion: 1, permissions: [] });
+    const document = pluginSandboxSrcDoc("bundle", manifest, { pluginId: manifest.id, uiJavaScript: "parent.postMessage({ ready: true }, '*')" });
+    expect(document).toContain("atob(encoded)");
+    expect(document).not.toContain("parent.postMessage({ ready: true }");
   });
 });

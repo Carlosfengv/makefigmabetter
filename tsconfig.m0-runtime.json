@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/runtime/*.ts"],
+  "exclude": ["src/runtime/*.test.ts", "src/runtime/figma-plugin-typings-contract.ts"]
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/runtime/*.ts",
+    "src/components/runtime/runtime-m1-harness.tsx",
+    "src/app/runtime-harness/page.tsx"
+  ],
+  "exclude": ["src/runtime/*.test.ts", "src/runtime/figma-plugin-typings-contract.ts"]
+}
