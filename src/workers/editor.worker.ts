@@ -1,12 +1,15 @@
 /// <reference lib="webworker" />
 
-import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, WorkerToMain } from "@/lib/editor-protocol";
+import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, Viewport, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
+import { createCooperativeYield } from "@/lib/cooperative-yield";
 import { findTopmostCanvasSelectionCandidate, findTopmostHit } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
 import { admitRenderSurface, MAX_RENDER_SURFACE_BYTES } from "@/lib/render-surface-budget";
 import { admitAlphaMaskSurface } from "@/lib/alpha-mask-budget";
 import { admitEffectSurfacePool } from "@/lib/effect-surface-budget";
+import { morphAlphaChannel } from "@/lib/alpha-morphology";
+import { compositeEffectSurface } from "@/lib/canvas-effect-composite";
 import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
 import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
 import { colorToSrgbCss, sampleLinearGradientForCanvas } from "@/lib/color-rendering";
@@ -14,8 +17,9 @@ import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
 import { styledTextSpans, styledTextVisualSpans, type RenderTextStyle } from "@/lib/text-style-runs";
 import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
 import { validateClipboardCapture } from "@/lib/editor-clipboard";
+import { resolveFigmaRestAssetBindings, resolveFigmaRestImportBatch } from "@/lib/figma-rest-import";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
 import { sha256Bytes } from "../lib/sha256";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
@@ -38,21 +42,26 @@ import { normalizePageSelection } from "@/lib/page-selection";
 import { withManualAutoLayoutSizing } from "@/lib/auto-layout-sizing";
 import { movableSelectionIds } from "@/lib/selection-move-roots";
 import { resolveSelectionNudge } from "@/lib/selection-nudge";
+import { resolveArrangeCommand } from "@/lib/arrange";
 import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
-import { renderDpr, resolveRenderQuality, type RenderQualityState } from "@/lib/render-quality";
+import { renderDpr, resolveRenderQuality, vectorPresentationTolerance, type RenderQualityState } from "@/lib/render-quality";
 import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
+import { showsPersistentCanvasLayerName } from "@/lib/canvas-layer-name";
 import { cacheAsset, readCachedAsset } from "@/lib/asset-byte-cache";
 import { ImageBitmapCache } from "@/lib/image-bitmap-cache";
 import { decodeRasterInWorker } from "@/lib/asset-decode-client";
 import { MAX_RASTER_DECODED_BYTES } from "@/lib/untrusted-asset";
 import { FontFaceRegistry } from "@/lib/font-face-registry";
+import { fontVariationCss } from "@/lib/font-variation-axes";
+import { documentFontFamilyChain } from "@/lib/document-font-family-chain";
 import { cssLineBoxBaseline as resolveCssLineBoxBaseline } from "@/lib/text-baseline";
 import { parseRustGpuSceneBatch } from "@/lib/rust-gpu-batch";
 import { hasMissingRustTextGlyph, parseRustTextLayout, type RustTextLayout, type RustTextVisualRun } from "@/lib/rust-text-layout";
+import { textFrozenLayoutFace } from "@/lib/text-svg-layout-input";
 import { parseRustTextCaretLayout } from "@/lib/rust-text-caret";
 import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
-import { orderNodesByRustRenderCommands, parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
+import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
@@ -66,6 +75,10 @@ import { decorativeCapMesh, isDecorativeCap } from "@/lib/decorative-cap-mesh";
 import { hasCommittedSelectionResize, scaleLegacySelectionGeometry } from "@/lib/selection-resize";
 import { hasCommittedSelectionTransform, scaleSelectionTransforms, type SelectionTransformPatch } from "@/lib/selection-transform-resize";
 import { parametricShapePoints as fallbackParametricShapePoints } from "@/lib/parametric-shape";
+import { traceShapeWithTextDecorations, traceShapeWithTextPath } from "@/lib/shape-with-text-path";
+import { layoutTextPath } from "@/lib/text-path-layout";
+import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "@/lib/connector-presentation";
+import { affineScreenMatrix, transformGroupRepeatMatrices } from "@/lib/transform-group-repeat";
 import { traceVectorPath } from "@/lib/vector-path";
 import { rotateSelectionAroundWorldPoint, type SelectionRotationPatch } from "@/lib/selection-rotation";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
@@ -75,14 +88,19 @@ import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
 import { fullStateReplayBatch, historyReplayBatch } from "@/lib/history-replay-batch";
 import { canvasNodeFromWasmProjection } from "@/lib/wasm-projection-node";
 import { visibleNodesOnPage } from "@/lib/hierarchy-visibility";
+import { fitViewportToBounds, isSameRenderedViewport, pageContentBounds, selectCoveringViewportFrame } from "@/lib/page-viewport";
 import { isFullyClippedForSelection } from "@/lib/selection-clip";
-import { invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode, type AffineMatrix } from "@/lib/scene-transform";
+import { invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForTransform, worldSpaceProjectionNodes, worldTransformForNode, worldTransformsForNodes, type AffineMatrix } from "@/lib/scene-transform";
 import { worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
 import { closedShapeStrokeLocalBounds } from "@/lib/closed-shape-stroke-bounds";
 import { ellipseStrokeRing } from "@/lib/ellipse-stroke-ring";
 import { frameDropTargetAtPoint, frameExitTargetAtPoint } from "@/lib/frame-drop-target";
 import { autoLayoutArrowReorder, autoLayoutDropReorder } from "@/lib/auto-layout-reorder";
 import { joinCrossVectorEndpoints } from "@/lib/vector-cross-connect";
+import { compileScene, findTopmostSceneHit, sceneNodesInPaintOrder } from "@/runtime/scene-compiler";
+import { specialNodeFallback } from "@/lib/special-node-fallback";
+import { connectorPathForNode, traceConnectorPath } from "@/lib/connector-path";
+import { DEFAULT_PAGE_ID, migrateLegacyFigmaBootstrapPage } from "@/lib/document-bootstrap";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -120,7 +138,7 @@ type PenDraft = {
   previewWorld?: { x: number; y: number };
 };
 type WasmProjectionNode = CoreProjectionNode;
-type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; nodes: WasmProjectionNode[] };
+type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; canonicalHash?: string; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; nodes: WasmProjectionNode[]; retiredIds?: string[] };
 type WasmDocumentEngine = {
   readonly revision: bigint;
   readonly can_undo: boolean;
@@ -131,6 +149,7 @@ type WasmDocumentEngine = {
   create_node(transactionId: string, baseRevision: bigint, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
   create_node_on_page(transactionId: string, baseRevision: bigint, pageId: string, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
   create_page(transactionId: string, baseRevision: bigint, pageId: string, name: string): bigint;
+  create_page_at_position(transactionId: string, baseRevision: bigint, pageId: string, name: string, positionId: string): bigint;
   seed_node(transactionId: string, baseRevision: bigint, nodeId: string, kind: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
   rename_node(transactionId: string, baseRevision: bigint, nodeId: string, name: string): bigint;
   update_node(transactionId: string, baseRevision: bigint, nodeId: string, name: string, x: number, y: number, width: number, height: number, rotation: number, fill: string, stroke: string, strokeWidth: number, opacity: number, cornerRadius: number, visible: boolean, locked: boolean, text: string): bigint;
@@ -151,7 +170,7 @@ type WasmDocumentEngine = {
 type WasmRuntime = typeof import("@/wasm/generated/editor_wasm");
 
 let canvas: OffscreenCanvas | undefined;
-const defaultPageId = "00000000-0000-0000-0000-000000000001";
+const defaultPageId = DEFAULT_PAGE_ID;
 let pages: CanvasPage[] = [{ id: defaultPageId, name: "Page 1", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" }];
 let activePageId = defaultPageId;
 let context: OffscreenCanvasRenderingContext2D | null = null;
@@ -161,8 +180,43 @@ let dpr = 1;
 let deviceDpr = 1;
 let renderQuality: RenderQualityState = { tier: "settled", zoomBucket: "normal" };
 let renderQualityTimer: ReturnType<typeof setTimeout> | undefined;
+let renderVisible = true;
+let progressivePaintGeneration = 0;
+let progressivePaintKey: string | undefined;
+let completedProgressivePaintKey: string | undefined;
+let progressivePaintCompletion: Promise<void> | undefined;
+let resolveProgressivePaintCompletion: (() => void) | undefined;
+function finishProgressivePaint() {
+  progressivePaintKey = undefined;
+  progressivePaintCompletion = undefined;
+  resolveProgressivePaintCompletion?.();
+  resolveProgressivePaintCompletion = undefined;
+}
+let presentedPageId: string | undefined;
+let presentedSurfaceWidth = 0;
+let presentedSurfaceHeight = 0;
+let cachedPresentedFrame: OffscreenCanvas | undefined;
+let cachedPresentedFramePageId: string | undefined;
+let cachedPresentedFrameSceneKey: string | undefined;
+let cachedPresentedFrameViewport: Viewport | undefined;
+let cachedPresentedFrameSurfaceWidth = 0;
+let cachedPresentedFrameSurfaceHeight = 0;
+let cachedOverviewFrame: {
+  canvas: OffscreenCanvas;
+  sceneKey: string;
+  viewport: Viewport;
+  width: number;
+  height: number;
+} | undefined;
+// The offscreen Canvas is presented by `render()` itself. Publishing every
+// wheel sample back to React makes the UI message queue part of the input path
+// and can starve subsequent wheel events despite an already completed render.
+// Keep inspector/caption state fresh during a gesture, then publish the exact
+// settled viewport once the quality timer fires.
+const INTERACTIVE_VIEW_STATE_INTERVAL_MS = 50;
+let lastInteractiveViewStateAt = Number.NEGATIVE_INFINITY;
 let tool: ToolKind = "select";
-let nodes: CanvasNode[] = starterNodes();
+let nodes: CanvasNode[] = [];
 /** A Pen gesture remains projection-only until Enter or closing the subpath,
  * so each completed path becomes one canonical Create history item. */
 let penDraft: PenDraft | undefined;
@@ -181,14 +235,18 @@ const imageLoads = new Set<string>();
 const fontFaces = new FontFaceRegistry();
 let nodeById = new Map(nodes.map((node) => [node.id, node]));
 let nodeBoundsById = new Map(nodes.map((node) => [node.id, boundsForNode(node)]));
+let worldTransformById = worldTransformsForNodes(nodes);
 let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
-let selectedIds: string[] = [nodes[0].id];
+let selectedIds: string[] = nodes[0] ? [nodes[0].id] : [];
 /** Page owns the transient selection. It is deliberately not Canonical state,
  * history, or a collaboration operation. */
 const selectionByPage = new Map<string, string[]>();
 /** Vector anchor selection is transient editing state, never Canonical data. */
 let selectedVectorPoints: Array<{ id: string; pointId: string }> = [];
 let viewport = { x: 0, y: 0, zoom: 1 };
+/** View position belongs to a page, not the document. A newly visited page is
+ * fitted once; subsequent visits restore the user's last pan and zoom. */
+const viewportByPage = new Map<string, Viewport>();
 type LocalHistoryEntry = { nodes: CanvasNode[]; advancesRevision: boolean };
 const history: LocalHistoryEntry[] = [];
 let future: LocalHistoryEntry[] = [];
@@ -197,6 +255,10 @@ const undoOrder: HistoryKind[] = [];
 let redoOrder: HistoryKind[] = [];
 const preservedProjectionNodes = new Map<string, PresentationNode>();
 let revision = 0;
+/** M4A's shared derived scene. It is rebuilt with the node/spatial indexes and
+ * never enters a Snapshot, transaction, Canonical hash or collaboration wire. */
+let compiledScene: ReturnType<typeof compileScene> | undefined;
+let compiledSceneFallbackSignature = "";
 let documentId = "00000000-0000-0000-0000-000000000000";
 let drag: Drag | undefined;
 let hoveredId: string | undefined;
@@ -246,10 +308,23 @@ type RustGpuTextProjection = { revision: number; key: string; glyphs: readonly W
 const rustGpuTextGlyphs = new Map<string, RustGpuTextProjection>();
 const rustGpuTextLoads = new Set<string>();
 const MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE = 4_096;
+const COMPLEX_DOCUMENT_NODE_THRESHOLD = 1_000;
+const PROGRESSIVE_PAINT_BUDGET_MS = 6;
+const PROGRESSIVE_PAINT_MAX_NODES = 24;
+const progressivePaintTasks: Array<() => void> = [];
+const progressivePaintTaskChannel = new MessageChannel();
+progressivePaintTaskChannel.port1.onmessage = () => {
+  progressivePaintTasks.shift()?.();
+};
+progressivePaintTaskChannel.port1.start();
+function scheduleProgressivePaint(task: () => void) {
+  progressivePaintTasks.push(task);
+  progressivePaintTaskChannel.port2.postMessage(undefined);
+}
 let renderSurfaceBytes = 0;
 let alphaMaskLimitReported = false;
 let effectSurfaceLimitReported = false;
-type EffectSurfaces = { source: OffscreenCanvas; sourceContext: OffscreenCanvasRenderingContext2D; shadow: OffscreenCanvas; shadowContext: OffscreenCanvasRenderingContext2D };
+type EffectSurfaces = { source: OffscreenCanvas; sourceContext: OffscreenCanvasRenderingContext2D; shadow: OffscreenCanvas; shadowContext: OffscreenCanvasRenderingContext2D; scratch: OffscreenCanvas; scratchContext: OffscreenCanvasRenderingContext2D };
 let effectSurfaces: EffectSurfaces | undefined;
 type AlphaMaskSurface = { surface: OffscreenCanvas; context: OffscreenCanvasRenderingContext2D };
 // A mask run only needs one surface at each live nesting depth. Reusing the
@@ -275,15 +350,6 @@ const canonicalBooleanPaths = new Map<string, FlattenedVectorPath | null>();
 let transientSceneVersion = 0;
 const diagnostics = createDiagnosticRecorder();
 const renderPerformance = createRenderPerformanceSampler();
-
-function starterNodes(): CanvasNode[] {
-  return [
-    { id: "00000000-0000-4000-8000-000000000001", pageId: defaultPageId, name: "Product card", kind: "frame", x: -250, y: -170, width: 500, height: 340, rotation: 0, fill: "#fbfbf8", stroke: "#d4d5cb", strokeWidth: 1, radius: 18, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000002", pageId: defaultPageId, name: "Sun disc", kind: "ellipse", x: -194, y: -112, width: 130, height: 130, rotation: 0, fill: "#f6ad62", stroke: "#b4612d", strokeWidth: 1, radius: 0, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000003", pageId: defaultPageId, name: "Signal", kind: "rectangle", x: 48, y: -92, width: 150, height: 46, rotation: 0, fill: "#e6edff", stroke: "#0048FF", strokeWidth: 1, radius: 23, opacity: 1, visible: true },
-    { id: "00000000-0000-4000-8000-000000000004", pageId: defaultPageId, name: "Headline", kind: "text", x: -194, y: 65, width: 370, height: 64, rotation: 0, fill: "#20221c", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1, text: "Design, with intent.", visible: true },
-  ];
-}
 
 function cloneDocument() { return structuredClone(nodes); }
 function storeActivePageSelection() {
@@ -326,21 +392,38 @@ function scaleVectorPath(path: NonNullable<CanvasNode["vectorPath"]>, scaleX: nu
 }
 function activeNodes() {
   const visible = visibleNodesOnPage(nodes, activePageId, defaultPageId);
-  return sortNodesByLayerOrder(visible.map((node) => worldSpaceProjectionNode(nodes, node) ?? node));
+  const projected = sortNodesByLayerOrder(visible.map((node) => nodeById.get(node.id) ?? node));
+  // Every backend starts with the Scene Compiler's display list. The local
+  // sort is retained solely as the cold-start/stale-IR fallback inside
+  // sceneNodesInPaintOrder; it may not define a different render order.
+  return sceneNodesInPaintOrder(compiledScene?.scene, projected);
+}
+function rememberActivePageViewport() {
+  viewportByPage.set(activePageId, { ...viewport });
+}
+function restoreOrFitPageViewport(pageId: string) {
+  const remembered = viewportByPage.get(pageId);
+  viewport = remembered
+    ? { ...remembered }
+    : fitViewportToBounds(pageContentBounds(nodes, pageId, defaultPageId), { width, height });
+  viewportByPage.set(pageId, { ...viewport });
 }
 /** A projected legacy node can continue through the fast Canvas/GPU paths.
  * Skew and reflection intentionally retain their local geometry, so this pass
  * applies the exact world affine directly to Canvas instead of decomposing it.
  */
 function nativeAffineForNode(node: CanvasNode): AffineMatrix | undefined {
-  return node.relativeTransform ? worldTransformForNode(nodes, node.id) : undefined;
+  return node.relativeTransform ? worldTransformById.get(node.id) : undefined;
+}
+function isFrameLike(node: CanvasNode | undefined) {
+  return node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet";
 }
 function boundsForNode(node: CanvasNode) {
-  if (node.kind === "line") {
+  if (node.kind === "line" || node.kind === "connector") {
     const visual = worldLineVisualBounds(nodes, node);
     if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
   }
-  const alignedClosedShape = (node.kind === "ellipse" && !node.arcData) || node.kind === "frame" || node.kind === "rectangle";
+  const alignedClosedShape = (node.kind === "ellipse" && !node.arcData) || isFrameLike(node) || node.kind === "rectangle";
   if (alignedClosedShape && (node.strokeAlign ?? "inside") !== "inside" && node.strokeWidth > 0) {
     const visual = worldVisualBoundsForNode(nodes, node);
     if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
@@ -353,7 +436,8 @@ function boundsForNode(node: CanvasNode) {
     const bounds = canonicalParametricVisualBounds(node);
     if (bounds) return worldVectorBounds(node, bounds);
   }
-  const bounds = nativeAffineForNode(node) ? worldBoundsForNode(nodes, node) : undefined;
+  const affine = nativeAffineForNode(node);
+  const bounds = affine ? worldBoundsForTransform(node, affine) : undefined;
   return bounds ? { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top } : rotatedNodeBounds(node);
 }
 function worldVectorBounds(node: CanvasNode, bounds: NonNullable<FlattenedVectorPath["bounds"]>) {
@@ -497,7 +581,7 @@ function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number 
     if (!parentId) return true;
     const parent = byId.get(parentId);
     if (!parent) return false;
-    if (parent.kind === "frame" && parent.clipsContent !== false && !containsWorldPoint(parent, point)) return false;
+    if (isFrameLike(parent) && parent.clipsContent !== false && !containsWorldPoint(parent, point)) return false;
     current = parent;
   }
   return true;
@@ -507,10 +591,25 @@ function refreshTransientGroupBounds(preservedGroupIds: ReadonlySet<string> = ne
   if (normalized) nodes = normalized;
 }
 function rebuildNodeIndex() {
-  const projected = nodes.map((node) => worldSpaceProjectionNode(nodes, node) ?? node);
+  // Relative-v1 imports can ask for the same ancestor transform thousands of
+  // times while painting nested Frame clips. Resolve the document once per
+  // projection rebuild instead of recreating the full id/ancestry map for
+  // every node and every clipping ancestor.
+  worldTransformById = worldTransformsForNodes(nodes);
+  const projected = worldSpaceProjectionNodes(nodes);
   nodeById = new Map(projected.map((node) => [node.id, node]));
   nodeBoundsById = new Map(projected.map((node) => [node.id, boundsForNode(node)]));
   spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
+  rebuildCompiledScene();
+}
+function rebuildCompiledScene() {
+  compiledScene = compileScene({ revision, nodes, pageId: activePageId, defaultPageId, previousScene: compiledScene?.scene });
+  const specialFallbacks = compiledScene.diagnostics.filter((diagnostic) => diagnostic.capability === "special-node");
+  const signature = specialFallbacks.map((diagnostic) => `${diagnostic.nodeId}:${diagnostic.reason}`).join("|");
+  if (signature && signature !== compiledSceneFallbackSignature) {
+    diagnostics.record({ category: "renderer", code: "SPECIAL_NODE_FALLBACK", documentRevision: revision, details: { rejectedNodes: specialFallbacks.length } });
+  }
+  compiledSceneFallbackSignature = signature;
 }
 function emit(message: WorkerToMain) {
   if (message.type === "snapshot" && hydrationCompletionRequestId) {
@@ -544,13 +643,53 @@ function emitRemoteBootstrap() {
   const snapshot = wasmDocument.snapshot_protobuf();
   self.postMessage({ type: "remote-bootstrap", documentId, revision, snapshot } satisfies WorkerToMain, [snapshot.buffer]);
 }
+function migrateLoadedFigmaBootstrapPage(engine: WasmDocumentEngine) {
+  try {
+    const migration = migrateLegacyFigmaBootstrapPage(
+      JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot,
+    );
+    if (!migration) return undefined;
+    engine.load_snapshot_json(JSON.stringify(migration.snapshot));
+    if (activePageId === migration.replacedPageId) activePageId = defaultPageId;
+    const rememberedViewport = viewportByPage.get(migration.replacedPageId);
+    if (rememberedViewport) viewportByPage.set(defaultPageId, rememberedViewport);
+    viewportByPage.delete(migration.replacedPageId);
+    selectionByPage.delete(migration.replacedPageId);
+    diagnostics.record({
+      category: "recovery",
+      code: "LEGACY_FIGMA_BOOTSTRAP_PAGE_MIGRATED",
+      documentRevision: Number(engine.revision),
+      details: {
+        replacedPageId: migration.replacedPageId,
+        removedStarterNodeCount: migration.removedStarterNodeIds.length,
+      },
+    });
+    return migration;
+  } catch {
+    // Migration is opportunistic and must never make an otherwise valid remote
+    // document unreadable. Keep the source snapshot and surface bounded evidence.
+    diagnostics.record({
+      category: "recovery",
+      code: "LEGACY_FIGMA_BOOTSTRAP_PAGE_MIGRATION_REJECTED",
+      documentRevision: Number(engine.revision),
+    });
+    return undefined;
+  }
+}
 function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
   if (!wasmDocument) {
     emitError(undefined, "TRANSIENT");
     return false;
   }
   try {
+    const shouldFitRemoteContent = !pageContentBounds(
+      nodes,
+      activePageId,
+      defaultPageId,
+    );
+    emit({ type: "remote-load-progress", stage: "decode" });
     wasmDocument.load_snapshot_protobuf(snapshot);
+    const bootstrapMigration = migrateLoadedFigmaBootstrapPage(wasmDocument);
     history.length = 0;
     future = [];
     undoOrder.length = 0;
@@ -560,13 +699,30 @@ function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
     // Selection is presentation state, not Canonical document state: retain
     // IDs that still exist after hydration, while naturally dropping deleted
     // layers through `syncProjectionFromWasm` below.
+    emit({ type: "remote-load-progress", stage: "project" });
     syncProjectionFromWasm(false);
     if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
-    rebuildNodeIndex();
-    render();
+    // Server snapshots intentionally contain document state, not a browser's
+    // presentation viewport. When this tab only had the empty bootstrap page,
+    // fit the first real remote page so imported content cannot hydrate fully
+    // while remaining off-screen.
+    if (shouldFitRemoteContent && nodes.length) restoreOrFitPageViewport(activePageId);
+    emit({ type: "remote-load-progress", stage: "render" });
+    render(
+      undefined,
+      (stage) => emit({ type: "remote-load-progress", stage }),
+      nodes.length >= 1_000,
+    );
     if (publish) {
       diagnostics.record({ category: "recovery", code: "REMOTE_SNAPSHOT_APPLIED", documentRevision: revision });
       emitSnapshot();
+    }
+    if (bootstrapMigration) {
+      const replacement = wasmDocument.snapshot_protobuf();
+      self.postMessage(
+        { type: "remote-reset", documentId, revision, snapshot: replacement } satisfies WorkerToMain,
+        [replacement.buffer],
+      );
     }
     return true;
   } catch (error) {
@@ -579,7 +735,10 @@ function applyRemoteSnapshot(snapshot: Uint8Array, publish = true) {
     return false;
   }
 }
-function hydrateRemoteSnapshot(snapshot: Uint8Array) { applyRemoteSnapshot(snapshot); }
+function hydrateRemoteSnapshot(snapshot: Uint8Array, requestId?: string) {
+  if (requestId) hydrationCompletionRequestId = requestId;
+  applyRemoteSnapshot(snapshot);
+}
 
 /** Serializing envelope derivation preserves the same client sequence and order
  * as the locally committed Core revision stream, even when WebCrypto resolves
@@ -631,12 +790,25 @@ function applyPendingReplay(replay: PendingOperationReplay, transactionId: strin
   const baseRevision = Number(wasmDocument.revision);
   let payload: Uint8Array;
   if (replay.kind === "core-batch") {
+    const currentIds = new Set(nodes.map((node) => node.id));
+    // A create/restore whose durable identity already exists in the remote
+    // snapshot cannot be replayed atomically. Let reconciliation discard the
+    // stale operation immediately instead of cloning/reordering a large Figma
+    // batch only for Rust to reject the duplicate ID at commit time.
+    if (
+      replay.batch.some(
+        (command) =>
+          (command.type === "create" || command.type === "restore") &&
+          currentIds.has(command.node.id),
+      )
+    )
+      throw new Error("REMOTE_REPLAY_NODE_ALREADY_EXISTS");
     const batch = rebaseCoreBatchForSnapshot(nodes, replay.batch);
     wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(batch));
     payload = encodeCoreBatchPayload(batch);
     replay = { kind: "core-batch", batch };
   } else if (replay.kind === "create-page") {
-    wasmDocument.create_page(transactionId, wasmDocument.revision, replay.page.id, replay.page.name);
+    wasmDocument.create_page_at_position(transactionId, wasmDocument.revision, replay.page.id, replay.page.name, replay.page.positionId);
     payload = encodeCreatePagePayload(replay.page);
   } else {
     const asset = replay.asset;
@@ -652,6 +824,14 @@ function applyPendingReplay(replay: PendingOperationReplay, transactionId: strin
  * never mutated, preserving service idempotency and the causal audit trail. */
 async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: PendingRemoteOperation[]) {
   if (!applyRemoteSnapshot(snapshot, false) || !wasmDocument) return;
+  // Publish the validated service snapshot before potentially expensive local
+  // intent replay. The main thread exposes it read-only until the final
+  // `remote-reconciled` boundary, so users can see and navigate large files
+  // without waiting behind reconciliation bookkeeping.
+  emitSnapshot();
+  // Finish the first frame before replaying a potentially large local queue.
+  // A cancellation resolves its completion too; follow any replacement paint.
+  while (progressivePaintCompletion) await progressivePaintCompletion;
   const plan = planPendingOperationReconciliation(operations);
   const removeOperationIds = [...plan.removeOperationIds];
   const discardedOperationIds = [...plan.discardedOperationIds];
@@ -662,7 +842,22 @@ async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: Pending
   const coreRejectedOperationIds: string[] = [];
   const blockedOperationIds = [...plan.blockedOperationIds];
   const replacements: PendingRemoteOperation[] = [];
+  const yieldToTasks = createCooperativeYield();
+  let completed = 0;
+  let lastProgressAt = 0;
   for (const operation of plan.replayable) {
+    // This must also run after a rejected intent. A series of synchronous
+    // rejects or immediately resolved crypto promises otherwise starves paint
+    // and input messages for the entire recovery loop.
+    await yieldToTasks();
+    // Camera input can start another paint after initial hydration. Give that
+    // visible work priority over the next historical operation as well.
+    while (progressivePaintCompletion) await progressivePaintCompletion;
+    if (completed === 0 || performance.now() - lastProgressAt >= 200) {
+      emit({ type: "remote-reconciliation-progress", completed, total: plan.replayable.length });
+      lastProgressAt = performance.now();
+    }
+    completed += 1;
     const replay = operation.replay;
     // `planPendingOperationReconciliation` only returns records with replay
     // data. Keep this guard at the Worker boundary in case an old IndexedDB
@@ -711,7 +906,7 @@ async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: Pending
   }
   // A render/projection refresh is recoverable presentation work. It must never
   // turn an already accepted Rust replay into a discarded document operation.
-  try { syncProjectionFromWasm(false); }
+  try { syncProjectionFromWasm(false); render(); }
   catch {
     diagnostics.record({ category: "renderer", code: "REMOTE_RECONCILIATION_PROJECTION_FAILED", documentRevision: revision });
   }
@@ -726,14 +921,37 @@ async function reconcileRemoteSnapshot(snapshot: Uint8Array, operations: Pending
 }
 function emitViewportCheckpoint() {
   if (!wasmDocument) return;
-  emit({ type: "viewport-checkpoint", viewport: { ...viewport }, documentHash: wasmDocument.canonical_hash(), coreRevision: Number(wasmDocument.revision) });
+  rememberActivePageViewport();
+  const pageIds = new Set(pages.map((page) => page.id));
+  const pageViewports = Object.fromEntries(
+    [...viewportByPage].filter(([pageId]) => pageIds.has(pageId)).map(([pageId, value]) => [pageId, { ...value }]),
+  );
+  emit({ type: "viewport-checkpoint", viewport: { ...viewport }, activePageId, pageViewports, documentHash: wasmDocument.canonical_hash(), coreRevision: Number(wasmDocument.revision) });
 }
 function emitViewState(viewportChanged = false) {
   rememberActivePageSelection();
-  emit({ type: "view-state", viewport: { ...viewport }, selectedIds: [...selectedIds], performance: renderPerformance.summary(), viewportChanged });
+  emit({ type: "view-state", viewport: { ...viewport }, selectedIds: [...selectedIds], activePageId, performance: renderPerformance.summary(), viewportChanged });
+}
+function emitInteractiveViewState() {
+  const now = performance.now();
+  if (now - lastInteractiveViewStateAt < INTERACTIVE_VIEW_STATE_INTERVAL_MS) return;
+  lastInteractiveViewStateAt = now;
+  emitViewState(true);
 }
 function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: number) {
-  const nextDpr = renderDpr(nextDeviceDpr, renderQuality);
+  const qualityDpr = renderDpr(nextDeviceDpr, renderQuality);
+  // A dense full-page overview is fill-rate bound: hundreds of overlapping
+  // Frame backgrounds at full Retina resolution can otherwise dominate the
+  // Canvas fallback. A fixed 1.5x backing store is noticeably sharper than
+  // CSS-pixel rendering on Retina and avoids DPR resizing between interaction
+  // and settled frames.
+  const complexDocumentDprCap =
+    nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
+      ? 1.5
+      : Number.POSITIVE_INFINITY;
+  const nextDpr = nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
+    ? Math.min(Math.max(1, nextDeviceDpr), complexDocumentDprCap)
+    : Math.min(qualityDpr, complexDocumentDprCap);
   const admission = admitRenderSurface(nextWidth, nextHeight, nextDpr);
   if (!admission.accepted) {
     diagnostics.record({ category: "renderer", code: "RENDER_SURFACE_REJECTED" });
@@ -749,11 +967,81 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: 
   if (canvas && (canvas.width !== admission.pixelWidth || canvas.height !== admission.pixelHeight)) {
     canvas.width = Math.max(1, admission.pixelWidth);
     canvas.height = Math.max(1, admission.pixelHeight);
+    completedProgressivePaintKey = undefined;
+    presentedPageId = undefined;
+    presentedSurfaceWidth = 0;
+    presentedSurfaceHeight = 0;
     effectSurfaces = undefined;
     alphaMaskSurfaces = [];
     alphaMaskLimitReported = false;
     effectSurfaceLimitReported = false;
   }
+  return true;
+}
+function cachePresentedFrame(
+  frame: OffscreenCanvas,
+  frameViewport: Viewport,
+  surfaceWidth: number,
+  surfaceHeight: number,
+) {
+  cachedPresentedFrame = frame;
+  cachedPresentedFramePageId = activePageId;
+  cachedPresentedFrameViewport = { ...frameViewport };
+  cachedPresentedFrameSurfaceWidth = surfaceWidth;
+  cachedPresentedFrameSurfaceHeight = surfaceHeight;
+  const sceneKey = `${revision}:${activePageId}:${transientSceneVersion}`;
+  cachedPresentedFrameSceneKey = sceneKey;
+  if (cachedOverviewFrame?.sceneKey !== sceneKey) cachedOverviewFrame = undefined;
+  // Retain the widest completed view as an alternative to the detail raster.
+  // Zooming out can reveal the rest of the page before the next scene paint.
+  // This is a reference to an immutable published surface, bounded to 32 MiB.
+  if (frame.width * frame.height * 4 <= 32 * 1024 * 1024 &&
+      (!cachedOverviewFrame || frameViewport.zoom <= cachedOverviewFrame.viewport.zoom)) {
+    cachedOverviewFrame = { canvas: frame, sceneKey, viewport: { ...frameViewport }, width: surfaceWidth, height: surfaceHeight };
+  }
+}
+function reprojectCachedFrameDuringInteraction() {
+  if (
+    renderQuality.tier !== "interactive" ||
+    nodes.length < COMPLEX_DOCUMENT_NODE_THRESHOLD ||
+    !canvas ||
+    !context ||
+    !cachedPresentedFrame ||
+    !cachedPresentedFrameViewport ||
+    cachedPresentedFramePageId !== activePageId ||
+    cachedPresentedFrameSceneKey !== `${revision}:${activePageId}:${transientSceneVersion}`
+  ) return false;
+  const frames = [{
+    canvas: cachedPresentedFrame,
+    viewport: cachedPresentedFrameViewport,
+    width: cachedPresentedFrameSurfaceWidth,
+    height: cachedPresentedFrameSurfaceHeight,
+  }];
+  if (cachedOverviewFrame?.sceneKey === cachedPresentedFrameSceneKey) frames.push(cachedOverviewFrame);
+  const projection = selectCoveringViewportFrame(
+    frames,
+    viewport,
+    { width, height },
+  );
+  if (!projection) return false;
+  const { frame, rect } = projection;
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.fillStyle = canvasDesignTokens.color.backdrop;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    frame.canvas,
+    rect.x * dpr,
+    rect.y * dpr,
+    rect.width * dpr,
+    rect.height * dpr,
+  );
+  context.restore();
+  presentedPageId = activePageId;
+  presentedSurfaceWidth = canvas.width;
+  presentedSurfaceHeight = canvas.height;
   return true;
 }
 function scheduleSettledRenderQuality() {
@@ -945,6 +1233,7 @@ function syncProjectionFromWasm(rememberExisting = true) {
     preservedProjectionNodes.set(projected.id, presentationNode(projected));
     return projected;
   });
+  setRenderSurface(width, height, deviceDpr);
   selectedIds = normalizePageSelection(nodes, activePageId, selectedIds, defaultPageId);
   rebuildNodeIndex();
   revision = snapshot.revision;
@@ -968,6 +1257,22 @@ function syncProjectionFromWasm(rememberExisting = true) {
  * resulting move transaction is accepted and projected again. */
 function refreshRustGpuScene() {
   if (!wasmDocument || !wasmRuntime || nodes.length > MAX_RUST_GPU_INSTANCE_NODES) {
+    rustGpuScene = undefined;
+    return;
+  }
+  const visiblePageNodes = visibleNodesOnPage(nodes, activePageId, defaultPageId);
+  const visibleById = new Map(visiblePageNodes.map((node) => [node.id, node]));
+  // The renderer must use the structural Canvas tree for clipped Frame
+  // descendants. Building a second full Rust/GPU batch here is pure cold-start
+  // cost and is especially expensive for deeply nested Figma imports.
+  if (
+    visiblePageNodes.some(
+      (node) =>
+        Boolean(node.parentId) &&
+        isFrameLike(visibleById.get(node.parentId!)) &&
+        visibleById.get(node.parentId!)?.clipsContent !== false,
+    )
+  ) {
     rustGpuScene = undefined;
     return;
   }
@@ -1020,9 +1325,9 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
   }
 }
 
-/** Derives line ranges only for a fully explicit, single-face run. Mixed runs
- * remain on the documented Canvas transition path until per-run shaping and
- * glyph raster passes are available. */
+/** Derives line ranges only for one stable document face. Contiguous paint-only
+ * Style Runs and a fallback-only default span may share it; metric-changing
+ * runs remain on the documented Canvas transition path. */
 function variationAxesKey(font: DocumentFontReference | undefined) {
   return JSON.stringify([...(font?.variationAxes ?? [])]
     // Do not discard malformed coordinates here: the Rust boundary must reject
@@ -1032,15 +1337,11 @@ function variationAxesKey(font: DocumentFontReference | undefined) {
 }
 
 function rustTextLayoutRequest(node: CanvasNode) {
-  const source = node.text ?? "Text";
-  const properties = node.textProperties;
-  const run = properties?.runs.length === 1 ? properties.runs[0] : undefined;
-  if (!run?.font || !Number.isFinite(run.fontSize) || run.fontSize <= 0 || !Number.isFinite(node.width) || node.width <= 0) return undefined;
-  const sourceByteLength = new TextEncoder().encode(source).byteLength;
-  if (run.start !== 0 || run.end !== sourceByteLength) return undefined;
-  const axesKey = variationAxesKey(run.font);
-  const key = JSON.stringify([revision, node.id, source, node.width, run.font.assetId, run.font.faceIndex, axesKey, run.fontSize]);
-  return { key, source, font: run.font, axesKey, fontSize: run.fontSize, widthEm: node.width / run.fontSize };
+  const face = textFrozenLayoutFace(node);
+  if (!face) return undefined;
+  const axesKey = variationAxesKey(face.font);
+  const key = JSON.stringify([revision, node.id, face.source, node.width, face.font.assetId, face.font.faceIndex, axesKey, face.fontSize]);
+  return { key, source: face.source, font: face.font, axesKey, fontSize: face.fontSize, widthEm: node.width / face.fontSize };
 }
 
 function refreshRustTextLayouts() {
@@ -1330,6 +1631,109 @@ function registerAsset(transactionId: string, asset: DocumentAsset) {
     queueRemotePayload(transactionId, baseRevision, encodeRegisterResourcePayload(asset), wasmDocument.canonical_hash(), { kind: "register-resource", asset: structuredClone(asset) });
   } catch (error) { emitError(error, "INVALID_COMMAND", transactionId); }
 }
+
+/** Applies the pure REST planner result exactly like any other Core mutation.
+ * Credentials, external URLs and byte downloads intentionally remain outside
+ * this Worker; Asset requests must be admitted separately before binding. */
+function importFigmaRestPlan(input: Extract<MainToWorker, { type: "import-figma-rest-plan" }>) {
+  if (!wasmDocument) {
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  if (input.baseRevision !== Number(wasmDocument.revision)) {
+    emitError(undefined, "REVISION_CONFLICT", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "REVISION_CONFLICT" });
+    return;
+  }
+  const resolved = resolveFigmaRestImportBatch(input.plan);
+  if (!resolved) {
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  try {
+    const baseRevision = Number(wasmDocument.revision);
+    wasmDocument.apply_transaction_json(input.transactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
+    recordHistory("core");
+    const bootstrapMigration = migrateLoadedFigmaBootstrapPage(wasmDocument);
+    syncProjectionFromWasm(false);
+    const firstImportedPageId = bootstrapMigration
+      ? defaultPageId
+      : input.plan.pages[0]?.id;
+    const importedPageBecomesActive = input.plan.pages.some((page) => page.id === activePageId) === false;
+    if (importedPageBecomesActive) {
+      storeActivePageSelection();
+      rememberActivePageViewport();
+      activePageId = firstImportedPageId ?? activePageId;
+      restoreOrFitPageViewport(activePageId);
+      rustGpuScene = undefined;
+      activateInteractiveRenderQuality();
+    }
+    selectedIds = [];
+    rebuildNodeIndex();
+    render();
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_IMPORT_ACCEPTED", documentRevision: revision, transactionId: input.transactionId, details: { pageCount: input.plan.pages.length, nodeCount: input.plan.nodes.length, assetRequestCount: input.plan.assetRequests.length } });
+    emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, input.transactionId));
+    if (bootstrapMigration) {
+      // Replacing the untouched bootstrap page changes page identity as well as
+      // content, so persist one validated canonical root instead of publishing
+      // an operation that would recreate the synthetic page remotely.
+      const replacement = wasmDocument.snapshot_protobuf();
+      self.postMessage(
+        { type: "remote-reset", documentId, revision, snapshot: replacement } satisfies WorkerToMain,
+        [replacement.buffer],
+      );
+    } else {
+      queueRemoteOperation(input.transactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
+    }
+    emit({ type: "ack", transactionId: input.transactionId, acceptedRevision: revision });
+  } catch (error) {
+    const errorCode = error instanceof Error && error.message.includes("ResourceLimit") ? "RESOURCE_LIMIT" : "INVALID_TRANSACTION";
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_IMPORT_REJECTED", documentRevision: revision, transactionId: input.transactionId, details: { errorCode } });
+    emitError(error, errorCode === "RESOURCE_LIMIT" ? "RESOURCE_LIMIT" : "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode });
+  }
+}
+
+/** Commits only post-authorization Asset Service metadata and references. Raw
+ * Figma URLs/credentials never cross this boundary; callers seed image bytes
+ * independently through the transient asset-bytes message. */
+function bindFigmaRestAssets(input: Extract<MainToWorker, { type: "bind-figma-rest-assets" }>) {
+  if (!wasmDocument) {
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  if (input.baseRevision !== Number(wasmDocument.revision)) {
+    emitError(undefined, "REVISION_CONFLICT", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "REVISION_CONFLICT" });
+    return;
+  }
+  const resolved = resolveFigmaRestAssetBindings(nodes, assets, input.authorized);
+  if (!resolved.batch.length) {
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_ASSET_BINDING_REJECTED", documentRevision: revision, transactionId: input.transactionId, details: { issueCount: resolved.issues.length } });
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  try {
+    const baseRevision = Number(wasmDocument.revision);
+    wasmDocument.apply_transaction_json(input.transactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
+    recordHistory("core");
+    syncProjectionFromWasm(false);
+    render();
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_ASSET_BINDING_ACCEPTED", documentRevision: revision, transactionId: input.transactionId, details: { assetCount: input.authorized.length, boundNodeCount: resolved.boundNodeIds.length, issueCount: resolved.issues.length } });
+    emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, input.transactionId));
+    queueRemoteOperation(input.transactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
+    emit({ type: "ack", transactionId: input.transactionId, acceptedRevision: revision });
+  } catch (error) {
+    const errorCode = error instanceof Error && error.message.includes("ResourceLimit") ? "RESOURCE_LIMIT" : "INVALID_TRANSACTION";
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_ASSET_BINDING_REJECTED", documentRevision: revision, transactionId: input.transactionId, details: { errorCode, issueCount: resolved.issues.length } });
+    emitError(error, errorCode === "RESOURCE_LIMIT" ? "RESOURCE_LIMIT" : "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode });
+  }
+}
 type JournalReplayEngine = Pick<WasmDocumentEngine, "revision" | "snapshot_json" | "apply_transaction_json" | "move_nodes" | "load_snapshot_json">;
 
 function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntry) {
@@ -1337,7 +1741,7 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
   try {
     if (entry.baseRevision !== Number(engine.revision)) throw new Error("JOURNAL_REVISION_CONFLICT");
     const operation = entry.operation;
-    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "boolean" || operation.type === "ungroup" || operation.type === "delete") {
+    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "boolean" || operation.type === "ungroup" || operation.type === "transformGroup" || operation.type === "delete") {
       const currentNodes = (JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot).nodes.map(canvasNodeFromProjection);
       const resolved = resolveCoreBatch(currentNodes, [operation]);
       if (!resolved) throw new Error("INVALID_JOURNAL_OPERATION");
@@ -1372,6 +1776,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
         const migrated = migrateLegacyCoreRotationSnapshot(current, presentation as Array<PresentationNode & { rotation?: unknown; stroke?: unknown; strokeWidth?: unknown }>, true);
         if (migrated !== current) engine.load_snapshot_json(migrated);
       }
+      migrateLoadedFigmaBootstrapPage(engine);
     } else {
       if (seedAssets.length) engine.seed_assets_json(JSON.stringify(seedAssets));
       nodes = normalizeAutoLayoutProjection(nodes);
@@ -1381,8 +1786,8 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
         engine.seed_batch_json(JSON.stringify(hydrated.batch));
       }
       // A workspace document gets its own Canonical identity before its first
-      // local or remote snapshot is emitted. The seeded starter canvas remains
-      // identical, but its operation history can never collide with another file.
+      // local or remote snapshot is emitted. Production documents start with an
+      // empty Page 1; demo content belongs exclusively to explicit fixtures.
       const seeded = JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot;
       if (seeded.documentId !== documentId) engine.load_snapshot_json(JSON.stringify({ ...seeded, documentId }));
     }
@@ -1395,10 +1800,26 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     redoOrder = [];
     if (localSnapshot) {
       const recovered = localSnapshot.journal?.at(-1);
-      viewport = { ...(recovered?.viewport ?? localSnapshot.viewport) };
+      const restoredViewport = localSnapshot.activePageId
+        ? localSnapshot.viewport
+        : recovered?.viewport ?? localSnapshot.viewport;
+      viewport = { ...restoredViewport };
+      viewportByPage.clear();
+      Object.entries(localSnapshot.pageViewports ?? {}).forEach(([pageId, value]) => {
+        if (Number.isFinite(value.x) && Number.isFinite(value.y) && Number.isFinite(value.zoom) && value.zoom > 0) {
+          viewportByPage.set(pageId, { ...value });
+        }
+      });
       preservedProjectionNodes.clear();
       (recovered?.presentation ?? localSnapshot.presentation).forEach((node) => preservedProjectionNodes.set(node.id, structuredClone(node)));
       syncProjectionFromWasm(false);
+      if (localSnapshot.activePageId && pages.some((page) => page.id === localSnapshot.activePageId)) {
+        activePageId = localSnapshot.activePageId;
+        viewport = { ...(viewportByPage.get(activePageId) ?? restoredViewport) };
+        viewportByPage.set(activePageId, { ...viewport });
+        rustGpuScene = undefined;
+        rebuildNodeIndex();
+      } else viewportByPage.set(activePageId, { ...viewport });
     } else if (benchmarkProjection) {
       // The generated projection has just been accepted by Core. Avoid building
       // an unnecessary second 100k-node Snapshot solely for benchmark display.
@@ -1446,6 +1867,10 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
 
 function localSnapshotFailureKind(error: unknown) {
   if (error instanceof Error) return error.name;
+  // Errors thrown from a wasm-bindgen or Worker realm do not always satisfy
+  // this realm's `instanceof Error`; retain their stable class without exposing
+  // an arbitrary message in diagnostics or persisted state.
+  if (error && typeof error === "object" && "name" in error && typeof error.name === "string") return error.name;
   return typeof error === "string" && /^(INVALID|UNSUPPORTED|CORRUPT)_[A-Z_]+$/.test(error)
     ? error
     : "UNKNOWN";
@@ -1506,7 +1931,7 @@ function recordHistory(kind: HistoryKind) {
   redoOrder = [];
   future = [];
 }
-function resetDocumentToStarterNodes() {
+function resetDocumentToBlankPage() {
   // Invalidate any in-flight hydration before publishing a new projection. The
   // transient snapshot deliberately carries no Core payload, so persistence can
   // retain the last confirmed document until the replacement Core is ready.
@@ -1518,12 +1943,14 @@ function resetDocumentToStarterNodes() {
   rustTextLayouts.clear();
   rustTextLayoutFallbacks.clear();
   documentCore = "Starting Rust/WASM bridge";
-  const reset = resetDocumentProjection(starterNodes());
+  const reset = resetDocumentProjection([]);
   nodes = reset.nodes;
   rebuildNodeIndex();
   selectionByPage.clear();
   selectedIds = reset.selectedIds;
   viewport = reset.viewport;
+  viewportByPage.clear();
+  viewportByPage.set(activePageId, { ...viewport });
   history.length = 0;
   future = [];
   undoOrder.length = 0;
@@ -1599,7 +2026,11 @@ function isFrameNameHit(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode
 function hitFrameName(screenX: number, screenY: number) {
   if (!context) return undefined;
   return [...activeNodes()].reverse().find((node) => {
-    if ((node.kind !== "frame" && node.kind !== "section") || node.visible === false || node.locked) return false;
+    // Persistent canvas labels belong to page-level Frames/Sections. Nested
+    // containers remain discoverable in Layers and show their name when
+    // selected, but must not paint (or expose a hit target for) a label over
+    // their parent's artwork.
+    if (!showsPersistentCanvasLayerName(node) || node.locked) return false;
     return isFrameNameHit(context!, node, screenX, screenY);
   });
 }
@@ -1607,6 +2038,13 @@ function paintedHit(worldX: number, worldY: number) {
   const point = { x: worldX, y: worldY };
   const active = activeNodes();
   const nodesById = new Map(active.map((node) => [node.id, node]));
+  const semanticHit = compiledScene && findTopmostSceneHit(compiledScene.scene, point, (id) => {
+    const candidate = nodesById.get(id);
+    return Boolean(candidate && candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
+  });
+  if (semanticHit) return { active, node: nodesById.get(semanticHit.nodeId) };
+  // Fallback remains available while an older/partial scene compiler cannot
+  // map a node kind. It keeps an optimization failure from changing selection.
   const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
   // Slices are export-only regions. The shared selector keeps them available
   // from Layers while direct canvas clicks reach painted content underneath.
@@ -1652,6 +2090,13 @@ function fillStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, wid
 function paintStackStyle(ctx: OffscreenCanvasRenderingContext2D, paint: NonNullable<CanvasNode["fills"]>[number], width: number, height: number) { return paintStyle(ctx, paint.css, paint.gradient, width, height); }
 function activeFills(node: CanvasNode): NonNullable<CanvasNode["fills"]> { return node.fills?.length ? node.fills : [{ css: node.fill, color: node.fillColor, gradient: node.fillGradient }]; }
 function activeStrokes(node: CanvasNode): NonNullable<CanvasNode["strokes"]> { return node.strokes?.length ? node.strokes : [{ css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient }]; }
+function hasVisibleFill(node: CanvasNode) {
+  return activeFills(node).some(
+    (paint) =>
+      paint.gradient?.stops.some((stop) => stop.color.alpha > 0) ??
+      (paint.color ?? documentColorFromCssHex(paint.css))?.alpha !== 0,
+  );
+}
 function fillPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
   activeFills(node).forEach((paint) => { ctx.fillStyle = paintStackStyle(ctx, paint, width, height); ctx.fill(); });
 }
@@ -1914,11 +2359,17 @@ function canonicalVectorStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
   const cap = canvasStrokeCap(node.strokeCapStart);
   if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath || !cap || node.strokeCapEnd !== node.strokeCapStart || node.strokeWidth <= 0) return undefined;
   const pathJson = JSON.stringify(node.vectorPath);
-  const key = `${node.id}:vector-stroke:${pathJson}:${node.strokeWidth}:${cap}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}`;
+  const tolerance = vectorPresentationTolerance(viewport.zoom, dpr);
+  const key = `${node.id}:vector-stroke:${tolerance}:${pathJson}:${node.strokeWidth}:${cap}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}`;
   const cached = canonicalStrokeMeshes.get(key);
   if (cached !== undefined) return cached ?? undefined;
+  // A new zoom-quality bucket must not synchronously tessellate every visible
+  // stroke in the middle of a gesture. The caller's native cubic stroke is a
+  // smooth interactive preview; the exact aligned mesh is populated by the
+  // settled render and reused on the next visit to this bucket.
+  if (renderQuality.tier === "interactive") return undefined;
   try {
-    const result: unknown = JSON.parse(wasmRuntime.vector_path_stroke_mesh_json(pathJson, .25, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10));
+    const result: unknown = JSON.parse(wasmRuntime.vector_path_stroke_mesh_json(pathJson, tolerance, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10));
     const triangles = typeof result === "object" && result !== null && "triangles" in result ? (result as { triangles?: unknown }).triangles : undefined;
     const mesh = Array.isArray(triangles) ? triangles.map((triangle) => {
       if (!Array.isArray(triangle) || triangle.length !== 3) return undefined;
@@ -2236,16 +2687,60 @@ function insetCornerRadii(width: number, height: number, radius: number, cornerR
 function outsetCornerRadii(width: number, height: number, radius: number, cornerRadii: CanvasNode["cornerRadii"], outset: number): CanvasNode["cornerRadii"] | undefined {
   return outsetRoundedRectRadii(width, height, radius, cornerRadii, outset);
 }
-function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, compositeMode?: GlobalCompositeOperation) {
+  if (
+    (isFrameLike(node) || node.kind === "rectangle") &&
+    !node.assetId &&
+    !hasVisibleFill(node) &&
+    !hasVisibleStroke(node)
+  )
+    return;
   const effects = orderedEffects(node);
   if (!effects.length) {
     ctx.save();
-    ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+    ctx.globalCompositeOperation = compositeMode ?? canvasCompositeMode(node.blendMode);
     renderNodePaint(ctx, node);
     ctx.restore();
     return;
   }
+  if (renderQuality.tier === "interactive") {
+    // Ordered inner/multi-shadow stacks use full-surface composition. During a
+    // page switch or viewport gesture, paint the source plus at most one native
+    // drop shadow immediately; the scheduled settled pass restores exact effects.
+    ctx.save();
+    ctx.globalCompositeOperation = compositeMode ?? canvasCompositeMode(node.blendMode);
+    renderNodePaint(ctx, node, effects.find((effect) => effect.dropShadow)?.dropShadow);
+    ctx.restore();
+    return;
+  }
+  // An alpha-mask source must consume target alpha, not reapply its ordinary
+  // layer blend. Mask effects remain on the established surface renderer;
+  // only the final source composition is overridden here.
+  if (compositeMode) {
+    ctx.save();
+    ctx.globalCompositeOperation = compositeMode;
+    renderNodeWithEffects(ctx, node, effects);
+    ctx.restore();
+    return;
+  }
   renderNodeWithEffects(ctx, node, effects);
+}
+
+/** Source paint for both the low-resolution and sharp structural passes.
+ * Only expensive effects are deferred; the caller must retain the same
+ * ancestor clips and canonical layer order in every published frame. */
+function renderNodePreview(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (
+    (isFrameLike(node) || node.kind === "rectangle") &&
+    !node.assetId &&
+    !hasVisibleFill(node) &&
+    !hasVisibleStroke(node)
+  )
+    return;
+  ctx.save();
+  ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+  renderNodePaint(ctx, node);
+  ctx.restore();
 }
 
 function canvasCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOperation {
@@ -2255,7 +2750,7 @@ function canvasCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOper
 function acquireEffectSurfaces(): EffectSurfaces | undefined {
   if (!canvas) return undefined;
   if (effectSurfaces && effectSurfaces.source.width === canvas.width && effectSurfaces.source.height === canvas.height) return effectSurfaces;
-  const admission = admitEffectSurfacePool(canvas.width, canvas.height, 2);
+  const admission = admitEffectSurfacePool(canvas.width, canvas.height, 3);
   if (!admission.accepted) {
     if (!effectSurfaceLimitReported) {
       diagnostics.record({ category: "renderer", code: `EFFECT_SURFACE_${admission.reason.toUpperCase()}`, documentRevision: revision });
@@ -2265,11 +2760,73 @@ function acquireEffectSurfaces(): EffectSurfaces | undefined {
   }
   const source = new OffscreenCanvas(canvas.width, canvas.height);
   const shadow = new OffscreenCanvas(canvas.width, canvas.height);
+  const scratch = new OffscreenCanvas(canvas.width, canvas.height);
   const sourceContext = source.getContext("2d");
   const shadowContext = shadow.getContext("2d");
-  if (!sourceContext || !shadowContext) return undefined;
-  effectSurfaces = { source, sourceContext, shadow, shadowContext };
+  const scratchContext = scratch.getContext("2d");
+  if (!sourceContext || !shadowContext || !scratchContext) return undefined;
+  effectSurfaces = { source, sourceContext, shadow, shadowContext, scratch, scratchContext };
   return effectSurfaces;
+}
+
+/** Builds the spread-adjusted SourceAlpha mask used by the Canvas shadow pass.
+ * This is deliberately separate from `ctx.filter`: Canvas exposes blur but no
+ * morphology, while Figma spread must alter alpha before blur and offset. */
+function renderSpreadAlphaMask(context: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, spread: number) {
+  context.drawImage(source, 0, 0, width, height);
+  if (!Number.isFinite(spread) || spread === 0) return;
+  try {
+    const pixels = context.getImageData(0, 0, source.width, source.height);
+    const alpha = new Uint8ClampedArray(source.width * source.height);
+    for (let index = 0; index < alpha.length; index += 1) alpha[index] = pixels.data[index * 4 + 3];
+    const morphed = morphAlphaChannel(alpha, source.width, source.height, spread);
+    for (let index = 0; index < morphed.length; index += 1) {
+      const pixel = index * 4;
+      pixels.data[pixel] = 255;
+      pixels.data[pixel + 1] = 255;
+      pixels.data[pixel + 2] = 255;
+      pixels.data[pixel + 3] = morphed[index];
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.putImageData(pixels, 0, 0);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  } catch {
+    // Tainted or resource-constrained canvas input remains on the established
+    // blur-only path; the editable document is never modified for rendering.
+  }
+}
+
+/** A viewport-sized alpha buffer ends at the camera edge, which is not
+ * necessarily the shape's edge. Keep simple inset shadows near their actual
+ * contour so magnifying a large background cannot add a border to the view. */
+function clipInnerShadowToShape(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow: NonNullable<CanvasNode["dropShadow"]>) {
+  if ((!isFrameLike(node) && node.kind !== "rectangle") || node.assetId || node.cornerSmoothing || node.opacity !== 1 ||
+      (hasVisibleStroke(node) && (node.strokeAlign ?? "inside") !== "inside") ||
+      orderedEffects(node).some((effect) => effect.layerBlur?.visible || effect.backgroundBlur?.visible)) return false;
+  const hasOpaqueFill = activeFills(node).some((paint) => paint.gradient
+    ? paint.gradient.stops.length > 0 && paint.gradient.stops.every((stop) => stop.color.alpha === 1)
+    : (paint.color ?? documentColorFromCssHex(paint.css))?.alpha === 1);
+  if (!hasOpaqueFill) return false;
+  const w = node.width * viewport.zoom;
+  const h = node.height * viewport.zoom;
+  // Allow the whole offset/spread and a conservative blur tail, plus one
+  // device pixel for antialiasing; only the unaffected interior is removed.
+  const inset = (Math.max(Math.abs(shadow.offsetX), Math.abs(shadow.offsetY)) + Math.abs(shadow.spread) + Math.max(0, shadow.blurRadius) * 3) * viewport.zoom + 1 / dpr;
+  if (inset * 2 >= Math.min(w, h)) return false;
+  ctx.save();
+  if (!applyNativeAffine(ctx, node)) {
+    const point = toScreen(node.x, node.y);
+    ctx.translate(point.x + w / 2, point.y + h / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
+  const radii = insetCornerRadii(w, h, node.radius * viewport.zoom, node.cornerRadii?.map((radius) => radius * viewport.zoom) as CanvasNode["cornerRadii"], inset);
+  ctx.beginPath();
+  ctx.rect(0, 0, w, h);
+  ctx.roundRect(inset, inset, w - inset * 2, h - inset * 2, radii ?? Math.max(0, node.radius * viewport.zoom - inset));
+  ctx.clip("evenodd");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return true;
 }
 
 /** Composites ordered Drop Shadows from a reusable source/shadow surface pair.
@@ -2302,13 +2859,21 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
     } else if (effect.dropShadow) {
       const shadow = effect.dropShadow;
       if (shadow.visible && shadow.color.alpha > 0) {
-        const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
-        targetContext.filter = `blur(${blur}px)`;
-        targetContext.drawImage(source, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
-        targetContext.filter = "none";
-        targetContext.globalCompositeOperation = "source-in";
-        targetContext.fillStyle = colorToSrgbCss(shadow.color);
-        targetContext.fillRect(0, 0, width, height);
+        renderSpreadAlphaMask(targetContext, source, shadow.spread * viewport.zoom);
+        const scratch = surfaces.scratch;
+        const scratchContext = surfaces.scratchContext;
+        scratchContext.save();
+        scratchContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+        scratchContext.clearRect(0, 0, width, height);
+        scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
+        scratchContext.drawImage(target, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
+        scratchContext.filter = "none";
+        scratchContext.globalCompositeOperation = "source-in";
+        scratchContext.fillStyle = colorToSrgbCss(shadow.color);
+        scratchContext.fillRect(0, 0, width, height);
+        scratchContext.restore();
+        targetContext.clearRect(0, 0, width, height);
+        targetContext.drawImage(scratch, 0, 0, width, height);
       }
       // The blurred, tinted alpha is already in `target`. Put the untouched
       // source *over* it: `destination-over` puts the source behind the
@@ -2319,27 +2884,39 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
     } else if (effect.innerShadow) {
       const shadow = effect.innerShadow;
       if (shadow.visible && shadow.color.alpha > 0) {
-        const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
-        targetContext.filter = `blur(${blur}px)`;
-        // Invert the offset so the same visual direction is perceived inside
-        // the source boundary rather than outside it.
-        targetContext.drawImage(source, -shadow.offsetX * viewport.zoom, -shadow.offsetY * viewport.zoom, width, height);
-        targetContext.filter = "none";
-        targetContext.globalCompositeOperation = "source-in";
-        targetContext.fillStyle = colorToSrgbCss(shadow.color);
-        targetContext.fillRect(0, 0, width, height);
-        targetContext.globalCompositeOperation = "destination-in";
-        targetContext.drawImage(source, 0, 0, width, height);
+        // An inset shadow shades the gap around an offset alpha mask. Positive
+        // spread shrinks that mask, widening the inner edge in device pixels.
+        renderSpreadAlphaMask(targetContext, source, -shadow.spread * viewport.zoom * dpr);
+        const scratch = surfaces.scratch;
+        const scratchContext = surfaces.scratchContext;
+        scratchContext.save();
+        scratchContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+        scratchContext.clearRect(0, 0, width, height);
+        scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
+        scratchContext.drawImage(target, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
+        scratchContext.filter = "none";
+        // Keep the colored complement of the shifted mask, then clip it to
+        // the source. Intersecting both masks instead tints the entire opaque
+        // interior (notably turning a white 1px inset into a white overlay).
+        scratchContext.globalCompositeOperation = "source-out";
+        scratchContext.fillStyle = colorToSrgbCss(shadow.color);
+        scratchContext.fillRect(0, 0, width, height);
+        scratchContext.globalCompositeOperation = "destination-in";
+        scratchContext.drawImage(source, 0, 0, width, height);
+        scratchContext.restore();
+        // The source pool normally rests at the identity transform.
         sourceContext.save();
-        sourceContext.globalCompositeOperation = "source-over";
-        sourceContext.drawImage(target, 0, 0, width, height);
+        sourceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const clippedToShape = clipInnerShadowToShape(sourceContext, node, shadow);
+        compositeEffectSurface(sourceContext, scratch, { width, height, dpr });
+        if (clippedToShape) sourceContext.restore();
         sourceContext.restore();
         targetContext.clearRect(0, 0, width, height);
       } else targetContext.drawImage(source, 0, 0, width, height);
     }
     else if (effect.backgroundBlur) {
       const blur = effect.backgroundBlur;
-      if (blur.visible && blur.radius > 0) {
+      if (blur.visible && blur.radius > 0 && renderQuality.tier === "settled") {
         targetContext.filter = `blur(${blur.radius * viewport.zoom}px)`;
         targetContext.drawImage(ctx.canvas, 0, 0, width, height);
         targetContext.filter = "none";
@@ -2347,7 +2924,13 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
         targetContext.drawImage(source, 0, 0, width, height);
         targetContext.globalCompositeOperation = "source-over";
         targetContext.drawImage(source, 0, 0, width, height);
-      } else targetContext.drawImage(source, 0, 0, width, height);
+      } else {
+        // Background blur samples the complete backing store. During a zoom or
+        // pan gesture that full-surface filter is immediately obsolete and can
+        // dominate the frame budget. Keep the source visible while interacting;
+        // scheduleSettledRenderQuality restores the exact blur after 160 ms.
+        targetContext.drawImage(source, 0, 0, width, height);
+      }
     }
     targetContext.restore();
     if (!effect.innerShadow || !effect.innerShadow.visible || effect.innerShadow.color.alpha <= 0) {
@@ -2355,17 +2938,14 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
       [sourceContext, targetContext] = [targetContext, sourceContext];
     }
   }
-  ctx.save();
-  ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
-  ctx.drawImage(source, 0, 0, width, height);
-  ctx.restore();
+  compositeEffectSurface(ctx, source, { width, height, dpr }, canvasCompositeMode(node.blendMode));
 }
 
 /** Renders one node's source paint, optionally through the legacy/single
  * shadow path. Multi-shadow composition is performed by the wrapper above. */
 function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow?: CanvasNode["dropShadow"]) {
   if (node.visible === false) return;
-  if (node.kind === "group" || node.kind === "slice") return;
+  if (node.kind === "group" || node.kind === "slice" || node.kind === "slideGrid" || node.kind === "slideRow" || node.kind === "transformGroup") return;
   if (node.kind === "booleanOperation") {
     renderBooleanOperation(ctx, node, shadow);
     return;
@@ -2373,7 +2953,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   const point = toScreen(node.x, node.y);
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
-  if (node.kind === "line") {
+  if (node.kind === "line" || node.kind === "connector") {
     ctx.save();
     ctx.globalAlpha = node.opacity;
     if (!applyNativeAffine(ctx, node)) {
@@ -2382,6 +2962,25 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     }
     applyDropShadow(ctx, shadow);
     applyStrokeStyle(ctx, node);
+    const connectorPath = node.kind === "connector" ? connectorPathForNode(node) : undefined;
+    if (connectorPath) {
+      const strokeWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+      ctx.lineWidth = strokeWidth;
+      ctx.lineCap = node.strokeCapStart === node.strokeCapEnd && (node.strokeCapStart === "round" || node.strokeCapStart === "square")
+        ? node.strokeCapStart
+        : "butt";
+      ctx.beginPath();
+      traceConnectorPath(ctx, connectorPath, viewport.zoom);
+      activeStrokes(node).forEach((layer) => {
+        ctx.strokeStyle = paintStackStyle(ctx, layer, Math.max(w, 1), Math.max(h, 1));
+        ctx.stroke();
+        ctx.fillStyle = ctx.strokeStyle;
+        renderConnectorEndpointDecorations(ctx, node, connectorPath, node.strokeWidth * viewport.zoom, viewport.zoom);
+      });
+      renderConnectorLabel(ctx, node, connectorPath);
+      ctx.restore();
+      return;
+    }
     const mesh = canonicalLineStrokeMesh(node);
     if (mesh) {
       fillCanonicalStrokeMesh(ctx, node, mesh, w, 1);
@@ -2444,7 +3043,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     const strokeWidth = node.strokeWidth * viewport.zoom;
     const ring = alignedEllipse && hasVisibleStroke(node) ? ellipseStrokeRing(w, h, strokeWidth, align) : undefined;
     const imageRectangleStrokeMesh = !alignedEllipse
-      && (node.kind === "frame" || node.kind === "rectangle")
+      && (isFrameLike(node) || node.kind === "rectangle")
       && hasVisibleStroke(node)
       ? canonicalRectangleStrokeMesh(node, w, h)
       : undefined;
@@ -2517,9 +3116,11 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     }
   } else if (node.kind === "vector" && node.vectorPath) {
     ctx.beginPath();
-    const flattened = canonicalVectorPath(node);
-    if (flattened) traceFlattenedVectorPath(ctx, flattened, viewport.zoom);
-    else traceVectorPath(ctx, node.vectorPath, viewport.zoom);
+    // Canvas and SVG both understand cubic Beziers natively. Rendering the
+    // Canonical handles directly avoids magnifying a document-space flattening
+    // tolerance into visible facets at high zoom. Rust flattening remains the
+    // bounded source for bounds, hit testing, Boolean and outline operations.
+    traceVectorPath(ctx, node.vectorPath, viewport.zoom);
     const fillRule = node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero";
     activeFills(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(fillRule); });
     if (hasVisibleStroke(node)) {
@@ -2558,8 +3159,24 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     } else {
       fillPaintStack(ctx, node, w, h);
     }
+  } else if (node.kind === "codeBlock") {
+    const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, node.strokeWidth * viewport.zoom);
+    roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius);
+    fillPaintStack(ctx, node, w, h);
+    if (hasVisibleStroke(node)) {
+      ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+      strokePaintStack(ctx, node, w, h);
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.rect(10 * viewport.zoom, 10 * viewport.zoom, Math.max(0, w - 20 * viewport.zoom), Math.max(0, h - 20 * viewport.zoom)); ctx.clip();
+    ctx.fillStyle = "#e2e8f0";
+    ctx.font = `${14 * viewport.zoom}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.textBaseline = "top";
+    (node.text ?? "").split(/\r?\n/u).forEach((line, index) => ctx.fillText(line, 10 * viewport.zoom, (10 + index * 20) * viewport.zoom));
+    ctx.restore();
   } else if (node.kind === "text") {
     const primaryStyle = node.textProperties?.runs[0];
+    const fallbackFonts = node.textProperties?.fallbackFonts;
     const baseMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
     const fontSize = (primaryStyle?.fontSize ?? 31) * viewport.zoom;
     const lineHeight = (node.textProperties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
@@ -2575,7 +3192,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       color: primaryStyle.color,
     } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
     ctx.fillStyle = paint;
-    applyCanvasTextStyle(ctx, primaryRenderStyle);
+    applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
     // CSS line boxes center the font's bounding ascent/descent inside the
     // declared line-height. Canvas' `middle` baseline uses a different em-box
     // convention, which was visibly a few pixels above the textarea glyphs.
@@ -2598,13 +3215,13 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
         // A CSS line has one shared alphabetic baseline. Measuring each style
         // run separately made a larger CJK/emoji run jump a few pixels from
         // the Latin run when the DOM editor opened.
-        applyCanvasTextStyle(ctx, primaryRenderStyle);
+        applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
         const lineBaseline = cssLineBoxBaseline(ctx, lineY, lineHeight);
         ctx.direction = line.direction;
         const alignment = node.textProperties?.paragraph.alignment ?? "left";
         if (spans.length <= 1) {
           const style = spans[0]?.style ?? primaryRenderStyle;
-          applyCanvasTextStyle(ctx, style);
+          applyCanvasTextStyle(ctx, style, fallbackFonts);
           ctx.fillStyle = style.color ? colorToSrgbCss(style.color) : paint;
           ctx.textAlign = alignment === "center" ? "center" : alignment === "right" || line.direction === "rtl" ? "right" : "left";
           const x = alignment === "center" ? textMetrics.width / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width : 0;
@@ -2623,13 +3240,13 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
           const drawableSpans = visualSpans.length ? visualSpans : spans.map((span) => ({ ...span, direction: line.direction }));
           ctx.textAlign = "left";
           const measured = drawableSpans.map((span) => {
-            applyCanvasTextStyle(ctx, span.style);
+            applyCanvasTextStyle(ctx, span.style, fallbackFonts);
             return ctx.measureText(span.text).width;
           });
           const lineWidth = measured.reduce((sum, width) => sum + width, 0);
           let x = alignment === "center" ? (textMetrics.width - lineWidth) / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width - lineWidth : 0;
           drawableSpans.forEach((span, index) => {
-            applyCanvasTextStyle(ctx, span.style);
+            applyCanvasTextStyle(ctx, span.style, fallbackFonts);
             ctx.direction = span.direction;
             ctx.fillStyle = span.style.color ? colorToSrgbCss(span.style.color) : paint;
             ctx.fillText(span.text, x, lineBaseline);
@@ -2641,9 +3258,49 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       previousEnd = line.end;
     });
     ctx.restore();
+  } else if (node.kind === "textPath") {
+    const fontSize = (node.textProperties?.runs[0]?.fontSize ?? 14) * viewport.zoom;
+    const glyphs = layoutTextPath(node, Math.max(1, (node.textProperties?.runs[0]?.fontSize ?? 14) * .6));
+    if (glyphs) {
+      ctx.save();
+      ctx.fillStyle = paint;
+      ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      glyphs.forEach((glyph) => {
+        ctx.save();
+        ctx.translate(glyph.x * viewport.zoom, glyph.y * viewport.zoom);
+        ctx.rotate(glyph.angle);
+        ctx.fillText(glyph.text, 0, 0);
+        ctx.restore();
+      });
+      ctx.restore();
+    }
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, node.strokeWidth * viewport.zoom);
-    if (hasVisibleStroke(node) && node.strokeWeights?.length === 4 && (node.kind === "frame" || node.kind === "rectangle")) {
+    if (
+      (isFrameLike(node) || node.kind === "rectangle") &&
+      !hasVisibleStroke(node) &&
+      geometry.outerRadius === 0 &&
+      !node.cornerRadii?.some((radius) => radius > 0) &&
+      !node.cornerSmoothing
+    ) {
+      // Most imported DOM containers are square, solid rectangles. A retained
+      // path plus fill forces expensive full-surface path rasterization for
+      // every nested background; fillRect maps to the browser's optimized
+      // rectangular paint and is pixel-identical for this geometry.
+      activeFills(node).forEach((layer) => {
+        ctx.fillStyle = paintStackStyle(ctx, layer, w, h);
+        ctx.fillRect(0, 0, w, h);
+      });
+    } else if (node.kind === "shapeWithText" && traceShapeWithTextPath(ctx, node.shapeWithTextType, w, h)) {
+      fillPaintStack(ctx, node, w, h);
+      if (hasVisibleStroke(node)) {
+        ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+        strokePaintStack(ctx, node, w, h);
+        if (traceShapeWithTextDecorations(ctx, node.shapeWithTextType, w, h)) strokePaintStack(ctx, node, w, h);
+      }
+    } else if (hasVisibleStroke(node) && node.strokeWeights?.length === 4 && (isFrameLike(node) || node.kind === "rectangle")) {
       roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
       fillPaintStack(ctx, node, w, h);
       const meshes = canonicalPerSideRectangleStrokeMeshes(node, w, h);
@@ -2657,7 +3314,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
           ctx.restore();
         } else meshes.forEach((mesh) => fillCanonicalStrokeMesh(ctx, node, mesh, w, h));
       } else renderPerSideStroke(ctx, node, w, h, geometry.outerRadius);
-    } else if (hasVisibleStroke(node) && (node.kind === "frame" || node.kind === "rectangle")) {
+    } else if (hasVisibleStroke(node) && (isFrameLike(node) || node.kind === "rectangle")) {
       const mesh = canonicalRectangleStrokeMesh(node, w, h);
       if (mesh) {
         roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
@@ -2685,8 +3342,45 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       fillPaintStack(ctx, node, w, h);
     }
   }
+  renderSpecialNodeOverlay(ctx, node, w, h);
   ctx.restore();
 }
+
+/** M6's static Canvas representations deliberately make their local content
+ * usable without dereferencing a remote provider.  The shared scene compiler
+ * separately records a diagnostic whenever the live behavior is unavailable. */
+function renderSpecialNodeOverlay(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  const fallback = specialNodeFallback(node, "canvas");
+  const label = node.kind === "media" ? "▶ Media"
+    : node.kind === "embed" ? (node.embedMetadata?.title || node.embedMetadata?.provider || "Embed preview")
+      : node.kind === "linkUnfurl" ? (node.linkUnfurlMetadata?.title || node.linkUnfurlMetadata?.provider || "Link preview")
+        : node.kind === "interactiveSlideElement" ? `${node.interactiveSlideElementType ?? "Slide"} interaction`
+          : node.kind === "textPath" && specialNodeFallback(node, "canvas") ? node.text
+            : node.kind === "shapeWithText" || node.kind === "sticky" || node.kind === "tableCell" ? node.text
+              : undefined;
+  if (!label && node.kind !== "table") return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(8 * viewport.zoom, 8 * viewport.zoom, Math.max(0, width - 16 * viewport.zoom), Math.max(0, height - 16 * viewport.zoom)); ctx.clip();
+  ctx.fillStyle = node.kind === "media" ? "#f8fafc" : "#1f2937";
+  ctx.font = `${Math.max(11, Math.min(18, (node.textProperties?.runs[0]?.fontSize ?? 14) * viewport.zoom))}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textBaseline = "top";
+  if (label) ctx.fillText(label, 10 * viewport.zoom, node.kind === "textPath" ? Math.max(0, height / 2 - 8 * viewport.zoom) : 10 * viewport.zoom);
+  if (node.kind === "table" && node.tableMetadata) {
+    ctx.strokeStyle = "rgba(71, 85, 105, .45)";
+    ctx.lineWidth = Math.max(1, viewport.zoom);
+    let cursor = 0;
+    node.tableMetadata.columnWidths.slice(0, -1).forEach((track) => { cursor += track * viewport.zoom; ctx.beginPath(); ctx.moveTo(cursor, 0); ctx.lineTo(cursor, height); ctx.stroke(); });
+    cursor = 0;
+    node.tableMetadata.rowHeights.slice(0, -1).forEach((track) => { cursor += track * viewport.zoom; ctx.beginPath(); ctx.moveTo(0, cursor); ctx.lineTo(width, cursor); ctx.stroke(); });
+  }
+  if (fallback && (node.kind === "media" || node.kind === "embed" || node.kind === "linkUnfurl" || node.kind === "interactiveSlideElement")) {
+    ctx.fillStyle = node.kind === "media" ? "rgba(248,250,252,.72)" : "rgba(71,85,105,.72)";
+    ctx.font = `${11 * viewport.zoom}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.fillText("Static preview", 10 * viewport.zoom, Math.max(28 * viewport.zoom, height - 24 * viewport.zoom));
+  }
+  ctx.restore();
+}
+
 
 function renderBooleanOperation(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow?: CanvasNode["dropShadow"]) {
   const path = canonicalBooleanPath(node);
@@ -2723,7 +3417,9 @@ function renderFrameClippedTree(
   ctx: OffscreenCanvasRenderingContext2D,
   orderedNodes: readonly CanvasNode[],
   dragPreviewRootIds: ReadonlySet<string> = new Set(),
+  reportProgress?: (completed: number, total: number) => void,
 ) {
+  let paintedNodes = 0;
   const ids = new Set(orderedNodes.map((node) => node.id));
   const children = new Map<string, CanvasNode[]>();
   const roots: CanvasNode[] = [];
@@ -2735,6 +3431,63 @@ function renderFrameClippedTree(
       children.set(node.parentId, siblings);
     }
   });
+  type PaintBounds = { left: number; top: number; right: number; bottom: number };
+  const subtreeBounds = new Map<string, PaintBounds | undefined>();
+  const combinedBounds = (
+    left: PaintBounds | undefined,
+    right: PaintBounds | undefined,
+  ): PaintBounds | undefined => {
+    if (!left) return right;
+    if (!right) return left;
+    return {
+      left: Math.min(left.left, right.left),
+      top: Math.min(left.top, right.top),
+      right: Math.max(left.right, right.right),
+      bottom: Math.max(left.bottom, right.bottom),
+    };
+  };
+  const boundsForSubtree = (node: CanvasNode): PaintBounds | undefined => {
+    if (subtreeBounds.has(node.id)) return subtreeBounds.get(node.id);
+    const own = nodeBoundsById.get(node.id);
+    let combined = own
+      ? {
+          left: own.x,
+          top: own.y,
+          right: own.x + own.width,
+          bottom: own.y + own.height,
+        }
+      : undefined;
+    (children.get(node.id) ?? []).forEach((child) => {
+      combined = combinedBounds(combined, boundsForSubtree(child));
+    });
+    subtreeBounds.set(node.id, combined);
+    return combined;
+  };
+  const frameClipChangesPixels = (
+    frame: CanvasNode,
+    descendants: readonly CanvasNode[],
+  ) => {
+    if (
+      frame.radius > 0 ||
+      frame.cornerSmoothing ||
+      frame.cornerRadii?.some((radius) => radius > 0)
+    )
+      return true;
+    const frameBounds = nodeBoundsById.get(frame.id);
+    const contentBounds = descendants.reduce<PaintBounds | undefined>(
+      (combined, child) =>
+        combinedBounds(combined, boundsForSubtree(child)),
+      undefined,
+    );
+    if (!frameBounds || !contentBounds) return false;
+    const epsilon = 0.01;
+    return (
+      contentBounds.left < frameBounds.x - epsilon ||
+      contentBounds.top < frameBounds.y - epsilon ||
+      contentBounds.right > frameBounds.x + frameBounds.width + epsilon ||
+      contentBounds.bottom > frameBounds.y + frameBounds.height + epsilon
+    );
+  };
   const compositeMaskedSiblings = (destination: OffscreenCanvasRenderingContext2D, mask: CanvasNode, targets: readonly CanvasNode[], depth: number) => {
     if (!targets.length || !canvas) return;
     const admission = admitAlphaMaskSurface(canvas.width, canvas.height, depth);
@@ -2758,8 +3511,7 @@ function renderFrameClippedTree(
     surfaceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
     renderSiblings(targets, surfaceContext, depth + 1);
     surfaceContext.save();
-    surfaceContext.globalCompositeOperation = "destination-in";
-    renderNode(surfaceContext, mask);
+    renderNode(surfaceContext, mask, "destination-in");
     surfaceContext.restore();
     destination.save();
     // The temporary surface is already in device pixels, unlike the logical
@@ -2781,8 +3533,32 @@ function renderFrameClippedTree(
       renderBranchInto(destination, depth)(node);
     }
   };
+  const isSafeRepeatSubtree = (siblings: readonly CanvasNode[]): boolean => siblings.every((node) => {
+    const descendants = children.get(node.id) ?? [];
+    return !node.isMask
+      && !orderedEffects(node).length
+      && node.kind !== "booleanOperation"
+      && !isFrameLike(node)
+      && node.kind !== "group"
+      && node.kind !== "transformGroup"
+      && !descendants.length;
+  });
+  const applyRepeatWorldAffine = (destination: OffscreenCanvasRenderingContext2D, matrix: AffineMatrix) => {
+    const screen = affineScreenMatrix(matrix, toScreen(0, 0), viewport.zoom);
+    destination.transform(
+      screen.a,
+      screen.b,
+      screen.c,
+      screen.d,
+      screen.e,
+      screen.f,
+    );
+  };
   function renderBranchInto(destination: OffscreenCanvasRenderingContext2D, depth: number, detachedPreview = false) {
     return (node: CanvasNode) => {
+      paintedNodes += 1;
+      if (paintedNodes === 1 || paintedNodes % 100 === 0)
+        reportProgress?.(paintedNodes, orderedNodes.length);
       // A child that has been dragged completely beyond an ancestor Frame's
       // clip stays visible until pointer-up. Omit it from the clipped document
       // pass so it can be rendered once as the detached Figma-style preview.
@@ -2791,11 +3567,33 @@ function renderFrameClippedTree(
       // destination may itself be an offscreen surface, so defer to the shared
       // sibling renderer rather than painting a mask as an ordinary node.
       if (node.isMask) return;
+      if (node.kind === "transformGroup") {
+        const descendants = children.get(node.id) ?? [];
+        // A derived copy is only painted through this direct Canvas route when
+        // each source leaf is free of masks, clipping containers and effects.
+        // Those features use offscreen composition that resets its transform;
+        // keeping their one-time source plus a diagnostic is safer than
+        // silently changing blend or clip order.
+        renderSiblings(descendants, destination, depth);
+        const canonical = nodes.find((candidate) => candidate.id === node.id);
+        const repeats = canonical && isSafeRepeatSubtree(descendants) ? transformGroupRepeatMatrices(nodes, canonical) : undefined;
+        repeats?.forEach((matrix) => {
+          destination.save();
+          applyRepeatWorldAffine(destination, matrix);
+          renderSiblings(descendants, destination, depth);
+          destination.restore();
+        });
+        return;
+      }
       renderNode(destination, node);
       if (node.kind === "booleanOperation" && canonicalBooleanPath(node)) return;
       const descendants = children.get(node.id) ?? [];
       if (!descendants.length) return;
-      if (node.kind === "frame" && node.clipsContent !== false) {
+      if (
+        isFrameLike(node) &&
+        node.clipsContent !== false &&
+        frameClipChangesPixels(node, descendants)
+      ) {
         clipFrameContents(destination, node);
         renderSiblings(descendants, destination, depth);
         destination.restore();
@@ -2834,6 +3632,7 @@ function acquireAlphaMaskSurface(depth: number): AlphaMaskSurface | undefined {
 }
 
 function clipFrameContents(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const screenTransform = ctx.getTransform();
   const point = toScreen(node.x, node.y);
   const frameWidth = node.width * viewport.zoom;
   const frameHeight = node.height * viewport.zoom;
@@ -2850,7 +3649,10 @@ function clipFrameContents(ctx: OffscreenCanvasRenderingContext2D, node: CanvasN
   // matrices, so leaving it active would apply the Frame matrix twice and make
   // nested content diverge from its hit/selection bounds. Keep the clip while
   // returning to the normal screen-space basis for the child render pass.
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Preserve the destination's basis: previews use a lower DPR than the
+  // presentation surface. Restoring the global DPR would misplace both the
+  // next ancestor clip and the child in the low-resolution frame.
+  ctx.setTransform(screenTransform);
 }
 
 function renderEllipseArc(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
@@ -2860,7 +3662,10 @@ function renderEllipseArc(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNo
   const end = arc.endingAngle * Math.PI / 180;
   const outerX = width / 2;
   const outerY = height / 2;
-  const innerRadius = Math.max(0, Math.min(.999999, arc.innerRadius));
+  // `1` is a valid Figma ArcData boundary. Keep it exact: the resulting
+  // coincident inner/outer contours correctly produce a zero-area fill rather
+  // than silently changing the persisted geometry to a very thin donut.
+  const innerRadius = Math.max(0, Math.min(1, arc.innerRadius));
   ctx.beginPath();
   ctx.ellipse(outerX, outerY, outerX, outerY, 0, start, end);
   if (innerRadius > 0) {
@@ -2938,11 +3743,48 @@ function renderLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasN
   ctx.fill();
 }
 
-function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle) {
-  const fontFamily = style.font ? fontFaces.familyFor(style.font.assetId) : undefined;
-  ctx.font = `${style.italic ? "italic " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamily ? `"${fontFamily}", ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
+function renderConnectorEndpointDecorations(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>, strokeWidth: number, scale: number) {
+  connectorEndpointDecorations(node, path).forEach((decoration) => {
+    ctx.beginPath();
+    connectorDecorationTriangles(decoration, strokeWidth).forEach(([a, b, c]) => {
+      const transform = (point: { x: number; y: number }) => ({
+        x: decoration.point.x * scale + point.x * decoration.direction.x - point.y * decoration.direction.y,
+        y: decoration.point.y * scale + point.x * decoration.direction.y + point.y * decoration.direction.x,
+      });
+      const first = transform(a); const second = transform(b); const third = transform(c);
+      ctx.moveTo(first.x, first.y); ctx.lineTo(second.x, second.y); ctx.lineTo(third.x, third.y); ctx.closePath();
+    });
+    ctx.fill();
+  });
+}
+
+function renderConnectorLabel(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>) {
+  const label = connectorLabelLayout(node, path);
+  if (!label) return;
+  const x = label.x * viewport.zoom; const y = label.y * viewport.zoom;
+  const width = label.width * viewport.zoom; const height = label.height * viewport.zoom;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,.94)";
+  ctx.fillRect(x - width / 2, y - height / 2, width, height);
+  ctx.fillStyle = "#0f172a";
+  ctx.font = `${12 * viewport.zoom}px ${canvasDesignTokens.typography.canvasText.family}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const lineHeight = 16 * viewport.zoom;
+  const firstBaseline = y - (label.lines.length - 1) * lineHeight / 2;
+  label.lines.forEach((line, index) => ctx.fillText(line, x, firstBaseline + index * lineHeight, Math.max(0, width - 8 * viewport.zoom)));
+  ctx.restore();
+}
+
+function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle, fallbackFonts?: readonly DocumentFontReference[]) {
+  const fontFamilies = documentFontFamilyChain(style.font, fallbackFonts, (assetId) => fontFaces.familyFor(assetId));
+  ctx.font = `${style.italic ? "italic " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
   const letterSpacingTarget = ctx as unknown as { letterSpacing?: string };
   if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * viewport.zoom}px`;
+  // This Canvas property is not exposed in every lib.dom version. Reset it for
+  // unvaried spans so a preceding Style Run cannot leak its axes into the next.
+  const variationTarget = ctx as unknown as { fontVariationSettings?: string };
+  if ("fontVariationSettings" in variationTarget) variationTarget.fontVariationSettings = fontVariationCss(style.font?.variationAxes);
 }
 
 /** Matches the browser's inline line-box rule: center the selected font's
@@ -2976,7 +3818,7 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
   } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
   const source = node.text ?? "";
   const sourceBytes = new TextEncoder().encode(source);
-  applyCanvasTextStyle(ctx, primaryStyle);
+  applyCanvasTextStyle(ctx, primaryStyle, properties.fallbackFonts);
   const maxWidth = properties.autoSize === "widthAndHeight" ? Number.POSITIVE_INFINITY : Math.max(1, node.width * viewport.zoom);
   const lines = layoutTextRanges({ text: source, maxWidth, measure: (value) => ctx.measureText(value).width });
   let height = 0;
@@ -2989,11 +3831,11 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
     const lineHeight = (properties.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
     height += lineHeight;
     if (spans.length <= 1) {
-      applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle);
+      applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle, properties.fallbackFonts);
       widest = Math.max(widest, ctx.measureText(line.text).width);
     } else {
       const measured = spans.reduce((total, span) => {
-        applyCanvasTextStyle(ctx, span.style);
+        applyCanvasTextStyle(ctx, span.style, properties.fallbackFonts);
         return total + ctx.measureText(span.text).width;
       }, 0);
       widest = Math.max(widest, measured);
@@ -3016,7 +3858,7 @@ function pasteTarget(): { pageId?: string; parentId?: string } {
   const selected = selectedIds.map((id) => nodeById.get(id)).filter((node): node is CanvasNode => Boolean(node));
   if (selected.length === 1) {
     const node = selected[0];
-    if (["frame", "group", "section"].includes(node.kind)) return { pageId: node.pageId ?? activePageId, parentId: node.id };
+    if (["frame", "component", "group", "section"].includes(node.kind)) return { pageId: node.pageId ?? activePageId, parentId: node.id };
     return { pageId: node.pageId ?? activePageId, parentId: node.parentId };
   }
   return { pageId: activePageId, parentId: undefined };
@@ -3608,7 +4450,7 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   // performance. Selection must instead retain its canonical local rectangle
   // and apply the resolved world matrix exactly once.
   const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
-  if (canonical.kind === "line") {
+  if (canonical.kind === "line" || canonical.kind === "connector") {
     renderLineOutline(ctx, canonical, canvasDesignTokens.stroke.selection.width);
     renderLineEndpointHandles(ctx, canonical);
     return;
@@ -3793,7 +4635,7 @@ function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     ctx.restore();
     return;
   }
-  if (canonical.kind === "line") {
+  if (canonical.kind === "line" || canonical.kind === "connector") {
     renderLineOutline(ctx, canonical, canvasDesignTokens.stroke.hover.width);
     return;
   }
@@ -3818,7 +4660,7 @@ function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     ctx.beginPath();
     ctx.ellipse(outlineX + outlineWidth / 2, outlineY + outlineHeight / 2, Math.max(0, outlineWidth / 2 - canvasDesignTokens.stroke.hover.pixelInset), Math.max(0, outlineHeight / 2 - canvasDesignTokens.stroke.hover.pixelInset), 0, 0, Math.PI * 2);
     ctx.stroke();
-  } else if (canonical.kind === "text" || canonical.kind === "frame" || canonical.kind === "section") {
+  } else if (canonical.kind === "text" || isFrameLike(canonical) || canonical.kind === "section") {
     // Frame/Section hover bounds stay rectilinear even when their paint has rounded corners.
     ctx.strokeRect(outlineX + canvasDesignTokens.stroke.hover.pixelInset, outlineY + canvasDesignTokens.stroke.hover.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1));
   } else {
@@ -3845,7 +4687,7 @@ function renderLayerName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.restore();
 }
 function renderFrameName(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
-  if ((node.kind !== "frame" && node.kind !== "section") || node.visible === false || selectedIds.includes(node.id)) return;
+  if (!showsPersistentCanvasLayerName(node) || selectedIds.includes(node.id)) return;
   renderLayerName(ctx, node);
 }
 function renderSelectionDimensions(ctx: OffscreenCanvasRenderingContext2D, dimensions: string, labelX: number, labelY: number, labelWidth: number, labelHeight: number, horizontalInset: number, cornerRadius: number) {
@@ -3887,7 +4729,7 @@ function renderRotatedSingleSelectionLabels(
   ctx.save();
   ctx.translate(topLeft.x, topLeft.y);
   ctx.rotate(angle);
-  if (canonical.kind === "frame" || canonical.kind === "section") {
+  if (isFrameLike(canonical) || canonical.kind === "section") {
     ctx.font = canvasFont(canvasDesignTokens.typography.layerName);
     ctx.fillStyle = canvasDesignTokens.color.selection;
     ctx.textBaseline = "bottom";
@@ -3964,7 +4806,7 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelec
     ctx.restore();
     return;
   }
-  if (selectedNode?.kind === "frame" || selectedNode?.kind === "section") renderLayerName(ctx, selectedNode, true);
+  if (selectedNode && (isFrameLike(selectedNode) || selectedNode.kind === "section")) renderLayerName(ctx, selectedNode, true);
   // The label is screen-space UI. Its anchor shares the same world-derived
   // selection rectangle as the outline and handles, then sits just below that
   // rectangle instead of inheriting an unprojected x/y or object rotation.
@@ -4000,8 +4842,53 @@ function renderMarquee(ctx: OffscreenCanvasRenderingContext2D) {
   ctx.strokeRect(x + .5, y + .5, marqueeWidth, marqueeHeight);
   ctx.restore();
 }
-function render(rendersPerInputFrame?: number) {
+function render(
+  rendersPerInputFrame?: number,
+  reportRemoteProgress?: (
+    stage: "render-paint" | "render-overlay" | "render-finalize",
+  ) => void,
+  fastStructuralPreview = false,
+) {
+  if (!renderVisible) return;
+  const progressiveRequestKey = nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
+    ? [revision, nodes.length, activePageId, transientSceneVersion, viewport.x, viewport.y, viewport.zoom, width, height, dpr, renderQuality.tier].join(":")
+    : undefined;
+  // Inspector, presence and persistence updates may request the same frame
+  // while a dense structural paint is already progressing. Do not restart
+  // that work: repeated cancellation otherwise leaves the low-res preview on
+  // screen indefinitely even though the camera and scene never changed.
+  if (
+    !reportRemoteProgress &&
+    renderQuality.tier === "settled" &&
+    progressiveRequestKey &&
+    (progressivePaintKey === progressiveRequestKey || completedProgressivePaintKey === progressiveRequestKey)
+  ) return;
+  // Once a preview/reprojection replaces the surface, an earlier completed
+  // camera key no longer proves what is on screen (including zoom A → B → A).
+  completedProgressivePaintKey = undefined;
+  const paintGeneration = ++progressivePaintGeneration;
+  finishProgressivePaint();
+  // Some local commits advance the revision after rebuilding the indexes. Do
+  // not let the derived scene advertise that older fence to a Hit Test.
+  if (!compiledScene || compiledScene.scene.revision !== revision) rebuildCompiledScene();
   if (!context || !canvas) return;
+  const startedAt = performance.now();
+  if (reprojectCachedFrameDuringInteraction()) {
+    renderPerformance.record({
+      totalMs: performance.now() - startedAt,
+      cullingMs: 0,
+      gpuPrepareMs: 0,
+      overlayMs: 0,
+      imageBitmapMs: 0,
+      compositeMs: 0,
+      candidateNodes: 0,
+      visibleNodes: 0,
+      gpuUploadBytes: 0,
+      rendersPerInputFrame,
+    });
+    maybeSimulateGpuLoss();
+    return;
+  }
   // Cache eviction is presentation-only. Re-request each visible missing asset
   // so a page converges on the shared per-image proxy budget instead of
   // leaving an evicted layer on its striped placeholder indefinitely.
@@ -4009,46 +4896,78 @@ function render(rendersPerInputFrame?: number) {
     .filter((node) => node.visible !== false && node.kind !== "text" && Boolean(node.assetId) && !imageBitmaps.has(node.assetId!))
     .map((node) => node.assetId!))
     .forEach((assetId) => void ensureImageBitmap(assetId));
-  const startedAt = performance.now();
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
   const candidateNodes = spatialGrid.query(viewportBounds);
   // The spatial index intentionally contains every canonical node. Intersect
   // it with hierarchy visibility here so a hidden Section's descendants cannot
   // reappear merely because this render path bypasses `activeNodes()`.
-  const hierarchyVisibleIds = new Set(visibleNodesOnPage(nodes, activePageId, defaultPageId).map((node) => node.id));
+  const pageVisibleNodes = visibleNodesOnPage(nodes, activePageId, defaultPageId);
+  const hierarchyVisibleIds = new Set(pageVisibleNodes.map((node) => node.id));
   const visibleNodes = candidateNodes.filter((node) => hierarchyVisibleIds.has(node.id) && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
   // `nodeById` and the spatial grid intentionally build their own projected
   // copies. Object identity therefore cannot decide whether an overlay node is
   // visible; compare the durable NodeId so Line selection/hover is not skipped
   // after a Relative-v1 projection.
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
-  // Rust supplies the committed command order. Canvas keeps interleaved layer
-  // order for nodes that cannot safely enter the GPU pass prefix.
-  const rustRenderGraph = rustRenderGraphForVisibleNodes(viewportBounds, visibleNodes);
-  const renderOrderedNodes = orderNodesByRustRenderCommands(sortNodesByLayerOrder(visibleNodes), rustRenderGraph);
+  // Rust supplies the committed command order for flat Canvas/GPU paths.
+  // Structural composition is deliberately different: a mask consumes the
+  // following *sibling* run, so reordering by render pass could put an Image
+  // or Text target before its alpha source. Preserve Canonical back-to-front
+  // layer order whenever Frame clips or alpha masks require the tree walker.
+  // Keep validating the Rust plan and surfacing its diagnostics while Canvas
+  // now consumes the shared Scene IR as its ordering authority.
+  // Recovery can temporarily advance Core ahead of the displayed projection.
+  // Such a graph cannot validate this frame; building it only delays zoom.
+  if (Number(wasmDocument?.revision) === revision)
+    void rustRenderGraphForVisibleNodes(viewportBounds, visibleNodes);
+  reportRemoteProgress?.("render-paint");
+  // Canvas' input order comes from the same Scene IR used by hit testing. The
+  // Rust command stream remains an optional GPU optimization, but it cannot
+  // redefine the Canvas stacking order.
+  const sceneOrderedNodes = sceneNodesInPaintOrder(compiledScene?.scene, visibleNodes);
+  const renderOrderedNodes = sceneOrderedNodes;
+  const structuralRenderNodes = sceneOrderedNodes;
   const cullingMs = performance.now() - cullingStartedAt;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
-  context.clearRect(0, 0, width, height);
-  context.fillStyle = canvasDesignTokens.color.backdrop;
-  context.fillRect(0, 0, width, height);
   let gpuRenderedNodeIds: ReadonlySet<string> | undefined;
   let gpuUploadBytes = 0;
   let imageBitmapMs = 0;
   let compositeMs = 0;
   const gpuStartedAt = performance.now();
-  const pageHasFrameChildren = visibleNodesOnPage(nodes, activePageId, defaultPageId)
-    .some((node) => node.parentId && nodes.some((parent) => parent.id === node.parentId && parent.kind === "frame" && parent.clipsContent !== false));
-  const pageHasBooleanOperations = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+  const pageHasFrameChildren = pageVisibleNodes.some((node) => {
+    const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
+    return parent && isFrameLike(parent) && parent.clipsContent !== false;
+  });
+  const pageHasBooleanOperations = pageVisibleNodes
     .some((node) => node.kind === "booleanOperation");
-  const pageHasAlphaMasks = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+  const pageHasAlphaMasks = pageVisibleNodes
     .some((node) => Boolean(node.isMask));
-  if (gpuRenderer) {
+  const pageHasTransformGroupRepeat = pageVisibleNodes
+    .some((node) => node.kind === "transformGroup" && Boolean(transformGroupRepeatMatrices(nodes, node)?.length));
+  const useProgressiveStructuralRender =
+    (fastStructuralPreview || nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD) &&
+    pageHasFrameChildren &&
+    !pageHasAlphaMasks &&
+    !pageHasTransformGroupRepeat;
+  const hasReusablePresentedFrame =
+    presentedPageId === activePageId &&
+    presentedSurfaceWidth === canvas.width &&
+    presentedSurfaceHeight === canvas.height &&
+    cachedPresentedFrameSceneKey === `${revision}:${activePageId}:${transientSceneVersion}` &&
+    isSameRenderedViewport(cachedPresentedFrameViewport, viewport);
+  if (!useProgressiveStructuralRender || !hasReusablePresentedFrame) {
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = canvasDesignTokens.color.backdrop;
+    context.fillRect(0, 0, width, height);
+    if (useProgressiveStructuralRender) renderGrid(context);
+  }
+  if (gpuRenderer && !useProgressiveStructuralRender) {
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
       const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId && node.kind !== "slice");
-      const pageHasRelativeTransform = visibleNodesOnPage(nodes, activePageId, defaultPageId)
+      const pageHasRelativeTransform = pageVisibleNodes
         .some((node) => Boolean(node.relativeTransform));
       const decodedImageAssetIds = new Set(pageNodes
         .filter((node) => node.kind === "image" && Boolean(node.assetId) && Boolean(imageBitmaps.get(node.assetId!)))
@@ -4057,11 +4976,16 @@ function render(rendersPerInputFrame?: number) {
       const gpuTextNodeIds = new Set([...rustGpuTextGlyphs]
         .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
         .map(([nodeId]) => nodeId));
-      const gpuNodes = pageHasFrameChildren || pageHasBooleanOperations || pageHasAlphaMasks ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node) || requiresCanvasEffectOrBlend(node));
+      const gpuNodes = pageHasFrameChildren || pageHasBooleanOperations || pageHasAlphaMasks || pageHasTransformGroupRepeat ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node) || requiresCanvasEffectOrBlend(node));
       const currentRustGpuScene = gpuNodes.length === pageNodes.length && rustGpuScene
         && rustGpuScene.revision === revision
         && rustGpuScene.pageId === activePageId
         && rustGpuScene.transientSceneVersion === transientSceneVersion
+        // A precomputed Rust instance buffer is a local acceleration only.
+        // It is admissible only when it proves the same Scene IR draw order;
+        // otherwise the TypeScript GPU builder receives the shared list.
+        && rustGpuScene.renderedNodeIds.size === gpuNodes.length
+        && [...rustGpuScene.renderedNodeIds].every((nodeId, index) => gpuNodes[index]?.id === nodeId)
         && !pageHasRelativeTransform
         ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
         : undefined;
@@ -4132,18 +5056,230 @@ function render(rendersPerInputFrame?: number) {
     }
   }
   const gpuPrepareMs = performance.now() - gpuStartedAt;
+  reportRemoteProgress?.("render-overlay");
   const overlayStartedAt = performance.now();
   const dragPreviewRootIds = escapedFrameDragPreviewRootIds();
-  if (pageHasFrameChildren || pageHasAlphaMasks) renderFrameClippedTree(context!, renderOrderedNodes, dragPreviewRootIds);
+  if (useProgressiveStructuralRender) {
+    const booleanOperandIds = renderedBooleanOperandIds(structuralRenderNodes);
+    const progressiveNodes = structuralRenderNodes.filter((node) => !booleanOperandIds.has(node.id));
+    const clippingAncestorsByNodeId = new Map<string, CanvasNode[]>();
+    const clippingAncestorsFor = (node: CanvasNode) => {
+      const cached = clippingAncestorsByNodeId.get(node.id);
+      if (cached) return cached;
+      const ancestors: CanvasNode[] = [];
+      const visited = new Set<string>([node.id]);
+      // Look up all projected parents, including those culled out of this
+      // viewport. Culling a Frame must not remove its clip from a child.
+      let parent = node.parentId ? nodeById.get(node.parentId) : undefined;
+      while (parent && !visited.has(parent.id)) {
+        visited.add(parent.id);
+        if (isFrameLike(parent) && parent.clipsContent !== false) ancestors.unshift(parent);
+        parent = parent.parentId ? nodeById.get(parent.parentId) : undefined;
+      }
+      clippingAncestorsByNodeId.set(node.id, ancestors);
+      return ancestors;
+    };
+    const paintStructuralNode = (destination: OffscreenCanvasRenderingContext2D, node: CanvasNode, effects = false) => {
+      const ancestors = clippingAncestorsFor(node);
+      for (const ancestor of ancestors) clipFrameContents(destination, ancestor);
+      if (effects) renderNode(destination, node);
+      else renderNodePreview(destination, node);
+      for (let ancestorIndex = 0; ancestorIndex < ancestors.length; ancestorIndex += 1) destination.restore();
+    };
+    // Paint into an untransferred staging surface. Yielding after each layer
+    // keeps Worker input responsive, while publishing only occasional
+    // checkpoints avoids forcing Chromium to composite the full transferred
+    // canvas hundreds of times during a large import.
+    let stagingCanvas = new OffscreenCanvas(canvas.width, canvas.height);
+    let stagingContext = stagingCanvas.getContext("2d");
+    if (!stagingContext) return;
+    progressivePaintKey = progressiveRequestKey;
+    progressivePaintCompletion = new Promise<void>((resolve) => {
+      resolveProgressivePaintCompletion = resolve;
+    });
+    stagingContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    stagingContext.fillStyle = canvasDesignTokens.color.backdrop;
+    stagingContext.fillRect(0, 0, width, height);
+    renderGrid(stagingContext);
+    const renderedViewport = { ...viewport };
+    const renderedSurfaceWidth = width;
+    const renderedSurfaceHeight = height;
+    const needsEffectPass = renderedViewport.zoom >= 1.5 && progressiveNodes.some((node) => orderedEffects(node).length > 0);
+    let paintingEffects = false;
+    const publishStagingSurface = () => {
+      if (paintGeneration !== progressivePaintGeneration || !context || !stagingContext) return;
+      context.save();
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, canvas!.width, canvas!.height);
+      context.drawImage(stagingCanvas, 0, 0);
+      context.restore();
+      presentedPageId = activePageId;
+      presentedSurfaceWidth = canvas!.width;
+      presentedSurfaceHeight = canvas!.height;
+      // The completed staging surface is safe to reuse between Worker turns:
+      // painting and input never execute concurrently. It becomes the raster
+      // used for subsequent camera-only interaction.
+      cachePresentedFrame(stagingCanvas, renderedViewport, renderedSurfaceWidth, renderedSurfaceHeight);
+    };
+    if (!hasReusablePresentedFrame) {
+      // Dense remote documents become usable after this complete overview is
+      // published. The exact 1.5x frame continues in the staging surface, but
+      // must not hold the entire editor behind a blocking loading screen.
+      const previewDpr = Math.min(dpr, 0.5);
+      const previewCanvas = new OffscreenCanvas(
+        Math.max(1, Math.ceil(width * previewDpr)),
+        Math.max(1, Math.ceil(height * previewDpr)),
+      );
+      const previewContext = previewCanvas.getContext("2d");
+      if (previewContext) {
+        previewContext.setTransform(previewDpr, 0, 0, previewDpr, 0, 0);
+        previewContext.fillStyle = canvasDesignTokens.color.backdrop;
+        previewContext.fillRect(0, 0, width, height);
+        renderGrid(previewContext);
+        progressiveNodes.forEach((node) => paintStructuralNode(previewContext, node));
+        context.save();
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(previewCanvas, 0, 0, canvas.width, canvas.height);
+        context.restore();
+        presentedPageId = activePageId;
+        presentedSurfaceWidth = canvas.width;
+        presentedSurfaceHeight = canvas.height;
+        cachePresentedFrame(previewCanvas, renderedViewport, renderedSurfaceWidth, renderedSurfaceHeight);
+        emit({
+          type: "frame-ready",
+          revision,
+          pageId: activePageId,
+          quality: "preview",
+        });
+      }
+    }
+    let index = 0;
+    const progressStep = Math.max(
+      100,
+      Math.ceil(progressiveNodes.length / 10),
+    );
+    let nextProgressIndex = progressStep;
+    const paintChunk = () => {
+      if (paintGeneration !== progressivePaintGeneration || !context || !stagingContext) return;
+      const chunkStartedAt = performance.now();
+      const end = Math.min(index + PROGRESSIVE_PAINT_MAX_NODES, progressiveNodes.length);
+      for (; index < end; index += 1) {
+        const node = progressiveNodes[index]!;
+        // A zoomed-out dense page can carry hundreds of blur/shadow records.
+        // Clearing multiple full-size effect surfaces per node can take tens of
+        // seconds, so overview mode preserves canonical vector/text paint and
+        // clipping at full presentation DPR. Detail zoom and normal-sized
+        // documents retain the complete ordered effect pipeline.
+        paintStructuralNode(stagingContext, node, paintingEffects);
+        if (performance.now() - chunkStartedAt >= PROGRESSIVE_PAINT_BUDGET_MS) {
+          index += 1;
+          break;
+        }
+      }
+      // Keep the complete low-resolution preview visible until every exact
+      // layer is ready. Publishing an early canonical prefix can replace a
+      // complete preview with an apparently blank or half-built page because
+      // background/container layers commonly precede visible descendants.
+      if (index === progressiveNodes.length) {
+        publishStagingSurface();
+        if (needsEffectPass && !paintingEffects) {
+          // Publish sharp geometry/text before expensive full-surface effects.
+          // Keep this completed raster immutable while the effect pass paints
+          // into a separate surface, so subsequent zooms cannot sample a blank
+          // or partially overwritten cache.
+          emit({ type: "frame-ready", revision, pageId: activePageId, quality: "sharp" });
+          stagingCanvas = new OffscreenCanvas(canvas!.width, canvas!.height);
+          stagingContext = stagingCanvas.getContext("2d");
+          if (!stagingContext) throw new Error("Progressive effect surface unavailable");
+          stagingContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+          stagingContext.fillStyle = canvasDesignTokens.color.backdrop;
+          stagingContext.fillRect(0, 0, width, height);
+          renderGrid(stagingContext);
+          paintingEffects = true;
+          index = 0;
+          scheduleProgressivePaint(runPaintChunk);
+          return;
+        }
+      }
+      if (
+        reportRemoteProgress &&
+        (index >= nextProgressIndex || index === progressiveNodes.length)
+      ) {
+        emit({
+          type: "remote-load-progress",
+          stage: "render-nodes",
+          completed: index,
+          total: progressiveNodes.length,
+        });
+        nextProgressIndex =
+          Math.floor(index / progressStep + 1) * progressStep;
+      }
+      if (index < progressiveNodes.length) {
+        scheduleProgressivePaint(runPaintChunk);
+        return;
+      }
+      cachePresentedFrame(stagingCanvas, renderedViewport, renderedSurfaceWidth, renderedSurfaceHeight);
+      completedProgressivePaintKey = progressiveRequestKey;
+      finishProgressivePaint();
+      reportRemoteProgress?.("render-finalize");
+      renderPerformance.record({
+        totalMs: performance.now() - startedAt,
+        cullingMs,
+        gpuPrepareMs,
+        overlayMs: performance.now() - overlayStartedAt,
+        imageBitmapMs,
+        compositeMs,
+        candidateNodes: candidateNodes.length,
+        visibleNodes: visibleNodes.length,
+        gpuUploadBytes,
+        rendersPerInputFrame,
+      });
+      emit({
+        type: "frame-ready",
+        revision,
+        pageId: activePageId,
+        quality: "settled",
+      });
+      maybeSimulateGpuLoss();
+    };
+    const runPaintChunk = () => {
+      try { paintChunk(); }
+      catch (error) {
+        if (paintGeneration === progressivePaintGeneration) finishProgressivePaint();
+        // Preserve the existing Worker crash/recovery path on paint failure.
+        throw error;
+      }
+    };
+    scheduleProgressivePaint(runPaintChunk);
+    return;
+  } else if (pageHasFrameChildren || pageHasAlphaMasks || pageHasTransformGroupRepeat)
+    renderFrameClippedTree(
+      context!,
+      structuralRenderNodes,
+      dragPreviewRootIds,
+      reportRemoteProgress
+        ? (completed, total) =>
+            emit({
+              type: "remote-load-progress",
+              stage: "render-nodes",
+              completed,
+              total,
+            })
+        : undefined,
+    );
   else {
     const booleanOperandIds = renderedBooleanOperandIds(renderOrderedNodes);
     renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id) && !booleanOperandIds.has(node.id)) renderNode(context!, node); });
   }
+  reportRemoteProgress?.("render-finalize");
   visibleNodes.forEach((node) => renderFrameName(context!, node));
   const hovered = hoveredId ? nodeById.get(hoveredId) : undefined;
   if (hovered && visibleNodeIds.has(hovered.id)) renderHover(context!, hovered);
   const frameDropTarget = drag?.mode === "move" && drag.dropTargetId ? nodeById.get(drag.dropTargetId) : undefined;
-  if (frameDropTarget?.kind === "frame") {
+  if (frameDropTarget && isFrameLike(frameDropTarget)) {
     renderFrameDropTarget(context!, frameDropTarget, frameDropTarget.autoLayout?.mode === "horizontal" || frameDropTarget.autoLayout?.mode === "vertical");
   }
   if (drag?.mode === "move" && !drag.dropTargetId) {
@@ -4171,7 +5307,16 @@ function render(rendersPerInputFrame?: number) {
   renderPenDraftPreview(context!);
   renderMarquee(context);
   renderGrid(context);
+  presentedPageId = activePageId;
+  presentedSurfaceWidth = canvas.width;
+  presentedSurfaceHeight = canvas.height;
   renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
+  emit({
+    type: "frame-ready",
+    revision,
+    pageId: activePageId,
+    quality: "settled",
+  });
   maybeSimulateGpuLoss();
 }
 async function pasteClipboard() {
@@ -4255,6 +5400,27 @@ function dispatch(command: EditorCommand) {
   command = withResolvedTextAutoSize(command);
   if (command.type === "update") command = { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
   command = withResolvedLayerPosition(command);
+  if (command.type === "arrange") {
+    const arranged = resolveArrangeCommand(nodes, command);
+    if (!arranged.ok) { emitError(undefined, "INVALID_COMMAND"); return; }
+    if (!arranged.updates.length) return;
+    if (wasmDocument) {
+      dispatchTransaction({ id: createId(), baseRevision: Number(wasmDocument.revision), commands: [command] });
+      return;
+    }
+    const before = cloneDocument();
+    nodes = nodes.map((node) => {
+      const patch = arranged.updates.find((candidate) => candidate.id === node.id)?.patch;
+      return patch ? { ...node, ...patch } : node;
+    });
+    history.push({ nodes: before, advancesRevision: true });
+    recordHistory("local");
+    revision += 1;
+    rebuildNodeIndex();
+    render();
+    emitSnapshot();
+    return;
+  }
   if (command.type === "flattenBoolean") {
     if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
     const boolean = nodes.find((node) => node.id === command.id);
@@ -4347,11 +5513,23 @@ function dispatch(command: EditorCommand) {
   switch (command.type) {
     case "select-page": {
       if (!pages.some((page) => page.id === command.id)) { emitError(undefined, "INVALID_COMMAND"); break; }
+      if (command.id === activePageId) { emitViewState(); break; }
       storeActivePageSelection();
+      rememberActivePageViewport();
       activePageId = command.id;
-      refreshRustGpuScene();
+      restoreOrFitPageViewport(activePageId);
       restorePageSelection(activePageId);
+      editingTextNodeId = undefined;
       hoveredId = undefined;
+      // Publish navigation before the potentially expensive first paint of a
+      // complex page so the page row and Layers panel acknowledge the click.
+      emitViewState(true);
+      emitViewportCheckpoint();
+      // The precomputed Rust GPU batch is only an acceleration. Rebuilding it
+      // from the full document snapshot on every page switch can dominate the
+      // first paint, while the renderer already has a bounded TS fallback.
+      rustGpuScene = undefined;
+      activateInteractiveRenderQuality();
       rebuildNodeIndex();
       render();
       emitSnapshot(undefined, false);
@@ -4362,12 +5540,15 @@ function dispatch(command: EditorCommand) {
       try {
         const pageBaseRevision = Number(wasmDocument.revision);
         const pageTransactionId = createId();
-        wasmDocument.create_page(pageTransactionId, wasmDocument.revision, command.id, command.name.trim());
+        if (command.positionId) wasmDocument.create_page_at_position(pageTransactionId, wasmDocument.revision, command.id, command.name.trim(), command.positionId);
+        else wasmDocument.create_page(pageTransactionId, wasmDocument.revision, command.id, command.name.trim());
         recordHistory("core");
         syncProjectionFromWasm(false);
         storeActivePageSelection();
+        rememberActivePageViewport();
         activePageId = command.id;
-        refreshRustGpuScene();
+        restoreOrFitPageViewport(activePageId);
+        rustGpuScene = undefined;
         restorePageSelection(activePageId);
         rebuildNodeIndex();
         render();
@@ -4511,7 +5692,7 @@ function dispatch(command: EditorCommand) {
       queueRemoteOperation(redoTransactionId, redoBaseRevision, batch, wasmDocument.canonical_hash());
       break;
     }
-    case "reset": resetDocumentToStarterNodes(); break;
+    case "reset": resetDocumentToBlankPage(); break;
     case "hydrate": {
       if (command.snapshot.format === "rust-core-v1") {
         ephemeralBenchmarkProjection = false;
@@ -4635,7 +5816,43 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     }
     return;
   }
-  const pageScopedCommands = transaction.commands.map((command) => {
+  const concreteCommands: EditorCommand[] = [];
+  for (const command of transaction.commands) {
+    if (command.type !== "arrange") { concreteCommands.push(command); continue; }
+    const arranged = resolveArrangeCommand(nodes, command);
+    if (!arranged.ok) {
+      emitError(undefined, "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
+      return;
+    }
+    concreteCommands.push(...arranged.updates.map(({ id, patch }) => ({ type: "update" as const, id, patch })));
+  }
+  if (!concreteCommands.length) {
+    emit({ type: "ack", transactionId: transaction.id, acceptedRevision: revision });
+    return;
+  }
+  // Older persisted snapshots may still carry Relative-v1 matrices on an
+  // Auto Layout frame or one of its flow children.  Such a snapshot renders,
+  // but Core rightly rejects the first layout reflow.  Commit the lossless
+  // world-space normalization alongside an arrange edit, rather than allowing
+  // a visible UI action to fail after the user has invoked it.
+  const normalizationPatches = transaction.commands.some((command) => command.type === "arrange")
+    ? autoLayoutProjectionNormalizationPatches(nodes)
+    : [];
+  const mergedUpdates = new Map<string, Partial<CanvasNode>>();
+  for (const normalization of normalizationPatches) mergedUpdates.set(normalization.id, normalization.patch);
+  const nonUpdates: EditorCommand[] = [];
+  for (const command of concreteCommands) {
+    if (command.type !== "update") { nonUpdates.push(command); continue; }
+    mergedUpdates.set(command.id, { ...(mergedUpdates.get(command.id) ?? {}), ...command.patch });
+  }
+  const pageScopedCommands = [
+    ...normalizationPatches.map(({ id }) => ({ type: "update" as const, id, patch: mergedUpdates.get(id)! })),
+    ...concreteCommands
+      .filter((command): command is Extract<EditorCommand, { type: "update" }> => command.type === "update" && !normalizationPatches.some((normalization) => normalization.id === command.id))
+      .map((command) => ({ type: "update" as const, id: command.id, patch: mergedUpdates.get(command.id)! })),
+    ...nonUpdates,
+  ].map((command) => {
     if (command.type === "create") return { ...command, node: { ...command.node, pageId: command.node.pageId ?? activePageId } };
     if (command.type === "update") return { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
     return command;
@@ -4904,7 +6121,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     return;
   }
   if (event.event === "move") {
-    if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; activateInteractiveRenderQuality(); render(); emitViewState(true); }
+    if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; activateInteractiveRenderQuality(); render(); emitInteractiveViewState(); }
     if (activeDrag.mode === "select") {
       if (!activeDrag.marqueeStarted) {
         activeDrag.marqueeStarted = exceedsMarqueeDragThreshold(
@@ -5118,7 +6335,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       // it must not mint a no-op transaction or remote Operation on pointer-up.
       if (!moved) { drag = undefined; render(); emitViewState(); return; }
       const dropTarget = activeDrag.dropTargetId
-        ? activeDrag.before.find((node) => node.id === activeDrag.dropTargetId && node.kind === "frame")
+        ? activeDrag.before.find((node) => node.id === activeDrag.dropTargetId && isFrameLike(node))
         : undefined;
       const movingIds = [...activeDrag.initial];
       const exitTarget = !dropTarget
@@ -5307,7 +6524,7 @@ function applyWheel(event: Extract<MainToWorker, { type: "wheel" }>) {
 function wheel(event: Extract<MainToWorker, { type: "wheel" }>) {
   applyWheel(event);
   activateInteractiveRenderQuality();
-  render(); emitViewState(true);
+  render(); emitInteractiveViewState();
 }
 function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "pointer" | "wheel" }>[]) {
   const occurredAt = events.reduce<number | undefined>((latest, event) => Number.isFinite(event.occurredAt) && event.occurredAt! >= 0 && (latest === undefined || event.occurredAt! > latest) ? event.occurredAt : latest, undefined);
@@ -5315,8 +6532,8 @@ function dispatchInputBatch(events: readonly Extract<MainToWorker, { type: "poin
     events.forEach(applyWheel);
     activateInteractiveRenderQuality();
     render(1);
-    emitViewState(true);
     recordInputToRenderLatency(occurredAt);
+    emitInteractiveViewState();
     return;
   }
   events.forEach((event) => { if (event.type === "pointer") pointer(event); else wheel(event); });
@@ -5334,6 +6551,21 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
     if (data.type === "init") { documentId = data.documentId ?? documentId; canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
+    else if (data.type === "visibility") {
+      renderVisible = data.visible;
+      if (renderVisible) {
+        // Hiding the tab cancels the interaction settle timer. Restore it to
+        // settled quality so returning cannot leave a cached preview forever.
+        renderQuality = resolveRenderQuality(renderQuality, viewport.zoom, false);
+        if (setRenderSurface(width, height, deviceDpr)) render();
+      }
+      else {
+        progressivePaintGeneration += 1;
+        finishProgressivePaint();
+        if (renderQualityTimer) clearTimeout(renderQualityTimer);
+        renderQualityTimer = undefined;
+      }
+    }
     else if (data.type === "tool") {
       if (tool === "pen" && data.tool !== "pen") cancelPenDraft();
       tool = data.tool;
@@ -5343,9 +6575,11 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
       remoteBootstrapPending = true;
       if (documentCore === "Rust/WASM bridge ready") emitRemoteBootstrap();
     }
-    else if (data.type === "remote-hydrate") hydrateRemoteSnapshot(data.snapshot);
+    else if (data.type === "remote-hydrate") hydrateRemoteSnapshot(data.snapshot, data.requestId);
     else if (data.type === "remote-reconcile") void reconcileRemoteSnapshot(data.snapshot, data.operations);
     else if (data.type === "register-asset") registerAsset(data.transactionId, data.asset);
+    else if (data.type === "import-figma-rest-plan") importFigmaRestPlan(data);
+    else if (data.type === "bind-figma-rest-assets") bindFigmaRestAssets(data);
     else if (data.type === "set-clipboard") {
       if (validateClipboardCapture(data.clipboard, documentSchemaVersion)) emitError(undefined, "INVALID_COMMAND");
       else {
@@ -5354,6 +6588,7 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
       }
     }
     else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes, data.decodedBitmap);
+    else if (data.type === "load-font") void ensureFontFace(data.assetId);
     else if (data.type === "editing-text") { editingTextNodeId = data.nodeId; render(); }
     else if (data.type === "text-caret-layout") void emitRustTextCaretLayout(data);
     else if (data.type === "simulate-crash") {

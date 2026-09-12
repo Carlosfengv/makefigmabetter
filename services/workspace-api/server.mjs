@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 export const DEMO_WORKSPACE_KEY = "design-lab-2026";
+export const TEST_OPERATIONS_DASHBOARD_ID = "6e0f7a4b-3e8b-4e7f-a1fd-4cf216c8db91";
 export const workspaceContract = Object.freeze({
   protocolVersion: 1,
   service: "makefigma-workspace-api",
@@ -37,6 +38,7 @@ export function createSeedWorkspace(key) {
     revision: 1,
     projects,
     documents: [
+      { id: TEST_OPERATIONS_DASHBOARD_ID, workspaceId, projectId: projects[0].id, name: "测试运营后台 Dashboard", status: "active", version: 1, createdAt: date(2), updatedAt: date(0), lastOpenedAt: date(0), thumbnail: "mint" },
       { id: "c46e30b5-4e63-4ec4-83ba-6b0fa3c9a7df", workspaceId, projectId: projects[0].id, name: "Orbit 卡片探索", status: "active", version: 4, createdAt: date(96), updatedAt: date(1), lastOpenedAt: date(1), thumbnail: "sun" },
       { id: "7b1d7e17-a0da-43d1-b499-eb46a48a1b70", workspaceId, projectId: projects[0].id, name: "设计系统：颜色与排版", status: "active", version: 8, createdAt: date(144), updatedAt: date(5), lastOpenedAt: date(5), thumbnail: "violet" },
       { id: "554d0985-f8b1-4e4c-9eef-920ce46e4846", workspaceId, projectId: projects[1].id, name: "新功能发布页面", status: "active", version: 2, createdAt: date(48), updatedAt: date(18), lastOpenedAt: date(18), thumbnail: "mint" },
