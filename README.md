@@ -126,7 +126,7 @@ GitHub Actions 会额外重新生成 WASM bridge，并验证前端、Rust Core�
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.108 --locked
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
 pnpm wasm:build
 ```
 

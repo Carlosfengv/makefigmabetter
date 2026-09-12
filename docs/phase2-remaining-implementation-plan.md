@@ -20,11 +20,13 @@
 以下能力不进入本计划：
 
 - Component、Instance、Variant、Variables、Styles 与 Library；
-- Figma REST 导入、Plugin Bridge 写回和 Round-trip 兼容；
+- Plugin Bridge 写回和 Round-trip 兼容；
 - 多人 Presence、评论、并发合并与协同 Undo；
 - `.fig` 私有文件格式读写。
 
 这些能力继续分别归入 Phase 3 或 Phase 4。
+
+补充（2026-08-16）：原计划中的 Figma REST 导入已由后续阶段决策前置为 Phase 2 的**受限交付兼容能力**，其 Canonical-first 数据契约、字段映射和未支持语义见 `docs/phase2-figma-api-delivery-spec.md` §6。范围只包括不可信 REST JSON 的预检、确定性 Canonical 候选和经既有事务/Asset Service 边界执行的导入；不包含 Plugin 写回、私有 `.fig`、变量/组件 round-trip 或绕过授权的资源下载。
 
 ## 2. 不可破坏的工程约束
 
@@ -62,7 +64,7 @@
 - 画布旋转控制柄、方向键世界坐标位移（含 Relative-v1）、基础 Shadow、Mixed Inspector 以及核心键盘流程均已完成候选验证；完整 UI Primitive 的跨辅助技术验收仍待独立审核；
 - Polygon/Star 已完成参数 NodeKind、协议/快照/重放、基础 Inspector、Rust Core→WASM→Canvas/Hit/SVG/PNG/PDF 的 Fill 轮廓、Canvas Stroke 网格、Rust Fill/Stroke 的空间/选择 Bounds，以及单一 Core 事务的 Convert to Vector 候选链路；嵌套 Star 的旋转、镜像、Undo/Redo 浏览器矩阵已通过，仍待独立审核。Vector 已有 Canonical/协议/快照/服务/WASM、受预算 Rust 几何、Canvas/Hit/SVG 与基础 Inspector 候选链路；画布锚点、控制柄和基础 Pen 已起步。BooleanOperation 已冻结活结构与 Flatten 语义，四种 Rust clipping 已驱动 Canvas/Hit/Flatten/SVG，Flatten/Outline 的事务队列链路已在浏览器通过；复杂操作数、PDF、跨格式与独立恢复验收仍未形成闭环。Slice、Mask、Effect 与 Auto Layout 已各有 Canonical→UI 候选闭环和基础导出，仍缺完整跨格式/Golden/独立恢复验收；
 - 高级文本的替换操作保留未编辑 Style Run，Inspector textarea 与画布 `contentEditable` 均可按 UTF-8 边界更新选区样式、复制/剪切/粘贴和原子提交；复杂脚本/IME 与独立屏幕阅读器验收仍待完成；
-- `F-PHASE2-PROFESSIONAL-COMPOSITE` 已提供 Auto Layout、两段独立 alpha Mask、Frame Clip、Blur、图片 fallback 与复杂文本的固定候选输入；该固定 URL 的 Reset demo 会恢复同一份 21 节点、3 资源的 fixture，而非切换至通用演示文档；性能采样、Golden、60 分钟稳定性与设计师验收仍未完成。
+- `F-PHASE2-PROFESSIONAL-COMPOSITE` 已提供 Auto Layout、两段封装在独立 Group 中的 alpha Mask、Frame Clip、Layer Blur + Drop Shadow 有序组合、图片 fallback 与复杂文本的固定候选输入；该固定 URL 的 Reset demo 会恢复同一份 24 节点、3 资源的 fixture，而非切换至通用演示文档；性能采样、Golden、60 分钟稳定性与设计师验收仍未完成。
 
 ## 4. 总体实施顺序
 
@@ -127,13 +129,13 @@ Size 仅表示相对工程量，不代表日历工期。
 | 2.5 键盘与可访问 UI | 部分完成 | R1、R2、R3 |
 | 2.6 VectorPath | 部分完成：Canonical、Rust 几何与基础消费链路已有候选实现 | G1 |
 | 2.7 Pen Tool | 部分完成：点级命令、Inspector、画布锚点/控制柄编辑与开放路径续画已起步 | G2 |
-| 2.8 Boolean/Outline/Stroke | Stroke 基础已完成，其余未实现 | G3 |
-| 2.9 Mask/Clip | Frame Clip 已有，通用 Mask 未实现 | G4 |
+| 2.8 Boolean/Outline/Stroke | 候选闭环：Live Boolean、Flatten 与首批 Vector/Line Outline 已贯通；复杂操作数、跨格式 Fixture 与独立恢复验收待完成 | G3、X1 |
+| 2.9 Mask/Clip | 候选闭环：同级 alpha Mask、Frame Clip、两层嵌套、选择裁剪与 SVG/PNG/PDF 来源已接入；像素 Golden、精确 Selection Bounds 与独立恢复验收待完成 | G4、X1 |
 | 2.10 Blend/Shadow/Blur | 有序 Drop/Inner Shadow、Layer/Background Blur 与首批 Blend Mode（Normal、Multiply、Screen、Overlay、Darken、Lighten）已在 Core/协议/快照/服务/WASM/Canvas/Inspector 候选闭环；SVG 对该 Blend 子集输出 `mix-blend-mode`。WebGPU 离屏纹理池、PDF 降级与 Golden 仍待 E1 | E1 |
 | 2.11 高级文本 | 部分完成 | R1、L1 |
 | 2.12 Constraints | 旋转/仿射 Frame 下的 Legacy 直接 child 与完整 Group 子树已迁移，连续 Resize 无漂移且嵌套 Frame 边界保持独立；活跃 Auto Layout Frame 现在独占子层几何，原有 Constraints 保留但不参与计算或 Inspector 编辑 | L2、L3 |
 | 2.13 Auto Layout | 候选闭环：Core/协议/快照/服务/WASM/Worker/Inspector 已覆盖单轴、Padding/Gap/Alignment、Hug/Fill、Min/Max、Absolute、固定尺寸 Wrap、三层嵌套和增量 Dirty Set；完整拖拽插入反馈、复杂文本/Wrap 组合与跨导出格式验收仍待 L3/X1 | L3、X1 |
-| 2.14 PNG/SVG/PDF | Slice 已具备 SVG、透明 PNG 与多页 JPEG-PDF 候选；完整节点/页面交付仍待 X1 | X1 |
+| 2.14 PNG/SVG/PDF | 候选闭环：页面、节点选择与 Slice 已共享冻结 SVG→PNG/PDF 输入、透明 RGBA/alpha-soft-mask 与 sidecar；原生可编辑 vector PDF、复杂 Effect raster 与独立交付验收待完成 | X1 |
 | 2.15 复杂性能 Fixture | Common Nodes 与 Professional Composite 固定候选均可打开；性能/Golden/稳定性采集仍待完成 | Q1 |
 | 2.16 专业编辑综合验收 | 未执行 | Q1 |
 
@@ -311,6 +313,8 @@ Size 仅表示相对工程量，不代表日历工期。
 
 **当前候选进度（2026-08-10）**：ADR 0027 已冻结。`Vector`、`VectorPath`、稳定 PointId、相对控制柄、Fill Rule、硬资源上限与原子 `SetVectorPath` 已覆盖 Core Hash/Undo/Redo、Protobuf Snapshot/Operation、Document Codec、Service reducer 和 WASM JSON 投影；Core 已提供带瞬态预算的 cubic flatten、局部 bounds、多子路径 fill hit 和 stroke mesh，Worker Canvas、fill/stroke hit 与选择 bounds 优先消费该 WASM 派生几何，SVG 复用同一相对控制柄分段语义。TypeScript 的同源 Canvas 命中回退现在也显式命中闭合填充轮廓边界，并采用与 Core 对齐的最大 24 层递归、262,144 点总预算的自适应 cubic 扁平化；超预算时安全拒绝回退命中。even-odd/non-zero 嵌套绕向、画布入口和极端陡峭曲线回归共同固定，避免边界点或固定采样弦线造成漏选/误选。选中 Vector 会显示可拖拽锚点与控制柄 overlay；基础 Inspector 可更新 Fill Rule 和子路径闭合状态，GPU 保持 Canvas 回退。尚未满足完整通过标准：fill tessellation、全量复杂路径的 Canvas/SVG fallback 一致性、Pen、PNG/PDF、复杂自交与多子路径 Fixture 仍留在 G1/G2 后续切片。
 
+补充（2026-09-12）：普通 Vector 的 Canvas 与冻结 SVG/PNG/PDF 输入直接消费 Canonical authored cubic，由浏览器在目标分辨率原生绘制，避免固定文档容差被放大后形成可见折面。Rust 的受预算 flatten 继续负责 Bounds、Hit Test、Boolean、Stroke Mesh 与 Outline；展示型 Stroke Mesh 使用按 Zoom/DPR 分桶的四分之一设备像素误差预算，Boolean/Outline 等确定性派生不依赖视口。导出不会把派生点写回 Canonical Document。
+
 ### G2：Pen Tool 与节点级路径编辑
 
 **目标**：完成连续钢笔绘制和既有 VectorPath 的点级编辑。
@@ -360,7 +364,9 @@ Size 仅表示相对工程量，不代表日历工期。
 - Boolean/Outline 后的 Path 可继续编辑；
 - 保存、刷新、Undo/Redo 和远端重放后 Hash 一致。
 
-**当前候选进度（2026-08-10）**：四种 live Boolean 已由 Rust clipping 统一驱动 Canvas、命中、Flatten 与 SVG 导出；`Subtract` 继续以层级顺序中的第一个 Vector 为主体。固定退化测试覆盖相切、包含、重合、开放/零面积和自交输入的重复性。Flatten 以一笔 Core create/delete/reposition 批次保留外部层级位置并可撤销；批次会先删除 Boolean operands、再删除 wrapper，避免 Core 的 `NodeHasChildren` 拒绝。编辑器事务队列已与 Flatten/Outline 的结构替换接通。2026-08-10 在固定专业夹具中复验了 `Union → Subtract → Flatten`：运算切换为 r0→r1，Flatten 为 r1→r2，替换结果是可直接编辑的 6 点 Vector，console `0` error。Vector 的无虚线、同 cap（none/round/square）描边可经同一 Rust tessellation + union 转为普通可编辑 Fill Path，并保留同一节点 ID；Line 现可使用不同的标准起止端帽（none/round/square），该组合由 Core 的同一 tessellation、WASM `vector_path_outline_with_caps` 与编辑器替换事务贯通。由于 NodeKind 不可变，Line 会在一个 create/delete/reposition Core 事务中替换为保留世界端点、层级位置和旋转的 Vector；真实浏览器已验证创建 Line、Outline 后得到 4 点 `Line outlined` Vector，Reset 后回到固定 21 节点且 console `0` error。Line 的实线、虚线和装饰性端帽，以及 Vector 的同标准端帽实线/虚线，均已覆盖；其余非 Vector Outline、PDF、复杂混合操作数、跨导出格式 Fixture 与浏览器/服务恢复的独立验收仍未完成。
+**当前候选进度（2026-08-10，2026-08-16 更新）**：四种 live Boolean 已由 Rust clipping 统一驱动 Canvas、命中、Flatten 与 SVG 导出；`Subtract` 继续以层级顺序中的第一个 Vector 为主体。固定退化测试覆盖相切、包含、重合、开放/零面积和自交输入的重复性。Flatten 以一笔 Core create/delete/reposition 批次保留外部层级位置并可撤销；批次会先删除 Boolean operands、再删除 wrapper，避免 Core 的 `NodeHasChildren` 拒绝。编辑器事务队列已与 Flatten/Outline 的结构替换接通。2026-08-10 在固定专业夹具中复验了 `Union → Subtract → Flatten`：运算切换为 r0→r1，Flatten 为 r1→r2，替换结果是可直接编辑的 6 点 Vector，console `0` error。Vector 的无虚线、同 cap（none/round/square）描边可经同一 Rust tessellation + union 转为普通可编辑 Fill Path，并保留同一节点 ID；Line 现可使用不同的标准起止端帽（none/round/square），该组合由 Core 的同一 tessellation、WASM `vector_path_outline_with_caps` 与编辑器替换事务贯通。由于 NodeKind 不可变，Line 会在一个 create/delete/reposition Core 事务中替换为保留世界端点、层级位置和旋转的 Vector；真实浏览器已验证创建 Line、Outline 后得到 4 点 `Line outlined` Vector，Reset 后回到当前固定 24 节点夹具且 console `0` error。2026-08-16 的同一运行时夹具还复验了 Canvas、SVG、PNG 与 PDF：两段 Group 内 alpha Mask 仅裁剪各自 target，粉色/青色矩形在四个输出均为对应椭圆，后续 Polygon、Star、Live Boolean 和 Vector 均保留可见；PDF 使用带 `/SMask` 的 RGBA raster fallback 并保留结构化 sidecar。Line 的实线、虚线和装饰性端帽，以及 Vector 的同标准端帽实线/虚线，均已覆盖；其余非 Vector Outline、复杂混合操作数、跨导出格式 Fixture 的独立验收仍未完成。
+
+补充（2026-08-16）：Document Service Snapshot 回归现固定 live Boolean wrapper、Union 枚举与两个 operand 的父子关系/Canonical Hash 往返，避免服务重启后仅恢复原始 operands。
 
 补充（2026-08-10）：Line 的实线 Outline Stroke 现接受任意标准端帽与装饰端帽组合。Rust 将主线与箭头、三角、菱形、圆点的派生网格统一 union 为闭合填充轮廓，WASM `line_outline_json` 和编辑器的 create/delete/reposition 替换事务消费同一结果。真实浏览器已验证 Arrow + Diamond 的 Line 转为包含 3 个闭合 subpath、11 个锚点的 `Line outlined` Vector，控制台 `0 error`；虚线仅支持相同的 None、Round 或 Square 端帽，装饰端帽与异端帽组合会明确拒绝。
 
@@ -386,7 +392,9 @@ Size 仅表示相对工程量，不代表日历工期。
 - 解除 Mask 后原节点 ID、顺序、属性和世界变换完整恢复；
 - 不可见/被裁掉内容不会被普通点击命中。
 
-**当前候选进度（2026-08-10）**：ADR 0029 已冻结 Phase 2 的唯一通用模式为同级后续层的 `alpha mask`：可绘制节点的 `SetMask` 标记进入 Canonical Hash、Undo/Redo、WASM batch、Protobuf Operation 与 Service reducer，并通过保留扩展键在 Snapshot 中无损保存。Canvas 对含 Mask 的页回退到结构渲染，以隔离 surface 的 `destination-in` 应用 source alpha；最多两层嵌套，每个临时 surface 为 128 MiB 上限，超限时目标 run 失败关闭并记录诊断。遮罩表面现按活跃嵌套深度复用，画布尺寸变化时才重新分配，避免每帧/每个 sibling run 创建全尺寸离屏画布。点击沿 parent 链同时检查 Frame Clip 与最近的前置 Mask，SVG 以同一 sibling run 输出 `mask-type="alpha"`。框选与画布选择叠加层现在都会排除完全落在祖先 Frame Clip 外、或完全不与生效 alpha-mask run 相交的图层；部分重叠保守保留完整选择边界，避免误排除仍可见的像素。图层面板中的实际选中状态不受影响，因此完全裁掉的层仍可从属性面板恢复。Inspector 可启用/解除标记，解除不会改写任何 ID、顺序或变换。WASM 快照回投 UI 图层现保留 `isMask`，修复提交图片 Mask 后控件错误回弹；真实浏览器已验证 `Seeded image asset` 启用后保持选中，Hash 从 `64d0d2307c85` 变为 `242b9fe7b5c5`，控制台 `0 error`。PDF、像素 Golden、Selection Bounds 的像素级精确裁剪和独立浏览器/服务恢复验收仍未完成。
+**当前候选进度（2026-08-10，2026-08-16 更新）**：ADR 0029 已冻结 Phase 2 的唯一通用模式为同级后续层的 `alpha mask`：可绘制节点的 `SetMask` 标记进入 Canonical Hash、Undo/Redo、WASM batch、Protobuf Operation 与 Service reducer，并通过保留扩展键在 Snapshot 中无损保存。创建与 fixture/import 水合会在同一 Core Transaction 的结构创建、删除和排序完成后发出该专用 `SetMask`，而不是假定投影的 `isMask` 字段会被创建命令消费或过早标记尚未有 target 的 source；因此初始 Snapshot、重载、Undo/Redo 与服务重放都保留掩码语义。Canvas 对含 Mask 的页回退到结构渲染，以隔离 surface 的 `destination-in` 应用 source alpha；最多两层嵌套，每个临时 surface 为 128 MiB 上限，超限时目标 run 失败关闭并记录诊断。遮罩表面现按活跃嵌套深度复用，画布尺寸变化时才重新分配，避免每帧/每个 sibling run 创建全尺寸离屏画布。点击沿 parent 链同时检查 Frame Clip 与最近的前置 Mask，SVG 以同一 sibling run 输出 `mask-type="alpha"`。框选与画布选择叠加层现在都会排除完全落在祖先 Frame Clip 外、或完全不与生效 alpha-mask run 相交的图层；部分重叠保守保留完整选择边界，避免误排除仍可见的像素。图层面板中的实际选中状态不受影响，因此完全裁掉的层仍可从属性面板恢复。Inspector 可启用/解除标记，解除不会改写任何 ID、顺序或变换。真实浏览器重载专业综合 fixture 后已验证 `Alpha mask` 仍选中，且仅导出 `Masked texture target` 的 SVG 含 `mask-type="alpha"`；控制台为 `0 error`。Document Service Snapshot 回归还固定了 `makefigma.mask.alpha.v1` 及外部 `figma.mask.type` 扩展字节的 hash 完整往返，确保服务不会把来源 mask 类型误写为 alpha。PDF、像素 Golden、Selection Bounds 的像素级精确裁剪和独立浏览器恢复验收仍未完成。
+
+补充（2026-08-16）：该批次顺序同时覆盖复制粘贴和 Boolean Flatten、Line Outline、Parametric→Vector 的新 Vector 替换；替换后的 Vector 保留原图层 mask 身份，全部结构命令完成后才发出 `SetMask`。服务端远程 operation 回归已证明这不是仅在本地 WASM 水合下成立的行为。
 
 补充（2026-08-10）：选择裁剪门现在连续相交所有祖先 Frame Clip 与有效 alpha-mask 边界；即使目标分别与各单层重叠、但不存在共同可见区域，也会从普通点击、框选和画布选择叠加层排除。旋转、曲线与 alpha 像素仍保守按世界 AABB 判定，避免误排除可见像素。
 
@@ -406,7 +414,7 @@ Size 仅表示相对工程量，不代表日历工期。
 
 **通过标准**：Slice 在编辑器中可稳定选择和编辑但不污染画布内容；三种导出都严格对应同一世界区域和 revision；保存与服务重放后范围不漂移。
 
-**当前候选进度（2026-08-10）**：ADR 0030 已冻结。`Slice` 已作为无 children、无 Paint/Mask 的 Canonical NodeKind 贯通 Core Hash/Undo/Redo、Protobuf、Snapshot、Document Service、WASM、Worker、Layers 与 Inspector；创建后可通过 Layers 选择、移动、Resize 和重命名。它不会被普通 Canvas Paint 或 SVG 画为内容，且其导出矩形不会截获底下可见图层的画布点击，避免大范围 Slice 使区域内对象无法直接选择或拖动；该选择优先级已提炼为独立单测，覆盖 Slice 覆盖普通图层和单独 Slice 两种情况。选中一个或多个 Slice 的 SVG、透明 PNG 与白底 JPEG-PDF 都以冻结 world matrix 计算输出区域，并以同一旋转四边形裁剪页面内容；PNG 逐张导出，PDF 合为多页。工具栏可选择 1×、2×、4×、8× 倍率，并可将 PNG 背景设为透明或白色；PNG/PDF 在浏览器创建 Canvas 前统一限制为 16,384px 单边、64MP/256MiB RGBA 和 8× 倍率，批量最多 32 Slice 且累计也受同一预算约束。PDF 任意背景、原生矢量、跨格式兼容报告以及独立服务恢复 Golden 仍留在 G5 后续切片。
+**当前候选进度（2026-08-10）**：ADR 0030 已冻结。`Slice` 已作为无 children、无 Paint/Mask 的 Canonical NodeKind 贯通 Core Hash/Undo/Redo、Protobuf、Snapshot、Document Service、WASM、Worker、Layers 与 Inspector；创建后可通过 Layers 选择、移动、Resize 和重命名。它不会被普通 Canvas Paint 或 SVG 画为内容，且其导出矩形不会截获底下可见图层的画布点击，避免大范围 Slice 使区域内对象无法直接选择或拖动；该选择优先级已提炼为独立单测，覆盖 Slice 覆盖普通图层和单独 Slice 两种情况。选中一个或多个 Slice 的 SVG、透明 PNG 与 PDF 1.4 RGBA/alpha-soft-mask 都以冻结 world matrix 计算输出区域，并以同一旋转四边形裁剪页面内容；PNG 逐张导出，PDF 合为多页。工具栏可选择 1×、2×、4×、8× 倍率，并可将 PNG/PDF 背景设为透明或使用明确的白底/任意 matte；PNG/PDF 在浏览器创建 Canvas 前统一限制为 16,384px 单边、64MP/256MiB RGBA 和 8× 倍率，批量最多 32 Slice 且累计也受同一预算约束。原生可编辑 vector PDF、跨格式兼容报告的独立 Golden 和服务恢复仍留在 G5/X1 后续切片。
 
 ## 7. Effect 工作包
 
@@ -416,7 +424,7 @@ Size 仅表示相对工程量，不代表日历工期。
 
 **目标**：完成 Phase 2.10 的常用效果组合。
 
-**当前候选进度（2026-08-10）**：ADR 0031 已冻结完整 Stack 的顺序、迁移和预算边界。R3 单一 Drop Shadow 已在 Canvas、Snapshot/服务/WASM 和 SVG filter 中可见；SVG 的 blur 采用 `stdDeviation = blurRadius / 2` 的 Canvas 近似，正 spread 与 Canvas 一样并入 blur kernel，且 filter 区域按本地几何有界生成。E1 已追加 Protobuf `Effect`、Core 最多 8 项的有序 `effect_stack`、Canonical Hash/Undo、Codec/Service/WASM/Worker 透传；旧 `drop_shadow` 保持为首项兼容投影，旧 Snapshot 继续以空 Stack 读取。Canvas 对多阴影、Layer/Background Blur 与 Inner Shadow 复用两张有界 RGBA8 隔离表面（单张 128 MiB、每帧 256 MiB），按 Stack 顺序组合；Inner Shadow 以 source alpha 裁剪，Background Blur 捕获当前已合成 backdrop 后以 source alpha 裁剪。Blend Mode 的首批六种模式已作为独立 Canonical Node/Appearance 字段穿过 Snapshot、Operation 与 WASM；Canvas 在最终节点合成时使用等值 `globalCompositeOperation`，含 Blend/Effect 的节点退回 Canvas 以免被当前 WebGPU 普通 alpha pass 错画，SVG 对这六种模式输出 `mix-blend-mode`。WASM 快照回投 UI 图层时现也显式保留 `blendMode`，避免提交后 Inspector 被错误重置为 `Normal`；单元测试与真实浏览器均验证初始 `Overlay`、改为 `Multiply` 后持续回显，控制台为 0 error。Inspector 已支持 Blend 下拉选择、最多 8 个 Drop Shadow 的添加、编辑、显隐、删除与顺序调整，以及两种 Blur 和单个 Inner Shadow 的基础参数。WebGPU 已具备独立、有预算的 RGBA8 离屏纹理池：单表面 128 MiB、总计 256 MiB，帧内资源固定并在后续帧按 LRU 回收，Device/Renderer 销毁时全部释放；其真实效果路径支持无 spread 的 1–8 项普通 Drop Shadow（每项依序执行 source → 5×5 binomial blur → premultiplied composite，随后只绘制一次本体）、单项 Layer Blur（source → blur → composite，替代本体而非额外叠画），以及单项、zero-spread Inner Shadow（原图 → 含反向 offset 的 blur → 原图 alpha clip + tinted source-over composite）。Inner Shadow 同样仅占两张纹理，颜色以 Canvas 一致的 sRGB 投影量化；纹理预算不足或出现更复杂 Stack 时整个图层安全回退 Canvas。`?fixture=phase2-gpu-drop-shadow` 提供两个无 parent 的固定矩形与两层有序阴影，真实浏览器已复验可见的双阴影、42.8/256 MiB 纹理占用读数与 Reset 后 console `0 error`；`?fixture=phase2-gpu-layer-blur` 切换为单项零 spread Inner Shadow 后也仍为 WebGPU scene active、3.6/256 MiB GPU effects、console `0 error`。资源栏会将场景与 Effect 纹理占用分别展示。PDF 降级、其余 Effect GPU pass 与 Golden 仍未实现，E1 继续为 Partial。
+**当前候选进度（2026-08-10，2026-08-16 更新）**：ADR 0031 已冻结完整 Stack 的顺序、迁移和预算边界。R3 单一 Drop Shadow 已在 Canvas、Snapshot/服务/WASM 和 SVG filter 中可见；SVG 的 blur 采用 `stdDeviation = blurRadius / 2` 的 Canvas 近似。E1 已追加 Protobuf `Effect`、Core 最多 8 项的有序 `effect_stack`、Canonical Hash/Undo、Codec/Service/WASM/Worker 透传；旧 `drop_shadow` 保持为首项兼容投影，旧 Snapshot 继续以空 Stack 读取。Canvas 对多阴影、Layer/Background Blur 与 Inner Shadow 复用三张有界 RGBA8 隔离表面（源图、阴影、scratch；单张 128 MiB、每帧 256 MiB），按 Stack 顺序组合；Drop/Inner Shadow 的非零 spread 在 Blur 前以可分离、透明边界的 alpha morphology（max/min）处理。SVG 的单项 Shadow/Inner Shadow 等价使用 `feMorphology → feGaussianBlur → feOffset`，PNG/PDF 消费同一冻结 SVG，不再把 spread 写为兼容性降级。Live Boolean Wrapper 的同一支持型 filter 现在也会附着于其 Rust 派生路径，而非只保留 Boolean operand 的 paint；因此下游 PNG/PDF 不会漏掉该 wrapper 的单项 Effect。Inner Shadow 以 source alpha 裁剪，Background Blur 捕获当前已合成 backdrop 后以 source alpha 裁剪。Blend Mode 的首批六种模式已作为独立 Canonical Node/Appearance 字段穿过 Snapshot、Operation 与 WASM；Canvas 在最终节点合成时使用等值 `globalCompositeOperation`，含 Blend/Effect 的节点退回 Canvas 以免被当前 WebGPU 普通 alpha pass 错画，SVG 对这六种模式输出 `mix-blend-mode`。WASM 快照回投 UI 图层时现也显式保留 `blendMode`，避免提交后 Inspector 被错误重置为 `Normal`；单元测试与真实浏览器均验证初始 `Overlay`、改为 `Multiply` 后持续回显，控制台为 0 error。Inspector 已支持 Blend 下拉选择、最多 8 个 Drop Shadow 的添加、编辑、显隐、删除；新增完整 Effect Stack 顺序面板可让 Drop Shadow、Layer Blur、Inner Shadow、Background Blur 跨类型重排，并在每次操作中同步 legacy `dropShadow` 首项投影。WebGPU 已具备独立、有预算的 RGBA8 离屏纹理池：单表面 128 MiB、总计 256 MiB，帧内资源固定并在后续帧按 LRU 回收，Device/Renderer 销毁时全部释放；其真实效果路径支持无 spread 的 1–8 项普通 Drop Shadow（每项依序执行 source → 5×5 binomial blur → premultiplied composite，随后只绘制一次本体）、单项 Layer Blur（source → blur → composite，替代本体而非额外叠画），以及单项、zero-spread Inner Shadow（原图 → 含反向 offset 的 blur → 原图 alpha clip + tinted source-over composite）。Inner Shadow 同样仅占两张纹理，颜色以 Canvas 一致的 sRGB 投影量化；纹理预算不足、含 spread 或出现更复杂 Stack 时整个图层安全回退 Canvas。`?fixture=phase2-gpu-drop-shadow` 提供两个无 parent 的固定矩形与两层有序阴影，真实浏览器已复验可见的双阴影、42.8/256 MiB 纹理占用读数与 Reset 后 console `0 error`；`?fixture=phase2-gpu-layer-blur` 切换为单项零 spread Inner Shadow 后也仍为 WebGPU scene active、3.6/256 MiB GPU effects、console `0 error`。`?fixture=phase1-render-composite&simulateGpuLoss=1` 进一步在真实浏览器得到 `WebGPU scene recovered (1) · device-loss simulation 1/1`；同一页面的 `simulateGpuLoss=2` 按预期停在 `Canvas 2D · WebGPU recovery exhausted · device-loss simulation 2/2`，而非无界重试。资源栏会将场景与 Effect 纹理占用分别展示。其余 Effect GPU pass 与 Golden 仍未实现，E1 继续为 Partial。
 
 **Canonical 模型**：
 
@@ -471,6 +479,8 @@ Size 仅表示相对工程量，不代表日历工期。
 - 字体缺失时有可见降级，不改变 Canonical FontId。
 
 **当前候选进度（2026-08-10）**：Inspector textarea 已将 DOM UTF-16 选区转换为 Canonical UTF-8 byte range，并以 `patchTextStyleRuns` 对所选范围原子更新字体、字号、字重、斜体、字距、颜色和轴；新增可访问选区状态会明确提示 mixed styles 与“修改会覆盖选区样式”。`makefigma-text-clipboard-v1` 会重基准选区 Style Runs，复制时同时提供 `text/plain` 与私有 MIME，粘贴优先恢复经验证的私有样式载体；不可信 `text/html` 只读取纯文本。画布 contentEditable 现已接入同一 Copy/Cut/Paste 协议，并以状态重绘避免与浏览器原生 DOM 粘贴叠加；3080 实际页面已验证双击进入、输入、⌘Enter 原子提交和 Undo 恢复。对于显式字体的复杂脚本，Worker 现将 Canonical Style Run 与 Rust 提供的 UAX #9 display-order run 相交，并按物理顺序绘制；RTL 行不再将整行错误地套用第一个 style，颜色、字重和字体范围会保留。未提供形状数据时，纯 RTL 行也会以反向的样式段安全绘制。复杂 IME 与独立屏幕阅读器验收仍待完成，L1 继续为 Partial。
+
+补充（2026-08-16）：导出器会从同一冻结 Snapshot 收集已授权、受 16 MiB 限制的 WOFF/WOFF2/TTF/OTF 字节，并作为隔离的 SVG `@font-face` 嵌入；Style Run 的主字体和 fallback 链在 SVG 中保持引用。Canvas 的绘制和 Auto Size 测量也按同一 Canonical 主字体 → 已加载 fallback chain → 系统字体顺序解析；Canvas fallback 与 SVG tspan 还会以同一规范化顺序消费 `variationAxes`，SVG 输出安全的 `font-variation-settings` 属性。SVG tspan 会逐行输出 Canvas 同源的 paragraph base direction、`unicode-bidi=plaintext` 与 RTL 视觉起始边，避免左对齐 RTL 在导出中反向锚定。无法获得、格式不受支持或超限的字体才进入 `font-asset` sidecar fallback。PNG/PDF 光栅化这份 SVG，因此与 L1 的冻结文本输入使用同一字体来源。
 
 补充（2026-08-10）：Inspector 与画布 contentEditable 的文本输入、IME 提交和不可信 clipboard 文本会将孤立 UTF-16 surrogate 替换为 U+FFFD；画布的原生 input/composition 监听在 React 光标布局前同步规范化瞬态 DOM。提交到 Canonical 的文本与 UTF-8 Style Run 边界因而始终基于合法 Unicode scalar。私有富文本载体若含无效 scalar 则退回纯文本路径，再按当前选区重建样式边界。
 
@@ -533,7 +543,7 @@ Size 仅表示相对工程量，不代表日历工期。
 - 修改文本只重算必要布局子树；
 - Undo/Redo、保存恢复、远端重放和导出结果一致。
 
-**当前候选进度（2026-08-10）**：ADR 0032 已冻结；Auto Layout 已作为显式 Canonical 记录贯通 Core Hash/Undo/Redo、Protobuf、Snapshot v20、Document Codec、Service reducer、WASM 投影、Worker 与 Inspector。Core 以局部祖先 Dirty Set、确定性浮点归一化、节点与迭代上限处理单轴固定布局、Padding/Gap/Alignment、Frame/文本 Hug、Fill、Min/Max、Absolute、固定尺寸 Wrap 和三层嵌套；文本 Hug 使用确定性度量，CRLF 按单个段落边界处理，避免 Windows 文本在保存恢复后额外增高。`Height` Auto Size 文本还会在其固定宽度上确定性软换行，令 Auto Layout 行高不再取决于浏览器 FontFace；测量以 Unicode grapheme 边界推进，Emoji ZWJ 与组合字符不会被拆为额外布局行。图层 Reparent、删除和 PositionId 重排会同时标记旧/新父容器，避免留下布局空隙。Inspector 仅在有效组合中开放 Wrap、Text Hug 与 Child Fill，且在 Auto Layout 作用域内明确覆盖旧 Constraints。自动布局子层在其所属容器内拖动时，画布现会根据同一套 PositionId 重排结果显示旋转/仿射安全的插入线和“插入到第几项”的反馈；拖进其他容器时继续使用已有的 Frame 放置反馈。待关闭项为复杂脚本/RTL 的受限宽度文本、PNG/PDF/SVG 一致导出与独立浏览器/服务验收。
+**当前候选进度（2026-08-10，2026-08-16 更新）**：ADR 0032 已冻结；Auto Layout 已作为显式 Canonical 记录贯通 Core Hash/Undo/Redo、Protobuf、Snapshot v21、Document Codec、Service reducer、WASM 投影、Worker 与 Inspector。Core 以局部祖先 Dirty Set、确定性浮点归一化、节点与迭代上限处理单轴固定布局、Padding/Gap/Alignment、Frame/文本 Hug、Fill、Min/Max、Absolute、固定尺寸 Wrap 和三层嵌套；文本 Hug 使用确定性度量，CRLF 按单个段落边界处理，避免 Windows 文本在保存恢复后额外增高。`Height` Auto Size 文本还会在其固定宽度上确定性软换行，令 Auto Layout 行高不再取决于浏览器 FontFace；测量以 Unicode grapheme 边界推进，Emoji ZWJ 与组合字符不会被拆为额外布局行。ChildLayout 的 optional `alignSelf`（inherit/start/center/end）会覆盖 Frame 的交叉轴对齐，缺省字段不改变旧 Snapshot Hash，Counter-axis Fill 继续表达 Stretch；协议编码器会为带 child-layout 的非 Frame 节点输出 `setAutoLayout`，真实浏览器对齐已完成服务保存与重载 hash 一致验证。`BASELINE` 已追加到 Protobuf（值 5）并经 Codec、Service、WASM、Inspector 进入 Core：只允许水平 Frame 的交叉轴，Text 按 Canvas 无字形度量 fallback 的 CSS line-box 规则计算第一行基线，非 Text 取下边缘；wrap 逐 track 独立对齐，primary axis、纵向 Frame 与 child override 一律拒绝。Wrap 的 `trackSpacing` 现以 optional Protobuf field 保存：主轴 `itemSpacing` 与交叉轴行/列 gap 可独立配置，旧 Snapshot 缺省时仍保持以 `itemSpacing` 间隔 tracks 的历史几何与 Hash。`trackAlignment: spaceBetween` 同步实现 Figma `counterAxisAlignContent` 的剩余空间分布；只在 Wrap 有效，`auto` 保持显式/历史 track gap。图层 Reparent、删除和 PositionId 重排会同时标记旧/新父容器，避免留下布局空隙。Inspector 仅在有效组合中开放 Wrap、Text Hug、Child Fill、独立 Wrap gap、Wrap track distribution 与水平 Frame Baseline，且在 Auto Layout 作用域内明确覆盖旧 Constraints。自动布局子层在其所属容器内拖动时，画布现会根据同一套 PositionId 重排结果显示旋转/仿射安全的插入线和“插入到第几项”的反馈；拖进其他容器时继续使用已有的 Frame 放置反馈。待关闭项为复杂脚本/RTL 的受限宽度文本、PNG/PDF/SVG 一致导出与独立验收。
 
 补充（2026-08-10）：无历史的 fixture／旧投影 `seed_batch_json` 在完整树与布局记录装载后，会执行一次不增加 revision 的确定性 Auto Layout 回流；已持久化的 Canonical Snapshot 不重算，以继续逐字节校验其既有 Hash。桥接层会先将活跃布局 Frame 与 flow child 的 Relative-v1 矩阵物化为世界坐标，再移除矩阵交给 Core，避免嵌套布局把局部 `x/y` 错当作页面坐标而在重载或导出中偏移。专业综合夹具的三层 Frame 因而按 Padding/Gap 分开，浏览器复验无重叠且控制台为 `0 error`。
 
@@ -541,9 +551,13 @@ Size 仅表示相对工程量，不代表日历工期。
 
 ### X1：PNG、SVG、PDF 与兼容性报告
 
+补充（2026-08-16）：普通 Vector 的 Rust 展平路径也已随同一冻结导出输入进入 SVG/PNG/PDF。新增跨格式回归将 Rust-derived Live Boolean、同级 alpha Mask、世界区域 Slice 与 PDF rasterization sidecar 放进同一 SVG 源，防止 Boolean 被原始 operands 替代、Mask 被普通绘制或 Slice 在 PDF 源中丢失。PDF 仍明确是 raster fallback；原生可编辑 PDF vector 仍是 X1 待办。
+
+补充（2026-08-16）：PDF 光栅输出现改为 PDF 1.4 的 lossless RGB image XObject 加灰度 `/SMask`；选择 Transparent 时，导出保留 alpha，不再强制 JPEG 白底。用户仍可选择任意不透明 matte。PDF sidecar 保留 `pdf-rasterization`，但会准确说明其是“带 alpha soft mask 的光栅”而非可编辑 vector。每个 SVG 根节点及全部 PNG/PDF sidecar 都记录冻结 `sourceRevision`，以及 page/node/slice target、请求格式、sRGB/P3 fallback 与透明/matte 策略，使异步导出可追溯到启动时的 Canonical Snapshot；多页 PDF 的单一 sidecar 会逐页列出同一字段。原生可编辑矢量 PDF 仍是明确未完成项。
+
 补充（2026-08-10）：SVG 现直接导出仅含一项可见 Layer Blur 的节点为有界 `feGaussianBlur` filter（`stdDeviation = radius / 2`），不再把这条标准矢量路径误记为降级；含阴影、Inner Shadow 或 Background Blur 的混合 Stack 因涉及中间合成/背景采样，继续输出结构化兼容性报告。
 
-补充（2026-08-10）：仅含一项、`spread = 0` 的 Inner Shadow 现会输出 `SourceAlpha → blur → offset → SourceAlpha clip → color merge` SVG filter，保留内侧裁剪和颜色/透明度；带 spread 或任何混合 Stack 仍会输出兼容性降级。
+补充（2026-08-16）：仅含一项的 Inner Shadow 现会输出 `SourceAlpha → morphology(spread) → blur → offset → SourceAlpha clip → color merge` SVG filter，保留内侧裁剪、颜色、透明度以及正/负 spread；任何混合 Stack 仍会输出兼容性降级。
 
 **目标**：让 Phase 2 文档可以稳定交付给下游。
 
@@ -577,7 +591,7 @@ Size 仅表示相对工程量，不代表日历工期。
 - Supported 项不得出现在警告中；
 - Partial/Unsupported 不得静默丢失。
 
-**当前候选进度（2026-08-10）**：SVG 的 Layer Blur、Inner Shadow、Background Blur、未提供冻结几何的 Live Boolean、文档字体资源未嵌入（明确使用 `sans-serif` 浏览器 fallback），以及无效 Slice/节点选择会同时输出人可读 warning 和结构化 `compatibilityFallbacks`（节点 ID、能力、`fallback` 结果、原因）。浏览器导出会先以与画布相同的 Rust/WASM clipping bridge 从当前不可变 Snapshot 派生 Live Boolean 路径，再传入 SVG/PNG/PDF 共用输入；所以有效的 Live Boolean 不需要 Flatten，也不会被误报为 fallback。纯 `exportPageToSvg` 调用若未收到这份冻结派生路径则保守拒绝该 wrapper 及其 operands，并记录 `live-boolean` 降级，绝不输出错误的原始重叠轮廓。已授权且已取得字节、并且不超过 16 MiB 的位图资源会以 `data:image/...` 内嵌到 SVG，并使用节点的裁剪形状及 `xMidYMid slice`；无字节、非图片或超预算资源会显式记录 `image-asset` 降级，绝不静默替换。固定专业夹具中选中 `Seeded image asset` 的真实浏览器导出已验证得到仅含该图层的 SVG，下载内容含 PNG data URI，状态显示导出完成且新浏览器会话控制台为 `0 error`；夹具的故意缺失资源不会再触发后台下载。只要存在降级，SVG、当前 Page 的 PNG/PDF 或 Slice PNG/PDF 会额外下载同名 `.compatibility.json`，其内容来自同一冻结 SVG 输入。页面、选中节点根及其子树、以及 Slice 都可选择 1×、2×、4×、8× 倍率和 PNG 透明/白底；节点导出与同一冻结 SVG 输入共享 PNG/PDF 光栅化及兼容报告路径。真实浏览器已验证选中 `Outline stroke result` 后导出得到仅包含该层的 128×108 SVG。 “Export all Pages PDF” 按 Canonical `Page.positionId` 顺序合为一个 PDF，并产生单一、逐页列出 ID/名称/降级项的 `.compatibility.json`。Frame Clip 的 SVG 定义现在预转换为世界坐标路径，避免浏览器 SVG→Canvas 光栅化时把嵌套内容裁为空白；专业综合 Fixture 的 PNG/PDF 已实际渲染检查其嵌套布局内容可见。PDF 还会无条件记录其白底 JPEG 光栅化降级，避免被误认为保留矢量或透明度。更多导出限制仍在逐项迁移为结构化报告，X1 继续为 Partial。
+**当前候选进度（2026-08-16）**：SVG 的 Layer Blur、Inner Shadow、Background Blur、未提供冻结几何的 Live Boolean、未授权/缺失/超限的文档字体，以及无效 Slice/节点选择会同时输出人可读 warning 和结构化 `compatibilityFallbacks`（节点 ID、能力、`fallback` 结果、原因）。浏览器导出会先以与画布相同的 Rust/WASM clipping bridge 从当前不可变 Snapshot 派生 Live Boolean 和 Vector 路径，再传入 SVG/PNG/PDF 共用输入；所以有效的 Live Boolean 不需要 Flatten，也不会被误报为 fallback。纯 `exportPageToSvg` 调用若未收到这份冻结派生路径则保守拒绝该 wrapper 及其 operands，并记录 `live-boolean` 降级，绝不输出错误的原始重叠轮廓。已授权且已取得字节、并且不超过 16 MiB 的位图及字体资源分别以 `data:image/...` 和隔离的 SVG `@font-face` 内嵌；无字节、非支持格式或超预算资源会显式记录 fallback，绝不静默替换。每次 SVG/PNG/PDF 导出均下载同名 `.compatibility.json`，即使无 fallback 也记录同一冻结 SVG 输入的 `sourceRevision`、page/node/slice target、请求格式、色彩 profile 和透明/matte 策略。页面、选中节点根及其子树、以及 Slice 都可选择 1×、2×、4×、8× 倍率和透明/不透明背景；节点导出与同一冻结 SVG 输入共享 PNG/PDF 光栅化及兼容报告路径。 “Export all Pages PDF” 按 Canonical `Page.positionId` 顺序合为一个 PDF，并产生单一、逐页列出 ID/名称/revision/目标/格式/透明度/降级项的 `.compatibility.json`。PDF 使用 PDF 1.4 lossless RGBA image XObject 和透明 alpha `/SMask`（或显式 matte），仍无条件记录 `pdf-rasterization`，避免被误认为可编辑矢量。Frame Clip 的 SVG 定义预转换为世界坐标路径，避免浏览器 SVG→Canvas 光栅化时把嵌套内容裁为空白。更多效果与原生可编辑 PDF 仍在结构化 fallback 范围内，X1 继续为 Partial。
 
 **通过标准**：
 
@@ -586,7 +600,7 @@ Size 仅表示相对工程量，不代表日历工期。
 - 危险资源不进入输出；
 - 导出结果与指定 revision 可追踪。
 
-补充（2026-08-10）：PDF 的 JPEG 光栅降级仍会写入兼容性报告，但导出器现可选择任意不透明的 `#RRGGBB` 背景色；选区、Slice 和按 Canonical Page 顺序合并的多页 PDF 使用同一个背景设置，报告会记录实际使用的 matte 色。
+补充（2026-08-10，2026-08-16 更新）：PDF 的 RGBA 光栅降级仍会写入兼容性报告；Transparent 使用 PDF 1.4 alpha soft mask，或可选择任意不透明的 `#RRGGBB` matte。选区、Slice 和按 Canonical Page 顺序合并的多页 PDF 使用同一个背景设置，报告会记录实际使用的透明或 matte 语义。
 
 补充（2026-08-10）：含 Display P3 的 Fill、Stroke、渐变 Stop、文本 Style Run 或阴影颜色会在 SVG 的固定 sRGB 投影中确定性转换；SVG、PNG 与 PDF 共用该冻结 SVG 输入，兼容性报告会以节点为单位记录 `display-p3` 色域收缩，避免静默丢失导出色彩语义。
 
@@ -604,7 +618,7 @@ Size 仅表示相对工程量，不代表日历工期。
 - 自定义字体与缺失字体 fallback；
 - 至少一个 PNG/SVG/PDF 导出目标。
 
-**当前候选进度（2026-08-10）**：`?fixture=phase2-professional-composite` 已提供固定 `F-PHASE2-PROFESSIONAL-COMPOSITE` 候选输入，含三层嵌套 Auto Layout、多语言/RTL/Emoji 与 Style Run、Frame Clip + 两段独立 alpha Mask run、Effect Stack/Blend、缺失图片、内嵌 Inter 字体子集及其未覆盖字形的系统 fallback、Polygon/Star/Vector/Boolean、Outline 结果 Vector 及 Slice。Fixture 测试现逐项冻结这些 Q1 输入的层级、两段遮罩、Effect、资源 fallback、Boolean operand 和导出 Slice，并通过同一 Canonical 原子创建路径；同时冻结 SVG 对两段 Mask/Blend 的输出与 Layer Blur、Inner Shadow、Background Blur、字体、Live Boolean 的可见降级，同时验证有字节的 PNG 以内嵌 data URI 导出、缺失图片输出结构化 fallback，并确认 PDF 增加 JPEG 光栅化降级。夹具的资源索引会在旧投影节点导入前预注册：一个可显示的 PNG、一个缺失图片 fallback 和一个真实字体资源；浏览器复验显示 21 个节点、3 个资源均进入 `Rust/WASM bridge ready`，且主线程的 FontFace 状态为 `loaded`，而非 TypeScript 回退。该 URL 的 Reset demo 在 Flatten 等试验后会重新 hydrate 固定 fixture，恢复 21 节点、3 资源、r0 和相同 Canonical Hash，避免证据运行漂移到通用演示文档。新增 `pnpm evidence:phase2-professional-composite` 会采集该夹具的截图、环境、console 和三轮输入证据，并将 Golden 固定为 `pending-independent-review`；`pnpm evidence:phase2-professional-composite-stability` 会在同一夹具循环执行 Pan、Zoom、Select、Move、Resize、Rotate、Text、Layout、Effect、Undo/Redo，在每轮结束时 Reset demo 并保存独立动作、性能和浏览器堆内存曲线归档、起止截图与 console。它还会从工具栏焦点发送真实 `ArrowRight`/`ArrowLeft` 并验证 Canonical Hash 发生变化，避免合成 Canvas 键盘事件把移动路径误报为通过。默认运行 60 分钟且同样只产出候选。单轮动作、性能或内存探针超过 90 秒会写入失败阶段并终止，避免无界等待。2026-08-10 的最新真实动作稳定性烟雾以 0 秒、三轮完成：Render P95 中位 3.435ms、Input-to-render P95 21ms、Input backlog P95 18.74ms，三个本地门槛均通过、console 为 0 error；内存归档也已在真实三轮会话中验证。随后在同一 1440×960/DPR 1 夹具的独立三轮稳态复采中，滚轮改为即时传递 Worker、普通/近景交互 backing store 调为 70%（闲置 160ms 恢复原生 DPR），Render P95 中位为 9.845ms、Input-to-render P95 为 29ms、Input backlog P95 为 0.05ms，三个本地门槛再次通过且 console 为 0 error。它们仅验证采集链路，不能替代独立的 60 分钟 Gate。完整 Outline 事务、独立 Golden/60 分钟和设计师验收仍待完成，Q1 继续为 Partial。
+**当前候选进度（2026-08-10，2026-08-16 更新）**：`?fixture=phase2-professional-composite` 已提供固定 `F-PHASE2-PROFESSIONAL-COMPOSITE` 候选输入，含三层嵌套 Auto Layout、多语言/RTL/Emoji 与 Style Run、Frame Clip + 两段独立 Group 内 alpha Mask run、一个仅含 Layer Blur + Drop Shadow 的有序效果栈、复杂 Effect Stack/Blend、缺失图片、内嵌 Inter 字体子集及其未覆盖字形的系统 fallback、Polygon/Star/Vector/Boolean、Outline 结果 Vector 及 Slice。Fixture 测试现逐项冻结这些 Q1 输入的层级、两段遮罩、Effect、资源 fallback、Boolean operand 和导出 Slice，并通过同一 Canonical 原子创建路径；同时冻结 SVG 对两段 Mask/Blend 的输出，以及复杂 Layer Blur、Inner Shadow、Background Blur、字体、Live Boolean 的可见降级，同时验证纯 Layer Blur + Drop Shadow 栈走 SVG filter 组合路径，验证有字节的 PNG 以内嵌 data URI 导出、缺失图片输出结构化 fallback，并确认 PDF 增加带 alpha `/SMask` 的 RGBA rasterization fallback，而非旧的 JPEG 白底路径。夹具的资源索引会在旧投影节点导入前预注册：一个可显示的 PNG、一个缺失图片 fallback 和一个真实字体资源；浏览器复验显示 24 个节点、3 个资源均进入 `Rust/WASM bridge ready`，且主线程的 FontFace 状态为 `loaded`，而非 TypeScript 回退。该 URL 的 Reset demo 在 Flatten 等试验后会重新 hydrate 固定 fixture，恢复 24 节点、3 资源、r0 和相同 Canonical Hash，避免证据运行漂移到通用演示文档。新增 `pnpm evidence:phase2-professional-composite` 会采集该夹具的截图、环境、console 和三轮输入证据，并将 Golden 固定为 `pending-independent-review`；`pnpm evidence:phase2-professional-composite-stability` 会在同一夹具循环执行 Pan、Zoom、Select、Move、Resize、Rotate、Text、Layout、Effect、Undo/Redo，在每轮结束时 Reset demo 并保存独立动作、性能和浏览器堆内存曲线归档、起止截图与 console。它还会从工具栏焦点发送真实 `ArrowRight`/`ArrowLeft` 并验证 Canonical Hash 发生变化，避免合成 Canvas 键盘事件把移动路径误报为通过。默认运行 60 分钟且同样只产出候选：除总时长外，默认还至少需要 30 轮完整采样，任意相邻轮次启动间隔超过 5 分钟即写入失败，避免宿主暂停留下的少量离散记录被误报为连续稳定性。单轮动作、性能或内存探针超过 90 秒会写入失败阶段并终止，避免无界等待。2026-08-16 的最新真实候选采集以 0 秒 warmup、三轮完成：Render P95 中位 3.235ms、Input-to-render P95 4ms、Input backlog P95 0.04ms，三个本地门槛均通过、console 为 0 error；证据目录为 `output/phase2-professional-composite/current-candidate/`。它们仅验证采集链路，不能替代独立的 60 分钟 Gate。完整 Outline 事务、独立 Golden/60 分钟和设计师验收仍待完成，Q1 继续为 Partial。
 
 **自动性能 Gate**：
 
