@@ -12,4 +12,4 @@ tmp/
 .env*
 !.env.example
 *.log
-phase0-gradient-stop-management.png
+/*.png

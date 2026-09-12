@@ -1,0 +1,37 @@
+{
+  "format": "makefigma-figma-visual-baseline-v1",
+  "fixtureId": "F-MCP-UNTITLED-NODE-1-90-REFERENCE",
+  "capturedAt": "2026-09-12T04:00:12.578Z",
+  "source": {
+    "provider": "figma-mcp",
+    "fileKey": "sOpexHz9cP8FTWJ8BvqBY2",
+    "nodeIds": [
+      "1:90"
+    ],
+    "designUrl": "https://www.figma.com/design/sOpexHz9cP8FTWJ8BvqBY2/Untitled?node-id=1-90",
+    "format": "png",
+    "scale": 1,
+    "figmaApiVersion": "not-disclosed-by-mcp",
+    "pluginTypingsVersion": "1.134.0"
+  },
+  "environment": {
+    "browser": "Figma MCP server export",
+    "dpr": 1,
+    "colorProfile": "srgb",
+    "normalization": [
+      "decode-png",
+      "premultiply-rgba"
+    ]
+  },
+  "references": {
+    "1:90": {
+      "path": "fixtures/golden-images/figma-mcp-untitled-node-1-90.png",
+      "sha256": "61abe49bcb70fc0173a222bdb715a9c19fd322a0512b2a0be1a03be3d8e315ca"
+    }
+  },
+  "threshold": {
+    "maxChannelDelta": 0,
+    "maxMismatchedPixels": 0,
+    "maxMeanChannelDelta": 0
+  }
+}

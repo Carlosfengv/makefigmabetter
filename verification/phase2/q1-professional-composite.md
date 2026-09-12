@@ -12,7 +12,7 @@
 
 ## 浏览器候选
 
-- 夹具加载后显示 `Rust/WASM bridge ready`、21 个节点、3 个资源及固定 Canonical Hash `0c36c7061973…`；其中包含 Frame Clip 与两段独立 alpha Mask run；控制台无 error。
+- 夹具加载后显示 `Rust/WASM bridge ready`、24 个节点、3 个资源及固定 Canonical Hash；两段 alpha Mask run 分别封装在独立 Group 中，因此只裁剪各自的后续 target，不会吞掉无关的根级图层；其中还包含一条仅由 Layer Blur + Drop Shadow 组成的有序效果栈；控制台无 error。
 - 内嵌的 Inter TTF 子集在主线程 `document.fonts` 中以 `makefigma-asset-…30f1` 注册为 `loaded`；文本仍含中文、阿拉伯文和 Emoji，用于覆盖未包含字形时的系统 fallback，而不向 Canonical 文本写入未登记的 Font AssetId。
 - 当前稳定性脚本已按现用 Playwright CLI 兼容格式完成真实 0 秒、三轮动作烟雾采集：每轮执行 Pan、Zoom、Select、Move、Resize、Rotate、Text、Layout、Effect、Undo/Redo 后 Reset demo，起止截图、环境、动作归档、性能摘要、浏览器堆内存曲线与 console 全部写入候选；中位 Render P95 为 3.435ms、Input-to-render P95 为 21ms、Input backlog P95 为 18.74ms，console 为 0 error。该产物仅证明采集链路，不构成 60 分钟签署。
 - 选择 `Polygon` 后执行图层面板的“置顶”操作，Canonical Hash 变更为 `947782a63b1e…`，未出现引擎错误；同时修复了并发工作区目录保存的 409 不应冒充编辑失败的问题。重新打开固定入口可恢复基线 Hash。

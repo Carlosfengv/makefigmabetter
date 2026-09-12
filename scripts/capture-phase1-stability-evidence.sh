@@ -260,7 +260,7 @@ exercise_image_import_and_cancel() {
   "$pwcli" --session "$session" upload "$image_path" 2>&1 | tee "$evidence_dir/image-cancel-select.log"
   # Wait and click in one browser command. Separate CLI invocations can take
   # long enough for a deliberate pre-read delay to expire between them.
-  if ! run_browser_code 'async (page) => { await page.waitForFunction(() => [...document.querySelectorAll("button.quiet-button")].some((candidate) => candidate.textContent?.trim() === "Cancel import"), { timeout: 15_000 }); await page.evaluate(() => { const button = [...document.querySelectorAll("button.quiet-button")].find((candidate) => candidate.textContent?.trim() === "Cancel import"); if (!button) throw new Error("Cancel import control disappeared"); button.click(); }); }' 2>&1 | tee "$evidence_dir/image-cancel-click.log"; then
+  if ! run_browser_code 'async (page) => { await page.waitForFunction(() => document.querySelector("button[data-action=asset-import]")?.textContent?.trim() === "Cancel import", { timeout: 15_000 }); await page.evaluate(() => { const button = document.querySelector("button[data-action=asset-import]"); if (!button) throw new Error("Cancel import control disappeared"); button.click(); }); }' 2>&1 | tee "$evidence_dir/image-cancel-click.log"; then
     echo "The live import did not expose a clickable cancellation control." >&2
     return 1
   fi

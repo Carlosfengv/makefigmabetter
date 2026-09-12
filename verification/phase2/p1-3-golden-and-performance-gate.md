@@ -46,3 +46,24 @@
 ## 待办（计入 Gate 前）
 
 - 独立审核者比对本轮 Golden 截图与像素策略、复核两份 `performance-summary.json` 的三项 Gate、确认 console 0 error，签署并把 `golden.status` / `signOff` 从 `pending-independent-review` 冻结为 baseline；签署记录归档本目录。此步骤按计划属独立审核环节，与 P1-2 的 AT 复核同批，不能由采集执行者自签。
+
+## 2026-08-16 R0 修复后复采
+
+- 候选目录：`output/phase2-common-nodes/r0-r2-20260816/`。
+- 环境：HeadlessChrome 151、1440×960、DPR 1、WebGPU 可用。
+- fixture SHA-256：`0d1e79460a7e9d56b4dac0d56ef22e3d61a323fa6f1d5b3b70978c5d62eb4428`；console 为 `Errors: 0`。
+- 三轮中位数：Render P95 **1.345 ms**、Input-to-render P95 **2 ms**、Input backlog P95 **0.05 ms**；三项自动 Gate 均为 `true`。
+- Golden 仍为 `pending-independent-review`。本轮只更新候选，不替代完整 60 分钟稳定性记录或独立冻结。
+
+## 2026-08-16 专业图形跨渲染 / PDF 候选
+
+- 候选目录：`output/phase2-professional-composite/vector-boolean-mask-r0-r2-20260816/`；固定 Professional Composite 同时包含普通 Vector、Live Boolean、两段独立 alpha Mask、Frame Clip 与 Slice。
+- HeadlessChrome 151、1440×960、DPR 1、WebGPU 可用；console 为 `Errors: 0`。三轮中位数：Render P95 **3.3 ms**、Input-to-render P95 **3 ms**、Input backlog P95 **0.04 ms**，三项自动 Gate 均为 `true`。
+- 真实页面点击 **Export PDF** 成功产出 `Page-1.pdf` 和 `Page-1.compatibility.json`；下载均无失败。兼容性 sidecar 明确记录 `pdf-rasterization` fallback，说明旧候选为带 `#ffffff` matte 的 JPEG 光栅页，未把原生矢量/alpha 保真误记为完成。
+- 该候选与 `src/lib/svg-export.test.ts` 的同源测试共同固定：Rust 派生的 Vector 路径、Live Boolean、alpha Mask 和 Slice 均进入同一 SVG 源，PNG/PDF 再光栅化这份源。Golden 仍为 `pending-independent-review`，需由独立审核者冻结。
+
+## 2026-08-16 RGBA PDF / 字体交付复验
+
+- 专业 fixture 的 **Export PDF** 实际下载成功；PDF 字节包含 `%PDF-1.4`、`/Filter /FlateDecode` 与 `/SMask`，不含 `/DCTDecode`。这证明透明 PDF 走的是 lossless RGBA + alpha soft mask，而非 JPEG 白底。
+- 同一 fixture 的 **Export SVG** 实际下载包含 `data-makefigma-source-revision` 与隔离 `@font-face`；sidecar `sourceRevision = 0`，没有 `font-asset` fallback。其余确实不可等价的 Effect/Image 能力仍保留结构化 fallback。
+- 这仍不是原生可编辑 vector PDF，也不替代独立 Golden 审核；`pdf-rasterization` 保持可见，避免把格式可读性误称为编辑保真。

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { phase2Evidence } from "./write-phase2-common-nodes-evidence.mjs";
 
 export function phase2ProfessionalCompositeEvidence({ evidenceDirectory, evidenceUrl, capturedAt = new Date().toISOString() }) {
-  return phase2Evidence({
+  const evidence = phase2Evidence({
     format: "makefigma-phase2-professional-composite-evidence-v1",
     evidenceDirectory,
     evidenceUrl,
@@ -14,9 +14,14 @@ export function phase2ProfessionalCompositeEvidence({ evidenceDirectory, evidenc
       "src/lib/phase2-professional-composite-fixture.ts",
       "src/lib/phase2-professional-composite-fixture.test.ts",
     ],
-    artifactPattern: /^(?:open|resize|snapshot|readiness|performance-warmup|screenshot-(?:start|end)|cycles|stability-summary|stability-failure)(?:-|\.)|^(?:action|performance|memory)-run-\d+\.txt$|^move-verification-run-\d+\.txt$|^(phase2-professional-composite(?:-(?:start|end))?\.png|screenshot\.log|console\.txt|browser-environment\.txt|performance-summary\.json|memory-summary\.json|source-fingerprint\.json)$/,
+    artifactPattern: /^(?:open|resize|snapshot|readiness|performance-warmup|screenshot-(?:start|end)|cycles|stability-summary|stability-failure)(?:-|\.)|^(?:action|performance|memory)-run-\d+\.txt$|^move-verification-run-\d+\.txt$|^(phase2-professional-composite(?:-(?:start|end))?\.png|screenshot\.log|console\.txt|browser-environment\.txt|golden-(?:verification\.json|diff\.png)|performance-summary\.json|memory-summary\.json|source-fingerprint\.json)$/,
     capturedAt,
   });
+  const goldenVerificationPath = resolve(evidenceDirectory, "golden-verification.json");
+  return {
+    ...evidence,
+    ...(existsSync(goldenVerificationPath) ? { goldenVerification: JSON.parse(readFileSync(goldenVerificationPath, "utf8")) } : {}),
+  };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

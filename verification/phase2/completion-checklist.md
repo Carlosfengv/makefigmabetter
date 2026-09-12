@@ -12,6 +12,7 @@
 | 前端测试、lint 与生产构建 | `pnpm lint`、`pnpm test`、`pnpm build`；CI `web` job | 已接入 CI；需以最终冻结源码复跑 |
 | Rust Core、服务与渲染器测试 | `cargo test --workspace`、`pnpm document:api:check`、`pnpm asset:api:check`、`pnpm workspace:api:check`、`pnpm mock:backend:check`；CI `rust`、`services`、`renderer-native` jobs | 已接入 CI；需以最终冻结源码复跑 |
 | 协议和 WASM 生成物一致 | `pnpm protocol:check && git diff --exit-code`、`pnpm wasm:build && git diff --exit-code`；CI `protocol`、`wasm` jobs | 已接入 CI；需在干净 clone 验证 |
+| WASM 跨路径可复现 | [R0 候选记录](r0-reproducible-baseline.md)：不同 worktree 路径重建后的 SHA-256 相同；构建脚本已映射路径相关 Rust 字符串 | 候选已通过；待提交后由全新 CI runner 复跑 |
 | 边界与兼容矩阵 | `pnpm check:boundaries`、`pnpm check:compatibility`；CI `web` job | 已接入 CI；兼容矩阵保持 Phase 2 Partial/Later 口径 |
 | Snapshot 与 Phase 1 固定 Fixture | `pnpm check:phase1-snapshot-fixtures` 及 CI `phase1-fixtures` job | 已接入 CI；需以最终冻结源码复跑 |
 | Common Nodes 固定 Fixture | `pnpm check:phase2-common-nodes-fixture`；CI `phase2-common-nodes-fixture` job；[manifest](common-nodes-fixture-manifest.json) | 已接入 CI；固定输入不是 Golden 签署 |
@@ -35,7 +36,7 @@
 | --- | --- | --- |
 | R3 | [旋转、键盘位移与基础 Shadow 候选](r3-rotation-control.md) 已接入；旋转、Undo/Redo、世界坐标方向键位移、基础 Shadow/Mixed Inspector 及核心键盘流程均已通过候选浏览器验证；完整跨辅助技术验收仍待办 | 候选完成，待独立审核 |
 | G0–G5 | Polygon、Star、Vector/Pen、Boolean/Outline、Mask、Slice | 候选/部分完成；详见计划 §4.2–4.3，仍缺完整几何、交互、导出与跨层验收 |
-| E1 | Effect Stack、离屏纹理池与降级报告 | 候选/部分完成；Core/Canvas/SVG 的首批 Stack、Blur 与 Blend 已接入，WebGPU 纹理池、PDF 降级与 Golden 待办 |
+| E1 | Effect Stack、离屏纹理池与降级报告 | 候选/部分完成；Core/Canvas/SVG 的首批 Stack、Blur 与 Blend 已接入，真实浏览器已验证一次 WebGPU 重建和二次稳定 Canvas 回退；跨渲染器 Golden、复杂 stack 与长期泄漏 Gate 待办 |
 | L1–L3 | 高级文本、Constraints 收口、Auto Layout | 候选/部分完成；文本 Run、Relative-v1 Constraints 与单轴 Auto Layout 已有候选，完整交互和跨导出验收待办 |
 | X1 | PNG/SVG/PDF 与兼容性报告 | 候选/部分完成；基础 SVG、Slice PNG/PDF 与兼容性输出已接入，完整节点/页面交付待办 |
 | Q1 | 复杂 Fixture、60 分钟稳定性、独立设计师验收 | 实施中；见 [Professional Composite 候选记录](q1-professional-composite.md)。短采集已形成候选，Golden、完整 60 分钟及独立设计师验收仍待办 |

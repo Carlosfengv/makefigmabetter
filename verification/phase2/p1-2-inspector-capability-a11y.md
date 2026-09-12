@@ -37,4 +37,5 @@
 ## 待办(计入 Gate 前)
 
 - 已于 2026-08-09 在 3080 测试环境真实采集，产物在 `output/playwright/phase2-inspector-a11y/20260809T1240Z/`，其中 `evidence-metadata.json` 记录 fixture SHA-256、朗读文本和 `Errors: 0`。2026-08-10 又在当前工作树以同一 3080 夹具复采，产物在 `output/phase2-a11y/recheck-20260810/`；其 live region 逐字验证为 `2 layers selected. Editable: Drop shadow. Mixed values: Fill. Not applicable: Stroke width, Stroke align, Per-side stroke, Corner radius, Stroke details, Line endpoints, Clip content, Section contents.`，并保持 `Errors: 0`。仍需将候选目录交独立审核者。
+- 2026-08-16 的 R0 修复后复采位于 `output/phase2-a11y/r0-r2-20260816/`：fixture SHA-256 为 `0d1e79460a7e9d56b4dac0d56ef22e3d61a323fa6f1d5b3b70978c5d62eb4428`，同一 live region 逐字通过，浏览器 console 为 `Errors: 0`。该目录的 `evidence-metadata.json` 仍明确标为 `pending-independent-review`。
 - 独立审核者以真实屏幕阅读器 (VoiceOver / NVDA) 复听 live region,签署并冻结 baseline,将 `signOff.status` 从 `pending-independent-review` 置为已冻结。

@@ -2,7 +2,7 @@
   "format": "makefigma-golden-manifest-v1",
   "fixtureName": "F-PHASE2-PROFESSIONAL-COMPOSITE",
   "fixture": "src/lib/phase2-professional-composite-fixture.ts",
-  "fixtureSha256": "d5bb264443d299ebf3fab36dad89748664bb5a9fc3b74c8681a0869aef73dfbd",
+  "fixtureSha256": "7ee10c4955d95670dd3a2b7f4e70658ce69de91a016c77749e5321d8b9c05671",
   "captures": [
     {
       "id": "phase2-professional-composite-1440x960-dpr1",
