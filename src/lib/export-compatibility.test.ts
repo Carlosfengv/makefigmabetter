@@ -3,7 +3,7 @@ import { withPdfRasterizationFallback } from "./export-compatibility";
 import type { SvgExportResult } from "./svg-export";
 
 describe("export compatibility", () => {
-  it("records the PDF JPEG fallback once while preserving prior SVG fallbacks", () => {
+  it("records the PDF raster fallback once while preserving prior SVG fallbacks", () => {
     const original: SvgExportResult = {
       svg: "<svg/>", width: 40, height: 20,
       warnings: ["Existing SVG fallback"],
@@ -18,7 +18,7 @@ describe("export compatibility", () => {
       original.compatibilityFallbacks[0],
       expect.objectContaining({ nodeId: "slice", capability: "pdf-rasterization", outcome: "fallback" }),
     ]);
-    expect(once.warnings).toEqual(["Existing SVG fallback", expect.stringContaining("opaque JPEG raster with #aa11ff matte")]);
+    expect(once.warnings).toEqual(["Existing SVG fallback", expect.stringContaining("lossless RGBA raster with #aa11ff matte")]);
     expect(twice).toBe(once);
   });
 });

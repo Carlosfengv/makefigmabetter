@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { admitSliceRasterBatch, admitSliceRasterExport, MAX_SLICE_EXPORT_PIXELS, pdfExportBackgroundColor, pdfFromJpeg, pdfFromJpegs, sliceExportBackgroundColor, SliceExportError } from "./slice-export";
+import { admitSliceRasterBatch, admitSliceRasterExport, MAX_SLICE_EXPORT_PIXELS, pdfExportBackgroundColor, pdfFromJpeg, pdfFromJpegs, pdfFromRgbaPages, sliceExportBackgroundColor, SliceExportError } from "./slice-export";
 
 describe("Slice export budget", () => {
   it("admits bounded raster regions and reports exact backing-store cost", () => {
@@ -17,15 +17,34 @@ describe("Slice export budget", () => {
     expect(admitSliceRasterBatch([{ width: 8_192, height: 8_192 }, { width: 1, height: 1 }])).toEqual({ accepted: false, reason: "RESOURCE_LIMIT" });
   });
 
-  it("keeps transparent PNGs transparent while allowing an explicit white backdrop", () => {
+  it("keeps transparent PNGs transparent while allowing a normalized explicit matte", () => {
     expect(sliceExportBackgroundColor("transparent")).toBeUndefined();
     expect(sliceExportBackgroundColor("white")).toBe("#ffffff");
+    expect(sliceExportBackgroundColor("#Aa11Ff")).toBe("#aa11ff");
+    expect(sliceExportBackgroundColor("#bad" as `#${string}`)).toBe("#ffffff");
     expect(pdfExportBackgroundColor("#Aa11Ff")).toBe("#aa11ff");
-    expect(pdfExportBackgroundColor("transparent" as `#${string}`)).toBe("#ffffff");
+    expect(pdfExportBackgroundColor("transparent")).toBeUndefined();
   });
 });
 
 describe("Slice PDF encoding", () => {
+  it("writes lossless RGBA PDF pages with a PDF 1.4 alpha soft mask", async () => {
+    const source = new TextDecoder().decode(await (await pdfFromRgbaPages([{
+      rgba: Uint8ClampedArray.from([255, 0, 0, 0, 0, 64, 255, 255]),
+      pageWidth: 20,
+      pageHeight: 10,
+      imageWidth: 2,
+      imageHeight: 1,
+    }])).arrayBuffer());
+
+    expect(source).toContain("%PDF-1.4");
+    expect(source).toContain("/MediaBox [0 0 20 10]");
+    expect(source).toContain("/ColorSpace /DeviceRGB");
+    expect(source).toContain("/ColorSpace /DeviceGray");
+    expect(source).toContain("/SMask 6 0 R");
+    expect(source).toContain("/Filter /FlateDecode");
+  });
+
   it("writes a single-page PDF 1.4 container with a JPEG image stream", async () => {
     const pdf = await pdfFromJpeg(new Blob([Uint8Array.of(0xff, 0xd8, 0xff, 0xd9)], { type: "image/jpeg" }), 100, 80, 200, 160);
     const source = new TextDecoder().decode(await pdf.arrayBuffer());
@@ -55,6 +74,16 @@ describe("Slice PDF encoding", () => {
       { jpeg, pageWidth: 8_192, pageHeight: 8_192, imageWidth: 8_192, imageHeight: 8_192 },
       { jpeg, pageWidth: 1, pageHeight: 1, imageWidth: 1, imageHeight: 1 },
     ])).rejects.toMatchObject({ code: "RESOURCE_LIMIT" } satisfies Partial<SliceExportError>);
+  });
+
+  it("rejects malformed RGBA page data before writing a PDF", async () => {
+    await expect(pdfFromRgbaPages([{
+      rgba: Uint8ClampedArray.of(0, 0, 0),
+      pageWidth: 1,
+      pageHeight: 1,
+      imageWidth: 1,
+      imageHeight: 1,
+    }])).rejects.toMatchObject({ code: "INVALID_SIZE" } satisfies Partial<SliceExportError>);
   });
 
   it("rejects data that is not a JPEG instead of emitting a malformed PDF", async () => {

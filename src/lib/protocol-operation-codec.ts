@@ -10,6 +10,7 @@ import {
   StrokeAlign as ProtoStrokeAlign,
   ConstraintType as ProtoConstraintType,
   LayoutAlignment as ProtoLayoutAlignment,
+  WrapTrackAlignment as ProtoWrapTrackAlignment,
   LayoutMode as ProtoLayoutMode,
   LayoutSizing as ProtoLayoutSizing,
   OperationEnvelope,
@@ -96,6 +97,10 @@ export function encodeRegisterResourcePayload(resource: ResourceRegistration): U
 }
 
 function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[] {
+  if (command.type === "createPage") {
+    const [key, actorId] = positionBytes(command.page.positionId, command.page.id);
+    return [{ createPage: { page: { pageId: idBytes(command.page.id), name: command.page.name, positionId: { key, actorId } } } }];
+  }
   if (command.type === "registerAsset") {
     const asset = command.asset;
     if ((asset.pixelWidth === undefined) !== (asset.pixelHeight === undefined)) throw new TypeError("Resource dimensions must be a pair.");
@@ -115,6 +120,7 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   }
   if (command.type === "restore") {
     const operations: ResolvedOperation[] = [{ restoreNode: { node: nodeProto(command.node) } }];
+    if (command.node.isMask) operations.push({ setMask: { nodeId: idBytes(command.node.id), enabled: true } });
     const layout = autoLayoutOperation(command.node);
     if (layout) operations.push(layout);
     return operations;
@@ -126,6 +132,7 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "splitVectorSegment") return [{ splitVectorSegment: { nodeId: idBytes(command.id), subpathIndex: command.subpathIndex, afterPointId: idBytes(command.afterPointId), t: command.t, pointId: idBytes(command.pointId) } }];
   if (command.type === "connectVectorEndpoints") return [{ connectVectorEndpoints: { nodeId: idBytes(command.id), firstSubpathIndex: command.firstSubpathIndex, firstPointId: idBytes(command.firstPointId), secondSubpathIndex: command.secondSubpathIndex, secondPointId: idBytes(command.secondPointId) } }];
   if (command.type === "setMask") return [{ setMask: { nodeId: idBytes(command.id), enabled: command.enabled } }];
+  if (command.type === "setExtensions") return [{ setNodeExtensions: { nodeId: idBytes(command.id), extensions: extensionsProto(command.extensions) } }];
   if (command.type === "deleteVectorPoint") return [{ deleteVectorPoint: { nodeId: idBytes(command.id), pointId: idBytes(command.pointId) } }];
   if (command.type === "setVectorPointHandles") return [{ setVectorPointHandles: { nodeId: idBytes(command.id), pointId: idBytes(command.pointId), handleInX: command.handleIn?.x, handleInY: command.handleIn?.y, handleOutX: command.handleOut?.x, handleOutY: command.handleOut?.y, pointType: command.pointType === "corner" ? VectorPointType.VECTOR_POINT_TYPE_CORNER : command.pointType === "mirrored" ? VectorPointType.VECTOR_POINT_TYPE_MIRRORED : VectorPointType.VECTOR_POINT_TYPE_ASYMMETRIC } }];
   if (command.type === "reposition") return command.positionIds.map(({ id, positionId }) => {
@@ -143,9 +150,9 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   const operations: ResolvedOperation[] = [
     { updateGeometry: { nodeId: idBytes(node.id), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation } },
     { renameNode: { nodeId: idBytes(node.id), name: node.name } },
-    { setAppearance: { nodeId: idBytes(node.id), fill: paintProto(undefined, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(undefined, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), relativeTransform: relativeTransform(node.relativeTransform), opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined } },
+    { setAppearance: { nodeId: idBytes(node.id), fill: paintProto(undefined, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(undefined, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), relativeTransform: relativeTransform(node.relativeTransform), opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined } },
   ];
-  if (node.kind === "vector") operations.push({ setVectorPath: { nodeId: idBytes(node.id), vectorPath: vectorPathProto(node.kind, node.vectorPath) } });
+  if (node.kind === "vector" || node.kind === "highlight" || node.kind === "textPath") operations.push({ setVectorPath: { nodeId: idBytes(node.id), vectorPath: vectorPathProto(node.kind, node.vectorPath) } });
   if (node.kind === "booleanOperation") {
     const operation = booleanOperationProto(node.kind, node.booleanOperation);
     if (operation === undefined) throw new TypeError("BooleanOperation nodes require an operation selector.");
@@ -168,13 +175,17 @@ function nodeProto(node: CoreProjectionNode) {
   return {
     nodeId: idBytes(node.id), parentId: node.parentId ? idBytes(node.parentId) : undefined, pageId: idBytes(node.pageId ?? "00000000-0000-0000-0000-000000000001"), positionId: { key, actorId: actor }, name: node.name,
     kind: nodeKind(node.kind), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation,
-    fill: paintProto(node.fillGradient, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(node.strokeGradient, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), vectorPath: node.kind === "vector" ? vectorPathProto(node.kind, node.vectorPath) : undefined, booleanOperation: booleanOperationProto(node.kind, node.booleanOperation), relativeTransform: relativeTransform(node.relativeTransform),
-    opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), autoLayout: autoLayoutProto(node.autoLayout), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), text: node.text, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined, extensions: extensionsProto(node.extensions),
+    fill: paintProto(node.fillGradient, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(node.strokeGradient, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), vectorPath: node.kind === "vector" || node.kind === "highlight" || node.kind === "textPath" ? vectorPathProto(node.kind, node.vectorPath) : undefined, booleanOperation: booleanOperationProto(node.kind, node.booleanOperation), relativeTransform: relativeTransform(node.relativeTransform),
+    opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), autoLayout: autoLayoutProto(node.autoLayout), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), text: node.text, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined, extensions: extensionsProto(node.extensions), reactions: [], prototypeMetadata: undefined,
   };
 }
 
 function autoLayoutOperation(node: CoreProjectionNode): ResolvedOperation | undefined {
-  if (node.kind !== "frame") return undefined;
+  // A non-Frame node uses this record for its relationship to a parent Auto
+  // Layout Frame (`absolute`, sizing and `alignSelf`).  Omitting it made a
+  // browser-local alignment look committed while the durable operation silently
+  // discarded that child-specific semantic.
+  if (node.kind !== "frame" && !node.autoLayout) return undefined;
   return { setAutoLayout: { nodeId: idBytes(node.id), autoLayout: autoLayoutProto(node.autoLayout) } };
 }
 
@@ -191,15 +202,16 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
   const bound = (candidate: unknown) => typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
   return {
     mode: value.mode === "horizontal" ? ProtoLayoutMode.LAYOUT_MODE_HORIZONTAL : value.mode === "vertical" ? ProtoLayoutMode.LAYOUT_MODE_VERTICAL : ProtoLayoutMode.LAYOUT_MODE_NONE,
-    paddingTop: value.padding[0], paddingRight: value.padding[1], paddingBottom: value.padding[2], paddingLeft: value.padding[3], itemSpacing: value.itemSpacing, wrap: value.wrap,
+    paddingTop: value.padding[0], paddingRight: value.padding[1], paddingBottom: value.padding[2], paddingLeft: value.padding[3], itemSpacing: value.itemSpacing, trackSpacing: bound(value.trackSpacing), wrapTrackAlignment: value.trackAlignment === "spaceBetween" ? ProtoWrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN : undefined, wrap: value.wrap,
     primaryAlignment: layoutAlignment(value.primaryAlignment), counterAlignment: layoutAlignment(value.counterAlignment),
     primarySizing: layoutSizing(value.primarySizing), counterSizing: layoutSizing(value.counterSizing),
     minWidth: bound(value.minWidth), maxWidth: bound(value.maxWidth), minHeight: bound(value.minHeight), maxHeight: bound(value.maxHeight), absolute: value.absolute,
+    alignSelf: value.alignSelf ? layoutAlignment(value.alignSelf) : undefined,
   };
 }
 
 function layoutAlignment(value: DocumentAutoLayout["primaryAlignment"]): ProtoLayoutAlignment {
-  return value === "center" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_CENTER : value === "end" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_END : value === "spaceBetween" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN : ProtoLayoutAlignment.LAYOUT_ALIGNMENT_START;
+  return value === "center" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_CENTER : value === "end" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_END : value === "spaceBetween" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN : value === "baseline" ? ProtoLayoutAlignment.LAYOUT_ALIGNMENT_BASELINE : ProtoLayoutAlignment.LAYOUT_ALIGNMENT_START;
 }
 
 function layoutSizing(value: DocumentAutoLayout["primarySizing"]): ProtoLayoutSizing {
@@ -286,7 +298,8 @@ function colorFromCss(value: string, fallback: DocumentColor) {
   if (value === "transparent") return TRANSPARENT_BLACK;
   return documentColorFromCssHex(value) ?? fallback;
 }
-function nodeKind(kind: CoreProjectionNode["kind"]) { return kind === "frame" ? NodeKind.NODE_KIND_FRAME : kind === "group" ? NodeKind.NODE_KIND_GROUP : kind === "section" ? NodeKind.NODE_KIND_SECTION : kind === "rectangle" ? NodeKind.NODE_KIND_RECTANGLE : kind === "ellipse" ? NodeKind.NODE_KIND_ELLIPSE : kind === "polygon" ? NodeKind.NODE_KIND_POLYGON : kind === "star" ? NodeKind.NODE_KIND_STAR : kind === "vector" ? NodeKind.NODE_KIND_VECTOR : kind === "booleanOperation" ? NodeKind.NODE_KIND_BOOLEAN_OPERATION : kind === "slice" ? NodeKind.NODE_KIND_SLICE : kind === "line" ? NodeKind.NODE_KIND_LINE : kind === "text" ? NodeKind.NODE_KIND_TEXT : NodeKind.NODE_KIND_IMAGE; }
+function nodeKind(kind: CoreProjectionNode["kind"]) { return kind === "frame" ? NodeKind.NODE_KIND_FRAME : kind === "component" ? NodeKind.NODE_KIND_COMPONENT : kind === "componentSet" ? NodeKind.NODE_KIND_COMPONENT_SET : kind === "instance" ? NodeKind.NODE_KIND_INSTANCE : kind === "slot" ? NodeKind.NODE_KIND_SLOT : kind === "connector" ? NodeKind.NODE_KIND_CONNECTOR : kind === "embed" ? NodeKind.NODE_KIND_EMBED : kind === "highlight" ? NodeKind.NODE_KIND_HIGHLIGHT : kind === "interactiveSlideElement" ? NodeKind.NODE_KIND_INTERACTIVE_SLIDE_ELEMENT : kind === "linkUnfurl" ? NodeKind.NODE_KIND_LINK_UNFURL : kind === "media" ? NodeKind.NODE_KIND_MEDIA : kind === "shapeWithText" ? NodeKind.NODE_KIND_SHAPE_WITH_TEXT : kind === "slideGrid" ? NodeKind.NODE_KIND_SLIDE_GRID : kind === "slide" ? NodeKind.NODE_KIND_SLIDE : kind === "slideRow" ? NodeKind.NODE_KIND_SLIDE_ROW : kind === "stamp" ? NodeKind.NODE_KIND_STAMP : kind === "sticky" ? NodeKind.NODE_KIND_STICKY : kind === "table" ? NodeKind.NODE_KIND_TABLE : kind === "tableCell" ? NodeKind.NODE_KIND_TABLE_CELL : kind === "textPath" ? NodeKind.NODE_KIND_TEXT_PATH : kind === "transformGroup" ? NodeKind.NODE_KIND_TRANSFORM_GROUP : kind === "washiTape" ? NodeKind.NODE_KIND_WASHI_TAPE : kind === "widget" ? NodeKind.NODE_KIND_WIDGET : kind === "group" ? NodeKind.NODE_KIND_GROUP : kind === "section" ? NodeKind.NODE_KIND_SECTION : kind === "rectangle" ? NodeKind.NODE_KIND_RECTANGLE : kind === "ellipse" ? NodeKind.NODE_KIND_ELLIPSE : kind === "polygon" ? NodeKind.NODE_KIND_POLYGON : kind === "star" ? NodeKind.NODE_KIND_STAR : kind === "vector" ? NodeKind.NODE_KIND_VECTOR : kind === "booleanOperation" ? NodeKind.NODE_KIND_BOOLEAN_OPERATION : kind === "slice" ? NodeKind.NODE_KIND_SLICE : kind === "line" ? NodeKind.NODE_KIND_LINE : kind === "text" ? NodeKind.NODE_KIND_TEXT : kind === "codeBlock" ? NodeKind.NODE_KIND_CODE_BLOCK : NodeKind.NODE_KIND_IMAGE; }
+function isFrameLike(kind: CoreProjectionNode["kind"]) { return kind === "frame" || kind === "component" || kind === "componentSet" || kind === "instance" || kind === "slot"; }
 function strokeCap(value: CoreProjectionNode["strokeCapStart"]) { return value === "round" ? ProtoStrokeCap.STROKE_CAP_ROUND : value === "square" ? ProtoStrokeCap.STROKE_CAP_SQUARE : value === "arrowLines" ? ProtoStrokeCap.STROKE_CAP_ARROW_LINES : value === "arrowEquilateral" ? ProtoStrokeCap.STROKE_CAP_ARROW_EQUILATERAL : value === "diamondFilled" ? ProtoStrokeCap.STROKE_CAP_DIAMOND_FILLED : value === "triangleFilled" ? ProtoStrokeCap.STROKE_CAP_TRIANGLE_FILLED : value === "circleFilled" ? ProtoStrokeCap.STROKE_CAP_CIRCLE_FILLED : ProtoStrokeCap.STROKE_CAP_NONE; }
 function strokeJoin(value: CoreProjectionNode["strokeJoin"]) { return value === "bevel" ? ProtoStrokeJoin.STROKE_JOIN_BEVEL : value === "round" ? ProtoStrokeJoin.STROKE_JOIN_ROUND : ProtoStrokeJoin.STROKE_JOIN_MITER; }
 function strokeAlign(value: CoreProjectionNode["strokeAlign"]) { return value === "center" ? ProtoStrokeAlign.STROKE_ALIGN_CENTER : value === "outside" ? ProtoStrokeAlign.STROKE_ALIGN_OUTSIDE : ProtoStrokeAlign.STROKE_ALIGN_INSIDE; }
@@ -302,12 +315,12 @@ function normalizedDashPattern(pattern: readonly number[] | undefined): number[]
 }
 function cornerRadii(kind: CoreProjectionNode["kind"], radii: CoreProjectionNode["cornerRadii"]): number[] {
   if (!radii) return [];
-  if (kind !== "frame" && kind !== "rectangle" && kind !== "section") throw new TypeError("Per-corner radii are only supported by Frame, Rectangle, and Section.");
+  if (!isFrameLike(kind) && kind !== "rectangle" && kind !== "section") throw new TypeError("Per-corner radii are only supported by Frame, Component, Rectangle, and Section.");
   if (radii.length !== 4 || !radii.every((radius) => Number.isFinite(radius) && radius >= 0)) throw new TypeError("Corner radii must contain four finite, non-negative values.");
   return [...radii];
 }
 function cornerSmoothing(kind: CoreProjectionNode["kind"], smoothing: CoreProjectionNode["cornerSmoothing"]): number {
-  if (kind !== "frame" && kind !== "rectangle" && kind !== "section") {
+  if (!isFrameLike(kind) && kind !== "rectangle" && kind !== "section") {
     // Core canonically projects absent scalar fields as zero. Group, Line and
     // Ellipse do not expose corner smoothing in Figma, so that canonical zero
     // means “not set”, rather than an invalid attempt to configure the node.
@@ -326,7 +339,7 @@ function normalizedStrokeWeights(kind: CoreProjectionNode["kind"], weights: Core
 }
 function arcData(kind: CoreProjectionNode["kind"], arc: CoreProjectionNode["arcData"]) {
   if (!arc) return undefined;
-  if (kind !== "ellipse" || ![arc.startingAngle, arc.endingAngle, arc.innerRadius].every(Number.isFinite) || arc.innerRadius < 0 || arc.innerRadius >= 1) throw new TypeError("Arc data is only supported by Ellipse with an inner radius in [0, 1).");
+  if (kind !== "ellipse" || ![arc.startingAngle, arc.endingAngle, arc.innerRadius].every(Number.isFinite) || arc.innerRadius < 0 || arc.innerRadius > 1) throw new TypeError("Arc data is only supported by Ellipse with an inner radius in [0, 1].");
   return arc;
 }
 function parametricShapeProto(kind: CoreProjectionNode["kind"], shape: DocumentParametricShape | undefined) {
@@ -342,7 +355,7 @@ function parametricShapeProto(kind: CoreProjectionNode["kind"], shape: DocumentP
   return { polygonParameters: undefined, starParameters: undefined };
 }
 function vectorPathProto(kind: CoreProjectionNode["kind"], path: DocumentVectorPath | undefined) {
-  if (kind !== "vector" || !path || (path.fillRule !== "nonZero" && path.fillRule !== "evenOdd") || path.subpaths.length > 64) throw new TypeError("Vector requires a valid canonical path.");
+  if ((kind !== "vector" && kind !== "highlight" && kind !== "textPath") || !path || (path.fillRule !== "nonZero" && path.fillRule !== "evenOdd") || path.subpaths.length > 64) throw new TypeError("Vector, Highlight, and TextPath require a valid canonical path.");
   let totalPoints = 0;
   const pointIds = new Set<string>();
   const subpaths = path.subpaths.map((subpath) => {

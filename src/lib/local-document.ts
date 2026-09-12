@@ -258,7 +258,14 @@ function attachViewportRecord(snapshot: CoreLocalSnapshot, journal: LocalJournal
 /** Applies only a record confirmed to belong to this exact Core revision. */
 export function applyViewportRecord(snapshot: CoreLocalSnapshot, record: ViewportRecord | undefined): CoreLocalSnapshot {
   const matches = record?.format === "viewport-record-v1" && record.documentHash === snapshot.documentHash && record.coreRevision === snapshot.coreRevision;
-  return matches ? { ...snapshot, viewport: record.viewport } : snapshot;
+  return matches
+    ? {
+        ...snapshot,
+        viewport: record.viewport,
+        ...(record.activePageId ? { activePageId: record.activePageId } : {}),
+        ...(record.pageViewports ? { pageViewports: record.pageViewports } : {}),
+      }
+    : snapshot;
 }
 
 /** A viewport is UI state, so it has a tiny independent persistence path. */

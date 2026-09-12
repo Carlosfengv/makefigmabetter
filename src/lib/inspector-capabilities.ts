@@ -7,17 +7,17 @@ type InspectorNodeKind = CanvasNode["kind"];
  * stroke. Keep single-select capability checks aligned with the mixed
  * Inspector so the UI never offers a write that has no visual node target.
  */
-export function supportsGenericAppearanceInspector(kind: InspectorNodeKind) {
+export function supportsGenericAppearanceInspector(kind: InspectorNodeKind): boolean {
   return kind !== "group" && kind !== "line" && kind !== "slice";
 }
 
-export function supportsPaintStackInspector(kind: InspectorNodeKind) {
+export function supportsPaintStackInspector(kind: InspectorNodeKind): boolean {
   return kind !== "group" && kind !== "text" && kind !== "slice";
 }
 
 /** Join, miter and dash belong to every drawable Stroke. Endpoint caps stay
  * Line-only, but closed shapes must not lose their Figma Stroke details. */
-export function supportsStrokeDetailsInspector(kind: InspectorNodeKind) {
+export function supportsStrokeDetailsInspector(kind: InspectorNodeKind): boolean {
   return kind !== "group" && kind !== "text" && kind !== "slice";
 }
 

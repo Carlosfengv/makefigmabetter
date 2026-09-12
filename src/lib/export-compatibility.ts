@@ -14,15 +14,17 @@ export function withExportCompatibilityFallback(result: SvgExportResult, fallbac
   };
 }
 
-/** PDF currently embeds an opaque JPEG page for offline portability. Record
- * that explicitly: consumers must not mistake a page or Slice export for a
- * vector or alpha-preserving deliverable. */
-export function withPdfRasterizationFallback(result: SvgExportResult, targetId: string, background: PdfExportBackground = "#ffffff"): SvgExportResult {
-  const matte = /^#[0-9a-fA-F]{6}$/.test(background) ? background.toLowerCase() : "#ffffff";
+/** PDF raster output preserves alpha through a PDF 1.4 soft mask when the
+ * caller selects a transparent background. It is still an explicit raster
+ * fallback, never a claim that the exported PDF retained editable vectors. */
+export function withPdfRasterizationFallback(result: SvgExportResult, targetId: string, background: PdfExportBackground = "transparent"): SvgExportResult {
+  const surface = background === "transparent"
+    ? "with a PDF 1.4 alpha soft mask"
+    : `with ${/^#[0-9a-fA-F]{6}$/.test(background) ? background.toLowerCase() : "#ffffff"} matte`;
   return withExportCompatibilityFallback(result, {
     nodeId: targetId,
     capability: "pdf-rasterization",
     outcome: "fallback",
-    reason: `PDF fallback for ${targetId}: PDF embeds an opaque JPEG raster with ${matte} matte, not vector or alpha-preserving content.`,
+    reason: `PDF fallback for ${targetId}: PDF embeds a lossless RGBA raster ${surface}, not editable vector content.`,
   });
 }

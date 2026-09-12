@@ -4,6 +4,7 @@ import { normalizeAutoLayoutProjection, resolveCoreBatch } from "./transaction-b
 import { exportPageToSvg } from "./svg-export";
 import { withPdfRasterizationFallback } from "./export-compatibility";
 import { worldTransformForNode } from "./scene-transform";
+import { textFrozenLayoutFace } from "./text-svg-layout-input";
 
 describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
   it("freezes the complex Phase 2 evidence surface and its structural coverage", () => {
@@ -16,10 +17,13 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
     const layoutThree = byName("Auto layout level 3");
     const title = byName("Mixed-language title");
     const paragraph = byName("Multilingual paragraphs");
+    const composedEffectBar = byName("Composed layer blur and shadow");
     const mask = byName("Alpha mask");
     const maskedTarget = byName("Masked texture target");
+    const maskedRun = byName("Masked texture run");
     const independentMask = byName("Independent alpha mask");
     const independentlyMaskedBadge = byName("Independently masked badge");
+    const independentlyMaskedRun = byName("Independently masked badge run");
     const seededImage = byName("Seeded image asset");
     const missingImage = byName("Missing image fallback");
     const boolean = byName("Boolean union");
@@ -27,19 +31,29 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
     const embeddedFont = fixture.assets.find((asset) => asset.mediaType === "font/ttf");
 
     expect(fixture).toMatchObject({ format: "makefigma-phase2-professional-composite-fixture-v1", name: PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME, viewport: { x: 0, y: 0, zoom: 1 } });
-    expect(names).toEqual(expect.arrayContaining(["Auto layout level 1", "Auto layout level 2", "Auto layout level 3", "Mixed-language title", "Alpha mask", "Masked texture target", "Independent alpha mask", "Independently masked badge", "Blur and blend card", "Boolean union", "Outline stroke result", "Professional export Slice"]));
+    expect(names).toEqual(expect.arrayContaining(["Auto layout level 1", "Auto layout level 2", "Auto layout level 3", "Mixed-language title", "Masked texture run", "Alpha mask", "Masked texture target", "Independently masked badge run", "Independent alpha mask", "Independently masked badge", "Blur and blend card", "Composed layer blur and shadow", "Boolean union", "Outline stroke result", "Professional export Slice"]));
     expect(fixture.nodes.filter((node) => node.autoLayout).map((node) => node.name)).toEqual(["Auto layout level 1", "Auto layout level 2", "Auto layout level 3"]);
     expect(root).toMatchObject({ clipsContent: true });
     expect(layoutOne).toMatchObject({ parentId: root?.id, autoLayout: { mode: "vertical" } });
     expect(layoutTwo).toMatchObject({ parentId: layoutOne?.id, autoLayout: { mode: "horizontal" } });
     expect(layoutThree).toMatchObject({ parentId: layoutTwo?.id, autoLayout: { mode: "vertical" } });
-    expect(title).toMatchObject({ parentId: layoutThree?.id, text: expect.stringContaining("中文"), textProperties: { runs: [expect.objectContaining({ start: 0, end: expect.any(Number) })], fallbackFonts: [expect.objectContaining({ assetId: embeddedFont?.assetId })] } });
+    expect(title).toMatchObject({ parentId: layoutThree?.id, text: expect.stringContaining("中文"), textProperties: { runs: expect.arrayContaining([expect.objectContaining({ start: 0, end: expect.any(Number) })]), fallbackFonts: [expect.objectContaining({ assetId: embeddedFont?.assetId })] } });
+    expect(title?.textProperties?.runs.map(({ start, end }) => ({ start, end }))).toEqual([
+      { start: 0, end: 10 }, { start: 10, end: 20 }, { start: 20, end: 34 }, { start: 34, end: 38 },
+    ]);
+    expect(new TextEncoder().encode(title?.text).byteLength).toBe(38);
+    expect(title?.textProperties?.runs.map((run) => run.color?.components)).toEqual([
+      [.059, .09, .165], [.109, .24, .59], [.49, .08, .2], [.78, .35, .05],
+    ]);
+    expect(textFrozenLayoutFace(title!)).toMatchObject({ font: { assetId: embeddedFont?.assetId, faceIndex: 0 }, fontSize: 18 });
     expect(paragraph).toMatchObject({ parentId: layoutThree?.id, text: expect.stringContaining("مرحبا") });
     expect(paragraph?.text).toContain("👩‍💻");
-    expect(mask).toMatchObject({ parentId: root?.id, isMask: true });
-    expect(maskedTarget).toMatchObject({ parentId: root?.id });
-    expect(independentMask).toMatchObject({ parentId: root?.id, isMask: true });
-    expect(independentlyMaskedBadge).toMatchObject({ parentId: root?.id });
+    expect(maskedRun).toMatchObject({ parentId: root?.id, kind: "group" });
+    expect(mask).toMatchObject({ parentId: maskedRun?.id, isMask: true });
+    expect(maskedTarget).toMatchObject({ parentId: maskedRun?.id });
+    expect(independentlyMaskedRun).toMatchObject({ parentId: root?.id, kind: "group" });
+    expect(independentMask).toMatchObject({ parentId: independentlyMaskedRun?.id, isMask: true });
+    expect(independentlyMaskedBadge).toMatchObject({ parentId: independentlyMaskedRun?.id });
     expect(fixture.nodes.filter((node) => node.isMask)).toEqual([mask, independentMask]);
     expect(fixture.nodes.indexOf(independentMask!)).toBe(fixture.nodes.indexOf(independentlyMaskedBadge!) - 1);
     expect(fixture.assets).toEqual(expect.arrayContaining([expect.objectContaining({ assetId: seededImage?.assetId, mediaType: "image/png", bytesBase64: expect.any(String) }), expect.objectContaining({ assetId: missingImage?.assetId, mediaType: "image/png" }), expect.objectContaining({ mediaType: "font/ttf", bytesBase64: expect.any(String), preRegistered: true })]));
@@ -55,6 +69,14 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
         expect.objectContaining({ layerBlur: expect.any(Object) }),
         expect.objectContaining({ backgroundBlur: expect.any(Object) }),
       ]),
+    });
+    expect(composedEffectBar).toMatchObject({
+      parentId: root?.id,
+      effectStack: [
+        { layerBlur: { radius: 2, visible: true } },
+        { dropShadow: { offsetX: 0, offsetY: 3, blurRadius: 6, spread: 0, color: { space: "srgb", components: [0, 0, 0], alpha: .25 }, visible: true } },
+        { innerShadow: { offsetX: -2, offsetY: 1, blurRadius: 4, spread: 1, color: { space: "srgb", components: [1, 1, 1], alpha: .35 }, visible: true } },
+      ],
     });
     expect(boolean).toMatchObject({ parentId: root?.id, kind: "booleanOperation", booleanOperation: "union" });
     expect(fixture.nodes.filter((node) => node.parentId === boolean?.id && node.kind === "vector")).toHaveLength(2);
@@ -85,18 +107,38 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
   it("keeps SVG delivery explicit about every professional-fixture fallback", () => {
     const fixture = createPhase2ProfessionalCompositeFixture();
     const root = fixture.nodes.find((node) => node.name === "Professional composite");
+    const composedEffectBar = fixture.nodes.find((node) => node.name === "Composed layer blur and shadow");
     const svg = exportPageToSvg(fixture.nodes, { pageId: root?.pageId, defaultPageId: root?.pageId, padding: 0 });
     const pdf = withPdfRasterizationFallback(svg, root?.id ?? "professional-page");
 
     expect(svg.svg).toContain("<svg");
     expect(svg.svg).toContain("mix-blend-mode:overlay");
+    expect(svg.svg).toContain("makefigma-composed-effect-");
+    expect(svg.svg).toContain('result="innerMask-2"');
+    expect(svg.compatibilityFallbacks).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: composedEffectBar?.id, capability: "layer-blur" }),
+      expect.objectContaining({ nodeId: composedEffectBar?.id, capability: "inner-shadow" }),
+      expect.objectContaining({ nodeId: composedEffectBar?.id, capability: "shadow-spread" }),
+    ]));
     expect(svg.svg).toContain("mask-type=\"alpha\"");
     expect(svg.svg.match(/<mask\b/g)).toHaveLength(2);
     expect(svg.svg).toContain("clipPathUnits=\"userSpaceOnUse\"");
     expect(svg.svg).not.toMatch(/<clipPath[^>]*><g transform=/);
     expect(svg.compatibilityFallbacks.map((fallback) => fallback.capability)).toEqual(expect.arrayContaining([
-      "layer-blur", "inner-shadow", "background-blur", "image-asset", "font-asset", "live-boolean",
+      "layer-blur", "inner-shadow", "background-blur", "image-asset", "font-asset", "text-layout", "live-boolean",
     ]));
     expect(pdf.compatibilityFallbacks.map((fallback) => fallback.capability)).toEqual(expect.arrayContaining(["pdf-rasterization"]));
+  });
+
+  it("keeps the fixture's alpha mask when its masked target is exported alone", () => {
+    const fixture = createPhase2ProfessionalCompositeFixture();
+    const root = fixture.nodes.find((node) => node.name === "Professional composite");
+    const target = fixture.nodes.find((node) => node.name === "Masked texture target");
+    if (!root || !target) throw new Error("Professional fixture is incomplete");
+
+    const svg = exportPageToSvg(fixture.nodes, { pageId: root.pageId!, defaultPageId: root.pageId!, padding: 0, nodeIds: [target.id] });
+
+    expect(svg.svg).toContain('mask-type="alpha"');
+    expect(svg.svg).toContain('mask="url(#makefigma-alpha-mask-');
   });
 });

@@ -17,7 +17,17 @@ export type LayerOrderResult = {
  * renders this order in reverse, so its first row is always visually topmost.
  */
 export function sortNodesByLayerOrder<T extends Pick<CanvasNode, "id" | "positionId">>(nodes: readonly T[]): T[] {
-  return [...nodes].sort((left, right) => comparePositionId(positionIdFor(left), positionIdFor(right)) || left.id.localeCompare(right.id));
+  // Sorting an empty or singleton projection must not require synthesizing a
+  // canonical position from a possibly legacy/non-UUID presentation ID.
+  if (nodes.length < 2) return [...nodes];
+  return nodes
+    .map((node) => ({ node, position: parsePositionId(positionIdFor(node)) }))
+    .sort(
+      (left, right) =>
+        compareParsedPositionId(left.position, right.position) ||
+        left.node.id.localeCompare(right.node.id),
+    )
+    .map(({ node }) => node);
 }
 
 export function orderNewLayerAtFront(nodes: readonly CanvasNode[], nodeId: string): string | undefined {
@@ -113,8 +123,9 @@ function parsePositionId(value: string) {
   return { key: BigInt(`0x${key}`), actor: BigInt(`0x${actor}`) };
 }
 
-function comparePositionId(left: string, right: string) {
-  const a = parsePositionId(left);
-  const b = parsePositionId(right);
+function compareParsedPositionId(
+  a: ReturnType<typeof parsePositionId>,
+  b: ReturnType<typeof parsePositionId>,
+) {
   return a.key < b.key ? -1 : a.key > b.key ? 1 : a.actor < b.actor ? -1 : a.actor > b.actor ? 1 : 0;
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CanvasNode } from "./editor-protocol";
 import { mixedInspectorCapabilities, supportsCornerRadiusInspector, supportsGenericAppearanceInspector, supportsMixedStrokeAlignInspector, supportsPaintStackInspector, supportsPerSideStrokeInspector, supportsStrokeAlignInspector, supportsStrokeDetailsInspector } from "./inspector-capabilities";
 
 describe("Inspector capability boundaries", () => {
@@ -9,13 +10,13 @@ describe("Inspector capability boundaries", () => {
     expect(supportsPaintStackInspector("text")).toBe(false);
     expect(supportsGenericAppearanceInspector("line")).toBe(false);
     expect(supportsPaintStackInspector("line")).toBe(true);
-    expect(["frame", "rectangle", "ellipse", "line", "section", "image"].every(supportsStrokeDetailsInspector)).toBe(true);
-    expect(["group", "text"].some(supportsStrokeDetailsInspector)).toBe(false);
+    expect((["frame", "rectangle", "ellipse", "line", "section", "image"] as CanvasNode["kind"][]).every(supportsStrokeDetailsInspector)).toBe(true);
+    expect((["group", "text"] as CanvasNode["kind"][]).some(supportsStrokeDetailsInspector)).toBe(false);
   });
 
   it("limits uniform corner radius to closed Phase 2 node kinds", () => {
-    expect(["frame", "rectangle", "section"].every(supportsCornerRadiusInspector)).toBe(true);
-    expect(["group", "ellipse", "line", "text", "image"].some(supportsCornerRadiusInspector)).toBe(false);
+    expect((["frame", "rectangle", "section"] as CanvasNode["kind"][]).every(supportsCornerRadiusInspector)).toBe(true);
+    expect((["group", "ellipse", "line", "text", "image"] as CanvasNode["kind"][]).some(supportsCornerRadiusInspector)).toBe(false);
   });
 
   it("keeps Stroke Align and independent Weight capability boundaries explicit", () => {
@@ -24,8 +25,8 @@ describe("Inspector capability boundaries", () => {
     expect(supportsStrokeAlignInspector({ kind: "ellipse" })).toBe(true);
     expect(supportsStrokeAlignInspector({ kind: "ellipse", arcData: { startingAngle: 0, endingAngle: 180, innerRadius: 0 } })).toBe(false);
     expect(supportsStrokeAlignInspector({ kind: "section" })).toBe(false);
-    expect(["frame", "rectangle"].every(supportsPerSideStrokeInspector)).toBe(true);
-    expect(["group", "section", "ellipse", "line", "text", "image"].some(supportsPerSideStrokeInspector)).toBe(false);
+    expect((["frame", "rectangle"] as CanvasNode["kind"][]).every(supportsPerSideStrokeInspector)).toBe(true);
+    expect((["group", "section", "ellipse", "line", "text", "image"] as CanvasNode["kind"][]).some(supportsPerSideStrokeInspector)).toBe(false);
     expect(supportsMixedStrokeAlignInspector([{ kind: "frame" }, { kind: "ellipse" }])).toBe(true);
     expect(supportsMixedStrokeAlignInspector([{ kind: "rectangle" }, { kind: "ellipse", arcData: { startingAngle: 0, endingAngle: 180, innerRadius: 0 } }])).toBe(false);
   });

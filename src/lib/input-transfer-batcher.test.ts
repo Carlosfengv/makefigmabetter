@@ -31,6 +31,30 @@ describe("transferable input batcher", () => {
     expect(cancelled).toEqual([9]);
   });
 
+  it("batches a high-frequency wheel stream into one ordered frame delivery", () => {
+    const sent: EditorInputEvent[][] = [];
+    let callback: FrameRequestCallback | undefined;
+    const batcher = createInputTransferBatcher(
+      (events) => sent.push([...events]),
+      {
+        request(next) {
+          callback = next;
+          return 12;
+        },
+        cancel() {},
+      },
+    );
+    const zoomIn = { ...wheel, deltaY: -4, ctrlKey: true };
+    const zoomOut = { ...wheel, deltaY: 6, ctrlKey: true };
+
+    batcher.enqueue(zoomIn);
+    batcher.enqueue(zoomOut);
+    expect(sent).toEqual([]);
+    callback?.(16);
+
+    expect(sent).toEqual([[zoomIn, zoomOut]]);
+  });
+
   it("summarizes input batch backlog without retaining raw samples", () => {
     const sampler = createInputBatchBacklogSampler(3);
     [2, 8, 4, 16].forEach((duration) => sampler.record(duration));

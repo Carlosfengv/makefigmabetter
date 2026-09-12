@@ -1,9 +1,58 @@
 import type { EditorErrorCode } from "./editor-error";
+import type { FigmaRestAuthorizedAsset, FigmaRestImportPlan } from "./figma-rest-import";
 
 export type { EditorErrorCode } from "./editor-error";
 
 export type ToolKind = "select" | "frame" | "section" | "rectangle" | "ellipse" | "polygon" | "star" | "vector" | "pen" | "line" | "arrow" | "text" | "slice" | "hand";
-export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" | "polygon" | "star" | "vector" | "booleanOperation" | "slice" | "line" | "text" | "image";
+export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" | "polygon" | "star" | "vector" | "booleanOperation" | "slice" | "line" | "text" | "image" | "codeBlock" | "component" | "instance" | "slot" | "componentSet" | "connector" | "embed" | "highlight" | "interactiveSlideElement" | "linkUnfurl" | "media" | "shapeWithText" | "slideGrid" | "slide" | "slideRow" | "stamp" | "sticky" | "table" | "tableCell" | "textPath" | "transformGroup" | "washiTape" | "widget";
+/** Figma may append languages without a Plugin API major-version change, so
+ * source is retained as an open string rather than an exhaustively closed enum. */
+export type CodeBlockLanguage = string;
+export interface DocumentComponentMetadata {
+  /** Local keys default to the Canonical NodeId. Imported remote keys stay
+   * visible but mutating APIs reject the remote record. */
+  key: string;
+  remote: boolean;
+  description: string;
+  descriptionMarkdown: string;
+  documentationLinks: Array<{ uri: string; name?: string }>;
+  /** Mirrors Figma's readonly componentPropertyDefinitions; mutation methods
+   * are added together with INSTANCE and SLOT semantics. */
+  componentPropertyDefinitions: Record<string, { type: "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT"; defaultValue?: string | boolean; description?: string }>;
+}
+export interface DocumentInstanceMetadata {
+  mainComponentId: string;
+  scaleFactor: number;
+  componentProperties: Record<string, string | boolean>;
+  overrides: Array<{ id: string; overriddenFields: string[] }>;
+  isExposedInstance: boolean;
+}
+export interface DocumentSlotMetadata { propertyName: string; sourceSlotId?: string; }
+export interface DocumentComponentSetMetadata extends Omit<DocumentComponentMetadata, "componentPropertyDefinitions"> {
+  variantGroupProperties: Record<string, { values: string[] }>;
+}
+export interface DocumentEmbedMetadata { srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null; }
+export interface DocumentLinkUnfurlMetadata { url: string; title: string | null; description: string | null; provider: string | null; }
+export interface DocumentMediaMetadata { hash: string; }
+export interface DocumentStickyMetadata { authorVisible: boolean; authorName: string; isWideWidth: boolean; }
+export interface DocumentTableMetadata { rowHeights: number[]; columnWidths: number[]; }
+export interface DocumentTableCellMetadata { rowIndex: number; columnIndex: number; }
+export interface DocumentTextPathMetadata { startSegment: number; startPosition: number; autoRename: boolean; textAlignHorizontal: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED"; textAlignVertical: "TOP" | "CENTER" | "BOTTOM"; }
+export type DocumentTransformModifier = Readonly<{ type: "REPEAT"; count: number; unitType: "RELATIVE" | "PIXELS"; offset: number; repeatType: "LINEAR"; axis: "HORIZONTAL" | "VERTICAL" } | { type: "REPEAT"; count: number; unitType: "RELATIVE" | "PIXELS"; offset: number; repeatType: "RADIAL" }>;
+export interface DocumentWidgetMetadata { widgetId: string; syncedState: Record<string, unknown>; syncedMap: Record<string, Record<string, unknown>>; }
+export type SlideTransitionStyle = "NONE" | "DISSOLVE" | "SLIDE_FROM_LEFT" | "SLIDE_FROM_RIGHT" | "SLIDE_FROM_BOTTOM" | "SLIDE_FROM_TOP" | "PUSH_FROM_LEFT" | "PUSH_FROM_RIGHT" | "PUSH_FROM_BOTTOM" | "PUSH_FROM_TOP" | "MOVE_FROM_LEFT" | "MOVE_FROM_RIGHT" | "MOVE_FROM_TOP" | "MOVE_FROM_BOTTOM" | "SLIDE_OUT_TO_LEFT" | "SLIDE_OUT_TO_RIGHT" | "SLIDE_OUT_TO_TOP" | "SLIDE_OUT_TO_BOTTOM" | "MOVE_OUT_TO_LEFT" | "MOVE_OUT_TO_RIGHT" | "MOVE_OUT_TO_TOP" | "MOVE_OUT_TO_BOTTOM" | "SMART_ANIMATE";
+export type SlideTransitionCurve = "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" | "LINEAR" | "GENTLE" | "QUICK" | "BOUNCY" | "SLOW";
+export interface DocumentSlideMetadata { isSkippedSlide: boolean; transition: { style: SlideTransitionStyle; duration: number; curve: SlideTransitionCurve; timing: { type: "ON_CLICK" | "AFTER_DELAY"; delay?: number } }; }
+export type ShapeWithTextType = "SQUARE" | "ELLIPSE" | "ROUNDED_RECTANGLE" | "DIAMOND" | "TRIANGLE_UP" | "TRIANGLE_DOWN" | "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" | "ENG_DATABASE" | "ENG_QUEUE" | "ENG_FILE" | "ENG_FOLDER" | "TRAPEZOID" | "PREDEFINED_PROCESS" | "SHIELD" | "DOCUMENT_SINGLE" | "DOCUMENT_MULTIPLE" | "MANUAL_INPUT" | "HEXAGON" | "CHEVRON" | "PENTAGON" | "OCTAGON" | "STAR" | "PLUS" | "ARROW_LEFT" | "ARROW_RIGHT" | "SUMMING_JUNCTION" | "OR" | "SPEECH_BUBBLE" | "INTERNAL_STORAGE";
+export interface DocumentConnectorMetadata {
+  lineType: "ELBOWED" | "STRAIGHT" | "CURVED";
+  start: { endpointNodeId?: string; magnet?: "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "AUTO"; x: number; y: number };
+  end: { endpointNodeId?: string; magnet?: "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "AUTO"; x: number; y: number };
+  startStrokeCap: string;
+  endStrokeCap: string;
+  text: string;
+  cornerRadius?: number;
+}
 /** Canonical Figma-compatible endpoint decoration for open paths. */
 export type StrokeCap = "none" | "round" | "square" | "arrowLines" | "arrowEquilateral" | "diamondFilled" | "triangleFilled" | "circleFilled";
 /** Figma-compatible corner treatment for stroked paths. */
@@ -16,17 +65,27 @@ export type ConstraintType = "min" | "center" | "max" | "stretch" | "scale";
 export interface DocumentConstraints { horizontal: ConstraintType; vertical: ConstraintType; }
 /** Canonical Frame auto-layout configuration. Absence retains legacy manual positioning. */
 export type AutoLayoutMode = "none" | "horizontal" | "vertical";
-export type AutoLayoutAlignment = "start" | "center" | "end" | "spaceBetween";
+/** `baseline` is valid only as a horizontal Frame's counter-axis alignment. */
+export type AutoLayoutAlignment = "start" | "center" | "end" | "spaceBetween" | "baseline";
+/** Figma counterAxisAlignContent's Phase 2 wrapped-track subset. */
+export type AutoLayoutTrackAlignment = "auto" | "spaceBetween";
 export type AutoLayoutSizing = "fixed" | "hug" | "fill";
 export interface DocumentAutoLayout {
   mode: AutoLayoutMode;
   padding: [number, number, number, number];
   itemSpacing: number;
+  /** Counter-axis gap between wrap tracks. Omission retains legacy itemSpacing. */
+  trackSpacing?: number;
+  /** Only meaningful when wrap is true; absence is Figma's AUTO behavior. */
+  trackAlignment?: AutoLayoutTrackAlignment;
   wrap: boolean;
   primaryAlignment: AutoLayoutAlignment;
   counterAlignment: AutoLayoutAlignment;
   primarySizing: AutoLayoutSizing;
   counterSizing: AutoLayoutSizing;
+  /** Direct Auto Layout child cross-axis override; absence inherits parent.
+   * Baseline and spaceBetween are Frame-only values. */
+  alignSelf?: "start" | "center" | "end";
   minWidth?: number;
   maxWidth?: number;
   minHeight?: number;
@@ -130,6 +189,15 @@ export interface DocumentTextProperties {
   fallbackFonts?: DocumentFontReference[];
 }
 
+/** M3's durable prototype contract.  It intentionally lives beside the Canvas
+ * projection rather than in UI state, and is encoded through the Canonical
+ * extension map by transaction-batch. */
+export type DocumentPrototypeTrigger = { type: "ON_CLICK" | "ON_PRESS" | "ON_HOVER" } | { type: "AFTER_TIMEOUT"; timeout: number };
+export type DocumentPrototypeTransition = { type: "NONE" } | { type: "DISSOLVE"; duration: number; easing?: "LINEAR" | "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" } | { type: "DIRECTIONAL"; direction: "LEFT" | "RIGHT" | "UP" | "DOWN"; duration: number; easing?: "LINEAR" | "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" } | { type: "SMART_ANIMATE"; duration: number; easing?: "LINEAR" | "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" };
+export type DocumentPrototypeAction = { type: "NODE"; navigation: "NAVIGATE" | "OVERLAY"; destinationId: string | null; transition?: DocumentPrototypeTransition | null; overlayRelativePosition?: { x: number; y: number } } | { type: "CHANGE_TO"; destinationId: string | null; transition?: DocumentPrototypeTransition | null } | { type: "BACK" | "CLOSE" } | { type: "URL"; url: string };
+export interface DocumentPrototypeReaction { trigger: DocumentPrototypeTrigger; actions: DocumentPrototypeAction[]; }
+export interface DocumentPrototypeMetadata { startingPoint?: boolean; overlay?: { positionType: "CENTER" | "MANUAL"; relativePosition?: { x: number; y: number }; backgroundInteraction: "CLOSE_ON_CLICK_OUTSIDE" | "DO_NOTHING" }; }
+
 export interface CanvasNode {
   id: string;
   /** Canonical Page ownership. Records written before Phase 1 omit this and
@@ -190,8 +258,31 @@ export interface CanvasNode {
   /** Empty retains the legacy base effect; otherwise this ordered stack wins. */
   effectStack?: DocumentEffect[];
   text?: string;
+  /** CODE_BLOCK-only. The source itself is stored in `text` so existing Core
+   * text-size and persistence limits remain the single durable boundary. */
+  codeLanguage?: CodeBlockLanguage;
+  componentMetadata?: DocumentComponentMetadata;
+  instanceMetadata?: DocumentInstanceMetadata;
+  slotMetadata?: DocumentSlotMetadata;
+  componentSetMetadata?: DocumentComponentSetMetadata;
+  connectorMetadata?: DocumentConnectorMetadata;
+  embedMetadata?: DocumentEmbedMetadata;
+  highlightHandleMirroring?: "NONE" | "ANGLE" | "ANGLE_AND_LENGTH";
+  interactiveSlideElementType?: "POLL" | "EMBED" | "FACEPILE" | "ALIGNMENT" | "YOUTUBE";
+  linkUnfurlMetadata?: DocumentLinkUnfurlMetadata;
+  mediaMetadata?: DocumentMediaMetadata;
+  shapeWithTextType?: ShapeWithTextType;
+  slideMetadata?: DocumentSlideMetadata;
+  stickyMetadata?: DocumentStickyMetadata;
+  tableMetadata?: DocumentTableMetadata;
+  tableCellMetadata?: DocumentTableCellMetadata;
+  textPathMetadata?: DocumentTextPathMetadata;
+  transformModifiers?: DocumentTransformModifier[];
+  widgetMetadata?: DocumentWidgetMetadata;
   /** Optional canonical text style record; omission means the stable default. */
   textProperties?: DocumentTextProperties;
+  reactions?: DocumentPrototypeReaction[];
+  prototypeMetadata?: DocumentPrototypeMetadata;
   /** Present only for a canonical Image node. Asset bytes remain external. */
   assetId?: string;
   locked?: boolean;
@@ -230,6 +321,10 @@ export interface DocumentAsset {
  * rejected base revision. */
 export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
+  /** External imports create ordered Pages and their scene tree in the same
+   * Canonical transaction; ordinary UI page creation remains a convenience
+   * command above this lower-level batch protocol. */
+  | { type: "createPage"; page: CanvasPage }
   /** An Asset Service-admitted resource may be registered in the same Core
    * transaction as nodes that first reference it (cross-document paste). */
   | { type: "registerAsset"; asset: DocumentAsset }
@@ -243,6 +338,7 @@ export type CoreBatchCommand =
   | { type: "splitVectorSegment"; id: string; subpathIndex: number; afterPointId: string; t: number; pointId: string }
   | { type: "connectVectorEndpoints"; id: string; firstSubpathIndex: number; firstPointId: string; secondSubpathIndex: number; secondPointId: string }
   | { type: "setMask"; id: string; enabled: boolean }
+  | { type: "setExtensions"; id: string; extensions: Record<string, number[]> }
   | { type: "deleteVectorPoint"; id: string; pointId: string }
   | { type: "setVectorPointHandles"; id: string; pointId: string; handleIn?: { x: number; y: number }; handleOut?: { x: number; y: number }; pointType: DocumentVectorPath["subpaths"][number]["points"][number]["pointType"] }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
@@ -316,6 +412,8 @@ export interface RustTextCaretLayout {
 export interface ViewportCheckpointMessage {
   type: "viewport-checkpoint";
   viewport: Viewport;
+  activePageId: string;
+  pageViewports: Record<string, Viewport>;
   documentHash: string;
   coreRevision: number;
 }
@@ -323,6 +421,9 @@ export interface ViewportCheckpointMessage {
 export interface ViewportRecord {
   format: "viewport-record-v1";
   viewport: Viewport;
+  /** Optional for records written before page-scoped viewport persistence. */
+  activePageId?: string;
+  pageViewports?: Record<string, Viewport>;
   documentHash: string;
   coreRevision: number;
 }
@@ -337,6 +438,7 @@ export type CoreJournalOperation =
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   | { type: "reparent"; ids: string[]; parentId?: string }
   | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
+  | { type: "transformGroup"; ids: string[]; id?: string; modifiers: DocumentTransformModifier[] }
   /** Wraps two or more selected hierarchy roots in a live Boolean container. */
   | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
   | { type: "ungroup"; id: string }
@@ -399,6 +501,9 @@ export interface CoreLocalSnapshot {
   /** Canonical Core hash used only to associate the independent viewport record. */
   documentHash?: string;
   viewport: Viewport;
+  /** Attached from the independent viewport record; never enters Core. */
+  activePageId?: string;
+  pageViewports?: Record<string, Viewport>;
   presentation: PresentationNode[];
   /** Read from the separate IndexedDB journal store; never written into the snapshot. */
   journal?: LocalJournalEntry[];
@@ -464,10 +569,18 @@ export interface EditorSnapshot {
 }
 
 export type EditorCommand =
-  | { type: "create-page"; id: string; name: string }
+  /** `positionId` is required for an externally ordered import. User-created
+   * pages may omit it and retain the legacy ID-derived placement. */
+  | { type: "create-page"; id: string; name: string; positionId?: string }
   | { type: "select-page"; id: string }
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
+  /** Resolves a deterministic world-space arrangement into concrete geometry
+   * updates in the Engine Worker. The concrete updates—not this convenience
+   * intent—are the replayable Core operation. */
+  | { type: "arrange"; ids: string[]; operation: "align"; axis: "x" | "y"; mode: "min" | "center" | "max"; reference?: "selectionBounds" | "primaryNode" }
+  | { type: "arrange"; ids: string[]; operation: "distribute"; axis: "x" | "y"; mode: "edgeGap" | "centerGap" }
+  | { type: "arrange"; ids: string[]; operation: "tidyUp"; axis: "auto" | "x" | "y"; gap: number; anchor: "first" | "selectionBounds" }
   | { type: "moveVectorPoint"; id: string; pointId: string; x: number; y: number }
   | { type: "setVectorSubpathClosed"; id: string; subpathIndex: number; closed: boolean }
   | { type: "insertVectorPoint"; id: string; subpathIndex: number; afterPointId?: string; point: DocumentVectorPath["subpaths"][number]["points"][number] }
@@ -480,6 +593,7 @@ export type EditorCommand =
   /** Move selected hierarchy roots under a new parent while preserving world space. */
   | { type: "reparent"; ids: string[]; parentId?: string }
   | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
+  | { type: "transformGroup"; ids: string[]; id?: string; modifiers: DocumentTransformModifier[] }
   /** Resolves selected roots into one live BooleanOperation container. */
   | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
   /** Replaces a live Boolean structure with its current Rust-derived VectorPath. */
@@ -523,6 +637,9 @@ export type EditorInputEvent =
 export type MainToWorker =
   | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; documentId?: string; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
   | { type: "resize"; width: number; height: number; dpr: number }
+  /** Background editor tabs keep their canonical state live but suspend paint
+   * work so duplicate views of a complex document do not contend for CPU. */
+  | { type: "visibility"; visible: boolean }
   | { type: "tool"; tool: ToolKind }
   /** Requests a durable Core snapshot after a burst of ephemeral viewport input. */
   | { type: "checkpoint" }
@@ -531,19 +648,30 @@ export type MainToWorker =
   | { type: "remote-bootstrap" }
   /** Delivers a server-owned Protobuf snapshot for Rust/WASM validation and
    * reconciliation. It is never decoded into a TypeScript document model. */
-  | { type: "remote-hydrate"; snapshot: Uint8Array }
+  | { type: "remote-hydrate"; snapshot: Uint8Array; requestId?: string }
   /** Applies a server snapshot, then replays every still-valid concrete local
    * pending intent before generating a replacement remote sequence. */
   | { type: "remote-reconcile"; snapshot: Uint8Array; operations: PendingRemoteOperation[] }
   /** Commits an already admitted, document-attached AssetId into the canonical
    * Resource Index and queues its own opaque remote operation. */
   | { type: "register-asset"; transactionId: string; asset: DocumentAsset }
+  /** Applies a caller-prevalidated Figma REST plan through one Core transaction.
+   * The Worker never receives credentials or Figma URLs on this channel. */
+  | { type: "import-figma-rest-plan"; transactionId: string; baseRevision: number; plan: FigmaRestImportPlan }
+  /** Binds Asset-Service-admitted Figma image results in a follow-up transaction.
+   * It contains immutable Asset metadata only; URL/token/bytes stay outside the
+   * Canonical command stream. */
+  | { type: "bind-figma-rest-assets"; transactionId: string; baseRevision: number; authorized: FigmaRestAuthorizedAsset[] }
   /** Browser-decoded external clipboard data. The Worker validates it again
    * before replacing its fast-path clipboard. */
   | { type: "set-clipboard"; clipboard: EditorClipboard; sourceDocumentId?: string }
   /** Browser-owned bytes may seed a freshly imported image bitmap. They are
    * transient and are never retained in a document snapshot. */
   | { type: "asset-bytes"; assetId: string; mediaType: string; bytes: ArrayBuffer; decodedBitmap?: ImageBitmap }
+  /** Explicit Runtime font-load request. It only addresses an Asset Service
+   * admitted font; bytes remain transient and are loaded from the existing
+   * worker cache or authorized asset endpoint. */
+  | { type: "load-font"; assetId: string }
   /** Transient presentation state. The Canvas renderer omits this glyph layer
    * while the DOM editor draws the same text, avoiding the double-rendered
    * visual jump that browsers otherwise introduce on focus. */
@@ -567,7 +695,17 @@ export type MainToWorker =
 
 export type WorkerToMain =
   | { type: "snapshot"; snapshot: EditorSnapshot }
+  /** Presentation progress. `sharp` contains current-resolution geometry/text;
+   * `settled` also includes the final effects. Hydration can finish earlier. */
+  | {
+      type: "frame-ready";
+      revision: number;
+      pageId: string;
+      quality: "preview" | "sharp" | "settled";
+    }
   | { type: "remote-bootstrap"; documentId: string; revision: number; snapshot: Uint8Array }
+  /** Coarse, data-free stages for a potentially large remote snapshot load. */
+  | { type: "remote-load-progress"; stage: "decode" | "project" | "render" | "render-paint" | "render-overlay" | "render-finalize" | "render-nodes"; completed?: number; total?: number }
   /** Requests an authorized destructive replacement of the remote demo root. */
   | { type: "remote-reset"; documentId: string; revision: number; snapshot: Uint8Array }
   /** A committed local Core batch represented as an opaque Protobuf envelope.
@@ -577,9 +715,10 @@ export type WorkerToMain =
    * atomically replace the listed old queue IDs with these new envelopes before
    * resuming ordered delivery. */
   | { type: "remote-reconciled"; removeOperationIds: string[]; replacements: PendingRemoteOperation[]; discardedOperationIds: string[]; coreRejectedOperationIds: string[]; blockedOperationIds: string[]; rejectionDiagnostics: string[] }
+  | { type: "remote-reconciliation-progress"; completed: number; total: number }
   | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string; layout?: RustTextCaretLayout }
   /** Lightweight high-frequency projection update; never contains durable document data. */
-  | { type: "view-state"; viewport: Viewport; selectedIds: string[]; performance: RenderPerformanceSummary; viewportChanged: boolean }
+  | { type: "view-state"; viewport: Viewport; selectedIds: string[]; activePageId: string; performance: RenderPerformanceSummary; viewportChanged: boolean }
   /** A durable viewport payload deliberately separated from the full Core snapshot. */
   | ViewportCheckpointMessage
   | { type: "ready" }
@@ -639,10 +778,32 @@ export function createNode(kind: NodeKind, x: number, y: number): CanvasNode {
     line: { name: "Line", width: 160, height: 0, fill: "transparent", stroke: "#0048FF", radius: 0 },
     text: { name: "Text", width: 220, height: 44, fill: "#23251f", stroke: "transparent", radius: 0, text: "Type something" },
     image: { name: "Image", width: 320, height: 220, fill: "#e6edff", stroke: "#0048FF", radius: 10 },
+    codeBlock: { name: "Code block", width: 320, height: 180, fill: "#1e293b", stroke: "#475569", radius: 8, text: "// Write code" },
+    component: { name: "Component", width: 320, height: 220, fill: "#f8fafc", stroke: "#7c3aed", radius: 10 },
+    instance: { name: "Instance", width: 320, height: 220, fill: "#f8fafc", stroke: "#7c3aed", radius: 10 },
+    slot: { name: "Slot", width: 160, height: 96, fill: "#f8fafc", stroke: "#7c3aed", radius: 8 },
+    componentSet: { name: "Component set", width: 640, height: 320, fill: "#f8fafc", stroke: "#7c3aed", radius: 10 },
+    connector: { name: "Connector", width: 160, height: 0, fill: "transparent", stroke: "#475569", radius: 0 },
+    embed: { name: "Embed", width: 360, height: 240, fill: "#f8fafc", stroke: "#64748b", radius: 8 },
+    highlight: { name: "Highlight", width: 160, height: 20, fill: "#fde047", stroke: "transparent", radius: 4 },
+    interactiveSlideElement: { name: "Interactive slide element", width: 360, height: 180, fill: "#e0e7ff", stroke: "#6366f1", radius: 12 },
+    linkUnfurl: { name: "Link unfurl", width: 360, height: 180, fill: "#f8fafc", stroke: "#64748b", radius: 12 },
+    media: { name: "Media", width: 320, height: 180, fill: "#111827", stroke: "transparent", radius: 8 },
+    shapeWithText: { name: "Shape with text", width: 180, height: 120, fill: "#e0e7ff", stroke: "#4f46e5", radius: 12, text: "Text" },
+    // Imported-only Figma Slides root. The Plugin API never creates it.
+    slideGrid: { name: "Slide grid", width: 1, height: 1, fill: "transparent", stroke: "transparent", radius: 0 },
+    slide: { name: "Slide", width: 1920, height: 1080, fill: "#ffffff", stroke: "transparent", radius: 0 },
+    slideRow: { name: "Slide row", width: 1, height: 1, fill: "transparent", stroke: "transparent", radius: 0 },
+    stamp: { name: "Star", width: 80, height: 80, fill: "#fbbf24", stroke: "transparent", radius: 40 },
+    sticky: { name: "Sticky", width: 200, height: 200, fill: "#fef3c7", stroke: "transparent", radius: 2, text: "" },
+    table: { name: "Table", width: 400, height: 200, fill: "#ffffff", stroke: "#d1d5db", radius: 0 },
+    tableCell: { name: "Table cell", width: 200, height: 100, fill: "#ffffff", stroke: "#d1d5db", radius: 0, text: "" },
+    textPath: { name: "Text path", width: 240, height: 100, fill: "#111827", stroke: "transparent", radius: 0, text: "Text on a path" }, transformGroup: { name: "Transform group", width: 100, height: 100, fill: "transparent", stroke: "transparent", radius: 0 }, washiTape: { name: "Washi tape", width: 180, height: 40, fill: "#fef3c7", stroke: "#f59e0b", radius: 2 }, widget: { name: "Widget", width: 240, height: 160, fill: "#ffffff", stroke: "#a78bfa", radius: 12 },
   };
   const preset = presets[kind];
   const parametricShape = kind === "polygon" ? { kind: "polygon" as const, pointCount: 5 } : kind === "star" ? { kind: "star" as const, pointCount: 5, innerRatio: 0.5 } : undefined;
-  const vectorPath = kind === "vector" ? { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: createId(), x: 80, y: 0, pointType: "corner" as const }, { id: createId(), x: 160, y: 120, pointType: "corner" as const }, { id: createId(), x: 0, y: 120, pointType: "corner" as const }] }] } : undefined;
+  const vectorPath = kind === "vector" || kind === "highlight" || kind === "textPath" ? { fillRule: "nonZero" as const, subpaths: [{ closed: kind !== "textPath", points: [{ id: createId(), x: 0, y: kind === "textPath" ? 50 : 0, pointType: "corner" as const }, { id: createId(), x: 160, y: kind === "highlight" ? 20 : kind === "textPath" ? 50 : 120, pointType: "corner" as const }, { id: createId(), x: 0, y: kind === "highlight" ? 20 : 120, pointType: "corner" as const }] }] } : undefined;
   const booleanOperation = kind === "booleanOperation" ? "union" as const : undefined;
-  return { id: createId(), kind, x, y, rotation: 0, strokeWidth: kind === "slice" ? 0 : 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, blendMode: "normal", visible: true, ...preset, parametricShape, vectorPath, booleanOperation, fillColor: documentColorFromCssHex(preset.fill) };
+  const id = createId();
+  return { id, kind, x, y, rotation: 0, strokeWidth: kind === "slice" ? 0 : 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, blendMode: "normal", visible: true, ...preset, codeLanguage: kind === "codeBlock" ? "PLAINTEXT" : undefined, componentMetadata: kind === "component" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } : undefined, componentSetMetadata: kind === "componentSet" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} } : undefined, connectorMetadata: kind === "connector" ? { lineType: "STRAIGHT", start: { x: 0, y: 0, magnet: "AUTO" }, end: { x: preset.width, y: 0, magnet: "AUTO" }, startStrokeCap: "NONE", endStrokeCap: "NONE", text: "" } : undefined, embedMetadata: kind === "embed" ? { srcUrl: "https://example.com", canonicalUrl: null, title: null, provider: null } : undefined, highlightHandleMirroring: kind === "highlight" ? "NONE" : undefined, interactiveSlideElementType: kind === "interactiveSlideElement" ? "POLL" : undefined, linkUnfurlMetadata: kind === "linkUnfurl" ? { url: "https://example.com", title: null, description: null, provider: null } : undefined, mediaMetadata: kind === "media" ? { hash: id } : undefined, shapeWithTextType: kind === "shapeWithText" ? "ROUNDED_RECTANGLE" : undefined, slideMetadata: kind === "slide" ? { isSkippedSlide: false, transition: { style: "NONE", duration: .3, curve: "EASE_IN", timing: { type: "ON_CLICK" } } } : undefined, stickyMetadata: kind === "sticky" ? { authorVisible: true, authorName: "", isWideWidth: false } : undefined, textPathMetadata: kind === "textPath" ? { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "TOP" } : undefined, widgetMetadata: kind === "widget" ? { widgetId: id, syncedState: {}, syncedMap: {} } : undefined, parametricShape, vectorPath, booleanOperation, fillColor: documentColorFromCssHex(preset.fill) };
 }

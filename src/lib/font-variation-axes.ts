@@ -38,3 +38,14 @@ export function formatFontVariationAxes(axes: DocumentFontReference["variationAx
     .map((axis) => `${axis.tag}=${axis.value}`)
     .join(", ");
 }
+
+/** Canonical CSS/SVG `font-variation-settings` value. JSON string escaping is
+ * valid CSS quoted-string escaping and keeps a persisted four-byte tag from
+ * becoming an attribute/style injection vector during Canvas or SVG export. */
+export function fontVariationCss(axes: DocumentFontReference["variationAxes"]): string {
+  return [...(axes ?? [])]
+    .filter((axis) => axis.tag.length === 4 && /^[\x20-\x7e]{4}$/.test(axis.tag) && Number.isFinite(axis.value))
+    .sort((left, right) => left.tag.localeCompare(right.tag))
+    .map((axis) => `${JSON.stringify(axis.tag)} ${axis.value === 0 ? 0 : axis.value}`)
+    .join(", ") || "normal";
+}

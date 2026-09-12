@@ -2,6 +2,7 @@ import { createId as generateId, createNode, documentColorFromCssHex, type Canva
 import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
+import { encodePrototypeValue, PROTOTYPE_METADATA_EXTENSION, PROTOTYPE_REACTIONS_EXTENSION, validatePrototypeMetadata, validatePrototypeReactions } from "../runtime/prototype-contract";
 
 export type { CoreBatchCommand, CoreProjectionNode } from "./editor-protocol";
 export type ResolvedCoreBatch = {
@@ -15,6 +16,28 @@ export type ResolvedCoreBatch = {
 };
 
 export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
+  const extensions = { ...node.extensions };
+  if (node.reactions !== undefined) extensions[PROTOTYPE_REACTIONS_EXTENSION] = encodePrototypeValue(validatePrototypeReactions(node.reactions));
+  if (node.prototypeMetadata !== undefined) extensions[PROTOTYPE_METADATA_EXTENSION] = encodePrototypeValue(validatePrototypeMetadata(node.prototypeMetadata));
+  if (node.kind === "codeBlock") extensions["figma.code-block.language.v1"] = [...new TextEncoder().encode(node.codeLanguage ?? "PLAINTEXT")];
+  if (node.kind === "component" && node.componentMetadata) extensions["figma.component.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.componentMetadata))];
+  if (node.kind === "instance" && node.instanceMetadata) extensions["figma.instance.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.instanceMetadata))];
+  if (node.kind === "slot" && node.slotMetadata) extensions["figma.slot.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.slotMetadata))];
+  if (node.kind === "componentSet" && node.componentSetMetadata) extensions["figma.component-set.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.componentSetMetadata))];
+  if (node.kind === "connector" && node.connectorMetadata) extensions["figma.connector.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.connectorMetadata))];
+  if (node.kind === "embed" && node.embedMetadata) extensions["figma.embed.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.embedMetadata))];
+  if (node.kind === "highlight" && node.highlightHandleMirroring) extensions["figma.highlight.handle-mirroring.v1"] = [...new TextEncoder().encode(node.highlightHandleMirroring)];
+  if (node.kind === "interactiveSlideElement" && node.interactiveSlideElementType) extensions["figma.interactive-slide-element.type.v1"] = [...new TextEncoder().encode(node.interactiveSlideElementType)];
+  if (node.kind === "linkUnfurl" && node.linkUnfurlMetadata) extensions["figma.link-unfurl.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.linkUnfurlMetadata))];
+  if (node.kind === "media" && node.mediaMetadata) extensions["figma.media.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.mediaMetadata))];
+  if (node.kind === "shapeWithText" && node.shapeWithTextType) extensions["figma.shape-with-text.type.v1"] = [...new TextEncoder().encode(node.shapeWithTextType)];
+  if (node.kind === "slide" && node.slideMetadata) extensions["figma.slide.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.slideMetadata))];
+  if (node.kind === "sticky" && node.stickyMetadata) extensions["figma.sticky.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.stickyMetadata))];
+  if (node.kind === "table" && node.tableMetadata) extensions["figma.table.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.tableMetadata))];
+  if (node.kind === "tableCell" && node.tableCellMetadata) extensions["figma.table-cell.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.tableCellMetadata))];
+  if (node.kind === "textPath" && node.textPathMetadata) extensions["figma.text-path.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.textPathMetadata))];
+  if (node.kind === "transformGroup" && node.transformModifiers) extensions["figma.transform-group.modifiers.v1"] = [...new TextEncoder().encode(JSON.stringify(node.transformModifiers))];
+  if (node.kind === "widget" && node.widgetMetadata) extensions["figma.widget.metadata.v1"] = [...new TextEncoder().encode(JSON.stringify(node.widgetMetadata))];
   // Keep the legacy R3 field synchronized with the first ordered effect so
   // older snapshots and render paths remain lossless while the Inspector edits
   // the whole stack.
@@ -24,7 +47,7 @@ export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
       : node.effectStack
     : node.dropShadow ? [{ dropShadow: node.dropShadow }] : [];
   const dropShadow = effectStack[0]?.dropShadow ?? node.dropShadow;
-  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: node.autoLayout, relativeTransform: node.relativeTransform, opacity: node.opacity, blendMode: node.blendMode ?? "normal", dropShadow, effectStack, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: node.kind === "frame" ? node.clipsContent !== false : undefined, isMask: Boolean(node.isMask), assetId: node.assetId, extensions: node.extensions };
+  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: node.autoLayout, relativeTransform: node.relativeTransform, opacity: node.opacity, blendMode: node.blendMode ?? "normal", dropShadow, effectStack, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: ["frame", "component", "instance", "slot", "componentSet"].includes(node.kind) ? node.clipsContent !== false : undefined, isMask: Boolean(node.isMask), assetId: node.assetId, extensions };
 }
 
 function sameDropShadow(left: CanvasNode["dropShadow"], right: CanvasNode["dropShadow"]) {
@@ -86,6 +109,9 @@ export function resolveFlattenBooleanBatch(
     height: boolean.height,
     rotation: boolean.rotation,
     relativeTransform: boolean.relativeTransform,
+    // Flatten replaces the Boolean wrapper, not its first operand.  Its mask
+    // identity must therefore follow the wrapper into the Vector result.
+    isMask: Boolean(boolean.isMask),
     positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
     vectorPath: {
       fillRule: "nonZero",
@@ -95,18 +121,18 @@ export function resolveFlattenBooleanBatch(
       })),
     },
   };
-  return {
-    replacement,
-    batch: [
-      { type: "create", node: coreProjectionNode(replacement) },
-      // Core deliberately rejects parent deletion while its live Boolean
-      // operands still exist. Delete children first, then the wrapper, within
-      // this one atomic transaction so Undo restores the whole structure.
-      { type: "delete", ids: operands.map((operand) => operand.id) },
-      { type: "delete", ids: [boolean.id] },
-      { type: "reposition", positionIds: [{ id: replacementId, positionId: boolean.positionId ?? replacement.positionId! }] },
-    ],
-  };
+  const batch: CoreBatchCommand[] = [
+    { type: "create", node: coreProjectionNode(replacement) },
+    // Core deliberately rejects parent deletion while its live Boolean
+    // operands still exist. Delete children first, then the wrapper, within
+    // this one atomic transaction so Undo restores the whole structure.
+    { type: "delete", ids: operands.map((operand) => operand.id) },
+    { type: "delete", ids: [boolean.id] },
+    { type: "reposition", positionIds: [{ id: replacementId, positionId: boolean.positionId ?? replacement.positionId! }] },
+  ];
+  const nextNodes = [...nodes.filter((node) => node.id !== boolean.id && !operands.some((operand) => operand.id === node.id)), { ...replacement, positionId: boolean.positionId ?? replacement.positionId }];
+  if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
+  return { replacement, batch };
 }
 
 /** Replaces a Vector's paint stroke with the closed fill contours derived by
@@ -199,14 +225,13 @@ export function resolveLineOutlineStrokeBatch(
       })),
     },
   };
-  return {
-    outlined,
-    batch: [
-      { type: "create", node: coreProjectionNode(outlined) },
-      { type: "delete", ids: [line.id] },
-      { type: "reposition", positionIds: [{ id: replacementId, positionId: line.positionId ?? outlined.positionId! }] },
-    ],
-  };
+  const batch: CoreBatchCommand[] = [
+    { type: "create", node: coreProjectionNode(outlined) },
+    { type: "delete", ids: [line.id] },
+    { type: "reposition", positionIds: [{ id: replacementId, positionId: line.positionId ?? outlined.positionId! }] },
+  ];
+  if (!appendCreatedMaskCommands(batch, [...nodes.filter((node) => node.id !== line.id), { ...outlined, positionId: line.positionId ?? outlined.positionId }])) return undefined;
+  return { outlined, batch };
 }
 
 /** Replaces one regular parametric shape with the exact derived closed path in
@@ -237,14 +262,13 @@ export function resolveParametricShapeToVectorBatch(
       }],
     },
   };
-  return {
-    replacement,
-    batch: [
-      { type: "create", node: coreProjectionNode(replacement) },
-      { type: "delete", ids: [shape.id] },
-      { type: "reposition", positionIds: [{ id: replacementId, positionId: shape.positionId ?? replacement.positionId! }] },
-    ],
-  };
+  const batch: CoreBatchCommand[] = [
+    { type: "create", node: coreProjectionNode(replacement) },
+    { type: "delete", ids: [shape.id] },
+    { type: "reposition", positionIds: [{ id: replacementId, positionId: shape.positionId ?? replacement.positionId! }] },
+  ];
+  if (!appendCreatedMaskCommands(batch, [...nodes.filter((node) => node.id !== shape.id), { ...replacement, positionId: shape.positionId ?? replacement.positionId }])) return undefined;
+  return { replacement, batch };
 }
 
 /** Resolves UI-level partial patches to the concrete Core commands accepted by WASM.
@@ -273,7 +297,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const node = { ...previous, ...command.patch, id: previous.id, kind: previous.kind };
       if ("fill" in command.patch) { node.fillColor = documentColorFromCssHex(node.fill); node.fillGradient = undefined; }
       if ("stroke" in command.patch) { node.strokeColor = documentColorFromCssHex(node.stroke); node.strokeGradient = undefined; }
-      const enablesAutoLayout = previous.kind === "frame"
+      const enablesAutoLayout = isFrameLike(previous)
         && (previous.autoLayout?.mode ?? "none") === "none"
         && (node.autoLayout?.mode === "horizontal" || node.autoLayout?.mode === "vertical");
       // Figma converts a Frame's ordinary children into layout children when
@@ -294,7 +318,12 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         if (node.kind === "group" || node.kind === "booleanOperation") affectedGroupIds.add(node.id);
         groupAncestorIds(nextNodes, node.parentId).forEach((id) => affectedGroupIds.add(id));
       }
-      batch.push({ type: "update", node: coreProjectionNode(node) });
+      const coreNode = coreProjectionNode(node);
+      batch.push({ type: "update", node: coreNode });
+      if ("reactions" in command.patch || "prototypeMetadata" in command.patch) {
+        batch.push({ type: "setExtensions", id: node.id, extensions: coreNode.extensions ?? {} });
+      }
+      if (isComponentSubtreeNode(nextNodes, node.id)) syncComponentChangeToInstances(nextNodes, node.id, command.patch, batch);
       continue;
     }
     if (command.type === "moveVectorPoint") {
@@ -483,7 +512,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (selected.length !== command.ids.length) return undefined;
       const target = command.parentId ? nextNodes.find((node) => node.id === command.parentId) : undefined;
-      if (command.parentId && (!target || !["frame", "group", "booleanOperation", "section"].includes(target.kind))) return undefined;
+      if (command.parentId && (!target || !["frame", "component", "group", "booleanOperation", "section"].includes(target.kind))) return undefined;
       const pageId = selected[0].pageId;
       if (selected.some((node) => node.pageId !== pageId || (target && node.pageId !== target.pageId))) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -503,7 +532,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       const parentWorld = command.parentId ? worldTransformForNode(nextNodes, command.parentId) : undefined;
       if (command.parentId && !parentWorld) return undefined;
-      const targetOwnsAutoLayout = target?.kind === "frame" && target.autoLayout?.mode !== undefined && target.autoLayout.mode !== "none";
+      const targetOwnsAutoLayout = isAutoLayoutFrame(target);
       const siblingNodes = nextNodes.filter((node) => node.pageId === pageId && node.parentId === command.parentId && !selectedIds.has(node.id));
       const reparented: CanvasNode[] = [];
       for (const node of sortNodesByLayerOrder(roots)) {
@@ -528,7 +557,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
       continue;
     }
-    if (command.type === "group" || command.type === "boolean") {
+    if (command.type === "group" || command.type === "boolean" || command.type === "transformGroup") {
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (!selected.length || new Set(command.ids).size !== command.ids.length || selected.length !== command.ids.length) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -542,8 +571,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (roots.some((node) => node.pageId !== pageId)) return undefined;
       const parentId = nearestCommonParentId(nextNodes, roots);
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
-      if (parentId && (!parent || !["frame", "group", "booleanOperation", "section"].includes(parent.kind))) return undefined;
-      const id = createId();
+      if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(parent.kind))) return undefined;
+      const id = command.type === "transformGroup" && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
       if (bounds.some((bound) => !bound)) return undefined;
@@ -563,7 +592,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
       const groupPositionId = `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`;
-      const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.autoLayout ? "frame" : "group";
+      const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.type === "transformGroup" ? "transformGroup" : command.autoLayout ? "frame" : "group";
       const group = {
         ...createNode(wrapperKind, left, top),
         ...groupTransform,
@@ -574,6 +603,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         height,
         positionId: groupPositionId,
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
+        ...(command.type === "transformGroup" ? { transformModifiers: structuredClone(command.modifiers) } : {}),
         ...(command.type === "group" && command.autoLayout ? { autoLayout: structuredClone(command.autoLayout) } : {}),
         // Core deliberately keeps Auto Layout Frames on legacy local geometry:
         // Relative-v1 matrices are not a supported layout-container transform.
@@ -707,7 +737,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
           // Command-D copy into an unsupported layout transaction; absolute
           // children intentionally retain their independent geometry.
           const destinationParent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
-          if (destinationParent?.kind === "frame" && destinationParent.autoLayout?.mode !== "none" && !source.autoLayout?.absolute) {
+          if (isAutoLayoutFrame(destinationParent) && !source.autoLayout?.absolute) {
             copy = { ...copy, relativeTransform: undefined };
           }
           nextNodes.push(copy);
@@ -754,7 +784,37 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       batch.splice(0, batch.length, ...retained);
     }
   }
+  // Core validates a mask against an already-existing following sibling. A
+  // fixture/import batch can create that target later in the same transaction,
+  // so defer every created node's final mask state until structural creation,
+  // deletion and repositioning have all resolved. This is still one atomic
+  // Core batch and works equally for local WASM hydration and Protobuf replay.
+  if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
   return { batch, nextNodes, createdIds, selectionIds, affectedGroupIds: [...affectedGroupIds] };
+}
+
+/** Normalizes mask state for nodes created in this batch. `CreateNode` does
+ * not persist `isMask`; Core owns that through SetMask and rejects a source
+ * without a final following sibling. */
+function appendCreatedMaskCommands(batch: CoreBatchCommand[], nodes: readonly CanvasNode[]) {
+  const createdIds = new Set(batch.flatMap((entry) => entry.type === "create" ? [entry.node.id] : []));
+  if (!createdIds.size) return true;
+  // A caller may have explicitly toggled a node it also created. Its final
+  // Canvas projection is the source of truth, so replace any early toggle with
+  // one post-structure command rather than replaying an invalid intermediate.
+  for (let index = batch.length - 1; index >= 0; index -= 1) {
+    const entry = batch[index];
+    if (entry?.type === "setMask" && createdIds.has(entry.id)) batch.splice(index, 1);
+  }
+  for (const id of createdIds) {
+    const node = nodes.find((candidate) => candidate.id === id);
+    if (!node?.isMask) continue;
+    const siblings = sortNodesByLayerOrder(nodes.filter((candidate) => candidate.pageId === node.pageId && candidate.parentId === node.parentId));
+    const index = siblings.findIndex((candidate) => candidate.id === id);
+    if (index < 0 || index >= siblings.length - 1) return false;
+    batch.push({ type: "setMask", id, enabled: true });
+  }
+  return true;
 }
 
 function hasGroupNormalizationChange(before: CanvasNode, after: CanvasNode) {
@@ -965,14 +1025,15 @@ export function resolvePasteBatch(
     // absolute children, whose geometry is intentionally outside the flow.
     const sourceParent = original.parentId ? sourceById.get(original.parentId) : undefined;
     const destinationParent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
-    if ((sourceParent?.kind === "frame" && sourceParent.autoLayout?.mode !== "none" || destinationParent?.kind === "frame" && destinationParent.autoLayout?.mode !== "none") && !original.autoLayout?.absolute) {
+    if ((isAutoLayoutFrame(sourceParent) || isAutoLayoutFrame(destinationParent)) && !original.autoLayout?.absolute) {
       copy = { ...copy, relativeTransform: undefined };
     }
     nextNodes.push(copy);
     batch.push({ type: "create", node: coreProjectionNode(copy) });
     if (isRoot) createdIds.push(copy.id);
   }
-  return batch.length ? { batch, nextNodes, createdIds, selectionIds: createdIds, affectedGroupIds: [] } : undefined;
+  if (!batch.length || !appendCreatedMaskCommands(batch, nextNodes)) return undefined;
+  return { batch, nextNodes, createdIds, selectionIds: createdIds, affectedGroupIds: [] };
 }
 
 /** Legacy projections could encode both an Auto Layout frame and its flow
@@ -983,8 +1044,8 @@ export function normalizeAutoLayoutProjection(nodes: readonly CanvasNode[]): Can
   const byId = new Map(nodes.map((node) => [node.id, node]));
   return nodes.map((node) => {
     const parent = node.parentId ? byId.get(node.parentId) : undefined;
-    const ownsLayout = node.kind === "frame" && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
-    const isFlowChild = parent?.kind === "frame" && parent.autoLayout?.mode !== undefined && parent.autoLayout.mode !== "none" && !node.autoLayout?.absolute;
+    const ownsLayout = isAutoLayoutFrame(node);
+    const isFlowChild = isAutoLayoutFrame(parent) && !node.autoLayout?.absolute;
     if (!ownsLayout && !isFlowChild) return node;
     // Core owns active layout frames and their flow-child positions in legacy
     // world space. Materialize the Relative-v1 matrix before removing it:
@@ -994,12 +1055,90 @@ export function normalizeAutoLayoutProjection(nodes: readonly CanvasNode[]): Can
   });
 }
 
+/**
+ * Turns the narrowly-scoped legacy Auto Layout migration into ordinary update
+ * patches so callers can commit it atomically with the edit that exposed the
+ * invalid representation.  In particular, a flow-child alignment change must
+ * clear the parent/frame matrices in the *same* Core transaction: Core only
+ * runs its layout reducer after the whole batch has been applied.
+ */
+export function autoLayoutProjectionNormalizationPatches(nodes: readonly CanvasNode[]): Array<{ id: string; patch: Partial<CanvasNode> }> {
+  const normalized = normalizeAutoLayoutProjection(nodes);
+  return normalized.flatMap((node, index) => {
+    const previous = nodes[index];
+    const patch: Partial<CanvasNode> = {};
+    if (node.x !== previous.x) patch.x = node.x;
+    if (node.y !== previous.y) patch.y = node.y;
+    if (node.width !== previous.width) patch.width = node.width;
+    if (node.height !== previous.height) patch.height = node.height;
+    if (node.rotation !== previous.rotation) patch.rotation = node.rotation;
+    if (node.relativeTransform !== previous.relativeTransform) patch.relativeTransform = node.relativeTransform;
+    return Object.keys(patch).length ? [{ id: node.id, patch }] : [];
+  });
+}
+
 /** Pasting may only re-home roots beneath a real container from the current
  * document. This prevents an untrusted clipboard envelope from creating a
  * dangling parent relation even before the Core validates the create batch. */
 function isValidPasteTarget(nodes: readonly CanvasNode[], target: { pageId?: string; parentId?: string }) {
   if (!target.parentId) return true;
   const parent = nodes.find((node) => node.id === target.parentId);
-  if (!parent || !["frame", "group", "section"].includes(parent.kind)) return false;
+  if (!parent || !["frame", "component", "group", "section"].includes(parent.kind)) return false;
   return !target.pageId || (parent.pageId ?? undefined) === target.pageId;
+}
+
+function isFrameLike(node: CanvasNode | undefined) {
+  return node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet";
+}
+
+function isAutoLayoutFrame(node: CanvasNode | undefined) {
+  return Boolean(node && isFrameLike(node) && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none");
+}
+
+/** Component edits propagate to the matching cloned instance layers in the
+ * same Core transaction. Instance-local override fields stay intact. */
+function syncComponentChangeToInstances(nodes: CanvasNode[], sourceNodeId: string, patch: Partial<CanvasNode>, batch: CoreBatchCommand[]) {
+  const syncableEntries = Object.entries(patch).filter(([key]) => !["componentMetadata", "instanceMetadata", "extensions", "parentId", "pageId", "positionId"].includes(key));
+  if (!syncableEntries.length) return;
+  const sourcePatch = Object.fromEntries(syncableEntries) as Partial<CanvasNode>;
+  nodes.forEach((candidate, index) => {
+    if (instanceSourceNodeId(candidate) !== sourceNodeId) return;
+    const root = instanceRootForNode(nodes, candidate);
+    if (!root?.instanceMetadata) return;
+    const overridden = root.instanceMetadata.overrides.find((entry) => entry.id === sourceNodeId)?.overriddenFields ?? [];
+    const patchWithoutOverrides = Object.fromEntries(Object.entries(sourcePatch).filter(([key]) => !overridden.includes(key))) as Partial<CanvasNode>;
+    if (!Object.keys(patchWithoutOverrides).length) return;
+    const updated = { ...candidate, ...patchWithoutOverrides };
+    nodes[index] = updated;
+    batch.push({ type: "update", node: coreProjectionNode(updated) });
+  });
+}
+
+function isComponentSubtreeNode(nodes: readonly CanvasNode[], id: string) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const visited = new Set<string>();
+  let current = byId.get(id);
+  while (current && !visited.has(current.id)) {
+    if (current.kind === "component") return true;
+    visited.add(current.id);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return false;
+}
+
+function instanceSourceNodeId(node: CanvasNode) {
+  const bytes = node.extensions?.["figma.instance.source-node.v1"];
+  return bytes ? new TextDecoder().decode(Uint8Array.from(bytes)) : undefined;
+}
+
+function instanceRootForNode(nodes: readonly CanvasNode[], node: CanvasNode) {
+  const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set<string>();
+  let current: CanvasNode | undefined = node;
+  while (current && !visited.has(current.id)) {
+    if (current.kind === "instance") return current;
+    visited.add(current.id);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return undefined;
 }

@@ -13,9 +13,22 @@ import { worldVisualBoundsForNode } from "./world-visual-bounds";
 import { ellipseStrokeRing } from "./ellipse-stroke-ring";
 import { nodeParametricShape, parametricShapePath, parametricShapePoints } from "./parametric-shape";
 import { vectorPathSvgD } from "./vector-path";
+import { fontVariationCss } from "./font-variation-axes";
+import { resolveTextDirection } from "./text-layout";
+import { sceneNodesInPaintOrder } from "../runtime/scene-compiler";
+import type { OrderedRenderScene } from "../runtime/ordered-render-ir";
+import { specialNodeFallback } from "./special-node-fallback";
+import { connectorPathForNode, connectorPathSvgD } from "./connector-path";
+import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "./connector-presentation";
+import { shapeWithTextDecorationPathD, shapeWithTextDecorations, shapeWithTextPath, shapeWithTextPathD } from "./shape-with-text-path";
+import { layoutTextPath } from "./text-path-layout";
+import { affineSvgMatrix, transformGroupRepeatMatrices } from "./transform-group-repeat";
 
 export type SvgExportResult = {
   svg: string;
+  /** Revision of the immutable snapshot supplied by the editor. Every
+   * derivative and its JSON sidecar can therefore be traced to one source. */
+  sourceRevision?: number;
   /** Frozen SVG viewport dimensions, reused by PNG/PDF Slice rasterization. */
   width: number;
   height: number;
@@ -28,18 +41,36 @@ export type SvgExportResult = {
 
 export type SvgCompatibilityFallback = {
   nodeId?: string;
-  capability: "layer-blur" | "inner-shadow" | "background-blur" | "image-asset" | "font-asset" | "display-p3" | "live-boolean" | "slice-selection" | "node-selection" | "pdf-rasterization";
+  capability: "layer-blur" | "inner-shadow" | "shadow-spread" | "background-blur" | "image-asset" | "font-asset" | "text-layout" | "display-p3" | "live-boolean" | "slice-selection" | "node-selection" | "scene-order" | "special-node" | "pdf-rasterization";
   outcome: "fallback";
   reason: string;
+};
+
+/** A short-lived, Core-derived line projection. It is deliberately separate
+ * from Canonical text: export needs the same frozen line boundaries Canvas
+ * shaped from the selected font, but must never persist derived layout data. */
+export type SvgTextLayoutProjection = {
+  lines: ReadonlyArray<{ start: number; end: number; direction: "ltr" | "rtl" }>;
 };
 
 export type SvgExportOptions = {
   pageId: string;
   defaultPageId: string;
+  /** Immutable source revision captured before any asynchronous asset or WASM
+   * work begins. It is presentation metadata and is never persisted. */
+  sourceRevision?: number;
+  /** Optional M4 Scene Compiler output from this same frozen source revision.
+   * When supplied, SVG uses its paint order instead of independently sorting
+   * nodes; a revision mismatch is reported and safely falls back. */
+  scene?: OrderedRenderScene;
   padding?: number;
   /** Transient Rust-derived paths for live Boolean wrappers. They are never
    * persisted; the caller must calculate them from the frozen export snapshot. */
   booleanPaths?: ReadonlyMap<string, DocumentVectorPath>;
+  /** Transient Rust/WASM-flattened Vector paths from the same frozen snapshot
+   * Canvas uses. Supplying these prevents SVG and its PNG/PDF raster path from
+   * independently approximating cubic curves. */
+  vectorPaths?: ReadonlyMap<string, DocumentVectorPath>;
   /** Transient Rust-derived Polygon/Star outlines. PNG/PDF rasterize this SVG,
    * so callers can keep all three exports on the frozen Core geometry. */
   parametricShapePaths?: ReadonlyMap<string, readonly { x: number; y: number }[]>;
@@ -51,6 +82,12 @@ export type SvgExportOptions = {
   /** Short-lived, already-authorized data URIs for raster fills. They are
    * presentation-only: no asset bytes are ever written into the Document. */
   imageDataUris?: ReadonlyMap<string, string>;
+  /** Short-lived, already-authorized font data URIs from the same frozen
+   * source. Export embeds these as isolated @font-face rules. */
+  fontDataUris?: ReadonlyMap<string, string>;
+  /** ICU4X/Rustybuzz line ranges derived from the same frozen font bytes Canvas
+   * used. SVG, and therefore PNG/PDF, consumes them without measuring text. */
+  textLayouts?: ReadonlyMap<string, SvgTextLayoutProjection>;
 };
 
 type SvgPaint = Readonly<{ value: string; opacity?: number }>;
@@ -80,11 +117,23 @@ function nodeUsesDisplayP3(node: CanvasNode) {
 // public library API used by tests and non-editor callers as well.
 const MAX_EMBEDDED_RASTER_DATA_URI_LENGTH = Math.ceil(16 * 1024 * 1024 * 4 / 3) + 128;
 const EMBEDDED_RASTER_DATA_URI = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]*={0,2}$/;
+const MAX_EMBEDDED_FONT_DATA_URI_LENGTH = Math.ceil(16 * 1024 * 1024 * 4 / 3) + 128;
+const EMBEDDED_FONT_DATA_URI = /^data:font\/(?:woff2?|ttf|otf);base64,[A-Za-z0-9+/]*={0,2}$/;
 
 function isSafeEmbeddedRasterDataUri(value: unknown): value is string {
   return typeof value === "string"
     && value.length <= MAX_EMBEDDED_RASTER_DATA_URI_LENGTH
     && EMBEDDED_RASTER_DATA_URI.test(value);
+}
+
+function isSafeEmbeddedFontDataUri(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= MAX_EMBEDDED_FONT_DATA_URI_LENGTH
+    && EMBEDDED_FONT_DATA_URI.test(value);
+}
+
+function svgFontFamily(assetId: string) {
+  return `makefigma-font-${assetId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
 /**
@@ -95,15 +144,24 @@ function isSafeEmbeddedRasterDataUri(value: unknown): value is string {
  * provide a bounded, authorized data URI map for a self-contained export.
  */
 export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExportOptions): SvgExportResult {
-  const allPageNodes = sortNodesByLayerOrder(visibleNodesOnPage(nodes, options.pageId, options.defaultPageId));
+  const visiblePageNodes = visibleNodesOnPage(nodes, options.pageId, options.defaultPageId);
+  const sceneMatchesFrozenRevision = Boolean(options.scene && (options.sourceRevision === undefined || options.scene.revision === options.sourceRevision));
+  const allPageNodes = sceneMatchesFrozenRevision
+    ? sceneNodesInPaintOrder(options.scene, visiblePageNodes)
+    : sortNodesByLayerOrder(visiblePageNodes);
   const allPageById = new Map(allPageNodes.map((node) => [node.id, node]));
   const selectedNodeIds = new Set((options.nodeIds ?? []).filter((id) => {
     const node = allPageById.get(id);
     return Boolean(node && node.kind !== "slice");
   }));
   const selectedNodeScope = selectedNodeIds.size > 0;
+  /** Ancestors needed to preserve Frame Clip/Mask nesting for a selected
+   * descendant. They carry structure only: their own fill/stroke is not part
+   * of a layer-selection export unless the user selected that ancestor. */
+  const selectionContextNodeIds = new Set<string>();
   const pageNodes = selectedNodeScope
-    ? allPageNodes.filter((node) => {
+    ? (() => {
+      const included = new Set(allPageNodes.filter((node) => {
       if (selectedNodeIds.has(node.id)) return true;
       const visited = new Set<string>();
       let parentId = node.parentId;
@@ -113,7 +171,39 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
         parentId = allPageById.get(parentId)?.parentId;
       }
       return false;
-    })
+      }).map((node) => node.id));
+      const siblingsByParent = new Map<string | undefined, CanvasNode[]>();
+      for (const node of allPageNodes) {
+        const siblings = siblingsByParent.get(node.parentId) ?? [];
+        siblings.push(node);
+        siblingsByParent.set(node.parentId, siblings);
+      }
+      // A selected descendant is still visually governed by a preceding alpha
+      // mask at any ancestor level. Export that mask definition too, but only
+      // the active mask in each sibling run—unrelated siblings stay excluded.
+      for (const selectedId of selectedNodeIds) {
+        let current = allPageById.get(selectedId);
+        const visited = new Set<string>();
+        while (current && !visited.has(current.id)) {
+          visited.add(current.id);
+          const siblings = siblingsByParent.get(current.parentId) ?? [];
+          const index = siblings.findIndex((node) => node.id === current!.id);
+          for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+            const candidate = siblings[cursor]!;
+            if (!candidate.isMask) continue;
+            included.add(candidate.id);
+            break;
+          }
+          const parent = current.parentId ? allPageById.get(current.parentId) : undefined;
+          if (parent) {
+            included.add(parent.id);
+            if (!selectedNodeIds.has(parent.id)) selectionContextNodeIds.add(parent.id);
+          }
+          current = parent;
+        }
+      }
+      return allPageNodes.filter((node) => included.has(node.id));
+    })()
     : allPageNodes;
   const requestedSlice = options.sliceId
     ? nodes.find((node) => node.id === options.sliceId && node.kind === "slice" && (node.pageId ?? options.defaultPageId) === options.pageId)
@@ -134,7 +224,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     }
     return false;
   };
-  const exportableNodes = pageNodes.filter((node) => !node.isMask && (node.kind !== "booleanOperation" || options.booleanPaths?.has(node.id)) && !isLiveBooleanOperand(node));
+  const exportableNodes = pageNodes.filter((node) => !selectionContextNodeIds.has(node.id) && !node.isMask && (node.kind !== "booleanOperation" || options.booleanPaths?.has(node.id)) && !isLiveBooleanOperand(node));
   const bounds = exportableNodes
     .filter((node) => node.kind !== "group" && node.kind !== "slice")
     .map((node) => worldVisualBoundsForNode(nodes, node))
@@ -174,11 +264,14 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       compatibilityFallbacks.push({ nodeId, capability, outcome: "fallback", reason });
     }
   };
+  if (options.scene && !sceneMatchesFrozenRevision) {
+    reportFallback("scene-order", "Scene order fallback: the supplied Scene IR revision does not match the frozen export revision.");
+  }
   const reportEffectFallback = (nodeId: string, capability: SvgCompatibilityFallback["capability"], label: string) => {
     const reason = `Effect fallback for ${nodeId}: SVG export does not yet preserve ${label}.`;
     reportFallback(capability, reason, nodeId);
   };
-  const activeEffects = (node: CanvasNode) => (node.effectStack ?? []).filter((effect) => Boolean(
+  const activeEffects = (node: CanvasNode) => (node.effectStack?.length ? node.effectStack : node.dropShadow ? [{ dropShadow: node.dropShadow }] : []).filter((effect) => Boolean(
     (effect.dropShadow?.visible && effect.dropShadow.color.alpha > 0)
     || (effect.layerBlur?.visible && effect.layerBlur.radius > 0)
     || (effect.innerShadow?.visible && effect.innerShadow.color.alpha > 0)
@@ -191,28 +284,58 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   const hasStandaloneInnerShadow = (node: CanvasNode) => {
     const effects = activeEffects(node);
     const shadow = effects.length === 1 ? effects[0]?.innerShadow : undefined;
-    return Boolean(shadow?.visible && shadow.color.alpha > 0 && shadow.spread === 0);
+    return Boolean(shadow?.visible && shadow.color.alpha > 0);
+  };
+  /** SVG can faithfully express an ordered Canvas stack when every entry is a
+   * single Layer Blur, Drop Shadow or Inner Shadow. Each step consumes the
+   * prior composited result, so blur/shadow order remains observably distinct
+   * instead of being flattened to independent SourceGraphic filters. */
+  const hasComposedShadowBlurStack = (node: CanvasNode) => {
+    const effects = activeEffects(node);
+    return effects.length > 1
+      && effects.every((effect) => [effect.layerBlur, effect.dropShadow, effect.innerShadow].filter(Boolean).length === 1);
   };
   if (options.nodeIds?.length && !selectedNodeScope) reportFallback("node-selection", "Requested layer selection is unavailable on this page; exported the full page instead.");
   for (const node of exportableNodes) {
-    const hasUnembeddedFontAsset = node.kind === "text" && Boolean(
-      node.textProperties?.runs.some((run) => run.font)
-      || node.textProperties?.fallbackFonts?.length,
-    );
+    const referencedFonts = node.kind === "text"
+      ? [...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []), ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? [])]
+      : [];
+    const hasUnembeddedFontAsset = referencedFonts.some((assetId) => !isSafeEmbeddedFontDataUri(options.fontDataUris?.get(assetId)));
     if (hasUnembeddedFontAsset) {
       reportFallback("font-asset", `Font fallback for ${node.id}: SVG export does not embed document font assets.`, node.id);
+    }
+    // System-font text has always had an explicit browser-layout policy. A
+    // document-owned font is different: if export did not receive the frozen
+    // Rust line ranges, its SVG line breaking can diverge from Canvas and must
+    // be visible in the delivery sidecar instead of silently looking supported.
+    if (node.kind === "text" && referencedFonts.length > 0 && !options.textLayouts?.has(node.id)) {
+      reportFallback("text-layout", `Text layout fallback for ${node.id}: SVG export did not receive frozen Rust text line ranges; browser line layout may differ from Canvas.`, node.id);
     }
     if (nodeUsesDisplayP3(node)) {
       reportFallback("display-p3", `Color fallback for ${node.id}: Display P3 colors are converted to clipped sRGB for SVG, PNG and PDF export.`, node.id);
     }
+  }
+  // Masks are not ordinary painted export nodes, but Canvas still applies their
+  // effects before source-alpha compositing. Include them in capability
+  // reporting so an unsupported mask effect cannot disappear behind a <mask>
+  // definition without a delivery-side warning.
+  const effectNodes = [...new Map([...exportableNodes, ...pageNodes.filter((node) => node.isMask)].map((node) => [node.id, node])).values()];
+  for (const node of effectNodes) {
     for (const effect of node.effectStack ?? []) {
-      if (effect.layerBlur?.visible && effect.layerBlur.radius > 0 && !hasStandaloneLayerBlur(node)) reportEffectFallback(node.id, "layer-blur", "Layer Blur");
-      if (effect.innerShadow?.visible && effect.innerShadow.color.alpha > 0 && !hasStandaloneInnerShadow(node)) reportEffectFallback(node.id, "inner-shadow", "Inner Shadow");
+      if (effect.layerBlur?.visible && effect.layerBlur.radius > 0 && !hasStandaloneLayerBlur(node) && !hasComposedShadowBlurStack(node)) reportEffectFallback(node.id, "layer-blur", "Layer Blur");
+      if (effect.innerShadow?.visible && effect.innerShadow.color.alpha > 0 && !hasStandaloneInnerShadow(node) && !hasComposedShadowBlurStack(node)) reportEffectFallback(node.id, "inner-shadow", "Inner Shadow");
       if (effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0) reportEffectFallback(node.id, "background-blur", "Background Blur");
     }
   }
   const blendStyle = (node: CanvasNode) => node.blendMode && node.blendMode !== "normal" ? ` style="mix-blend-mode:${node.blendMode}"` : "";
   let nextDefinitionId = 0;
+  const embeddedFontIds = [...new Set(exportableNodes.flatMap((node) => node.kind === "text" ? [
+    ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),
+    ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? []),
+  ] : []))].filter((assetId) => isSafeEmbeddedFontDataUri(options.fontDataUris?.get(assetId)));
+  if (embeddedFontIds.length) {
+    definitions.push(`<style>${embeddedFontIds.map((assetId) => `@font-face{font-family:'${svgFontFamily(assetId)}';src:url('${options.fontDataUris!.get(assetId)!}') format('${fontFormat(options.fontDataUris!.get(assetId)!)}');}`).join("")}</style>`);
+  }
   const paintValue = (paint: DocumentPaint): SvgPaint => {
     if (!paint.gradient) return paint.color
       ? { value: colorToOpaqueSrgbCss(paint.color), opacity: paint.color.alpha }
@@ -230,23 +353,17 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       : { css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient };
     return [legacy];
   };
-  /**
-   * R3's persisted base shadow maps to SVG primitives rather than being
-   * silently omitted. `shadowBlur` and SVG Gaussian blur use different units;
-   * stdDeviation=blur/2 is the established Canvas-compatible approximation.
-   * Canvas lacks spread, so R3 represents positive spread by widening that
-   * blur kernel; keep this SVG path identical until E1 adds morphology passes.
-   * A user-space filter region is computed in the node's local coordinates,
-   * before the same world matrix is applied to both paint and effect.
-   */
+  /** SVG's morphology primitive is the export-side spread contract: it alters
+   * SourceAlpha before blur/offset, preserving both positive and negative
+   * spread without changing the blur kernel. PNG/PDF rasterize this same frozen
+   * SVG, so this path cannot silently diverge by target format. */
   const dropShadowFilter = (node: CanvasNode) => {
     const shadows = (node.effectStack?.map((effect) => effect.dropShadow).filter((shadow): shadow is NonNullable<CanvasNode["dropShadow"]> => Boolean(shadow)) ?? (node.dropShadow ? [node.dropShadow] : []))
       .filter((shadow) => shadow.visible && shadow.color.alpha > 0);
     if (!shadows.length) return "";
     const id = `makefigma-drop-shadow-${nextDefinitionId++}`;
     const bounds = shadows.reduce((result, shadow) => {
-      const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2);
-      const extent = blur + 1;
+      const extent = Math.max(0, shadow.blurRadius) + Math.abs(shadow.spread) + 1;
       return {
         left: Math.min(result.left, shadow.offsetX - extent),
         top: Math.min(result.top, shadow.offsetY - extent),
@@ -255,12 +372,54 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       };
     }, { left: 0, top: 0, right: node.width, bottom: node.height });
     const primitives = shadows.map((shadow, index) => {
-      const blur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2);
       const suffix = shadows.length === 1 ? "" : `-${index}`;
-      return `<feGaussianBlur in="SourceAlpha" stdDeviation="${number(blur / 2)}" result="blur${suffix}"/><feOffset in="blur${suffix}" dx="${number(shadow.offsetX)}" dy="${number(shadow.offsetY)}" result="offsetBlur${suffix}"/><feFlood flood-color="${attribute(colorToOpaqueSrgbCss(shadow.color))}" flood-opacity="${number(shadow.color.alpha)}" result="shadowColor${suffix}"/><feComposite in="shadowColor${suffix}" in2="offsetBlur${suffix}" operator="in" result="shadow${suffix}"/>`;
+      const spread = shadow.spread === 0 ? "" : `<feMorphology in="SourceAlpha" operator="${shadow.spread > 0 ? "dilate" : "erode"}" radius="${number(Math.abs(shadow.spread))}" result="spread${suffix}"/>`;
+      const source = shadow.spread === 0 ? "SourceAlpha" : `spread${suffix}`;
+      return `${spread}<feGaussianBlur in="${source}" stdDeviation="${number(Math.max(0, shadow.blurRadius) / 2)}" result="blur${suffix}"/><feOffset in="blur${suffix}" dx="${number(shadow.offsetX)}" dy="${number(shadow.offsetY)}" result="offsetBlur${suffix}"/><feFlood flood-color="${attribute(colorToOpaqueSrgbCss(shadow.color))}" flood-opacity="${number(shadow.color.alpha)}" result="shadowColor${suffix}"/><feComposite in="shadowColor${suffix}" in2="offsetBlur${suffix}" operator="in" result="shadow${suffix}"/>`;
     }).join("");
     const merges = `${shadows.map((_, index) => `<feMergeNode in="shadow${shadows.length === 1 ? "" : `-${index}`}"/>`).join("")}<feMergeNode in="SourceGraphic"/>`;
     definitions.push(`<filter id="${id}" filterUnits="userSpaceOnUse" x="${number(bounds.left)}" y="${number(bounds.top)}" width="${number(bounds.right - bounds.left)}" height="${number(bounds.bottom - bounds.top)}">${primitives}<feMerge>${merges}</feMerge></filter>`);
+    return ` filter="url(#${id})"`;
+  };
+  /** Builds one SVG filter graph for Canvas-compatible ordered Layer Blur,
+   * Drop Shadow and Inner Shadow entries. `current` is deliberately threaded
+   * through every primitive: each operation observes the prior composite, and
+   * PNG/PDF rasterize this exact frozen graph. */
+  const composedShadowBlurFilter = (node: CanvasNode) => {
+    if (!hasComposedShadowBlurStack(node)) return "";
+    const effects = activeEffects(node);
+    const extent = effects.reduce((total, effect) => {
+      const shadow = effect.dropShadow ?? effect.innerShadow;
+      return total + (effect.layerBlur?.radius ?? 0) + (shadow ? Math.max(0, shadow.blurRadius) + Math.abs(shadow.spread) + Math.max(Math.abs(shadow.offsetX), Math.abs(shadow.offsetY)) : 0) + 1;
+    }, 0);
+    const id = `makefigma-composed-effect-${nextDefinitionId++}`;
+    let current = "SourceGraphic";
+    const primitives = effects.map((effect, index) => {
+      if (effect.layerBlur) {
+        const result = `effect-${index}`;
+        const input = current;
+        current = result;
+        return `<feGaussianBlur in="${input}" stdDeviation="${number(effect.layerBlur.radius / 2)}" result="${result}"/>`;
+      }
+      const shadow = effect.dropShadow ?? effect.innerShadow!;
+      const suffix = `-${index}`;
+      const input = current;
+      const alpha = `alpha${suffix}`;
+      const spread = `spread${suffix}`;
+      const blurred = `blur${suffix}`;
+      const offset = `offset${suffix}`;
+      const shadowColor = `shadowColor${suffix}`;
+      const shadowResult = `shadow${suffix}`;
+      const result = `effect-${index}`;
+      const morphology = shadow.spread === 0 ? "" : `<feMorphology in="${alpha}" operator="${shadow.spread > 0 ? "dilate" : "erode"}" radius="${number(Math.abs(shadow.spread))}" result="${spread}"/>`;
+      const shadowSource = shadow.spread === 0 ? alpha : spread;
+      current = result;
+      if (effect.innerShadow) {
+        return `<feColorMatrix in="${input}" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="${alpha}"/>${morphology}<feGaussianBlur in="${shadowSource}" stdDeviation="${number(Math.max(0, shadow.blurRadius) / 2)}" result="${blurred}"/><feOffset in="${blurred}" dx="${number(-shadow.offsetX)}" dy="${number(-shadow.offsetY)}" result="${offset}"/><feComposite in="${offset}" in2="${alpha}" operator="in" result="innerMask${suffix}"/><feFlood flood-color="${attribute(colorToOpaqueSrgbCss(shadow.color))}" flood-opacity="${number(shadow.color.alpha)}" result="${shadowColor}"/><feComposite in="${shadowColor}" in2="innerMask${suffix}" operator="in" result="${shadowResult}"/><feMerge result="${result}"><feMergeNode in="${input}"/><feMergeNode in="${shadowResult}"/></feMerge>`;
+      }
+      return `<feColorMatrix in="${input}" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="${alpha}"/>${morphology}<feGaussianBlur in="${shadowSource}" stdDeviation="${number(Math.max(0, shadow.blurRadius) / 2)}" result="${blurred}"/><feOffset in="${blurred}" dx="${number(shadow.offsetX)}" dy="${number(shadow.offsetY)}" result="${offset}"/><feFlood flood-color="${attribute(colorToOpaqueSrgbCss(shadow.color))}" flood-opacity="${number(shadow.color.alpha)}" result="${shadowColor}"/><feComposite in="${shadowColor}" in2="${offset}" operator="in" result="${shadowResult}"/><feMerge result="${result}"><feMergeNode in="${shadowResult}"/><feMergeNode in="${input}"/></feMerge>`;
+    }).join("");
+    definitions.push(`<filter id="${id}" filterUnits="userSpaceOnUse" x="${number(-extent)}" y="${number(-extent)}" width="${number(node.width + extent * 2)}" height="${number(node.height + extent * 2)}">${primitives}</filter>`);
     return ` filter="url(#${id})"`;
   };
   /** A sole Layer Blur maps directly to SVG's source-graphic Gaussian blur.
@@ -275,18 +434,18 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     definitions.push(`<filter id="${id}" filterUnits="userSpaceOnUse" x="${number(-extent)}" y="${number(-extent)}" width="${number(node.width + extent * 2)}" height="${number(node.height + extent * 2)}"><feGaussianBlur in="SourceGraphic" stdDeviation="${number(radius / 2)}"/></filter>`);
     return ` filter="url(#${id})"`;
   };
-  /** SVG can preserve a simple Inner Shadow with an alpha-only source, an
-   * offset blur and an explicit SourceAlpha clip. Positive/negative spread and
-   * ordered stacks still need morphology/intermediate composition, so they
-   * intentionally remain visible compatibility fallbacks. */
+  /** SVG preserves a standalone Inner Shadow with an alpha-only source,
+   * morphology spread, offset blur and an explicit SourceAlpha clip. */
   const innerShadowFilter = (node: CanvasNode) => {
     if (!hasStandaloneInnerShadow(node)) return "";
     const shadow = activeEffects(node)[0]!.innerShadow!;
     const id = `makefigma-inner-shadow-${nextDefinitionId++}`;
     const color = colorToOpaqueSrgbCss(shadow.color);
     const blur = Math.max(0, shadow.blurRadius);
-    const extent = blur + Math.max(Math.abs(shadow.offsetX), Math.abs(shadow.offsetY)) + 1;
-    definitions.push(`<filter id="${id}" filterUnits="userSpaceOnUse" x="${number(-extent)}" y="${number(-extent)}" width="${number(node.width + extent * 2)}" height="${number(node.height + extent * 2)}"><feGaussianBlur in="SourceAlpha" stdDeviation="${number(blur / 2)}" result="blur"/><feOffset in="blur" dx="${number(-shadow.offsetX)}" dy="${number(-shadow.offsetY)}" result="offsetBlur"/><feComposite in="offsetBlur" in2="SourceAlpha" operator="in" result="innerMask"/><feFlood flood-color="${attribute(color)}" flood-opacity="${number(shadow.color.alpha)}" result="innerColor"/><feComposite in="innerColor" in2="innerMask" operator="in" result="innerShadow"/><feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="innerShadow"/></feMerge></filter>`);
+    const extent = blur + Math.abs(shadow.spread) + Math.max(Math.abs(shadow.offsetX), Math.abs(shadow.offsetY)) + 1;
+    const spread = shadow.spread === 0 ? "" : `<feMorphology in="SourceAlpha" operator="${shadow.spread > 0 ? "dilate" : "erode"}" radius="${number(Math.abs(shadow.spread))}" result="spread"/>`;
+    const source = shadow.spread === 0 ? "SourceAlpha" : "spread";
+    definitions.push(`<filter id="${id}" filterUnits="userSpaceOnUse" x="${number(-extent)}" y="${number(-extent)}" width="${number(node.width + extent * 2)}" height="${number(node.height + extent * 2)}">${spread}<feGaussianBlur in="${source}" stdDeviation="${number(blur / 2)}" result="blur"/><feOffset in="blur" dx="${number(-shadow.offsetX)}" dy="${number(-shadow.offsetY)}" result="offsetBlur"/><feComposite in="offsetBlur" in2="SourceAlpha" operator="in" result="innerMask"/><feFlood flood-color="${attribute(color)}" flood-opacity="${number(shadow.color.alpha)}" result="innerColor"/><feComposite in="innerColor" in2="innerMask" operator="in" result="innerShadow"/><feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="innerShadow"/></feMerge></filter>`);
     return ` filter="url(#${id})"`;
   };
   // Decorative Line endpoints (arrowheads, diamond, dot) are filled from the
@@ -299,8 +458,16 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     if (!d) return "";
     return `<path d="${d}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} stroke="none" fill-rule="nonzero"/>`;
   };
+  const connectorDecorativeCapPaint = (node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>, paint: SvgPaint) => connectorEndpointDecorations(node, path).map((decoration) => {
+    const d = connectorDecorationTriangles(decoration, node.strokeWidth).map(([a, b, c]) => `M ${number(a.x)} ${number(a.y)} L ${number(b.x)} ${number(b.y)} L ${number(c.x)} ${number(c.y)} Z`).join(" ");
+    return `<path d="${d}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} stroke="none" fill-rule="nonzero"/>`;
+  }).join("");
   const shape = (node: CanvasNode, fill: SvgPaint, stroke: SvgPaint, fillRule = "nonzero") => {
     const common = `fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} stroke="${attribute(stroke.value)}"${paintOpacity("stroke", stroke)} fill-rule="${fillRule}" stroke-linecap="${svgStrokeCap(node)}" stroke-linejoin="${attribute(node.strokeJoin ?? "miter")}" stroke-miterlimit="${number(node.strokeMiterLimit ?? 10)}"${node.strokeDashPattern?.length ? ` stroke-dasharray="${node.strokeDashPattern.map(number).join(" ")}"` : ""}${stroke.value !== "none" ? ` stroke-width="${number(node.strokeWidth)}"` : ""}`;
+    if (node.kind === "connector") {
+      const connectorPath = node.kind === "connector" ? connectorPathForNode(node) : undefined;
+      if (connectorPath) return `<path d="${connectorPathSvgD(connectorPath, number)}" ${common}/>${stroke.value === "none" ? "" : connectorDecorativeCapPaint(node, connectorPath, stroke)}`;
+    }
     if (node.kind === "line") {
       const markers = stroke.value === "none" ? "" : `${decorativeCapPaint(node.strokeCapStart, 0, -1, node, stroke)}${decorativeCapPaint(node.strokeCapEnd, node.width, 1, node, stroke)}`;
       if (stroke.value !== "none" && !node.strokeDashPattern?.length && needsIndependentLineOutline(node)) {
@@ -312,7 +479,16 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       if (node.arcData) return `<path d="${ellipseArcPath(node)}" ${common.replace(`fill-rule="${fillRule}"`, 'fill-rule="evenodd"')}/>`;
       return `<ellipse cx="${number(node.width / 2)}" cy="${number(node.height / 2)}" rx="${number(node.width / 2)}" ry="${number(node.height / 2)}" ${common}/>`;
     }
-    if (node.kind === "vector" && node.vectorPath) return `<path d="${vectorPathSvgD(node.vectorPath, number)}" ${common.replace(`fill-rule="${fillRule}"`, `fill-rule="${node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero"}"`)}/>`;
+    if (node.kind === "shapeWithText") {
+      const shapePath = shapeWithTextPath(node.shapeWithTextType, node.width, node.height);
+      if (shapePath?.kind === "ellipse") return `<ellipse cx="${number(node.width / 2)}" cy="${number(node.height / 2)}" rx="${number(node.width / 2)}" ry="${number(node.height / 2)}" ${common}/>`;
+      const d = shapePath ? shapeWithTextPathD(shapePath, number) : undefined;
+      if (d) return `<path d="${d}" ${common}/>`;
+    }
+    if (node.kind === "vector" && node.vectorPath) {
+      const vectorPath = options.vectorPaths?.get(node.id) ?? node.vectorPath;
+      return `<path d="${vectorPathSvgD(vectorPath, number)}" ${common.replace(`fill-rule="${fillRule}"`, `fill-rule="${vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero"}"`)}/>`;
+    }
     const parametricShape = nodeParametricShape(node);
     if (parametricShape) {
       const derived = options.parametricShapePaths?.get(node.id);
@@ -421,7 +597,9 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokeMarkup}`;
   };
   const nodeMarkup = (node: CanvasNode) => {
-    if (node.kind === "group" || node.kind === "slice") return "";
+    const specialFallback = specialNodeFallback(node, "svg");
+    if (specialFallback) reportFallback("special-node", `${specialFallback.code}: ${specialFallback.reason}`, node.id);
+    if (node.kind === "group" || node.kind === "slice" || node.kind === "slideGrid" || node.kind === "slideRow" || node.kind === "transformGroup") return "";
     if (node.kind === "booleanOperation") {
       const vectorPath = options.booleanPaths?.get(node.id);
       const source = children.get(node.id)?.find((candidate) => candidate.kind === "vector");
@@ -429,6 +607,11 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       const transform = worldTransformForNode(nodes, node.id);
       if (!transform) return "";
       const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
+      // The Boolean wrapper is the rendered node: Canvas isolates this derived
+      // result before it applies the wrapper's ordered effects. Retain that
+      // ownership in SVG so its PNG/PDF raster consumers do not silently lose
+      // a supported standalone effect.
+      const effect = composedShadowBlurFilter(node) || dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
       const derived = { ...source, vectorPath };
       const fillPaints = activePaints(source, "fill").map(paintValue);
       const strokePaints = activePaints(source, "stroke").map(paintValue);
@@ -436,17 +619,22 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
         ...fillPaints.map((paint) => shape(derived, paint, { value: "none" })),
         ...strokePaints.filter(() => source.strokeWidth > 0).map((paint) => shape(derived, { value: "none" }, paint)),
       ].join("");
-      return `<g transform="${matrix}" opacity="${number(node.opacity * source.opacity)}"${blendStyle(node)}>${layers}</g>`;
+      return `<g transform="${matrix}" opacity="${number(node.opacity * source.opacity)}"${blendStyle(node)}${effect}>${layers}</g>`;
     }
     const fills = activePaints(node, "fill");
     const strokes = activePaints(node, "stroke");
     const transform = worldTransformForNode(nodes, node.id);
     if (!transform) return "";
     const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
-    const effect = dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
+    const effect = composedShadowBlurFilter(node) || dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
     if (node.kind === "text") {
       const fill = paintValue(fills[0]);
-      return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${svgTextMarkup(node, fill)}</g>`;
+      return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${svgTextMarkup(node, fill, options.fontDataUris, options.textLayouts?.get(node.id))}</g>`;
+    }
+    if (node.kind === "textPath") {
+      const fill = paintValue(fills[0]);
+      const markup = svgTextPathMarkup(node, fill.value, fill.opacity, number);
+      if (markup) return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${markup}</g>`;
     }
     const fillPaints = fills.map(paintValue);
     const strokePaints = strokes.map(paintValue);
@@ -464,7 +652,17 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
         ...fillPaints.map((paint) => shape(node, paint, { value: "none" })),
         ...strokePaints.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)),
       ].join("");
-    return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${layers}</g>`;
+    const connectorLabel = node.kind === "connector"
+      ? (() => {
+        const path = connectorPathForNode(node); const label = path && connectorLabelLayout(node, path);
+        return label ? `<g><rect x="${number(label.x - label.width / 2)}" y="${number(label.y - label.height / 2)}" width="${number(label.width)}" height="${number(label.height)}" fill="#ffffff" fill-opacity=".94"/><text fill="#0f172a" font-family="sans-serif" font-size="12" text-anchor="middle" dominant-baseline="central">${label.lines.map((line, index) => `<tspan x="${number(label.x)}" y="${number(label.y - (label.lines.length - 1) * 8 + index * 16)}">${escapeSvgText(line)}</tspan>`).join("")}</text></g>` : "";
+      })()
+      : "";
+    const shapeWithTextDecoration = node.kind === "shapeWithText" && node.strokeWidth > 0
+      ? shapeWithTextDecorations(node.shapeWithTextType, node.width, node.height).flatMap((decoration) => strokePaints.filter((paint) => paint.value !== "none").map((paint) => `<path d="${shapeWithTextDecorationPathD(decoration, number)}" fill="none" stroke="${attribute(paint.value)}"${paintOpacity("stroke", paint)} stroke-width="${number(node.strokeWidth)}" stroke-linecap="${svgStrokeCap(node)}" stroke-linejoin="${attribute(node.strokeJoin ?? "miter")}"/>`)).join("")
+      : "";
+    const specialComposition = svgSpecialNodeComposition(node, number);
+    return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${layers}${connectorLabel}${shapeWithTextDecoration}${specialComposition}</g>`;
   };
   const renderSiblings = (siblings: readonly CanvasNode[], lineage: Set<string>): string => {
     let markup = "";
@@ -501,7 +699,16 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const descendants = children.get(node.id) ?? [];
     const nextLineage = new Set(lineage).add(node.id);
     const descendantsMarkup = renderSiblings(descendants, nextLineage);
-    const own = nodeMarkup(node);
+    if (node.kind === "transformGroup") {
+      // Let the regular node path report an unsupported modifier, then keep
+      // the one-time source subtree visible. Supported bounded linear Repeat
+      // instances wrap that same subtree, preserving its sibling paint order.
+      const own = nodeMarkup(node);
+      const repeats = transformGroupRepeatMatrices(nodes, node);
+      const derived = repeats?.map((matrix) => `<g transform="${affineSvgMatrix(matrix, number)}">${renderSiblings(descendants, nextLineage)}</g>`).join("") ?? "";
+      return `${own}${descendantsMarkup}${derived}`;
+    }
+    const own = selectionContextNodeIds.has(node.id) ? "" : nodeMarkup(node);
     if (node.kind !== "frame" || node.clipsContent === false || !descendantsMarkup) return `${own}${descendantsMarkup}`;
     const transform = worldTransformForNode(nodes, node.id);
     if (!transform) return `${own}${descendantsMarkup}`;
@@ -521,12 +728,65 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   if (requestedSlice && !sliceTransform) reportFallback("slice-selection", "Slice has an invalid world transform; exported the full page instead.", requestedSlice.id);
   const defs = definitions.length ? `<defs>${definitions.join("")}</defs>` : "";
   return {
-    svg: `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="${number(left)} ${number(top)} ${number(width)} ${number(height)}" width="${number(width)}" height="${number(height)}">${defs}${croppedContent}</svg>`,
+    svg: `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg"${options.sourceRevision === undefined ? "" : ` data-makefigma-source-revision="${number(options.sourceRevision)}"`} viewBox="${number(left)} ${number(top)} ${number(width)} ${number(height)}" width="${number(width)}" height="${number(height)}">${defs}${croppedContent}</svg>`,
+    sourceRevision: options.sourceRevision,
     width,
     height,
     warnings: [...warnings],
     compatibilityFallbacks,
   };
+}
+
+function svgTextPathMarkup(node: CanvasNode, fill: string, opacity: number | undefined, number: (value: number) => string): string | undefined {
+  const fontSize = node.textProperties?.runs[0]?.fontSize ?? 14;
+  const glyphs = layoutTextPath(node, Math.max(1, fontSize * .6));
+  if (!glyphs) return undefined;
+  return glyphs.map((glyph) => `<text x="${number(glyph.x)}" y="${number(glyph.y)}" transform="rotate(${number(glyph.angle * 180 / Math.PI)} ${number(glyph.x)} ${number(glyph.y)})" text-anchor="middle" dominant-baseline="central" font-family="ui-sans-serif,system-ui,sans-serif" font-size="${number(fontSize)}" fill="${attribute(fill)}"${opacity === undefined ? "" : ` fill-opacity="${number(opacity)}"`}>${escapeSvgText(glyph.text)}</text>`).join("");
+}
+
+function escapeSvgText(value: string): string { return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;"); }
+
+/** M6's plain-text card subset. It deliberately avoids pretending that a
+ * generic SVG exporter performed rich-run shaping; Text and TextPath keep
+ * their dedicated layout paths above. */
+function svgSpecialNodeComposition(node: CanvasNode, number: (value: number) => string): string {
+  const text = node.kind === "shapeWithText" || node.kind === "sticky" || node.kind === "tableCell" ? node.text?.trim() : undefined;
+  const textMarkup = text
+    ? (() => {
+      const centered = node.kind === "shapeWithText";
+      const x = centered ? node.width / 2 : 10;
+      const y = centered ? node.height / 2 : 10;
+      const anchor = centered ? "middle" : "start";
+      const lines = text.split(/\r\n|[\n\r\u2028\u2029]/u).slice(0, 8);
+      const lineHeight = 16;
+      const startY = centered ? y - (lines.length - 1) * lineHeight / 2 : y;
+      return `<text x="${number(x)}" y="${number(startY)}" fill="#1f2937" font-family="sans-serif" font-size="14" text-anchor="${anchor}" dominant-baseline="central">${lines.map((line, index) => `<tspan x="${number(x)}" dy="${index ? number(lineHeight) : "0"}">${escapeSvgText(line)}</tspan>`).join("")}</text>`;
+    })()
+    : "";
+  if (node.kind === "media") {
+    const x = Math.max(12, node.width / 2 - 12); const y = Math.max(12, node.height / 2 - 14);
+    return `${textMarkup}<path d="M ${number(x)} ${number(y)} L ${number(x)} ${number(y + 28)} L ${number(x + 24)} ${number(y + 14)} Z" fill="#f8fafc" fill-opacity=".9"/><text x="${number(node.width / 2)}" y="${number(Math.min(node.height - 12, y + 42))}" fill="#f8fafc" font-family="sans-serif" font-size="12" text-anchor="middle" dominant-baseline="central">Media preview</text>`;
+  }
+  if (node.kind === "embed" || node.kind === "linkUnfurl") {
+    const metadata = node.kind === "embed" ? node.embedMetadata : node.linkUnfurlMetadata;
+    const title = metadata?.title || metadata?.provider || (node.kind === "embed" ? "Embed preview" : "Link preview");
+    const description = node.kind === "linkUnfurl" ? node.linkUnfurlMetadata?.description : node.embedMetadata?.canonicalUrl;
+    const provider = metadata?.provider;
+    const lines = [title, description, provider].filter((value): value is string => Boolean(value)).slice(0, 3);
+    return `${textMarkup}<rect x="8" y="8" width="${number(Math.max(0, node.width - 16))}" height="${number(Math.max(0, node.height - 16))}" rx="4" fill="#f8fafc" fill-opacity=".86"/>${lines.map((line, index) => `<text x="16" y="${number(24 + index * 18)}" fill="#1f2937" font-family="sans-serif" font-size="${index ? "12" : "14"}" font-weight="${index ? "400" : "600"}" dominant-baseline="central">${escapeSvgText(line)}</text>`).join("")}`;
+  }
+  if (node.kind === "interactiveSlideElement") {
+    const label = node.interactiveSlideElementType === "POLL" ? "Poll interaction" : "Interactive slide element";
+    const x = Math.max(8, node.width / 2 - 34); const y = Math.max(8, node.height / 2 - 18);
+    return `${textMarkup}<rect x="${number(x)}" y="${number(y)}" width="68" height="36" rx="18" fill="#475569" fill-opacity=".72"/><text x="${number(node.width / 2)}" y="${number(y + 18)}" fill="#f8fafc" font-family="sans-serif" font-size="12" text-anchor="middle" dominant-baseline="central">${label}</text>`;
+  }
+  if (node.kind !== "table" || !node.tableMetadata) return textMarkup;
+  const columns = node.tableMetadata.columnWidths.filter((value) => Number.isFinite(value) && value > 0);
+  const rows = node.tableMetadata.rowHeights.filter((value) => Number.isFinite(value) && value > 0);
+  let x = 0; let y = 0;
+  const vertical = columns.slice(0, -1).map((width) => { x += width; return `<path d="M ${number(x)} 0 V ${number(node.height)}" fill="none" stroke="#94a3b8" stroke-width="1"/>`; }).join("");
+  const horizontal = rows.slice(0, -1).map((height) => { y += height; return `<path d="M 0 ${number(y)} H ${number(node.width)}" fill="none" stroke="#94a3b8" stroke-width="1"/>`; }).join("");
+  return `${vertical}${horizontal}`;
 }
 
 function roundedRectPath(width: number, height: number, radius: number, radii: CanvasNode["cornerRadii"], cornerSmoothing?: number) {
@@ -578,7 +838,9 @@ function ellipseArcPath(node: CanvasNode) {
   const radiusY = node.height / 2;
   const centerX = radiusX;
   const centerY = radiusY;
-  const inner = Math.max(0, Math.min(.999999, arc.innerRadius));
+  // Preserve Figma's inclusive `innerRadius` range. At exactly one the two
+  // contours coincide, which is intentionally a zero-area even-odd fill.
+  const inner = Math.max(0, Math.min(1, arc.innerRadius));
   if (Math.abs(span) >= Math.PI * 2 - 1e-8) {
     const outer = `M ${number(centerX + radiusX)} ${number(centerY)} A ${number(radiusX)} ${number(radiusY)} 0 1 1 ${number(centerX - radiusX)} ${number(centerY)} A ${number(radiusX)} ${number(radiusY)} 0 1 1 ${number(centerX + radiusX)} ${number(centerY)}`;
     if (inner === 0) return `${outer} Z`;
@@ -617,7 +879,7 @@ function strokeCap(value: CanvasNode["strokeCapStart"]) {
 /** SVG needs explicit tspans to retain Canvas' newline semantics and its
  * Canonical UTF-8 Style Runs. Advanced shaping/kerning remains Partial, but
  * ordinary mixed size/weight/italic/tracking no longer flattens to run zero. */
-function svgTextMarkup(node: CanvasNode, fill: SvgPaint) {
+function svgTextMarkup(node: CanvasNode, fill: SvgPaint, fontDataUris?: ReadonlyMap<string, string>, layout?: SvgTextLayoutProjection) {
   const primary = node.textProperties?.runs[0];
   const size = primary?.fontSize ?? 31;
   const paragraph = node.textProperties?.paragraph;
@@ -627,36 +889,69 @@ function svgTextMarkup(node: CanvasNode, fill: SvgPaint) {
   const lineHeight = paragraph?.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT;
   const paragraphSpacing = paragraph?.paragraphSpacing ?? 0;
   const source = node.text ?? "";
-  const lines = svgTextLineRanges(source);
-  // SVG export deliberately has no font byte payload. Declare the same generic
-  // browser fallback on every text node; custom/fallback font assets are
-  // separately surfaced through the compatibility report.
-  const attributes = `x="${number(x)}" fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} text-anchor="${anchor}" font-family="sans-serif"`;
-  const lineMarkup = lines.map((line, index) => {
+  const sourceBytes = new TextEncoder().encode(source);
+  const lines = layout?.lines.length
+    ? layout.lines.map((line) => ({ ...line, text: new TextDecoder().decode(sourceBytes.slice(line.start, line.end)) }))
+    : svgTextLineRanges(source);
+  const fallbackFamilies = (node.textProperties?.fallbackFonts ?? [])
+    .filter((font) => isSafeEmbeddedFontDataUri(fontDataUris?.get(font.assetId)))
+    .map((font) => svgFontFamily(font.assetId));
+  const attributes = `x="${number(x)}" fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} text-anchor="${anchor}" font-family="${[...fallbackFamilies, "sans-serif"].map(attribute).join(",")}"`;
+  let lineY = 0;
+  let previousEnd = 0;
+  const lineMarkup = lines.map((line) => {
+    // Paragraph spacing belongs only at an explicit paragraph separator, not
+    // between soft-wrapped lines. This mirrors Canvas's frozen byte ranges.
+    const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineY += paragraphSpacing;
     const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
-    const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style)}>${text(span.text)}</tspan>`).join("");
-    return `<tspan x="${number(x)}" y="${number(size + index * (lineHeight + paragraphSpacing))}">${content}</tspan>`;
+    const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, fontDataUris, fallbackFamilies)}>${text(span.text)}</tspan>`).join("");
+    // Canvas resolves a paragraph base direction before choosing the visual
+    // start edge. Preserve that same bidi contract in exported SVG instead of
+    // letting a left-aligned Arabic/Hebrew line begin at x=0.
+    // A frozen Rust projection has already resolved each visual line's base
+    // direction. Re-deriving it from the sliced source here can disagree at
+    // BiDi-neutral boundaries, which would make SVG/PNG/PDF pick a different
+    // visual start edge from the Canvas snapshot.
+    const direction = "direction" in line ? line.direction : resolveTextDirection(line.text);
+    const lineAnchor = alignment === "center" ? "middle" : alignment === "right" || direction === "rtl" ? "end" : "start";
+    const lineX = lineAnchor === "middle" ? node.width / 2 : lineAnchor === "end" ? node.width : 0;
+    const markup = `<tspan x="${number(lineX)}" y="${number(size + lineY)}" text-anchor="${lineAnchor}" direction="${direction}" unicode-bidi="plaintext">${content}</tspan>`;
+    lineY += lineHeight;
+    previousEnd = line.end;
+    return markup;
   }).join("");
   return `<text ${attributes}>${lineMarkup}</text>`;
 }
 
 function svgTextLineRanges(source: string) {
-  const ranges: Array<{ start: number; end: number }> = [];
+  const ranges: Array<{ start: number; end: number; text: string }> = [];
   const bytes = new TextEncoder();
   const separator = /\r\n|[\n\r\u2028\u2029]/gu;
   let utf16Start = 0;
   for (const match of source.matchAll(separator)) {
     const index = match.index ?? utf16Start;
-    ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source.slice(0, index)).byteLength });
+    ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source.slice(0, index)).byteLength, text: source.slice(utf16Start, index) });
     utf16Start = index + match[0].length;
   }
-  ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source).byteLength });
+  ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source).byteLength, text: source.slice(utf16Start) });
   return ranges;
 }
 
-function svgTextStyleAttributes(style: RenderTextStyle) {
+function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyMap<string, string>, fallbackFamilies: readonly string[] = []) {
   const color = style.color ? ` fill="${attribute(colorToSrgbCss(style.color))}"` : "";
-  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${color}`;
+  const family = style.font && isSafeEmbeddedFontDataUri(fontDataUris?.get(style.font.assetId))
+    ? [svgFontFamily(style.font.assetId), ...fallbackFamilies, "sans-serif"]
+    : fallbackFamilies.length ? [...fallbackFamilies, "sans-serif"] : undefined;
+  const variations = style.font?.variationAxes?.length ? ` font-variation-settings="${attribute(fontVariationCss(style.font.variationAxes))}"` : "";
+  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${family ? ` font-family="${family.map(attribute).join(",")}"` : ""}${variations}${color}`;
+}
+
+function fontFormat(dataUri: string) {
+  if (dataUri.startsWith("data:font/woff2;")) return "woff2";
+  if (dataUri.startsWith("data:font/woff;")) return "woff";
+  if (dataUri.startsWith("data:font/ttf;")) return "truetype";
+  return "opentype";
 }
 
 /** Canvas and SVG cannot apply different caps to individual dash segments.

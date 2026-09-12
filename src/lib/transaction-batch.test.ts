@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode, type CanvasNode } from "./editor-protocol";
 import { transformPoint, translateNodeWorldPatch, worldTransformForNode } from "./scene-transform";
-import { captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
 import { createPhase2ProfessionalCompositeFixture } from "./phase2-professional-composite-fixture";
 import fixture from "../../fixtures/documents/phase2-common-nodes.fixture.json";
 
@@ -479,6 +479,24 @@ describe("Core transaction batch resolution", () => {
     expect(resolveParametricShapeToVectorBatch([polygon], polygon.id, [{ x: 0, y: 0 }, { x: 1, y: 0 }])).toBeUndefined();
   });
 
+  it("keeps mask identity through Boolean, Line and parametric Vector replacements", () => {
+    const target = { ...rectangle("00000000-0000-4000-8000-000000000070"), positionId: "00000000000000000000000000000070:00000000000000000000000000000000" };
+    const boolean = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000071", isMask: true, positionId: "00000000000000000000000000000061:00000000000000000000000000000000" };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000072", parentId: boolean.id, vectorPath: { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "00000000-0000-4000-8000-000000000073", x: 0, y: 0, pointType: "corner" as const }, { id: "00000000-0000-4000-8000-000000000074", x: 1, y: 0, pointType: "corner" as const }, { id: "00000000-0000-4000-8000-000000000075", x: 0, y: 1, pointType: "corner" as const }] }] } };
+    const second = { ...first, id: "00000000-0000-4000-8000-000000000076" };
+    const flattened = resolveFlattenBooleanBatch([boolean, first, second, target], boolean.id, { subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }]}] }, (() => { let id = 80; return () => `00000000-0000-4000-8000-${(id++).toString().padStart(12, "0")}`; })());
+    expect(flattened?.replacement.isMask).toBe(true);
+    expect(flattened?.batch.at(-1)).toEqual({ type: "setMask", id: flattened?.replacement.id, enabled: true });
+
+    const line = { ...createNode("line", 0, 0), id: "00000000-0000-4000-8000-000000000090", isMask: true, width: 10, strokeWidth: 2, positionId: "00000000000000000000000000000060:00000000000000000000000000000000" };
+    const outlined = resolveLineOutlineStrokeBatch([line, target], line.id, { subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 2 }]}] }, (() => { let id = 91; return () => `00000000-0000-4000-8000-${(id++).toString().padStart(12, "0")}`; })());
+    expect(outlined?.batch.at(-1)).toEqual({ type: "setMask", id: outlined?.outlined.id, enabled: true });
+
+    const polygon = { ...createNode("polygon", 0, 0), id: "00000000-0000-4000-8000-000000000095", isMask: true, positionId: "00000000000000000000000000000065:00000000000000000000000000000000", parametricShape: { kind: "polygon" as const, pointCount: 3 } };
+    const vector = resolveParametricShapeToVectorBatch([polygon, target], polygon.id, [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 2 }], (() => { let id = 96; return () => `00000000-0000-4000-8000-${(id++).toString().padStart(12, "0")}`; })());
+    expect(vector?.batch.at(-1)).toEqual({ type: "setMask", id: vector?.replacement.id, enabled: true });
+  });
+
   it("wraps a single selected layer and makes the wrapper the resolved selection", () => {
     const child = { ...rectangle("00000000-0000-4000-8000-000000000001"), x: 25, y: 40, width: 48, height: 24 };
     const groupId = "00000000-0000-4000-8000-000000000003";
@@ -721,6 +739,16 @@ describe("clipboard capture and paste resolution", () => {
     expect(resolved?.createdIds).toEqual([pasteId]);
   });
 
+  it("defers a pasted alpha mask until its following pasted target exists", () => {
+    const mask = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000056", isMask: true, positionId: "00000000000000000000000000000056:00000000000000000000000000000000" };
+    const target = { ...createNode("rectangle", 20, 0), id: "00000000-0000-4000-8000-000000000057", positionId: "00000000000000000000000000000057:00000000000000000000000000000000" };
+    const clipboard = captureClipboard([mask, target], [mask.id, target.id], 19)!;
+    const resolved = resolvePasteBatch([], clipboard, {}, new Set(), (() => { let id = 58; return () => `00000000-0000-4000-8000-${(id++).toString().padStart(12, "0")}`; })());
+
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["create", "create", "setMask"]);
+    expect(resolved?.batch.at(-1)).toMatchObject({ type: "setMask", enabled: true });
+  });
+
   it("captures and pastes Polygon, Star, Vector and Slice nodes", () => {
     const kinds = ["polygon", "star", "vector", "slice"] as const;
     const source = kinds.map((kind, index) => ({
@@ -777,6 +805,11 @@ describe("clipboard capture and paste resolution", () => {
     expect(normalized[0]).toMatchObject({ x: 10, y: 20 });
     expect(normalized[1]).toMatchObject({ x: 14, y: 25 });
     expect(worldTransformForNode(normalized, flow.id)).toMatchObject({ e: 14, f: 25 });
+
+    expect(autoLayoutProjectionNormalizationPatches([layout, flow, absolute, ordinary])).toEqual([
+      { id: layout.id, patch: { relativeTransform: undefined } },
+      { id: flow.id, patch: { x: 14, y: 25, relativeTransform: undefined } },
+    ]);
   });
 
   it("re-homes a Relative-v1 pasted root against its destination rather than its source parent", () => {

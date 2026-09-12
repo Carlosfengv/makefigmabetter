@@ -1,4 +1,4 @@
-import { createNode, type CanvasNode, type DocumentAsset, type DocumentColor, type Viewport } from "./editor-protocol";
+import { createNode, documentColorFromCssHex, type CanvasNode, type DocumentAsset, type DocumentColor, type Viewport } from "./editor-protocol";
 
 export const PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME = "F-PHASE2-PROFESSIONAL-COMPOSITE";
 
@@ -40,7 +40,15 @@ export function createPhase2ProfessionalCompositeFixture(): Phase2ProfessionalCo
   });
   const title = fixtureNode("text", "00000000-0000-4000-8000-000000003005", "Mixed-language title", 8, 8, {
     parentId: layoutThree.id, width: 190, height: 34, fill: "#0f172a", text: "Design · 中文 · مرحبا · 👋",
-    textProperties: { runs: [{ start: 0, end: 38, fontSize: 18, fontWeight: 700, italic: false, letterSpacing: .1 }], paragraph: { alignment: "left", lineHeight: 26, paragraphSpacing: 0 }, autoSize: "height", fallbackFonts: [{ assetId: "00000000-0000-4000-8000-0000000030f1", faceIndex: 0 }] },
+    // These byte boundaries deliberately cross Latin, CJK, Arabic and Emoji
+    // without splitting a scalar. All four runs keep identical advances so
+    // the professional fixture exercises paint-only Style Run export too.
+    textProperties: { runs: [
+      { start: 0, end: 10, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, color: { space: "srgb", components: [.059, .09, .165], alpha: 1 } },
+      { start: 10, end: 20, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, color: { space: "srgb", components: [.109, .24, .59], alpha: 1 } },
+      { start: 20, end: 34, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, color: { space: "srgb", components: [.49, .08, .2], alpha: 1 } },
+      { start: 34, end: 38, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, color: { space: "srgb", components: [.78, .35, .05], alpha: 1 } },
+    ], paragraph: { alignment: "left", lineHeight: 26, paragraphSpacing: 0 }, autoSize: "height", fallbackFonts: [{ assetId: "00000000-0000-4000-8000-0000000030f1", faceIndex: 0 }] },
   });
   const paragraph = fixtureNode("text", "00000000-0000-4000-8000-000000003006", "Multilingual paragraphs", 8, 44, {
     parentId: layoutThree.id, width: 190, height: 64, fill: "#334155", text: "RTL: مرحبا بالعالم\nEmoji: 👩‍💻 é",
@@ -58,11 +66,28 @@ export function createPhase2ProfessionalCompositeFixture(): Phase2ProfessionalCo
       { backgroundBlur: { radius: 12, visible: true } },
     ],
   });
-  const mask = fixtureNode("ellipse", "00000000-0000-4000-8000-000000003009", "Alpha mask", 500, 300, {
-    parentId: root.id, width: 160, height: 150, fill: "#ffffff", stroke: "transparent", strokeWidth: 0, isMask: true,
+  // This intentionally contains only the SVG-native ordered effects. The
+  // larger card above remains the explicit sidecar/fallback case for
+  // Background Blur within a mixed stack.
+  const composedEffectBar = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003022", "Composed layer blur and shadow", 36, 472, {
+    parentId: root.id, width: 400, height: 18, fill: "#334155", stroke: "transparent", strokeWidth: 0, radius: 8,
+    effectStack: [
+      { layerBlur: { radius: 2, visible: true } },
+      { dropShadow: { offsetX: 0, offsetY: 3, blurRadius: 6, spread: 0, color: black25, visible: true } },
+      { innerShadow: { offsetX: -2, offsetY: 1, blurRadius: 4, spread: 1, color: white35, visible: true } },
+    ],
   });
-  const maskedTarget = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003010", "Masked texture target", 480, 282, {
-    parentId: root.id, width: 320, height: 190, fill: "#ec4899", stroke: "#831843", strokeWidth: 3, radius: 28,
+  // An alpha mask applies to its following siblings within one parent. Keep
+  // each mask run in a Group so unrelated root-level artwork is not silently
+  // swallowed by the run in SVG/PNG/PDF while the canvas uses another path.
+  const maskedRun = fixtureNode("group", "00000000-0000-4000-8000-000000003023", "Masked texture run", 480, 282, {
+    parentId: root.id, width: 320, height: 190, fill: "transparent", stroke: "transparent", strokeWidth: 0,
+  });
+  const mask = fixtureNode("ellipse", "00000000-0000-4000-8000-000000003009", "Alpha mask", 20, 18, {
+    parentId: maskedRun.id, width: 160, height: 150, fill: "#ffffff", stroke: "transparent", strokeWidth: 0, isMask: true,
+  });
+  const maskedTarget = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003010", "Masked texture target", 0, 0, {
+    parentId: maskedRun.id, width: 320, height: 190, fill: "#ec4899", stroke: "#831843", strokeWidth: 3, radius: 28,
   });
   const image = fixtureNode("image", "00000000-0000-4000-8000-000000003011", "Seeded image asset", 36, 500, {
     parentId: root.id, width: 180, height: 112, assetId: "00000000-0000-4000-8000-0000000030a2", fill: "#dbeafe", stroke: "#60a5fa", strokeWidth: 2,
@@ -78,15 +103,18 @@ export function createPhase2ProfessionalCompositeFixture(): Phase2ProfessionalCo
   const outline = vectorNode("00000000-0000-4000-8000-000000003017", "Outline stroke result", 620, 514, root.id, "#c4b5fd");
   // Keep this second sibling run after all ordinary content so it exercises
   // two independent alpha masks without changing the first mask's targets.
-  const independentMask = fixtureNode("ellipse", "00000000-0000-4000-8000-000000003020", "Independent alpha mask", 748, 530, {
-    parentId: root.id, width: 132, height: 112, fill: "#ffffff", stroke: "transparent", strokeWidth: 0, isMask: true,
+  const independentlyMaskedRun = fixtureNode("group", "00000000-0000-4000-8000-000000003024", "Independently masked badge run", 718, 512, {
+    parentId: root.id, width: 190, height: 146, fill: "transparent", stroke: "transparent", strokeWidth: 0,
   });
-  const independentlyMaskedBadge = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003021", "Independently masked badge", 718, 512, {
-    parentId: root.id, width: 190, height: 146, fill: "#14b8a6", stroke: "#115e59", strokeWidth: 3, radius: 22,
+  const independentMask = fixtureNode("ellipse", "00000000-0000-4000-8000-000000003020", "Independent alpha mask", 30, 18, {
+    parentId: independentlyMaskedRun.id, width: 132, height: 112, fill: "#ffffff", stroke: "transparent", strokeWidth: 0, isMask: true,
+  });
+  const independentlyMaskedBadge = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003021", "Independently masked badge", 0, 0, {
+    parentId: independentlyMaskedRun.id, width: 190, height: 146, fill: "#14b8a6", stroke: "#115e59", strokeWidth: 3, radius: 22,
   });
   const slice = fixtureNode("slice", "00000000-0000-4000-8000-000000003018", "Professional export Slice", 452, 28, { parentId: root.id, width: 370, height: 470, rotation: -4, fill: "transparent", stroke: "transparent", strokeWidth: 0 });
 
-  return { format: "makefigma-phase2-professional-composite-fixture-v1", name: PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME, viewport: { x: 0, y: 0, zoom: 1 }, assets: fixtureAssets.map((asset) => ({ ...asset })), nodes: [root, layoutOne, layoutTwo, layoutThree, title, paragraph, avatar, effectCard, mask, maskedTarget, image, missingImage, polygon, star, boolean, booleanLeft, booleanRight, outline, independentMask, independentlyMaskedBadge, slice] };
+  return { format: "makefigma-phase2-professional-composite-fixture-v1", name: PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME, viewport: { x: 0, y: 0, zoom: 1 }, assets: fixtureAssets.map((asset) => ({ ...asset })), nodes: [root, layoutOne, layoutTwo, layoutThree, title, paragraph, avatar, effectCard, composedEffectBar, maskedRun, mask, maskedTarget, image, missingImage, polygon, star, boolean, booleanLeft, booleanRight, outline, independentlyMaskedRun, independentMask, independentlyMaskedBadge, slice] };
 }
 
 function fixtureNode(kind: CanvasNode["kind"], id: string, name: string, x: number, y: number, patch: Partial<CanvasNode>): CanvasNode {
@@ -96,7 +124,18 @@ function fixtureNode(kind: CanvasNode["kind"], id: string, name: string, x: numb
   // export look blank. Keep x/y as the human-readable local fallback and make
   // the shared Canvas/SVG world-matrix resolver the actual source of position.
   const relativeTransform = patch.parentId ? { a: 1, b: 0, c: 0, d: 1, e: x, f: y } : undefined;
-  return { ...createNode(kind, x, y), id, name, ...patch, relativeTransform };
+  const node = { ...createNode(kind, x, y), id, name, ...patch, relativeTransform };
+  // `createNode` also materializes a Canonical display color for its preset.
+  // A fixture override of the legacy CSS fallback must replace that matching
+  // color, otherwise the Protobuf bridge correctly prefers the stale preset
+  // color and all browser/export renderers agree on the *wrong* appearance.
+  return {
+    ...node,
+    fillColor: patch.fill === undefined ? node.fillColor : documentColorFromCssHex(patch.fill),
+    fillGradient: patch.fill === undefined ? node.fillGradient : undefined,
+    strokeColor: patch.stroke === undefined ? node.strokeColor : documentColorFromCssHex(patch.stroke),
+    strokeGradient: patch.stroke === undefined ? node.strokeGradient : undefined,
+  };
 }
 
 function vectorNode(id: string, name: string, x: number, y: number, parentId: string, fill: string): CanvasNode {

@@ -15,6 +15,18 @@ describe("viewport record recovery", () => {
   it("leaves a Core document untouched when a viewport write is absent or stale", () => {
     expect(applyViewportRecord(snapshot, undefined)).toBe(snapshot);
   });
+
+  it("restores the active page and its page-scoped viewports", () => {
+    const pageViewports = {
+      "page-1": { x: 0, y: 0, zoom: 1 },
+      "page-2": { x: -1150, y: -648, zoom: .26 },
+    };
+    expect(applyViewportRecord(snapshot, { ...record, activePageId: "page-2", pageViewports })).toMatchObject({
+      activePageId: "page-2",
+      pageViewports,
+      viewport: record.viewport,
+    });
+  });
 });
 
 describe("remote root adoption", () => {

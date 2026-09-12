@@ -7,6 +7,9 @@ import { outsetRoundedRectRadii } from "./aligned-rounded-rect";
 import { isEffectivelyLocked } from "./hierarchy-lock";
 import { nodeParametricShape, parametricShapePoints, pointInPolygon } from "./parametric-shape";
 import { vectorPathContains } from "./vector-path";
+import { connectorPathContains, connectorPathForNode } from "./connector-path";
+import { connectorDecorationContains, connectorLabelContains } from "./connector-presentation";
+import { shapeWithTextContains } from "./shape-with-text-path";
 
 export type WorldPoint = Readonly<{ x: number; y: number }>;
 
@@ -18,7 +21,11 @@ export type WorldPoint = Readonly<{ x: number; y: number }>;
 export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boolean {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height) || node.width <= 0) return false;
   const local = toLocalPoint(node, point);
-  if (node.kind === "line") {
+  if (node.kind === "connector") {
+    const path = connectorPathForNode(node);
+    if (path) return connectorPathContains(path, local, Math.max(4, node.strokeWidth / 2)) || connectorDecorationContains(node, path, local) || connectorLabelContains(node, path, local);
+  }
+  if (node.kind === "line" || node.kind === "connector") {
     const startDecoration = isDecorativeCap(node.strokeCapStart) ? node.strokeCapStart : undefined;
     const endDecoration = isDecorativeCap(node.strokeCapEnd) ? node.strokeCapEnd : undefined;
     const hasEndpointDecoration = Boolean(startDecoration || endDecoration);
@@ -69,6 +76,10 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boo
     return ellipseContains(local, node.width, node.height, extent);
   }
   if (node.kind === "vector" && node.vectorPath) return vectorPathContains(node.vectorPath, local);
+  if (node.kind === "shapeWithText") {
+    const contains = shapeWithTextContains(node.shapeWithTextType, node.width, node.height, local);
+    if (contains !== undefined) return contains;
+  }
   const parametricShape = nodeParametricShape(node);
   if (parametricShape) return pointInPolygon(local, parametricShapePoints(node.width, node.height, parametricShape));
   if (node.kind === "frame" || node.kind === "rectangle" || node.kind === "section") return roundedRectContains(local, node.width, node.height, node.radius, node.cornerRadii, node.cornerSmoothing);
@@ -127,7 +138,7 @@ function toLocalPoint(node: CanvasNode, point: WorldPoint): WorldPoint {
   const radians = (Number.isFinite(node.rotation) ? node.rotation : 0) * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
-  if (node.kind === "line") {
+  if (node.kind === "line" || node.kind === "connector") {
     const dx = point.x - node.x;
     const dy = point.y - node.y;
     return { x: cos * dx + sin * dy, y: -sin * dx + cos * dy };

@@ -1,0 +1,57 @@
+{
+  "version": "phase2-multipage-pdf-v1",
+  "document": {
+    "children": [
+      {
+        "id": "0:100",
+        "type": "CANVAS",
+        "name": "Mask delivery page",
+        "children": [
+          {
+            "id": "100:1",
+            "type": "ELLIPSE",
+            "name": "Alpha source",
+            "isMask": true,
+            "maskType": "ALPHA",
+            "relativeTransform": [[1, 0, 32], [0, 1, 24]],
+            "absoluteBoundingBox": { "x": 32, "y": 24, "width": 160, "height": 110 },
+            "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1, "a": 1 } }]
+          },
+          {
+            "id": "100:2",
+            "type": "RECTANGLE",
+            "name": "Masked magenta target",
+            "relativeTransform": [[1, 0, 0], [0, 1, 0]],
+            "absoluteBoundingBox": { "x": 0, "y": 0, "width": 240, "height": 160 },
+            "cornerRadius": 20,
+            "fills": [{ "type": "SOLID", "color": { "r": 0.925, "g": 0.282, "b": 0.596, "a": 0.72 } }]
+          }
+        ]
+      },
+      {
+        "id": "0:101",
+        "type": "CANVAS",
+        "name": "Matte delivery page",
+        "children": [
+          {
+            "id": "101:1",
+            "type": "RECTANGLE",
+            "name": "Opaque teal card",
+            "relativeTransform": [[1, 0, 12], [0, 1, 18]],
+            "absoluteBoundingBox": { "x": 12, "y": 18, "width": 220, "height": 130 },
+            "cornerRadius": 16,
+            "fills": [{ "type": "SOLID", "color": { "r": 0.078, "g": 0.72, "b": 0.65, "a": 1 } }]
+          },
+          {
+            "id": "101:2",
+            "type": "ELLIPSE",
+            "name": "Blue seal",
+            "relativeTransform": [[1, 0, 72], [0, 1, 46]],
+            "absoluteBoundingBox": { "x": 72, "y": 46, "width": 96, "height": 74 },
+            "fills": [{ "type": "SOLID", "color": { "r": 0.22, "g": 0.64, "b": 0.96, "a": 1 } }]
+          }
+        ]
+      }
+    ]
+  }
+}

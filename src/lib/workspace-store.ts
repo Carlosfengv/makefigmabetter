@@ -1,6 +1,7 @@
 import { createId } from "./editor-protocol";
 
 export const DEMO_WORKSPACE_KEY = "design-lab-2026";
+export const TEST_OPERATIONS_DASHBOARD_ID = "6e0f7a4b-3e8b-4e7f-a1fd-4cf216c8db91";
 
 // The workspace catalogue lives in an independently deployable backend
 // (services/workspace-api), reached same-origin through the Next `/workspace-api`
@@ -64,12 +65,22 @@ export function createSeedWorkspace(key: string): WorkspaceData {
     revision: 1,
     projects,
     documents: [
+      { id: TEST_OPERATIONS_DASHBOARD_ID, workspaceId, projectId: projects[0].id, name: "测试运营后台 Dashboard", status: "active", version: 1, createdAt: date(2), updatedAt: date(0), lastOpenedAt: date(0), thumbnail: "mint" },
       { id: "c46e30b5-4e63-4ec4-83ba-6b0fa3c9a7df", workspaceId, projectId: projects[0].id, name: "Orbit 卡片探索", status: "active", version: 4, createdAt: date(96), updatedAt: date(1), lastOpenedAt: date(1), thumbnail: "sun" },
       { id: "7b1d7e17-a0da-43d1-b499-eb46a48a1b70", workspaceId, projectId: projects[0].id, name: "设计系统：颜色与排版", status: "active", version: 8, createdAt: date(144), updatedAt: date(5), lastOpenedAt: date(5), thumbnail: "violet" },
       { id: "554d0985-f8b1-4e4c-9eef-920ce46e4846", workspaceId, projectId: projects[1].id, name: "新功能发布页面", status: "active", version: 2, createdAt: date(48), updatedAt: date(18), lastOpenedAt: date(18), thumbnail: "mint" },
       { id: "91914309-6b8c-437c-9c0c-fad11307bbfc", workspaceId, name: "移动端流程草图", status: "active", version: 1, createdAt: date(72), updatedAt: date(36), thumbnail: "sand" },
     ],
   };
+}
+
+/** Keeps the demo discoverable in existing local test workspaces created before
+ * the dashboard prototype was introduced, without rewriting user documents. */
+function includeTestOperationsDashboard(workspace: WorkspaceData): WorkspaceData {
+  if (workspace.documents.some((document) => document.id === TEST_OPERATIONS_DASHBOARD_ID)) return workspace;
+  const template = createSeedWorkspace(workspace.key).documents.find((document) => document.id === TEST_OPERATIONS_DASHBOARD_ID);
+  if (!template) return workspace;
+  return { ...workspace, documents: [template, ...workspace.documents] };
 }
 
 export function loadWorkspace(key: string): WorkspaceData | undefined {
@@ -80,7 +91,11 @@ export function loadWorkspace(key: string): WorkspaceData | undefined {
     window.localStorage.setItem(storageKey(key), JSON.stringify(initial));
     return initial;
   }
-  try { return JSON.parse(stored) as WorkspaceData; } catch { return undefined; }
+  try {
+    const workspace = includeTestOperationsDashboard(JSON.parse(stored) as WorkspaceData);
+    window.localStorage.setItem(storageKey(key), JSON.stringify(workspace));
+    return workspace;
+  } catch { return undefined; }
 }
 
 type WorkspaceSaveOptions = { suppressConflict?: boolean };
@@ -166,7 +181,7 @@ export async function fetchWorkspace(key: string, { allowCachedFallback = true }
     // link as a nonexistent workspace while the independent API restarts.
     if (response.status === 404) return undefined;
     if (!response.ok) return allowCachedFallback ? loadWorkspace(key) : undefined;
-    const workspace = await response.json() as WorkspaceData;
+    const workspace = includeTestOperationsDashboard(await response.json() as WorkspaceData);
     serverRevisions.set(key, workspace.revision);
     window.localStorage.setItem(storageKey(key), JSON.stringify(workspace));
     return workspace;

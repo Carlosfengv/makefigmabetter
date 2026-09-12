@@ -1,4 +1,4 @@
-import { BlendMode, ConstraintType, LayoutAlignment, LayoutMode, LayoutSizing, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap } from "@makefigma/protocol-types";
+import { BlendMode, ConstraintType, LayoutAlignment, LayoutMode, LayoutSizing, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -15,6 +15,16 @@ describe("protocol operation codec", () => {
     expect(batch.operations[0].createNode?.node).toMatchObject({ name: node.name, kind: NodeKind.NODE_KIND_RECTANGLE, nodeId: idBytes(id), pageId: idBytes(node.pageId!) });
   });
 
+  it("serializes an imported Page before its scene nodes in one remote operation batch", () => {
+    const page = { id: "00000000-0000-4000-8000-0000000000a0", name: "Imported", positionId: "40000000000000000000000000000000:00000000000000000000000000000000" };
+    const node = { ...createNode("rectangle", 10, 20), id, pageId: page.id, positionId: "80000000000000000000000000000000:00000000000000000000000000000000" };
+    const resolved = resolveCoreBatch([], [{ type: "create", node }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{ type: "createPage", page }, ...resolved!.batch]));
+
+    expect(batch.operations[0].createPage?.page).toMatchObject({ pageId: idBytes(page.id), name: "Imported" });
+    expect(batch.operations[1].createNode?.node).toMatchObject({ pageId: idBytes(page.id), nodeId: idBytes(id) });
+  });
+
   it("serializes a zero-height line with the generated Line node kind", () => {
     const node = { ...createNode("line", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const resolved = resolveCoreBatch([], [{ type: "create", node }]);
@@ -28,6 +38,155 @@ describe("protocol operation codec", () => {
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
 
     expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SLICE, width: 320, height: 220, strokeWidth: 0 });
+  });
+
+  it("serializes beta TextPath with its dedicated node kind and metadata", () => {
+    const node = { ...createNode("textPath", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", textPathMetadata: { startSegment: 1, startPosition: .5, autoRename: false, textAlignHorizontal: "RIGHT" as const, textAlignVertical: "CENTER" as const } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_TEXT_PATH, vectorPath: expect.anything() });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.text-path.metadata.v1"])).toContain('"startSegment":1');
+  });
+
+  it("serializes beta TransformGroup with repeat metadata", () => {
+    const node = { ...createNode("transformGroup", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", transformModifiers: [{ type: "REPEAT" as const, count: 2, unitType: "PIXELS" as const, offset: 10, repeatType: "LINEAR" as const, axis: "VERTICAL" as const }] };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_TRANSFORM_GROUP });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.transform-group.modifiers.v1"])).toContain('"repeatType":"LINEAR"');
+  });
+
+  it("serializes WashiTape with its dedicated generated node kind", () => {
+    const node = { ...createNode("washiTape", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_WASHI_TAPE });
+  });
+
+  it("serializes Widget identity and synced state metadata", () => {
+    const node = { ...createNode("widget", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", widgetMetadata: { widgetId: "com.example.widget", syncedState: { votes: 1 }, syncedMap: {} } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_WIDGET });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.widget.metadata.v1"])).toContain("com.example.widget");
+  });
+
+  it("serializes CodeBlock with its dedicated generated node kind and language extension", () => {
+    const node = { ...createNode("codeBlock", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", text: "const x = 1", codeLanguage: "TYPESCRIPT" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_CODE_BLOCK, text: "const x = 1" });
+    expect(batch.operations[0].createNode?.node?.extensions["figma.code-block.language.v1"]).toEqual(Uint8Array.from(new TextEncoder().encode("TYPESCRIPT")));
+  });
+
+  it("serializes Component with its dedicated node kind and durable library metadata", () => {
+    const node = {
+      ...createNode("component", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000",
+      componentMetadata: { key: "component-key", remote: false, description: "Card", descriptionMarkdown: "**Card**", documentationLinks: [{ uri: "https://design.example/card" }], componentPropertyDefinitions: {} },
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_COMPONENT, clipsContent: true });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.component.metadata.v1"])).toContain('"key":"component-key"');
+  });
+
+  it("serializes ComponentSet with its dedicated node kind and variant metadata", () => {
+    const node = { ...createNode("componentSet", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", componentSetMetadata: { key: "set", remote: false, description: "Variants", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: { State: { values: ["Default"] } } } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_COMPONENT_SET, clipsContent: true });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.component-set.metadata.v1"])).toContain("State");
+  });
+
+  it("serializes Connector with its dedicated node kind and relationship metadata", () => {
+    const node = { ...createNode("connector", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", connectorMetadata: { lineType: "ELBOWED" as const, start: { endpointNodeId: "a", x: 0, y: 0 }, end: { endpointNodeId: "b", x: 160, y: 0 }, startStrokeCap: "NONE", endStrokeCap: "ARROW_EQUILATERAL", text: "links" } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_CONNECTOR, height: 0 });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.connector.metadata.v1"])).toContain("ELBOWED");
+  });
+
+  it("serializes Embed with its dedicated node kind and readonly preview metadata", () => {
+    const node = { ...createNode("embed", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: null, title: "Demo", provider: "Example" } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_EMBED, width: 360, height: 240 });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.embed.metadata.v1"])).toContain("player.example");
+  });
+
+  it("serializes Highlight with its dedicated node kind, path, and handle metadata", () => {
+    const node = { ...createNode("highlight", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", highlightHandleMirroring: "ANGLE" as const };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_HIGHLIGHT, vectorPath: expect.anything() });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.highlight.handle-mirroring.v1"])).toBe("ANGLE");
+  });
+
+  it("serializes InteractiveSlideElement with its readonly interactive type", () => {
+    const node = { ...createNode("interactiveSlideElement", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", interactiveSlideElementType: "POLL" as const };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_INTERACTIVE_SLIDE_ELEMENT });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.interactive-slide-element.type.v1"])).toBe("POLL");
+  });
+
+  it("serializes LinkUnfurl with its dedicated node kind and rich-preview metadata", () => {
+    const node = { ...createNode("linkUnfurl", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", linkUnfurlMetadata: { url: "https://example.com/story", title: "Story", description: "Preview", provider: "Example" } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_LINK_UNFURL });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.link-unfurl.metadata.v1"])).toContain("example.com/story");
+  });
+
+  it("serializes Media with its dedicated node kind, GIF resource, and content hash", () => {
+    const node = { ...createNode("media", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", assetId: "00000000-0000-4000-8000-000000000002", mediaMetadata: { hash: "gif-hash" } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_MEDIA, assetId: expect.anything() });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.media.metadata.v1"])).toContain("gif-hash");
+  });
+
+  it("serializes ShapeWithText with its dedicated node kind and selector metadata", () => {
+    const node = { ...createNode("shapeWithText", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", shapeWithTextType: "DIAMOND" as const, text: "Decision" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SHAPE_WITH_TEXT, text: "Decision" });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.shape-with-text.type.v1"])).toBe("DIAMOND");
+  });
+
+  it("serializes an imported SlideGrid with its dedicated read-only node kind", () => {
+    const node = { ...createNode("slideGrid", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SLIDE_GRID });
+  });
+
+  it("serializes Slide with fixed geometry and its transition extension", () => {
+    const node = { ...createNode("slide", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SLIDE, width: 1920, height: 1080 });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.slide.metadata.v1"])).toContain("ON_CLICK");
+  });
+
+  it("serializes SlideRow with its dedicated structural node kind", () => {
+    const node = { ...createNode("slideRow", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SLIDE_ROW });
+  });
+
+  it("serializes Stamp with its dedicated node kind and name", () => {
+    const node = { ...createNode("stamp", 10, 20), id, name: "Heart", pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_STAMP, name: "Heart" });
+  });
+
+  it("serializes Sticky's dedicated type and metadata extension", () => {
+    const node = { ...createNode("sticky", 10, 20), id, text: "Vote", pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_STICKY, text: "Vote" });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.sticky.metadata.v1"])).toContain("authorVisible");
+  });
+
+  it("serializes Instance with its dedicated node kind and component link metadata", () => {
+    const node = { ...createNode("instance", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", instanceMetadata: { mainComponentId: "00000000-0000-4000-8000-000000000002", scaleFactor: 1, componentProperties: { enabled: true }, overrides: [], isExposedInstance: false } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_INSTANCE, clipsContent: true });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.instance.metadata.v1"])).toContain('"mainComponentId"');
+  });
+
+  it("serializes Slot with its dedicated node kind and property metadata", () => {
+    const node = { ...createNode("slot", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", slotMetadata: { propertyName: "Content" } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_SLOT, clipsContent: true });
+    expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.slot.metadata.v1"])).toContain("Content");
   });
 
   it("serializes Blend Mode for both a created node and an appearance update", () => {
@@ -70,6 +229,19 @@ describe("protocol operation codec", () => {
     );
 
     expect(batch.operations[0].setMask).toEqual({ nodeId: idBytes(id), enabled: true });
+  });
+
+  it("preserves an alpha mask when the node enters Core through creation", () => {
+    const mask = { ...createNode("rectangle", 10, 20), id, isMask: true };
+    const target = { ...createNode("rectangle", 30, 20), id: "00000000-0000-4000-8000-000000000002" };
+    const batch = ResolvedOperationBatch.decode(
+      encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: mask }, { type: "create", node: target }])!.batch),
+    );
+
+    expect(batch.operations).toHaveLength(3);
+    expect(batch.operations[0].createNode?.node?.nodeId).toEqual(idBytes(id));
+    expect(batch.operations[1].createNode?.node?.nodeId).toEqual(idBytes(target.id));
+    expect(batch.operations[2].setMask).toEqual({ nodeId: idBytes(id), enabled: true });
   });
 
   it("serializes a canonical Drop Shadow on create and inspector update", () => {
@@ -167,18 +339,35 @@ describe("protocol operation codec", () => {
 
   it("serializes Auto Layout as an explicit replayable Frame operation", () => {
     const autoLayout = {
-      mode: "horizontal" as const, padding: [4, 8, 12, 16] as [number, number, number, number], itemSpacing: 10, wrap: true,
-      primaryAlignment: "spaceBetween" as const, counterAlignment: "center" as const,
+      mode: "horizontal" as const, padding: [4, 8, 12, 16] as [number, number, number, number], itemSpacing: 10, trackSpacing: 14, trackAlignment: "spaceBetween" as const, wrap: true,
+      primaryAlignment: "spaceBetween" as const, counterAlignment: "baseline" as const,
       primarySizing: "fixed" as const, counterSizing: "fixed" as const,
-      minWidth: 120, maxHeight: 320, absolute: false,
+      minWidth: 120, maxHeight: 320, absolute: false, alignSelf: "end" as const,
     };
     const node = { ...createNode("frame", 10, 20), id, autoLayout };
     const created = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
-    const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { autoLayout: { ...autoLayout, wrap: false, mode: "vertical" } } }])!.batch));
+    const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { autoLayout: { ...autoLayout, wrap: false, mode: "vertical", counterAlignment: "start" } } }])!.batch));
 
-    expect(created.operations[0].createNode?.node?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_HORIZONTAL, paddingTop: 4, paddingLeft: 16, itemSpacing: 10, wrap: true });
-    expect(created.operations[1].setAutoLayout?.autoLayout).toMatchObject({ primaryAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN, counterAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_CENTER, primarySizing: LayoutSizing.LAYOUT_SIZING_FIXED, minWidth: 120, maxHeight: 320 });
+    expect(created.operations[0].createNode?.node?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_HORIZONTAL, paddingTop: 4, paddingLeft: 16, itemSpacing: 10, trackSpacing: 14, wrapTrackAlignment: WrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN, wrap: true });
+    expect(created.operations[1].setAutoLayout?.autoLayout).toMatchObject({ primaryAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN, counterAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_BASELINE, primarySizing: LayoutSizing.LAYOUT_SIZING_FIXED, minWidth: 120, maxHeight: 320, alignSelf: LayoutAlignment.LAYOUT_ALIGNMENT_END });
     expect(updated.operations.find((operation) => operation.setAutoLayout)?.setAutoLayout?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_VERTICAL, wrap: false });
+  });
+
+  it("serializes a flow child's align-self relationship as a durable operation", () => {
+    const parent = { ...createNode("frame", 10, 20), id, autoLayout: {
+      mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false,
+      primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false,
+    } };
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const child = { ...createNode("rectangle", 10, 20), id: childId, parentId: parent.id, autoLayout: {
+      mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false,
+      primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false, alignSelf: "end" as const,
+    } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([parent, child], [{ type: "update", id: child.id, patch: { autoLayout: child.autoLayout } }])!.batch));
+
+    expect(batch.operations.find((operation) => operation.setAutoLayout)?.setAutoLayout).toMatchObject({
+      nodeId: idBytes(childId), autoLayout: { mode: LayoutMode.LAYOUT_MODE_NONE, alignSelf: LayoutAlignment.LAYOUT_ALIGNMENT_END },
+    });
   });
 
   it("does not coerce hydrated null Auto Layout bounds to a zero-size constraint", () => {

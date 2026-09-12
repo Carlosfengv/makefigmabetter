@@ -20,10 +20,28 @@ export function resolveRenderQuality(previous: RenderQualityState, zoom: number,
 export function renderDpr(deviceDpr: number, state: RenderQualityState): number {
   const native = Math.max(.5, Number.isFinite(deviceDpr) ? deviceDpr : 1);
   if (state.tier === "settled") return native;
-  // Canvas overlays (Mask/Clip/Effect) are the interactive hot path. A 70%
-  // transient backing store keeps their frame budget below the Phase 2 gate at
-  // normal and near zoom; settled rendering restores the native DPR after the
-  // gesture has been idle for 160 ms.
-  const factor = state.zoomBucket === "far" ? .65 : .7;
+  // Canvas overlays (Mask/Clip/Effect) are the interactive hot path. A 50%
+  // transient backing store keeps the professional composite below the Phase 2
+  // input budget without changing the settled image; native DPR is restored
+  // after the gesture has been idle for 160 ms.
+  const factor = .5;
   return Math.max(.5, Math.min(native, native * factor));
+}
+
+const MAX_VECTOR_PRESENTATION_TOLERANCE = .25;
+const MIN_VECTOR_PRESENTATION_TOLERANCE = .0025;
+
+/**
+ * Convert a quarter-device-pixel curve error budget into document units.
+ * Power-of-two buckets keep zoom gestures from producing an unbounded mesh
+ * cache while guaranteeing that the selected tolerance never exceeds the
+ * current screen-space error budget.
+ */
+export function vectorPresentationTolerance(zoom: number, dpr: number): number {
+  const scale = Math.max(.01, Number.isFinite(zoom) ? zoom : 1)
+    * Math.max(.5, Number.isFinite(dpr) ? dpr : 1);
+  const raw = Math.min(MAX_VECTOR_PRESENTATION_TOLERANCE, .25 / scale);
+  if (raw >= MAX_VECTOR_PRESENTATION_TOLERANCE) return MAX_VECTOR_PRESENTATION_TOLERANCE;
+  const bucket = MAX_VECTOR_PRESENTATION_TOLERANCE / 2 ** Math.ceil(Math.log2(MAX_VECTOR_PRESENTATION_TOLERANCE / raw));
+  return Math.max(MIN_VECTOR_PRESENTATION_TOLERANCE, bucket);
 }

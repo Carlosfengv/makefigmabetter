@@ -49,7 +49,7 @@ export function nodeRelativeTransform(node: Pick<CanvasNode, "kind" | "x" | "y" 
   const radians = node.rotation * Math.PI / 180;
   const cosine = Math.cos(radians);
   const sine = Math.sin(radians);
-  if (node.kind === "line") return normalizeAffine({ a: cosine, b: sine, c: -sine, d: cosine, e: node.x, f: node.y });
+  if (node.kind === "line" || node.kind === "connector") return normalizeAffine({ a: cosine, b: sine, c: -sine, d: cosine, e: node.x, f: node.y });
   const centerX = node.width / 2;
   const centerY = node.height / 2;
   return normalizeAffine({
@@ -74,39 +74,76 @@ export function nodeRelativeTransform(node: Pick<CanvasNode, "kind" | "x" | "y" 
  * subtree to coexist in the same snapshot. Cycles and invalid transforms are
  * rejected rather than guessed.
  */
-export function worldTransformForNode(nodes: readonly CanvasNode[], id: string): AffineMatrix | undefined {
+function createWorldTransformResolver(nodes: readonly CanvasNode[]) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const visited = new Set<string>();
-  let cursor = byId.get(id);
-  while (cursor) {
-    if (visited.has(cursor.id)) return undefined;
-    visited.add(cursor.id);
-    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
-  }
   const resolved = new Map<string, AffineMatrix>();
+  const resolving = new Set<string>();
+  const invalid = new Set<string>();
+  const ancestryState = new Map<string, "resolving" | "valid" | "invalid">();
+  const hasValidAncestry = (id: string): boolean => {
+    const state = ancestryState.get(id);
+    if (state === "valid") return true;
+    if (state === "invalid" || state === "resolving") return false;
+    const node = byId.get(id);
+    if (!node) return true;
+    ancestryState.set(id, "resolving");
+    const valid = !node.parentId || !byId.has(node.parentId) || hasValidAncestry(node.parentId);
+    ancestryState.set(id, valid ? "valid" : "invalid");
+    return valid;
+  };
   const resolve = (node: CanvasNode): AffineMatrix | undefined => {
     const cached = resolved.get(node.id);
     if (cached) return cached;
+    if (invalid.has(node.id) || resolving.has(node.id) || !hasValidAncestry(node.id)) {
+      invalid.add(node.id);
+      return undefined;
+    }
+    resolving.add(node.id);
     const local = nodeRelativeTransform(node);
-    if (!local) return undefined;
+    if (!local) {
+      resolving.delete(node.id);
+      invalid.add(node.id);
+      return undefined;
+    }
     if (!node.relativeTransform) {
+      resolving.delete(node.id);
       resolved.set(node.id, local);
       return local;
     }
     const parent = node.parentId ? byId.get(node.parentId) : undefined;
-    const world = parent ? resolve(parent) : local;
-    const result = parent ? multiplyAffine(world!, local) : world;
+    const parentWorld = parent ? resolve(parent) : undefined;
+    const result = parent && !parentWorld
+      ? undefined
+      : parent
+        ? multiplyAffine(parentWorld!, local)
+        : local;
+    resolving.delete(node.id);
     if (result) resolved.set(node.id, result);
+    else invalid.add(node.id);
     return result;
   };
-  const node = byId.get(id);
-  if (!node) return undefined;
-  return resolve(node);
+
+  return (id: string) => {
+    const node = byId.get(id);
+    return node ? resolve(node) : undefined;
+  };
 }
 
-export function worldBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNode): TransformBounds | undefined {
-  const transform = worldTransformForNode(nodes, node.id);
-  if (!transform) return undefined;
+export function worldTransformForNode(nodes: readonly CanvasNode[], id: string): AffineMatrix | undefined {
+  return createWorldTransformResolver(nodes)(id);
+}
+
+export function worldTransformsForNodes(nodes: readonly CanvasNode[]): ReadonlyMap<string, AffineMatrix> {
+  const resolveWorld = createWorldTransformResolver(nodes);
+  const transforms = new Map<string, AffineMatrix>();
+  nodes.forEach((node) => {
+    const transform = resolveWorld(node.id);
+    if (transform) transforms.set(node.id, transform);
+  });
+  return transforms;
+}
+
+export function worldBoundsForTransform(node: CanvasNode, transform: AffineMatrix): TransformBounds {
   const points = [
     transformPoint(transform, { x: 0, y: 0 }),
     transformPoint(transform, { x: node.width, y: 0 }),
@@ -119,6 +156,12 @@ export function worldBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNod
   };
 }
 
+export function worldBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNode): TransformBounds | undefined {
+  const transform = worldTransformForNode(nodes, node.id);
+  if (!transform) return undefined;
+  return worldBoundsForTransform(node, transform);
+}
+
 /**
  * Produces the existing Canvas projection fields for the common transform
  * subset (translation, rotation and positive non-skew scale). During
@@ -126,9 +169,7 @@ export function worldBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNod
  * legacy projection instead of being approximated incorrectly. Full skew and
  * reflection painting will move to the matrix-native Canvas pass.
  */
-export function worldSpaceProjectionNode(nodes: readonly CanvasNode[], node: CanvasNode): CanvasNode | undefined {
-  const world = worldTransformForNode(nodes, node.id);
-  if (!world) return undefined;
+function worldSpaceProjectionForTransform(node: CanvasNode, world: AffineMatrix): CanvasNode | undefined {
   const scaleX = Math.hypot(world.a, world.b);
   const scaleY = Math.hypot(world.c, world.d);
   const determinant = world.a * world.d - world.b * world.c;
@@ -138,7 +179,7 @@ export function worldSpaceProjectionNode(nodes: readonly CanvasNode[], node: Can
   const rotation = Math.atan2(world.b, world.a) * 180 / Math.PI;
   const width = node.width * scaleX;
   const height = node.height * scaleY;
-  if (node.kind === "line") {
+  if (node.kind === "line" || node.kind === "connector") {
     return {
       ...node,
       x: normalizeZero(world.e),
@@ -161,6 +202,22 @@ export function worldSpaceProjectionNode(nodes: readonly CanvasNode[], node: Can
     rotation: normalizeZero(rotation),
     relativeTransform: undefined,
   };
+}
+
+export function worldSpaceProjectionNode(nodes: readonly CanvasNode[], node: CanvasNode): CanvasNode | undefined {
+  const world = worldTransformForNode(nodes, node.id);
+  return world ? worldSpaceProjectionForTransform(node, world) : undefined;
+}
+
+/** Projects an entire document with one shared ancestry cache. This is the
+ * switch-page/render-index path; resolving every node independently would
+ * rebuild the same id map and parent chain thousands of times. */
+export function worldSpaceProjectionNodes(nodes: readonly CanvasNode[]): CanvasNode[] {
+  const resolveWorld = createWorldTransformResolver(nodes);
+  return nodes.map((node) => {
+    const world = resolveWorld(node.id);
+    return world ? worldSpaceProjectionForTransform(node, world) ?? node : node;
+  });
 }
 
 /** Converts a desired world transform into the node properties required below
@@ -348,7 +405,7 @@ export function normalizeGroupBounds(
 }
 
 function isAutoLayoutFrame(node: CanvasNode | undefined) {
-  return node?.kind === "frame" && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
+  return (node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet") && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
 }
 
 function isInvertibleAffine(matrix: AffineMatrix) {

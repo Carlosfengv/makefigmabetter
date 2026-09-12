@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { IDENTITY_AFFINE, invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
+import { IDENTITY_AFFINE, invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForNode, worldSpaceProjectionNode, worldSpaceProjectionNodes, worldTransformForNode } from "./scene-transform";
 
 describe("scene transform foundation", () => {
   it("resolves a three-level relative hierarchy into deterministic world space", () => {
@@ -62,6 +62,24 @@ describe("scene transform foundation", () => {
     };
     expect(worldSpaceProjectionNode([skewed], skewed)).toBeUndefined();
     expect(worldBoundsForNode([skewed], skewed)).toEqual({ left: 20, top: 50, right: 114, bottom: 90 });
+  });
+
+  it("batch-projects a hierarchy with the same geometry as individual projection", () => {
+    const parent = { ...createNode("frame", 100, 50), id: "parent", width: 300, height: 200 };
+    const child = {
+      ...createNode("rectangle", 0, 0), id: "child", parentId: parent.id, width: 80, height: 40,
+      relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 },
+    };
+    const nodes = [parent, child];
+
+    expect(worldSpaceProjectionNodes(nodes)).toEqual(nodes.map((node) => worldSpaceProjectionNode(nodes, node) ?? node));
+  });
+
+  it("keeps valid legacy world geometry independent from an invalid parent transform", () => {
+    const invalidParent = { ...createNode("frame", 0, 0), id: "parent", relativeTransform: { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 } };
+    const legacyChild = { ...createNode("rectangle", 20, 30), id: "child", parentId: invalidParent.id };
+
+    expect(worldTransformForNode([invalidParent, legacyChild], legacyChild.id)).toMatchObject({ e: 20, f: 30 });
   });
 
   it("converts a world transform to a new parent-local transform without visual drift", () => {

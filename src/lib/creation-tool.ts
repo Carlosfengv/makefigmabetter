@@ -1,6 +1,11 @@
 import type { NodeKind, ToolKind } from "./editor-protocol";
 
-export function isCreationTool(tool: ToolKind): tool is Exclude<NodeKind, "image" | "group" | "booleanOperation"> | "arrow" {
+/** Only values that are both a Canvas node and a UI tool may reach the
+ * pointer/keyboard creation path. New non-tool NodeKinds therefore cannot
+ * accidentally widen this predicate when the document schema grows. */
+export type CreationToolNodeKind = Extract<NodeKind, ToolKind>;
+
+export function isCreationTool(tool: ToolKind): tool is CreationToolNodeKind | "arrow" {
   return tool === "frame" || tool === "section" || tool === "rectangle" || tool === "ellipse" || tool === "polygon" || tool === "star" || tool === "vector" || tool === "line" || tool === "arrow" || tool === "text" || tool === "slice";
 }
 

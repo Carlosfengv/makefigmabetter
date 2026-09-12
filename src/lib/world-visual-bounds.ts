@@ -1,7 +1,9 @@
 import type { CanvasNode } from "./editor-protocol";
 import { closedShapeStrokeLocalBounds } from "./closed-shape-stroke-bounds";
 import { worldLineVisualBounds } from "./line-world-bounds";
-import { transformPoint, worldBoundsForNode, worldTransformForNode, type TransformBounds } from "./scene-transform";
+import { transformPoint, worldBoundsForNode, worldTransformForNode, type AffineMatrix, type TransformBounds } from "./scene-transform";
+
+type PrecomputedWorldGeometry = Readonly<{ transform: AffineMatrix; bounds: TransformBounds }>;
 
 /**
  * The selection/culling/export envelope for common shapes. Line already owns
@@ -10,11 +12,11 @@ import { transformPoint, worldBoundsForNode, worldTransformForNode, type Transfo
  * conservative for rotated shapes, which is desirable here: it must never
  * clip rendered paint.
  */
-export function worldVisualBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNode): TransformBounds | undefined {
-  if (node.kind === "line") return withDropShadow(nodes, node, worldLineVisualBounds(nodes, node));
+export function worldVisualBoundsForNode(nodes: readonly CanvasNode[], node: CanvasNode, precomputed?: PrecomputedWorldGeometry): TransformBounds | undefined {
+  if (node.kind === "line" || node.kind === "connector") return withDropShadow(nodes, node, worldLineVisualBounds(nodes, node, precomputed?.transform), precomputed?.transform);
   const localBounds = closedShapeStrokeLocalBounds(node);
-  if (!localBounds) return withDropShadow(nodes, node, worldBoundsForNode(nodes, node));
-  const transform = worldTransformForNode(nodes, node.id);
+  if (!localBounds) return withDropShadow(nodes, node, precomputed?.bounds ?? worldBoundsForNode(nodes, node), precomputed?.transform);
+  const transform = precomputed?.transform ?? worldTransformForNode(nodes, node.id);
   if (!transform) return undefined;
   const corners = [
     { x: localBounds.x, y: localBounds.y }, { x: localBounds.x + localBounds.width, y: localBounds.y },
@@ -23,17 +25,17 @@ export function worldVisualBoundsForNode(nodes: readonly CanvasNode[], node: Can
   return withDropShadow(nodes, node, {
     left: Math.min(...corners.map((point) => point.x)), top: Math.min(...corners.map((point) => point.y)),
     right: Math.max(...corners.map((point) => point.x)), bottom: Math.max(...corners.map((point) => point.y)),
-  });
+  }, transform);
 }
 
 /** Canvas has no spread property, but its shadow footprint and our export
  * envelope use the same conservative approximation: blur plus positive spread.
  * Offset follows the node's affine axes, so rotated nodes cannot clip a shadow. */
-function withDropShadow(nodes: readonly CanvasNode[], node: CanvasNode, bounds: TransformBounds | undefined): TransformBounds | undefined {
+function withDropShadow(nodes: readonly CanvasNode[], node: CanvasNode, bounds: TransformBounds | undefined, precomputedTransform?: AffineMatrix): TransformBounds | undefined {
   const shadows = (node.effectStack?.map((effect) => effect.dropShadow).filter((shadow): shadow is NonNullable<CanvasNode["dropShadow"]> => Boolean(shadow)) ?? (node.dropShadow ? [node.dropShadow] : []))
     .filter((shadow) => shadow.visible && shadow.color.alpha > 0);
   if (!bounds || !shadows.length) return bounds;
-  const transform = worldTransformForNode(nodes, node.id);
+  const transform = precomputedTransform ?? worldTransformForNode(nodes, node.id);
   if (!transform) return bounds;
   const scale = Math.max(Math.hypot(transform.a, transform.b), Math.hypot(transform.c, transform.d));
   return shadows.reduce((result, shadow) => {

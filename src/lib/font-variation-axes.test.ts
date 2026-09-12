@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFontVariationAxes, parseFontVariationAxes } from "./font-variation-axes";
+import { fontVariationCss, formatFontVariationAxes, parseFontVariationAxes } from "./font-variation-axes";
 
 describe("font variation axis inspector syntax", () => {
   it("accepts and canonically orders multiple finite OpenType coordinates", () => {
@@ -8,6 +8,7 @@ describe("font variation axis inspector syntax", () => {
       axes: [{ tag: "wdth", value: 92 }, { tag: "wght", value: 650 }],
     });
     expect(formatFontVariationAxes([{ tag: "wght", value: 650 }, { tag: "wdth", value: 92 }])).toBe("wdth=92, wght=650");
+    expect(fontVariationCss([{ tag: "wght", value: 650 }, { tag: "wdth", value: 92 }])).toBe('"wdth" 92, "wght" 650');
   });
 
   it("rejects ambiguous, duplicate, non-finite, and non-OpenType coordinates", () => {
@@ -15,5 +16,6 @@ describe("font variation axis inspector syntax", () => {
     expect(parseFontVariationAxes("wght=650,wght=700")).toMatchObject({ valid: false });
     expect(parseFontVariationAxes("wght=Infinity")).toMatchObject({ valid: false });
     expect(parseFontVariationAxes("wght:650")).toMatchObject({ valid: false });
+    expect(fontVariationCss([{ tag: "bad", value: 650 }, { tag: "wght", value: Number.NaN }])).toBe("normal");
   });
 });

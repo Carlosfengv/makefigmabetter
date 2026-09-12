@@ -29,7 +29,7 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
       if (index >= 0) planned[index] = { ...planned[index], ...canvasNode(node), id: planned[index].id, kind: planned[index].kind };
       return { type: "update", node };
     }
-    if (command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles") {
+    if (command.type === "createPage" || command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles" || command.type === "setExtensions") {
       return { ...command };
     }
     if (command.type === "reparent") {
