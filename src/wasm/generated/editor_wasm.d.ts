@@ -23,6 +23,12 @@ export class DocumentEngine {
      */
     create_page(transaction_id: string, base_revision: bigint, page_id: string, name: string): bigint;
     /**
+     * Creates a Page at an explicit Canonical PositionId. REST imports use
+     * this path so their source order is not replaced by ID-derived order in
+     * the browser before the equivalent protobuf operation reaches Service.
+     */
+    create_page_at_position(transaction_id: string, base_revision: bigint, page_id: string, name: string, position_id: string): bigint;
+    /**
      * `node_ids` is a comma-separated sequence of validated UUIDs. The format is
      * intentionally narrow because this is an internal Worker-to-WASM boundary.
      */
@@ -317,6 +323,7 @@ export interface InitOutput {
     readonly documentengine_create_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
     readonly documentengine_create_node_on_page: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number) => [bigint, number, number];
     readonly documentengine_create_page: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number) => [bigint, number, number];
+    readonly documentengine_create_page_at_position: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number) => [bigint, number, number];
     readonly documentengine_delete_nodes: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
     readonly documentengine_gpu_scene_instances_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly documentengine_load_snapshot_json: (a: number, b: number, c: number) => [bigint, number, number];

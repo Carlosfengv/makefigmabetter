@@ -35,6 +35,38 @@ export enum NodeKind {
   NODE_KIND_BOOLEAN_OPERATION = 12,
   /** NODE_KIND_SLICE - Non-painting canonical export region (Phase 2 G5). */
   NODE_KIND_SLICE = 13,
+  /**
+   * NODE_KIND_CODE_BLOCK - FigJam code block. Its source is stored in SceneNode.text; the language
+   * remains a forward-compatible Canonical extension.
+   */
+  NODE_KIND_CODE_BLOCK = 14,
+  /**
+   * NODE_KIND_COMPONENT - Design component. Component-specific metadata is forward-compatible
+   * extension data while child hierarchy uses the Canonical tree.
+   */
+  NODE_KIND_COMPONENT = 15,
+  NODE_KIND_INSTANCE = 16,
+  NODE_KIND_SLOT = 17,
+  NODE_KIND_COMPONENT_SET = 18,
+  NODE_KIND_CONNECTOR = 19,
+  NODE_KIND_EMBED = 20,
+  NODE_KIND_HIGHLIGHT = 21,
+  NODE_KIND_INTERACTIVE_SLIDE_ELEMENT = 22,
+  NODE_KIND_LINK_UNFURL = 23,
+  NODE_KIND_MEDIA = 24,
+  NODE_KIND_SHAPE_WITH_TEXT = 25,
+  /** NODE_KIND_SLIDE_GRID - Read-only root container in Figma Slides. Its children are Slide Rows. */
+  NODE_KIND_SLIDE_GRID = 26,
+  NODE_KIND_SLIDE = 27,
+  NODE_KIND_SLIDE_ROW = 28,
+  NODE_KIND_STAMP = 29,
+  NODE_KIND_STICKY = 30,
+  NODE_KIND_TABLE = 31,
+  NODE_KIND_TABLE_CELL = 32,
+  NODE_KIND_TEXT_PATH = 33,
+  NODE_KIND_TRANSFORM_GROUP = 34,
+  NODE_KIND_WASHI_TAPE = 35,
+  NODE_KIND_WIDGET = 36,
   UNRECOGNIZED = -1,
 }
 
@@ -119,6 +151,11 @@ export enum LayoutAlignment {
   LAYOUT_ALIGNMENT_CENTER = 2,
   LAYOUT_ALIGNMENT_END = 3,
   LAYOUT_ALIGNMENT_SPACE_BETWEEN = 4,
+  /**
+   * LAYOUT_ALIGNMENT_BASELINE - Counter-axis only on horizontal Auto Layout frames. Never use this for a
+   * primary axis or child align_self override.
+   */
+  LAYOUT_ALIGNMENT_BASELINE = 5,
   UNRECOGNIZED = -1,
 }
 
@@ -127,6 +164,14 @@ export enum LayoutSizing {
   LAYOUT_SIZING_FIXED = 1,
   LAYOUT_SIZING_HUG = 2,
   LAYOUT_SIZING_FILL = 3,
+  UNRECOGNIZED = -1,
+}
+
+/** Figma counterAxisAlignContent's Phase 2 wrap-track subset. */
+export enum WrapTrackAlignment {
+  WRAP_TRACK_ALIGNMENT_UNSPECIFIED = 0,
+  WRAP_TRACK_ALIGNMENT_AUTO = 1,
+  WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2,
   UNRECOGNIZED = -1,
 }
 
@@ -310,6 +355,27 @@ export interface AutoLayout {
   minHeight?: number | undefined;
   maxHeight?: number | undefined;
   absolute: boolean;
+  /**
+   * Child-only cross-axis override. Omitted means inherit the Frame's
+   * counter_alignment. SpaceBetween and Baseline are rejected by the
+   * Canonical validator.
+   */
+  alignSelf?:
+    | LayoutAlignment
+    | undefined;
+  /**
+   * Optional counter-axis gap between wrap tracks. Omitted preserves the
+   * historical behavior of reusing item_spacing for backwards-compatible
+   * snapshots.
+   */
+  trackSpacing?:
+    | number
+    | undefined;
+  /**
+   * Figma counterAxisAlignContent. Omission/default is AUTO; SPACE_BETWEEN is
+   * valid only when wrap is true.
+   */
+  wrapTrackAlignment?: WrapTrackAlignment | undefined;
 }
 
 export interface Color {
@@ -470,6 +536,80 @@ export interface TextProperties {
   fallbackFonts: FontReference[];
 }
 
+/**
+ * M3 prototype vocabulary. These records are append-only and intentionally
+ * separate from Player's transient navigation/overlay state. The current Core
+ * also keeps an opaque extension mirror so older engines can preserve a newer
+ * prototype value byte-for-byte rather than decoding/re-encoding unknown oneof
+ * tags.
+ */
+export interface PrototypeEmpty {
+}
+
+export interface PrototypeTimeout {
+  timeoutMs: number;
+}
+
+export interface PrototypeTrigger {
+  onClick?: PrototypeEmpty | undefined;
+  onPress?: PrototypeEmpty | undefined;
+  onHover?: PrototypeEmpty | undefined;
+  afterTimeout?: PrototypeTimeout | undefined;
+}
+
+export interface PrototypeTransition {
+  none?: PrototypeEmpty | undefined;
+  dissolve?: PrototypeTimedTransition | undefined;
+  directional?: PrototypeDirectionalTransition | undefined;
+}
+
+export interface PrototypeTimedTransition {
+  durationMs: number;
+  easing: string;
+}
+
+export interface PrototypeDirectionalTransition {
+  durationMs: number;
+  easing: string;
+  direction: string;
+}
+
+export interface PrototypeNodeAction {
+  navigation: string;
+  destinationId?: Uint8Array | undefined;
+  transition?: PrototypeTransition | undefined;
+  overlayRelativeX?: number | undefined;
+  overlayRelativeY?: number | undefined;
+}
+
+export interface PrototypeUrlAction {
+  url: string;
+}
+
+export interface PrototypeAction {
+  node?: PrototypeNodeAction | undefined;
+  back?: PrototypeEmpty | undefined;
+  close?: PrototypeEmpty | undefined;
+  url?: PrototypeUrlAction | undefined;
+}
+
+export interface PrototypeReaction {
+  trigger?: PrototypeTrigger | undefined;
+  actions: PrototypeAction[];
+}
+
+export interface PrototypeOverlayMetadata {
+  positionType: string;
+  relativeX?: number | undefined;
+  relativeY?: number | undefined;
+  backgroundInteraction: string;
+}
+
+export interface PrototypeMetadata {
+  startingPoint: boolean;
+  overlay?: PrototypeOverlayMetadata | undefined;
+}
+
 export interface SceneNode {
   nodeId: Uint8Array;
   parentId?: Uint8Array | undefined;
@@ -542,6 +682,8 @@ export interface SceneNode {
   effectStack: Effect[];
   autoLayout?: AutoLayout | undefined;
   blendMode: BlendMode;
+  reactions: PrototypeReaction[];
+  prototypeMetadata?: PrototypeMetadata | undefined;
 }
 
 export interface SceneNode_ExtensionsEntry {
@@ -783,6 +925,21 @@ export interface SetMask {
   enabled: boolean;
 }
 
+/**
+ * Replaces the complete canonical extension map. It is used by M3 so a
+ * reaction update and unknown imported extension values remain one atomic,
+ * replayable reducer command.
+ */
+export interface SetNodeExtensions {
+  nodeId: Uint8Array;
+  extensions: { [key: string]: Uint8Array };
+}
+
+export interface SetNodeExtensions_ExtensionsEntry {
+  key: string;
+  value: Uint8Array;
+}
+
 export interface ResolvedOperation {
   createPage?: CreatePage | undefined;
   createNode?: CreateNode | undefined;
@@ -809,6 +966,7 @@ export interface ResolvedOperation {
   setMask?: SetMask | undefined;
   setAutoLayout?: AutoLayoutUpdate | undefined;
   connectVectorEndpoints?: ConnectVectorEndpoints | undefined;
+  setNodeExtensions?: SetNodeExtensions | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -1749,6 +1907,9 @@ function createBaseAutoLayout(): AutoLayout {
     minHeight: undefined,
     maxHeight: undefined,
     absolute: false,
+    alignSelf: undefined,
+    trackSpacing: undefined,
+    wrapTrackAlignment: undefined,
   };
 }
 
@@ -1801,6 +1962,15 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.absolute !== false) {
       writer.uint32(128).bool(message.absolute);
+    }
+    if (message.alignSelf !== undefined) {
+      writer.uint32(136).int32(message.alignSelf);
+    }
+    if (message.trackSpacing !== undefined) {
+      writer.uint32(145).double(message.trackSpacing);
+    }
+    if (message.wrapTrackAlignment !== undefined) {
+      writer.uint32(152).int32(message.wrapTrackAlignment);
     }
     return writer;
   },
@@ -1940,6 +2110,30 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.absolute = reader.bool();
           continue;
         }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.alignSelf = reader.int32() as any;
+          continue;
+        }
+        case 18: {
+          if (tag !== 145) {
+            break;
+          }
+
+          message.trackSpacing = reader.double();
+          continue;
+        }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.wrapTrackAlignment = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1970,6 +2164,9 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.minHeight = object.minHeight ?? undefined;
     message.maxHeight = object.maxHeight ?? undefined;
     message.absolute = object.absolute ?? false;
+    message.alignSelf = object.alignSelf ?? undefined;
+    message.trackSpacing = object.trackSpacing ?? undefined;
+    message.wrapTrackAlignment = object.wrapTrackAlignment ?? undefined;
     return message;
   },
 };
@@ -3656,6 +3853,822 @@ export const TextProperties: MessageFns<TextProperties> = {
   },
 };
 
+function createBasePrototypeEmpty(): PrototypeEmpty {
+  return {};
+}
+
+export const PrototypeEmpty: MessageFns<PrototypeEmpty> = {
+  encode(_: PrototypeEmpty, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeEmpty {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeEmpty();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeEmpty>, I>>(base?: I): PrototypeEmpty {
+    return PrototypeEmpty.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeEmpty>, I>>(_: I): PrototypeEmpty {
+    const message = createBasePrototypeEmpty();
+    return message;
+  },
+};
+
+function createBasePrototypeTimeout(): PrototypeTimeout {
+  return { timeoutMs: 0 };
+}
+
+export const PrototypeTimeout: MessageFns<PrototypeTimeout> = {
+  encode(message: PrototypeTimeout, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.timeoutMs !== 0) {
+      writer.uint32(9).double(message.timeoutMs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeTimeout {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeTimeout();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.timeoutMs = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeTimeout>, I>>(base?: I): PrototypeTimeout {
+    return PrototypeTimeout.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeTimeout>, I>>(object: I): PrototypeTimeout {
+    const message = createBasePrototypeTimeout();
+    message.timeoutMs = object.timeoutMs ?? 0;
+    return message;
+  },
+};
+
+function createBasePrototypeTrigger(): PrototypeTrigger {
+  return { onClick: undefined, onPress: undefined, onHover: undefined, afterTimeout: undefined };
+}
+
+export const PrototypeTrigger: MessageFns<PrototypeTrigger> = {
+  encode(message: PrototypeTrigger, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.onClick !== undefined) {
+      PrototypeEmpty.encode(message.onClick, writer.uint32(10).fork()).join();
+    }
+    if (message.onPress !== undefined) {
+      PrototypeEmpty.encode(message.onPress, writer.uint32(18).fork()).join();
+    }
+    if (message.onHover !== undefined) {
+      PrototypeEmpty.encode(message.onHover, writer.uint32(26).fork()).join();
+    }
+    if (message.afterTimeout !== undefined) {
+      PrototypeTimeout.encode(message.afterTimeout, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeTrigger {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeTrigger();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.onClick = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.onPress = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.onHover = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.afterTimeout = PrototypeTimeout.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeTrigger>, I>>(base?: I): PrototypeTrigger {
+    return PrototypeTrigger.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeTrigger>, I>>(object: I): PrototypeTrigger {
+    const message = createBasePrototypeTrigger();
+    message.onClick = (object.onClick !== undefined && object.onClick !== null)
+      ? PrototypeEmpty.fromPartial(object.onClick)
+      : undefined;
+    message.onPress = (object.onPress !== undefined && object.onPress !== null)
+      ? PrototypeEmpty.fromPartial(object.onPress)
+      : undefined;
+    message.onHover = (object.onHover !== undefined && object.onHover !== null)
+      ? PrototypeEmpty.fromPartial(object.onHover)
+      : undefined;
+    message.afterTimeout = (object.afterTimeout !== undefined && object.afterTimeout !== null)
+      ? PrototypeTimeout.fromPartial(object.afterTimeout)
+      : undefined;
+    return message;
+  },
+};
+
+function createBasePrototypeTransition(): PrototypeTransition {
+  return { none: undefined, dissolve: undefined, directional: undefined };
+}
+
+export const PrototypeTransition: MessageFns<PrototypeTransition> = {
+  encode(message: PrototypeTransition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.none !== undefined) {
+      PrototypeEmpty.encode(message.none, writer.uint32(10).fork()).join();
+    }
+    if (message.dissolve !== undefined) {
+      PrototypeTimedTransition.encode(message.dissolve, writer.uint32(18).fork()).join();
+    }
+    if (message.directional !== undefined) {
+      PrototypeDirectionalTransition.encode(message.directional, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeTransition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeTransition();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.none = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.dissolve = PrototypeTimedTransition.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.directional = PrototypeDirectionalTransition.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeTransition>, I>>(base?: I): PrototypeTransition {
+    return PrototypeTransition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeTransition>, I>>(object: I): PrototypeTransition {
+    const message = createBasePrototypeTransition();
+    message.none = (object.none !== undefined && object.none !== null)
+      ? PrototypeEmpty.fromPartial(object.none)
+      : undefined;
+    message.dissolve = (object.dissolve !== undefined && object.dissolve !== null)
+      ? PrototypeTimedTransition.fromPartial(object.dissolve)
+      : undefined;
+    message.directional = (object.directional !== undefined && object.directional !== null)
+      ? PrototypeDirectionalTransition.fromPartial(object.directional)
+      : undefined;
+    return message;
+  },
+};
+
+function createBasePrototypeTimedTransition(): PrototypeTimedTransition {
+  return { durationMs: 0, easing: "" };
+}
+
+export const PrototypeTimedTransition: MessageFns<PrototypeTimedTransition> = {
+  encode(message: PrototypeTimedTransition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.durationMs !== 0) {
+      writer.uint32(9).double(message.durationMs);
+    }
+    if (message.easing !== "") {
+      writer.uint32(18).string(message.easing);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeTimedTransition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeTimedTransition();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.durationMs = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.easing = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeTimedTransition>, I>>(base?: I): PrototypeTimedTransition {
+    return PrototypeTimedTransition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeTimedTransition>, I>>(object: I): PrototypeTimedTransition {
+    const message = createBasePrototypeTimedTransition();
+    message.durationMs = object.durationMs ?? 0;
+    message.easing = object.easing ?? "";
+    return message;
+  },
+};
+
+function createBasePrototypeDirectionalTransition(): PrototypeDirectionalTransition {
+  return { durationMs: 0, easing: "", direction: "" };
+}
+
+export const PrototypeDirectionalTransition: MessageFns<PrototypeDirectionalTransition> = {
+  encode(message: PrototypeDirectionalTransition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.durationMs !== 0) {
+      writer.uint32(9).double(message.durationMs);
+    }
+    if (message.easing !== "") {
+      writer.uint32(18).string(message.easing);
+    }
+    if (message.direction !== "") {
+      writer.uint32(26).string(message.direction);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeDirectionalTransition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeDirectionalTransition();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.durationMs = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.easing = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.direction = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeDirectionalTransition>, I>>(base?: I): PrototypeDirectionalTransition {
+    return PrototypeDirectionalTransition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeDirectionalTransition>, I>>(
+    object: I,
+  ): PrototypeDirectionalTransition {
+    const message = createBasePrototypeDirectionalTransition();
+    message.durationMs = object.durationMs ?? 0;
+    message.easing = object.easing ?? "";
+    message.direction = object.direction ?? "";
+    return message;
+  },
+};
+
+function createBasePrototypeNodeAction(): PrototypeNodeAction {
+  return {
+    navigation: "",
+    destinationId: undefined,
+    transition: undefined,
+    overlayRelativeX: undefined,
+    overlayRelativeY: undefined,
+  };
+}
+
+export const PrototypeNodeAction: MessageFns<PrototypeNodeAction> = {
+  encode(message: PrototypeNodeAction, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.navigation !== "") {
+      writer.uint32(10).string(message.navigation);
+    }
+    if (message.destinationId !== undefined) {
+      writer.uint32(18).bytes(message.destinationId);
+    }
+    if (message.transition !== undefined) {
+      PrototypeTransition.encode(message.transition, writer.uint32(26).fork()).join();
+    }
+    if (message.overlayRelativeX !== undefined) {
+      writer.uint32(33).double(message.overlayRelativeX);
+    }
+    if (message.overlayRelativeY !== undefined) {
+      writer.uint32(41).double(message.overlayRelativeY);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeNodeAction {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeNodeAction();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.navigation = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.destinationId = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.transition = PrototypeTransition.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.overlayRelativeX = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.overlayRelativeY = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeNodeAction>, I>>(base?: I): PrototypeNodeAction {
+    return PrototypeNodeAction.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeNodeAction>, I>>(object: I): PrototypeNodeAction {
+    const message = createBasePrototypeNodeAction();
+    message.navigation = object.navigation ?? "";
+    message.destinationId = object.destinationId ?? undefined;
+    message.transition = (object.transition !== undefined && object.transition !== null)
+      ? PrototypeTransition.fromPartial(object.transition)
+      : undefined;
+    message.overlayRelativeX = object.overlayRelativeX ?? undefined;
+    message.overlayRelativeY = object.overlayRelativeY ?? undefined;
+    return message;
+  },
+};
+
+function createBasePrototypeUrlAction(): PrototypeUrlAction {
+  return { url: "" };
+}
+
+export const PrototypeUrlAction: MessageFns<PrototypeUrlAction> = {
+  encode(message: PrototypeUrlAction, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.url !== "") {
+      writer.uint32(10).string(message.url);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeUrlAction {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeUrlAction();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.url = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeUrlAction>, I>>(base?: I): PrototypeUrlAction {
+    return PrototypeUrlAction.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeUrlAction>, I>>(object: I): PrototypeUrlAction {
+    const message = createBasePrototypeUrlAction();
+    message.url = object.url ?? "";
+    return message;
+  },
+};
+
+function createBasePrototypeAction(): PrototypeAction {
+  return { node: undefined, back: undefined, close: undefined, url: undefined };
+}
+
+export const PrototypeAction: MessageFns<PrototypeAction> = {
+  encode(message: PrototypeAction, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.node !== undefined) {
+      PrototypeNodeAction.encode(message.node, writer.uint32(10).fork()).join();
+    }
+    if (message.back !== undefined) {
+      PrototypeEmpty.encode(message.back, writer.uint32(18).fork()).join();
+    }
+    if (message.close !== undefined) {
+      PrototypeEmpty.encode(message.close, writer.uint32(26).fork()).join();
+    }
+    if (message.url !== undefined) {
+      PrototypeUrlAction.encode(message.url, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeAction {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeAction();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.node = PrototypeNodeAction.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.back = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.close = PrototypeEmpty.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.url = PrototypeUrlAction.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeAction>, I>>(base?: I): PrototypeAction {
+    return PrototypeAction.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeAction>, I>>(object: I): PrototypeAction {
+    const message = createBasePrototypeAction();
+    message.node = (object.node !== undefined && object.node !== null)
+      ? PrototypeNodeAction.fromPartial(object.node)
+      : undefined;
+    message.back = (object.back !== undefined && object.back !== null)
+      ? PrototypeEmpty.fromPartial(object.back)
+      : undefined;
+    message.close = (object.close !== undefined && object.close !== null)
+      ? PrototypeEmpty.fromPartial(object.close)
+      : undefined;
+    message.url = (object.url !== undefined && object.url !== null)
+      ? PrototypeUrlAction.fromPartial(object.url)
+      : undefined;
+    return message;
+  },
+};
+
+function createBasePrototypeReaction(): PrototypeReaction {
+  return { trigger: undefined, actions: [] };
+}
+
+export const PrototypeReaction: MessageFns<PrototypeReaction> = {
+  encode(message: PrototypeReaction, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.trigger !== undefined) {
+      PrototypeTrigger.encode(message.trigger, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.actions) {
+      PrototypeAction.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeReaction {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeReaction();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.trigger = PrototypeTrigger.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.actions.push(PrototypeAction.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeReaction>, I>>(base?: I): PrototypeReaction {
+    return PrototypeReaction.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeReaction>, I>>(object: I): PrototypeReaction {
+    const message = createBasePrototypeReaction();
+    message.trigger = (object.trigger !== undefined && object.trigger !== null)
+      ? PrototypeTrigger.fromPartial(object.trigger)
+      : undefined;
+    message.actions = object.actions?.map((e) => PrototypeAction.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBasePrototypeOverlayMetadata(): PrototypeOverlayMetadata {
+  return { positionType: "", relativeX: undefined, relativeY: undefined, backgroundInteraction: "" };
+}
+
+export const PrototypeOverlayMetadata: MessageFns<PrototypeOverlayMetadata> = {
+  encode(message: PrototypeOverlayMetadata, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.positionType !== "") {
+      writer.uint32(10).string(message.positionType);
+    }
+    if (message.relativeX !== undefined) {
+      writer.uint32(17).double(message.relativeX);
+    }
+    if (message.relativeY !== undefined) {
+      writer.uint32(25).double(message.relativeY);
+    }
+    if (message.backgroundInteraction !== "") {
+      writer.uint32(34).string(message.backgroundInteraction);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeOverlayMetadata {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeOverlayMetadata();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.positionType = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.relativeX = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.relativeY = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.backgroundInteraction = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeOverlayMetadata>, I>>(base?: I): PrototypeOverlayMetadata {
+    return PrototypeOverlayMetadata.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeOverlayMetadata>, I>>(object: I): PrototypeOverlayMetadata {
+    const message = createBasePrototypeOverlayMetadata();
+    message.positionType = object.positionType ?? "";
+    message.relativeX = object.relativeX ?? undefined;
+    message.relativeY = object.relativeY ?? undefined;
+    message.backgroundInteraction = object.backgroundInteraction ?? "";
+    return message;
+  },
+};
+
+function createBasePrototypeMetadata(): PrototypeMetadata {
+  return { startingPoint: false, overlay: undefined };
+}
+
+export const PrototypeMetadata: MessageFns<PrototypeMetadata> = {
+  encode(message: PrototypeMetadata, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.startingPoint !== false) {
+      writer.uint32(8).bool(message.startingPoint);
+    }
+    if (message.overlay !== undefined) {
+      PrototypeOverlayMetadata.encode(message.overlay, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrototypeMetadata {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrototypeMetadata();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.startingPoint = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.overlay = PrototypeOverlayMetadata.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PrototypeMetadata>, I>>(base?: I): PrototypeMetadata {
+    return PrototypeMetadata.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrototypeMetadata>, I>>(object: I): PrototypeMetadata {
+    const message = createBasePrototypeMetadata();
+    message.startingPoint = object.startingPoint ?? false;
+    message.overlay = (object.overlay !== undefined && object.overlay !== null)
+      ? PrototypeOverlayMetadata.fromPartial(object.overlay)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseSceneNode(): SceneNode {
   return {
     nodeId: new Uint8Array(0),
@@ -3704,6 +4717,8 @@ function createBaseSceneNode(): SceneNode {
     effectStack: [],
     autoLayout: undefined,
     blendMode: 0,
+    reactions: [],
+    prototypeMetadata: undefined,
   };
 }
 
@@ -3852,6 +4867,12 @@ export const SceneNode: MessageFns<SceneNode> = {
     }
     if (message.blendMode !== 0) {
       writer.uint32(368).int32(message.blendMode);
+    }
+    for (const v of message.reactions) {
+      PrototypeReaction.encode(v!, writer.uint32(378).fork()).join();
+    }
+    if (message.prototypeMetadata !== undefined) {
+      PrototypeMetadata.encode(message.prototypeMetadata, writer.uint32(386).fork()).join();
     }
     return writer;
   },
@@ -4264,6 +5285,22 @@ export const SceneNode: MessageFns<SceneNode> = {
           message.blendMode = reader.int32() as any;
           continue;
         }
+        case 47: {
+          if (tag !== 378) {
+            break;
+          }
+
+          message.reactions.push(PrototypeReaction.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 48: {
+          if (tag !== 386) {
+            break;
+          }
+
+          message.prototypeMetadata = PrototypeMetadata.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4354,6 +5391,10 @@ export const SceneNode: MessageFns<SceneNode> = {
       ? AutoLayout.fromPartial(object.autoLayout)
       : undefined;
     message.blendMode = object.blendMode ?? 0;
+    message.reactions = object.reactions?.map((e) => PrototypeReaction.fromPartial(e)) || [];
+    message.prototypeMetadata = (object.prototypeMetadata !== undefined && object.prototypeMetadata !== null)
+      ? PrototypeMetadata.fromPartial(object.prototypeMetadata)
+      : undefined;
     return message;
   },
 };
@@ -6499,6 +7540,137 @@ export const SetMask: MessageFns<SetMask> = {
   },
 };
 
+function createBaseSetNodeExtensions(): SetNodeExtensions {
+  return { nodeId: new Uint8Array(0), extensions: {} };
+}
+
+export const SetNodeExtensions: MessageFns<SetNodeExtensions> = {
+  encode(message: SetNodeExtensions, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    globalThis.Object.entries(message.extensions).forEach(([key, value]: [string, Uint8Array]) => {
+      SetNodeExtensions_ExtensionsEntry.encode({ key: key as any, value }, writer.uint32(18).fork()).join();
+    });
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetNodeExtensions {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetNodeExtensions();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          const entry2 = SetNodeExtensions_ExtensionsEntry.decode(reader, reader.uint32());
+          if (entry2.value !== undefined) {
+            message.extensions[entry2.key] = entry2.value;
+          }
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetNodeExtensions>, I>>(base?: I): SetNodeExtensions {
+    return SetNodeExtensions.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetNodeExtensions>, I>>(object: I): SetNodeExtensions {
+    const message = createBaseSetNodeExtensions();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.extensions = (globalThis.Object.entries(object.extensions ?? {}) as [string, Uint8Array][]).reduce(
+      (acc: { [key: string]: Uint8Array }, [key, value]: [string, Uint8Array]) => {
+        if (value !== undefined) {
+          acc[key] = value;
+        }
+        return acc;
+      },
+      {},
+    );
+    return message;
+  },
+};
+
+function createBaseSetNodeExtensions_ExtensionsEntry(): SetNodeExtensions_ExtensionsEntry {
+  return { key: "", value: new Uint8Array(0) };
+}
+
+export const SetNodeExtensions_ExtensionsEntry: MessageFns<SetNodeExtensions_ExtensionsEntry> = {
+  encode(message: SetNodeExtensions_ExtensionsEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value.length !== 0) {
+      writer.uint32(18).bytes(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetNodeExtensions_ExtensionsEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetNodeExtensions_ExtensionsEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetNodeExtensions_ExtensionsEntry>, I>>(
+    base?: I,
+  ): SetNodeExtensions_ExtensionsEntry {
+    return SetNodeExtensions_ExtensionsEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetNodeExtensions_ExtensionsEntry>, I>>(
+    object: I,
+  ): SetNodeExtensions_ExtensionsEntry {
+    const message = createBaseSetNodeExtensions_ExtensionsEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? new Uint8Array(0);
+    return message;
+  },
+};
+
 function createBaseResolvedOperation(): ResolvedOperation {
   return {
     createPage: undefined,
@@ -6526,6 +7698,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setMask: undefined,
     setAutoLayout: undefined,
     connectVectorEndpoints: undefined,
+    setNodeExtensions: undefined,
   };
 }
 
@@ -6605,6 +7778,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.connectVectorEndpoints !== undefined) {
       ConnectVectorEndpoints.encode(message.connectVectorEndpoints, writer.uint32(202).fork()).join();
+    }
+    if (message.setNodeExtensions !== undefined) {
+      SetNodeExtensions.encode(message.setNodeExtensions, writer.uint32(210).fork()).join();
     }
     return writer;
   },
@@ -6816,6 +7992,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.connectVectorEndpoints = ConnectVectorEndpoints.decode(reader, reader.uint32());
           continue;
         }
+        case 26: {
+          if (tag !== 210) {
+            break;
+          }
+
+          message.setNodeExtensions = SetNodeExtensions.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6909,6 +8093,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       (object.connectVectorEndpoints !== undefined && object.connectVectorEndpoints !== null)
         ? ConnectVectorEndpoints.fromPartial(object.connectVectorEndpoints)
         : undefined;
+    message.setNodeExtensions = (object.setNodeExtensions !== undefined && object.setNodeExtensions !== null)
+      ? SetNodeExtensions.fromPartial(object.setNodeExtensions)
+      : undefined;
     return message;
   },
 };

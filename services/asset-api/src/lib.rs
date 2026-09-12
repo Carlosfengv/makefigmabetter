@@ -38,9 +38,7 @@ impl ApiState {
     /// same durable service without exposing its storage implementation to
     /// individual routes.
     pub fn from_shared(service: Arc<AssetService>) -> Self {
-        Self {
-            service,
-        }
+        Self { service }
     }
 }
 
@@ -59,7 +57,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/assets/uploads/{session_id}/complete",
             post(complete_upload).options(preflight),
         )
-        .route("/v1/assets/audit-events", get(audit_events).options(preflight))
+        .route(
+            "/v1/assets/audit-events",
+            get(audit_events).options(preflight),
+        )
         .route(
             "/v1/documents/{document_id}/writers",
             put(grant_writer).options(preflight),
@@ -286,14 +287,14 @@ async fn audit_events(
         Err(error) => return error_response(error),
     };
     let after_sequence = query.after_sequence.unwrap_or(0).max(0);
-    let events = match state.service.audit_events_page(
-        principal,
-        after_sequence,
-        query.limit.unwrap_or(100),
-    ) {
-        Ok(events) => events,
-        Err(error) => return error_response(error),
-    };
+    let events =
+        match state
+            .service
+            .audit_events_page(principal, after_sequence, query.limit.unwrap_or(100))
+        {
+            Ok(events) => events,
+            Err(error) => return error_response(error),
+        };
     let next_sequence = events
         .last()
         .map(|event| event.sequence)
@@ -391,7 +392,11 @@ async fn attach_asset_from_document(
         target_document_id,
         asset_id,
     ) {
-        Ok(created) => empty_response(if created { StatusCode::CREATED } else { StatusCode::NO_CONTENT }),
+        Ok(created) => empty_response(if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::NO_CONTENT
+        }),
         Err(error) => error_response(error),
     }
 }
@@ -407,9 +412,14 @@ async fn detach_clipboard_asset(
         parse_id(&asset_id),
     ) {
         (Ok(principal), Ok(document_id), Ok(asset_id)) => (principal, document_id, asset_id),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return error_response(error),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+            return error_response(error);
+        }
     };
-    match state.service.detach_clipboard_asset_from_document(principal, document_id, asset_id) {
+    match state
+        .service
+        .detach_clipboard_asset_from_document(principal, document_id, asset_id)
+    {
         Ok(_) => empty_response(StatusCode::NO_CONTENT),
         Err(error) => error_response(error),
     }
@@ -426,9 +436,14 @@ async fn finalize_clipboard_asset(
         parse_id(&asset_id),
     ) {
         (Ok(principal), Ok(document_id), Ok(asset_id)) => (principal, document_id, asset_id),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return error_response(error),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+            return error_response(error);
+        }
     };
-    match state.service.finalize_clipboard_asset_attachment(principal, document_id, asset_id) {
+    match state
+        .service
+        .finalize_clipboard_asset_attachment(principal, document_id, asset_id)
+    {
         Ok(()) => empty_response(StatusCode::NO_CONTENT),
         Err(error) => error_response(error),
     }
@@ -758,14 +773,21 @@ mod tests {
             .header(header::CONTENT_TYPE, JSON)
             .body(Body::from(format!("{{\"kind\":\"raster-image\",\"contentHash\":\"{content_hash}\",\"mediaType\":\"image/png\",\"byteLength\":{}}}", bytes.len())))
             .unwrap();
-        assert_eq!(app.clone().oneshot(begin).await.unwrap().status(), StatusCode::CREATED);
+        assert_eq!(
+            app.clone().oneshot(begin).await.unwrap().status(),
+            StatusCode::CREATED
+        );
 
-        let page = headers(Request::get("/v1/assets/audit-events?afterSequence=0&limit=1"))
-            .body(Body::empty())
-            .unwrap();
+        let page = headers(Request::get(
+            "/v1/assets/audit-events?afterSequence=0&limit=1",
+        ))
+        .body(Body::empty())
+        .unwrap();
         let response = app.clone().oneshot(page).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let payload = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
         assert_eq!(payload["events"].as_array().unwrap().len(), 1);
         assert_eq!(payload["events"][0]["action"], "upload_started");
@@ -774,11 +796,18 @@ mod tests {
         assert!(next_sequence > 0);
         assert!(!String::from_utf8_lossy(&body).contains(&session));
 
-        let empty = headers(Request::get(format!("/v1/assets/audit-events?afterSequence={next_sequence}")))
-            .body(Body::empty())
-            .unwrap();
+        let empty = headers(Request::get(format!(
+            "/v1/assets/audit-events?afterSequence={next_sequence}"
+        )))
+        .body(Body::empty())
+        .unwrap();
         let empty = app.oneshot(empty).await.unwrap();
-        let empty = serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(empty.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let empty = serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(empty.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(empty["events"].as_array().unwrap().is_empty());
         assert_eq!(empty["nextSequence"], next_sequence);
     }
@@ -825,16 +854,20 @@ mod tests {
             .to_owned();
         let source_document = id_hex(3);
         let target_document = id_hex(4);
-        let source_writer = headers(Request::put(format!("/v1/documents/{source_document}/writers")))
-            .body(Body::empty())
-            .unwrap();
+        let source_writer = headers(Request::put(format!(
+            "/v1/documents/{source_document}/writers"
+        )))
+        .body(Body::empty())
+        .unwrap();
         assert_eq!(
             first.clone().oneshot(source_writer).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
-        let target_writer = headers(Request::put(format!("/v1/documents/{target_document}/writers")))
-            .body(Body::empty())
-            .unwrap();
+        let target_writer = headers(Request::put(format!(
+            "/v1/documents/{target_document}/writers"
+        )))
+        .body(Body::empty())
+        .unwrap();
         assert_eq!(
             first.clone().oneshot(target_writer).await.unwrap().status(),
             StatusCode::NO_CONTENT
@@ -852,7 +885,9 @@ mod tests {
             "/v1/documents/{target_document}/assets/{asset_id}/attach-from-document"
         )))
         .header(header::CONTENT_TYPE, JSON)
-        .body(Body::from(format!("{{\"sourceDocumentId\":\"{source_document}\"}}")))
+        .body(Body::from(format!(
+            "{{\"sourceDocumentId\":\"{source_document}\"}}"
+        )))
         .unwrap();
         assert_eq!(
             first.clone().oneshot(attach_target).await.unwrap().status(),

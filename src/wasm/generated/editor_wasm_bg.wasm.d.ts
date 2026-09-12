@@ -12,6 +12,7 @@ export const documentengine_canonical_hash: (a: number) => [number, number];
 export const documentengine_create_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
 export const documentengine_create_node_on_page: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number) => [bigint, number, number];
 export const documentengine_create_page: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number) => [bigint, number, number];
+export const documentengine_create_page_at_position: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number) => [bigint, number, number];
 export const documentengine_delete_nodes: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
 export const documentengine_gpu_scene_instances_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const documentengine_load_snapshot_json: (a: number, b: number, c: number) => [bigint, number, number];

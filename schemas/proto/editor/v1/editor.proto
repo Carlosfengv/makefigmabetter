@@ -82,6 +82,34 @@ enum NodeKind {
   NODE_KIND_BOOLEAN_OPERATION = 12;
   // Non-painting canonical export region (Phase 2 G5).
   NODE_KIND_SLICE = 13;
+  // FigJam code block. Its source is stored in SceneNode.text; the language
+  // remains a forward-compatible Canonical extension.
+  NODE_KIND_CODE_BLOCK = 14;
+  // Design component. Component-specific metadata is forward-compatible
+  // extension data while child hierarchy uses the Canonical tree.
+  NODE_KIND_COMPONENT = 15;
+  NODE_KIND_INSTANCE = 16;
+  NODE_KIND_SLOT = 17;
+  NODE_KIND_COMPONENT_SET = 18;
+  NODE_KIND_CONNECTOR = 19;
+  NODE_KIND_EMBED = 20;
+  NODE_KIND_HIGHLIGHT = 21;
+  NODE_KIND_INTERACTIVE_SLIDE_ELEMENT = 22;
+  NODE_KIND_LINK_UNFURL = 23;
+  NODE_KIND_MEDIA = 24;
+  NODE_KIND_SHAPE_WITH_TEXT = 25;
+  // Read-only root container in Figma Slides. Its children are Slide Rows.
+  NODE_KIND_SLIDE_GRID = 26;
+  NODE_KIND_SLIDE = 27;
+  NODE_KIND_SLIDE_ROW = 28;
+  NODE_KIND_STAMP = 29;
+  NODE_KIND_STICKY = 30;
+  NODE_KIND_TABLE = 31;
+  NODE_KIND_TABLE_CELL = 32;
+  NODE_KIND_TEXT_PATH = 33;
+  NODE_KIND_TRANSFORM_GROUP = 34;
+  NODE_KIND_WASHI_TAPE = 35;
+  NODE_KIND_WIDGET = 36;
 }
 
 // Open-path endpoint decoration. Unspecified is accepted from historical
@@ -156,6 +184,9 @@ enum LayoutAlignment {
   LAYOUT_ALIGNMENT_CENTER = 2;
   LAYOUT_ALIGNMENT_END = 3;
   LAYOUT_ALIGNMENT_SPACE_BETWEEN = 4;
+  // Counter-axis only on horizontal Auto Layout frames. Never use this for a
+  // primary axis or child align_self override.
+  LAYOUT_ALIGNMENT_BASELINE = 5;
 }
 
 enum LayoutSizing {
@@ -163,6 +194,13 @@ enum LayoutSizing {
   LAYOUT_SIZING_FIXED = 1;
   LAYOUT_SIZING_HUG = 2;
   LAYOUT_SIZING_FILL = 3;
+}
+
+// Figma counterAxisAlignContent's Phase 2 wrap-track subset.
+enum WrapTrackAlignment {
+  WRAP_TRACK_ALIGNMENT_UNSPECIFIED = 0;
+  WRAP_TRACK_ALIGNMENT_AUTO = 1;
+  WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2;
 }
 
 message AutoLayout {
@@ -182,6 +220,17 @@ message AutoLayout {
   optional double min_height = 14;
   optional double max_height = 15;
   bool absolute = 16;
+  // Child-only cross-axis override. Omitted means inherit the Frame's
+  // counter_alignment. SpaceBetween and Baseline are rejected by the
+  // Canonical validator.
+  optional LayoutAlignment align_self = 17;
+  // Optional counter-axis gap between wrap tracks. Omitted preserves the
+  // historical behavior of reusing item_spacing for backwards-compatible
+  // snapshots.
+  optional double track_spacing = 18;
+  // Figma counterAxisAlignContent. Omission/default is AUTO; SPACE_BETWEEN is
+  // valid only when wrap is true.
+  optional WrapTrackAlignment wrap_track_alignment = 19;
 }
 
 enum ColorSpace {
@@ -389,6 +438,55 @@ message TextProperties {
   repeated FontReference fallback_fonts = 4;
 }
 
+// M3 prototype vocabulary. These records are append-only and intentionally
+// separate from Player's transient navigation/overlay state. The current Core
+// also keeps an opaque extension mirror so older engines can preserve a newer
+// prototype value byte-for-byte rather than decoding/re-encoding unknown oneof
+// tags.
+message PrototypeEmpty {}
+message PrototypeTimeout { double timeout_ms = 1; }
+message PrototypeTrigger {
+  oneof kind {
+    PrototypeEmpty on_click = 1;
+    PrototypeEmpty on_press = 2;
+    PrototypeEmpty on_hover = 3;
+    PrototypeTimeout after_timeout = 4;
+  }
+}
+message PrototypeTransition {
+  oneof kind {
+    PrototypeEmpty none = 1;
+    PrototypeTimedTransition dissolve = 2;
+    PrototypeDirectionalTransition directional = 3;
+  }
+}
+message PrototypeTimedTransition { double duration_ms = 1; string easing = 2; }
+message PrototypeDirectionalTransition { double duration_ms = 1; string easing = 2; string direction = 3; }
+message PrototypeNodeAction {
+  string navigation = 1;
+  optional bytes destination_id = 2;
+  optional PrototypeTransition transition = 3;
+  optional double overlay_relative_x = 4;
+  optional double overlay_relative_y = 5;
+}
+message PrototypeUrlAction { string url = 1; }
+message PrototypeAction {
+  oneof kind {
+    PrototypeNodeAction node = 1;
+    PrototypeEmpty back = 2;
+    PrototypeEmpty close = 3;
+    PrototypeUrlAction url = 4;
+  }
+}
+message PrototypeReaction { PrototypeTrigger trigger = 1; repeated PrototypeAction actions = 2; }
+message PrototypeOverlayMetadata {
+  string position_type = 1;
+  optional double relative_x = 2;
+  optional double relative_y = 3;
+  string background_interaction = 4;
+}
+message PrototypeMetadata { bool starting_point = 1; optional PrototypeOverlayMetadata overlay = 2; }
+
 message SceneNode {
   bytes node_id = 1;
   optional bytes parent_id = 2;
@@ -447,6 +545,8 @@ message SceneNode {
   repeated Effect effect_stack = 44;
   optional AutoLayout auto_layout = 45;
   BlendMode blend_mode = 46;
+  repeated PrototypeReaction reactions = 47;
+  optional PrototypeMetadata prototype_metadata = 48;
 }
 
 message GeometryUpdate {
@@ -653,6 +753,14 @@ message SetMask {
   bool enabled = 2;
 }
 
+// Replaces the complete canonical extension map. It is used by M3 so a
+// reaction update and unknown imported extension values remain one atomic,
+// replayable reducer command.
+message SetNodeExtensions {
+  bytes node_id = 1;
+  map<string, bytes> extensions = 2;
+}
+
 message ResolvedOperation {
   oneof kind {
     CreatePage create_page = 1;
@@ -680,6 +788,7 @@ message ResolvedOperation {
     SetMask set_mask = 23;
     AutoLayoutUpdate set_auto_layout = 24;
     ConnectVectorEndpoints connect_vector_endpoints = 25;
+    SetNodeExtensions set_node_extensions = 26;
   }
 }
 

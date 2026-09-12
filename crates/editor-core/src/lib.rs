@@ -123,6 +123,58 @@ pub enum NodeKind {
     Star,
     /// Editable multi-subpath cubic path (ADR 0027).
     Vector,
+    /// FigJam source-code block. Source uses the existing bounded `text`
+    /// storage; language is a forward-compatible extension payload.
+    CodeBlock,
+    /// Reusable design component. Its Frame-like hierarchy is Canonical;
+    /// library metadata remains forward-compatible extension data.
+    Component,
+    /// Linked component use. Instance-specific linkage and overrides are
+    /// forward-compatible extensions, while its rendered subtree is Canonical.
+    Instance,
+    /// Component-property slot. Its property identity is extension metadata.
+    Slot,
+    /// Variant container. Its direct-child restriction is enforced at the
+    /// Canonical parent boundary; library metadata is extension data.
+    ComponentSet,
+    /// FigJam relationship connector. Endpoint and routing data is extension
+    /// metadata while the line geometry remains Canonical.
+    Connector,
+    /// FigJam iframe preview. The immutable source data is extension metadata.
+    Embed,
+    /// FigJam highlighter stroke. Canonical path data remains vector-shaped.
+    Highlight,
+    /// Read-only interactive Slides content; type data lives in extensions.
+    InteractiveSlideElement,
+    /// FigJam rich link preview. Resolved link data is retained as extensions.
+    LinkUnfurl,
+    /// FigJam media item. Asset binding and media hash are extension-backed.
+    Media,
+    /// FigJam shape with embedded text. The shape selector is extension data.
+    ShapeWithText,
+    /// Figma Slides' imported-only root container. Its direct children are
+    /// SlideRows and Plugin API mutation is intentionally rejected upstream.
+    SlideGrid,
+    /// Fixed-size Figma Slides canvas. Slide-specific metadata lives in
+    /// extensions while its children remain ordinary SceneNodes.
+    Slide,
+    /// Imported-only structural row between a SlideGrid and its Slides.
+    SlideRow,
+    /// FigJam stamp. The official stamp subtype is carried by its name.
+    Stamp,
+    /// FigJam sticky note. Text and author presentation live in extensions.
+    Sticky,
+    /// Structured FigJam table; grid metadata is extension-backed.
+    Table,
+    /// One Table child carrying immutable row/column coordinates.
+    TableCell,
+    /// Beta text that follows a durable vector path; text-specific settings
+    /// are extension-backed while geometry uses the ordinary vector path.
+    TextPath,
+    /// Beta Group variant that applies extension-backed child transforms.
+    TransformGroup,
+    WashiTape,
+    Widget,
     /// Live boolean structure. Its direct children remain the durable operands
     /// and the derived result is intentionally never persisted (ADR 0028).
     BooleanOperation,
@@ -148,6 +200,8 @@ pub enum BooleanOperation {
 /// historical snapshot wire shape while making the relationship hashed and
 /// replayable like every other node extension.
 const ALPHA_MASK_EXTENSION_KEY: &str = "makefigma.mask.alpha.v1";
+const PROTOTYPE_REACTIONS_EXTENSION_KEY: &str = "makefigma.prototype.reactions.v1";
+const PROTOTYPE_METADATA_EXTENSION_KEY: &str = "makefigma.prototype.metadata.v1";
 
 /// Endpoint decorations shared by Figma-compatible open paths. Arrow is a
 /// Line preset, never a separate document node kind.
@@ -231,6 +285,9 @@ pub enum LayoutAlignment {
     Center,
     End,
     SpaceBetween,
+    /// Figma's horizontal Auto Layout counter-axis text-baseline alignment.
+    /// It is invalid for a primary axis, vertical frame, or child override.
+    Baseline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,6 +298,13 @@ pub enum LayoutSizing {
     Fill,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WrapTrackAlignment {
+    #[default]
+    Auto,
+    SpaceBetween,
+}
+
 /// Container and child inputs live in a separate canonical table, which keeps
 /// legacy Node snapshots byte-compatible while still making layout semantic.
 #[derive(Debug, Clone, PartialEq)]
@@ -248,11 +312,20 @@ pub struct AutoLayout {
     pub mode: LayoutMode,
     pub padding: [f64; 4],
     pub item_spacing: f64,
+    /// Counter-axis gap between wrap tracks. Omission retains legacy snapshots'
+    /// behavior of using `item_spacing` for both axes.
+    pub track_spacing: Option<f64>,
+    /// Figma's counterAxisAlignContent subset for wrapped rows/columns.
+    pub track_alignment: WrapTrackAlignment,
     pub wrap: bool,
     pub primary_alignment: LayoutAlignment,
     pub counter_alignment: LayoutAlignment,
     pub primary_sizing: LayoutSizing,
     pub counter_sizing: LayoutSizing,
+    /// A flow child's cross-axis override. `None` inherits its Frame's
+    /// `counter_alignment`; `SpaceBetween` and `Baseline` are deliberately
+    /// invalid here.
+    pub align_self: Option<LayoutAlignment>,
     pub min_width: Option<f64>,
     pub max_width: Option<f64>,
     pub min_height: Option<f64>,
@@ -266,11 +339,14 @@ impl Default for AutoLayout {
             mode: LayoutMode::None,
             padding: [0.0; 4],
             item_spacing: 0.0,
+            track_spacing: None,
+            track_alignment: WrapTrackAlignment::Auto,
             wrap: false,
             primary_alignment: LayoutAlignment::Start,
             counter_alignment: LayoutAlignment::Start,
             primary_sizing: LayoutSizing::Fixed,
             counter_sizing: LayoutSizing::Fixed,
+            align_self: None,
             min_width: None,
             max_width: None,
             min_height: None,
@@ -368,7 +444,10 @@ pub struct InnerShadow {
 
 /// A blur of previously composited backdrop pixels, clipped to the source.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BackgroundBlur { pub radius: f64, pub visible: bool }
+pub struct BackgroundBlur {
+    pub radius: f64,
+    pub visible: bool,
+}
 
 /// Phase 2's extensible, ordered effect model.  The first rollout has one
 /// effect kind, but uses the final stack-shaped storage so documents never
@@ -665,6 +744,12 @@ pub enum Command {
         id: NodeId,
         enabled: bool,
     },
+    /// Replaces a node's forward-compatible Canonical extension map. This is
+    /// used by M3 prototype data and preserves unknown imported fields exactly.
+    SetNodeExtensions {
+        id: NodeId,
+        extensions: BTreeMap<String, Vec<u8>>,
+    },
     /// Moves one existing vector anchor without rewriting unrelated path data.
     MoveVectorPoint {
         id: NodeId,
@@ -846,6 +931,11 @@ pub enum AppliedChange {
         id: NodeId,
         before: bool,
         after: bool,
+    },
+    ExtensionsChanged {
+        id: NodeId,
+        before: BTreeMap<String, Vec<u8>>,
+        after: BTreeMap<String, Vec<u8>>,
     },
     NodeAssetChanged {
         id: NodeId,
@@ -1146,15 +1236,23 @@ impl Document {
     /// its primary/counter axes. Map those physical axes to the parent's axes
     /// before the parent lays it out; this keeps nested Frame sizing stable
     /// when the two containers use different directions.
-    fn auto_layout_child_sizing(&self, node: &Node, parent_horizontal: bool) -> (LayoutSizing, LayoutSizing) {
+    fn auto_layout_child_sizing(
+        &self,
+        node: &Node,
+        parent_horizontal: bool,
+    ) -> (LayoutSizing, LayoutSizing) {
         let layout = self.auto_layout_for_node(node.id);
-        if node.kind == NodeKind::Frame && layout.mode != LayoutMode::None {
+        if is_frame_like(&node.kind) && layout.mode != LayoutMode::None {
             let (width, height) = match layout.mode {
                 LayoutMode::Horizontal => (layout.primary_sizing, layout.counter_sizing),
                 LayoutMode::Vertical => (layout.counter_sizing, layout.primary_sizing),
                 LayoutMode::None => unreachable!("active layout has a direction"),
             };
-            return if parent_horizontal { (width, height) } else { (height, width) };
+            return if parent_horizontal {
+                (width, height)
+            } else {
+                (height, width)
+            };
         }
         (layout.primary_sizing, layout.counter_sizing)
     }
@@ -1383,6 +1481,16 @@ impl Document {
             .map(|_| ())
     }
 
+    /// Trusted hydration counterpart to `Command::SetMask`. Snapshot and
+    /// fixture loaders create every structural sibling first, then apply mask
+    /// identities without creating history or advancing the document revision.
+    /// Keeping the same reducer validation prevents a legacy projection from
+    /// bypassing the ordinary mask-kind, following-sibling, lock, or budget
+    /// invariants simply because it is being hydrated.
+    pub fn seed_mask(&mut self, id: NodeId, enabled: bool) -> Result<(), CommandError> {
+        self.apply(&Command::SetMask { id, enabled }).map(|_| ())
+    }
+
     /// Trusted snapshot hydration for explicit rich-text semantics. Legacy text
     /// nodes intentionally omit this record and use `TextProperties::default()`.
     pub fn seed_text_properties(
@@ -1404,8 +1512,13 @@ impl Document {
     /// Trusted snapshot hydration for explicit Auto Layout input. Omitted
     /// records remain the stable default and are not materialized in the map.
     pub fn seed_auto_layout(&mut self, id: NodeId, layout: AutoLayout) -> Result<(), CommandError> {
-        let node = self.nodes.get(&id).ok_or(CommandError::MissingNode { id })?;
-        if !valid_auto_layout(&layout) || (layout.mode != LayoutMode::None && node.kind != NodeKind::Frame) {
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        if !valid_auto_layout(&layout)
+            || (layout.mode != LayoutMode::None && !is_frame_like(&node.kind))
+        {
             return Err(CommandError::InvalidAutoLayout);
         }
         self.replace_auto_layout_option(id, (layout != AutoLayout::default()).then_some(layout));
@@ -1435,6 +1548,18 @@ impl Document {
             return Err(CommandError::DuplicatePage { id: page.id });
         }
         self.pages.insert(page.id, page);
+        Ok(())
+    }
+
+    /// Replaces the deterministic default Page metadata while hydrating a
+    /// trusted snapshot. The identity remains stable, but imported documents
+    /// can preserve the source page name and ordering key without retaining a
+    /// synthetic extra Page 1.
+    pub fn seed_default_page(&mut self, page: Page) -> Result<(), CommandError> {
+        if page.id != DEFAULT_PAGE_ID || page.name.trim().is_empty() {
+            return Err(CommandError::InvalidPageName);
+        }
+        self.pages.insert(DEFAULT_PAGE_ID, page);
         Ok(())
     }
 
@@ -1504,7 +1629,9 @@ impl Document {
         for command in &transaction.commands {
             changes.push(next.apply(command)?);
         }
-        changes.extend(next.reflow_auto_layout(next.auto_layout_dirty_frames(&transaction.commands, self))?);
+        changes.extend(
+            next.reflow_auto_layout(next.auto_layout_dirty_frames(&transaction.commands, self))?,
+        );
         next.ensure_non_empty_groups()?;
         next.revision += 1;
         let accepted_revision = next.revision;
@@ -1705,7 +1832,12 @@ impl Document {
                 text_properties,
             } => {
                 self.assert_parent_mutable(node.parent_id)?;
-                self.restore_tombstoned_node(*page_id, node.clone(), *asset_id, text_properties.clone())
+                self.restore_tombstoned_node(
+                    *page_id,
+                    node.clone(),
+                    *asset_id,
+                    text_properties.clone(),
+                )
             }
             Command::Create(node) => {
                 self.assert_parent_mutable(node.parent_id)?;
@@ -1744,7 +1876,10 @@ impl Document {
                     // projection of that matrix, so width/height may legitimately
                     // change while a child is moved. Legacy Groups retain the
                     // historical translation-only gate until they are migrated.
-                    let relative_group_bounds = self.nodes.get(id).is_some_and(|node| node.relative_transform.is_some())
+                    let relative_group_bounds = self
+                        .nodes
+                        .get(id)
+                        .is_some_and(|node| node.relative_transform.is_some())
                         && after.x.is_finite()
                         && after.y.is_finite()
                         && after.width.is_finite()
@@ -1752,13 +1887,14 @@ impl Document {
                         && after.width > 0.0
                         && after.height > 0.0
                         && after.rotation.is_finite();
-                    relative_group_bounds || self.geometry_for(*id).is_some_and(|before| {
+                    relative_group_bounds
+                        || self.geometry_for(*id).is_some_and(|before| {
                             after.x.is_finite()
                                 && after.y.is_finite()
                                 && after.width == before.width
                                 && after.height == before.height
                                 && after.rotation == 0.0
-                    })
+                        })
                 } else {
                     false
                 };
@@ -1770,33 +1906,65 @@ impl Document {
                 // an active Auto Layout Frame is the sole owner of descendant
                 // placement and sizing. Applying both systems during a resize
                 // would transiently rewrite the child before layout reflows.
-                let frame_has_active_auto_layout = kind == NodeKind::Frame
-                    && self.auto_layout_for_node(*id).mode != LayoutMode::None;
-                let constrained_children = if kind == NodeKind::Frame
+                let frame_has_active_auto_layout =
+                    is_frame_like(&kind) && self.auto_layout_for_node(*id).mode != LayoutMode::None;
+                let constrained_children = if is_frame_like(&kind)
                     && !frame_has_active_auto_layout
                     && after.rotation == 0.0
-                    && self.nodes.get(id).is_some_and(|node| node.relative_transform.is_none() && node.rotation == 0.0)
-                {
+                    && self.nodes.get(id).is_some_and(|node| {
+                        node.relative_transform.is_none() && node.rotation == 0.0
+                    }) {
                     let before = frame_before.expect("existing node has geometry");
-                    self.nodes.values().filter(|child| {
-                        if child.relative_transform.is_some() { return false; }
-                        let mut parent_id = child.parent_id;
-                        while let Some(ancestor_id) = parent_id {
-                            if ancestor_id == *id { return true; }
-                            let Some(ancestor) = self.nodes.get(&ancestor_id) else { return false; };
-                            if !is_structural_container(&ancestor.kind) { return false; }
-                            parent_id = ancestor.parent_id;
-                        }
-                        false
-                    }).filter_map(|child| {
-                        child.constraints.map(|constraints| geometry_for_constraints(before, after, Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation }, constraints, &child.kind).map(|geometry| (child.id, geometry)))
-                    }).collect::<Result<Vec<_>, _>>()?
-                } else { Vec::new() };
+                    self.nodes
+                        .values()
+                        .filter(|child| {
+                            if child.relative_transform.is_some() {
+                                return false;
+                            }
+                            let mut parent_id = child.parent_id;
+                            while let Some(ancestor_id) = parent_id {
+                                if ancestor_id == *id {
+                                    return true;
+                                }
+                                let Some(ancestor) = self.nodes.get(&ancestor_id) else {
+                                    return false;
+                                };
+                                if !is_structural_container(&ancestor.kind) {
+                                    return false;
+                                }
+                                parent_id = ancestor.parent_id;
+                            }
+                            false
+                        })
+                        .filter_map(|child| {
+                            child.constraints.map(|constraints| {
+                                geometry_for_constraints(
+                                    before,
+                                    after,
+                                    Geometry {
+                                        x: child.x,
+                                        y: child.y,
+                                        width: child.width,
+                                        height: child.height,
+                                        rotation: child.rotation,
+                                    },
+                                    constraints,
+                                    &child.kind,
+                                )
+                                .map(|geometry| (child.id, geometry))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Vec::new()
+                };
                 // Relative-v1 nodes already live in their Frame's local space,
                 // including below one or more transformed Groups. Unlike legacy
                 // world-space coordinates, their constraints remain correct when
                 // the Frame itself is rotated or has an arbitrary affine matrix.
-                let mut matrix_constrained_children = if kind == NodeKind::Frame && !frame_has_active_auto_layout {
+                let mut matrix_constrained_children = if is_frame_like(&kind)
+                    && !frame_has_active_auto_layout
+                {
                     let frame_before_local = Geometry {
                         x: 0.0,
                         y: 0.0,
@@ -1811,40 +1979,52 @@ impl Document {
                         height: after.height,
                         rotation: 0.0,
                     };
-                    self.nodes.values().filter_map(|child| {
-                        let constraints = child.constraints?;
-                        let (child_to_frame, parent_to_frame) = self.relative_transform_to_frame(child.id, *id)?;
-                        let child_before = Geometry {
-                            x: child_to_frame.e,
-                            y: child_to_frame.f,
-                            width: child.width,
-                            height: child.height,
-                            rotation: child.rotation,
-                        };
-                        Some(geometry_for_constraints(
-                            frame_before_local,
-                            frame_after_local,
-                            child_before,
-                            constraints,
-                            &child.kind,
-                        ).and_then(|child_after_local| {
-                            let child_to_frame_after = AffineTransform {
-                                e: child_after_local.x,
-                                f: child_after_local.y,
-                                ..child_to_frame
+                    self.nodes
+                        .values()
+                        .filter_map(|child| {
+                            let constraints = child.constraints?;
+                            let (child_to_frame, parent_to_frame) =
+                                self.relative_transform_to_frame(child.id, *id)?;
+                            let child_before = Geometry {
+                                x: child_to_frame.e,
+                                y: child_to_frame.f,
+                                width: child.width,
+                                height: child.height,
+                                rotation: child.rotation,
                             };
-                            let child_after_transform = child_to_frame_after
-                                .then(parent_to_frame.inverse().map_err(|_| CommandError::InvalidGeometry)?);
-                            let child_after_geometry = geometry_for_relative_transform(
-                                child_after_transform,
-                                child_after_local.width,
-                                child_after_local.height,
-                                &child.kind,
-                            )?;
-                            Ok((child.id, child_after_geometry, child_after_transform))
-                        }))
-                    }).collect::<Result<Vec<_>, _>>()?
-                } else { Vec::new() };
+                            Some(
+                                geometry_for_constraints(
+                                    frame_before_local,
+                                    frame_after_local,
+                                    child_before,
+                                    constraints,
+                                    &child.kind,
+                                )
+                                .and_then(|child_after_local| {
+                                    let child_to_frame_after = AffineTransform {
+                                        e: child_after_local.x,
+                                        f: child_after_local.y,
+                                        ..child_to_frame
+                                    };
+                                    let child_after_transform = child_to_frame_after.then(
+                                        parent_to_frame
+                                            .inverse()
+                                            .map_err(|_| CommandError::InvalidGeometry)?,
+                                    );
+                                    let child_after_geometry = geometry_for_relative_transform(
+                                        child_after_transform,
+                                        child_after_local.width,
+                                        child_after_local.height,
+                                        &child.kind,
+                                    )?;
+                                    Ok((child.id, child_after_geometry, child_after_transform))
+                                }),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Vec::new()
+                };
                 // Legacy direct Frame children historically store world-space
                 // geometry.  Leaving them on that projection when a Frame is
                 // rotated or matrix-backed silently made an Inspector-visible
@@ -1854,10 +2034,15 @@ impl Document {
                 // the same per-axis rule as modern children.  Group paths are
                 // intentionally not guessed here: a legacy Group has derived
                 // world bounds and must be migrated as a complete subtree.
-                if kind == NodeKind::Frame && !frame_has_active_auto_layout && constrained_children.is_empty() {
-                    let frame_before_transform = self.node_world_transform(*id)
+                if is_frame_like(&kind)
+                    && !frame_has_active_auto_layout
+                    && constrained_children.is_empty()
+                {
+                    let frame_before_transform = self
+                        .node_world_transform(*id)
                         .ok_or(CommandError::InvalidGeometry)?;
-                    let frame_inverse = frame_before_transform.inverse()
+                    let frame_inverse = frame_before_transform
+                        .inverse()
                         .map_err(|_| CommandError::InvalidGeometry)?;
                     let frame_before_local = Geometry {
                         x: 0.0,
@@ -1873,41 +2058,46 @@ impl Document {
                         height: after.height,
                         rotation: 0.0,
                     };
-                    let legacy_direct = self.nodes.values().filter_map(|child| {
-                        let constraints = child.constraints?;
-                        (child.parent_id == Some(*id) && child.relative_transform.is_none())
-                            .then_some((child, constraints))
-                    }).map(|(child, constraints)| {
-                        let child_to_frame = node_legacy_transform(child)
-                            .ok_or(CommandError::InvalidGeometry)?
-                            .then(frame_inverse);
-                        let child_before = Geometry {
-                            x: child_to_frame.e,
-                            y: child_to_frame.f,
-                            width: child.width,
-                            height: child.height,
-                            rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
-                        };
-                        let child_after_local = geometry_for_constraints(
-                            frame_before_local,
-                            frame_after_local,
-                            child_before,
-                            constraints,
-                            &child.kind,
-                        )?;
-                        let child_after_transform = AffineTransform {
-                            e: child_after_local.x,
-                            f: child_after_local.y,
-                            ..child_to_frame
-                        };
-                        let child_after_geometry = geometry_for_relative_transform(
-                            child_after_transform,
-                            child_after_local.width,
-                            child_after_local.height,
-                            &child.kind,
-                        )?;
-                        Ok((child.id, child_after_geometry, child_after_transform))
-                    }).collect::<Result<Vec<_>, CommandError>>()?;
+                    let legacy_direct = self
+                        .nodes
+                        .values()
+                        .filter_map(|child| {
+                            let constraints = child.constraints?;
+                            (child.parent_id == Some(*id) && child.relative_transform.is_none())
+                                .then_some((child, constraints))
+                        })
+                        .map(|(child, constraints)| {
+                            let child_to_frame = node_legacy_transform(child)
+                                .ok_or(CommandError::InvalidGeometry)?
+                                .then(frame_inverse);
+                            let child_before = Geometry {
+                                x: child_to_frame.e,
+                                y: child_to_frame.f,
+                                width: child.width,
+                                height: child.height,
+                                rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
+                            };
+                            let child_after_local = geometry_for_constraints(
+                                frame_before_local,
+                                frame_after_local,
+                                child_before,
+                                constraints,
+                                &child.kind,
+                            )?;
+                            let child_after_transform = AffineTransform {
+                                e: child_after_local.x,
+                                f: child_after_local.y,
+                                ..child_to_frame
+                            };
+                            let child_after_geometry = geometry_for_relative_transform(
+                                child_after_transform,
+                                child_after_local.width,
+                                child_after_local.height,
+                                &child.kind,
+                            )?;
+                            Ok((child.id, child_after_geometry, child_after_transform))
+                        })
+                        .collect::<Result<Vec<_>, CommandError>>()?;
                     matrix_constrained_children.extend(legacy_direct);
 
                     // A legacy Group's scalar geometry is a derived world-space
@@ -1922,25 +2112,41 @@ impl Document {
                     // modern Relative-v1 subtree.
                     let mut local_to_frame = BTreeMap::new();
                     local_to_frame.insert(*id, AffineTransform::IDENTITY);
-                    let mut pending = self.nodes.values()
-                        .filter(|node| node.parent_id == Some(*id) && node.kind == NodeKind::Group && node.relative_transform.is_none())
+                    let mut pending = self
+                        .nodes
+                        .values()
+                        .filter(|node| {
+                            node.parent_id == Some(*id)
+                                && node.kind == NodeKind::Group
+                                && node.relative_transform.is_none()
+                        })
                         .map(|node| node.id)
                         .collect::<Vec<_>>();
                     let mut legacy_group_subtree = Vec::new();
                     while let Some(child_id) = pending.pop() {
-                        let child = self.nodes.get(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
+                        let child = self
+                            .nodes
+                            .get(&child_id)
+                            .ok_or(CommandError::MissingNode { id: child_id })?;
                         // A nested Frame/Section/Boolean owns a fresh layout or
                         // structural context. Its legacy descendants are not a
                         // transparent Group chain, so an outer Frame resize must
                         // leave that boundary untouched until its own migration
                         // transaction has an unambiguous local coordinate space.
-                        if matches!(child.kind, NodeKind::Frame | NodeKind::Section | NodeKind::BooleanOperation)
-                            && self.nodes.values().any(|descendant| descendant.parent_id == Some(child_id))
+                        if matches!(
+                            child.kind,
+                            NodeKind::Frame | NodeKind::Section | NodeKind::BooleanOperation
+                        ) && self
+                            .nodes
+                            .values()
+                            .any(|descendant| descendant.parent_id == Some(child_id))
                         {
                             continue;
                         }
                         let parent_id = child.parent_id.ok_or(CommandError::InvalidGeometry)?;
-                        let parent_to_frame = *local_to_frame.get(&parent_id).ok_or(CommandError::InvalidGeometry)?;
+                        let parent_to_frame = *local_to_frame
+                            .get(&parent_id)
+                            .ok_or(CommandError::InvalidGeometry)?;
                         let child_to_frame = match child.relative_transform {
                             Some(local) => local.then(parent_to_frame),
                             None => node_legacy_transform(child)
@@ -1954,22 +2160,29 @@ impl Document {
                             height: child.height,
                             rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
                         };
-                        let child_after_local = child.constraints.map(|constraints| {
-                            geometry_for_constraints(
-                                frame_before_local,
-                                frame_after_local,
-                                child_before,
-                                constraints,
-                                &child.kind,
-                            )
-                        }).transpose()?.unwrap_or(child_before);
+                        let child_after_local = child
+                            .constraints
+                            .map(|constraints| {
+                                geometry_for_constraints(
+                                    frame_before_local,
+                                    frame_after_local,
+                                    child_before,
+                                    constraints,
+                                    &child.kind,
+                                )
+                            })
+                            .transpose()?
+                            .unwrap_or(child_before);
                         let child_to_frame_after = AffineTransform {
                             e: child_after_local.x,
                             f: child_after_local.y,
                             ..child_to_frame
                         };
-                        let child_after_transform = child_to_frame_after
-                            .then(parent_to_frame.inverse().map_err(|_| CommandError::InvalidGeometry)?);
+                        let child_after_transform = child_to_frame_after.then(
+                            parent_to_frame
+                                .inverse()
+                                .map_err(|_| CommandError::InvalidGeometry)?,
+                        );
                         local_to_frame.insert(child_id, child_to_frame_after);
                         // A modern leaf below a legacy Group retains its local
                         // matrix unless the Frame resize changed its constrained
@@ -1982,12 +2195,19 @@ impl Document {
                                 child_after_local.height,
                                 &child.kind,
                             )?;
-                            legacy_group_subtree.push((child_id, child_after_geometry, child_after_transform));
+                            legacy_group_subtree.push((
+                                child_id,
+                                child_after_geometry,
+                                child_after_transform,
+                            ));
                         }
                         if child.kind == NodeKind::Group {
-                            pending.extend(self.nodes.values()
-                                .filter(|descendant| descendant.parent_id == Some(child_id))
-                                .map(|descendant| descendant.id));
+                            pending.extend(
+                                self.nodes
+                                    .values()
+                                    .filter(|descendant| descendant.parent_id == Some(child_id))
+                                    .map(|descendant| descendant.id),
+                            );
                         }
                     }
                     matrix_constrained_children.extend(legacy_group_subtree);
@@ -1997,15 +2217,28 @@ impl Document {
                 if is_structural_container(&kind) {
                     affected_groups.insert(0, *id);
                 }
-                for group_id in self.group_ancestor_ids(constrained_children.iter().map(|(child_id, _)| self.nodes.get(child_id).and_then(|child| child.parent_id))) {
-                    if !affected_groups.contains(&group_id) { affected_groups.push(group_id); }
+                for group_id in
+                    self.group_ancestor_ids(constrained_children.iter().map(|(child_id, _)| {
+                        self.nodes.get(child_id).and_then(|child| child.parent_id)
+                    }))
+                {
+                    if !affected_groups.contains(&group_id) {
+                        affected_groups.push(group_id);
+                    }
                 }
-                for group_id in self.group_ancestor_ids(matrix_constrained_children.iter().map(|(child_id, _, _)| self.nodes.get(child_id).and_then(|child| child.parent_id))) {
-                    if !affected_groups.contains(&group_id) { affected_groups.push(group_id); }
+                for group_id in self.group_ancestor_ids(matrix_constrained_children.iter().map(
+                    |(child_id, _, _)| self.nodes.get(child_id).and_then(|child| child.parent_id),
+                )) {
+                    if !affected_groups.contains(&group_id) {
+                        affected_groups.push(group_id);
+                    }
                 }
                 let before_bounds = affected_groups
                     .iter()
-                    .filter_map(|group_id| self.geometry_for(*group_id).map(|geometry| (*group_id, geometry)))
+                    .filter_map(|group_id| {
+                        self.geometry_for(*group_id)
+                            .map(|geometry| (*group_id, geometry))
+                    })
                     .collect::<Vec<_>>();
                 let node = self
                     .nodes
@@ -2026,16 +2259,46 @@ impl Document {
                     after,
                 }];
                 for (child_id, child_after) in constrained_children {
-                    let child = self.nodes.get_mut(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
-                    let child_before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                    let child = self
+                        .nodes
+                        .get_mut(&child_id)
+                        .ok_or(CommandError::MissingNode { id: child_id })?;
+                    let child_before = Geometry {
+                        x: child.x,
+                        y: child.y,
+                        width: child.width,
+                        height: child.height,
+                        rotation: child.rotation,
+                    };
                     if child_before != child_after {
-                        (child.x, child.y, child.width, child.height, child.rotation) = (child_after.x, child_after.y, child_after.width, child_after.height, child_after.rotation);
-                        changes.push(AppliedChange::GeometryChanged { id: child_id, before: child_before, after: child_after });
+                        (child.x, child.y, child.width, child.height, child.rotation) = (
+                            child_after.x,
+                            child_after.y,
+                            child_after.width,
+                            child_after.height,
+                            child_after.rotation,
+                        );
+                        changes.push(AppliedChange::GeometryChanged {
+                            id: child_id,
+                            before: child_before,
+                            after: child_after,
+                        });
                     }
                 }
-                for (child_id, child_after_geometry, child_after_transform) in matrix_constrained_children {
-                    let child = self.nodes.get_mut(&child_id).ok_or(CommandError::MissingNode { id: child_id })?;
-                    let child_before_geometry = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
+                for (child_id, child_after_geometry, child_after_transform) in
+                    matrix_constrained_children
+                {
+                    let child = self
+                        .nodes
+                        .get_mut(&child_id)
+                        .ok_or(CommandError::MissingNode { id: child_id })?;
+                    let child_before_geometry = Geometry {
+                        x: child.x,
+                        y: child.y,
+                        width: child.width,
+                        height: child.height,
+                        rotation: child.rotation,
+                    };
                     let before_appearance = appearance_for_node(child);
                     let after_appearance = Appearance {
                         relative_transform: Some(child_after_transform),
@@ -2144,16 +2407,31 @@ impl Document {
                 if after.contents_hidden && node.kind != NodeKind::Section {
                     return Err(CommandError::InvalidAppearance);
                 }
-                if after.clips_content == Some(true) && node.kind != NodeKind::Frame {
+                if after.clips_content == Some(true) && !is_frame_like(&node.kind) {
                     return Err(CommandError::InvalidAppearance);
                 }
-                if !after.corner_radii.is_empty() && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section) {
+                if !after.corner_radii.is_empty()
+                    && !matches!(
+                        node.kind,
+                        NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section
+                    )
+                {
                     return Err(CommandError::InvalidAppearance);
                 }
-                if after.corner_smoothing != 0.0 && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section) {
+                if after.corner_smoothing != 0.0
+                    && !matches!(
+                        node.kind,
+                        NodeKind::Frame | NodeKind::Rectangle | NodeKind::Section
+                    )
+                {
                     return Err(CommandError::InvalidAppearance);
                 }
-                if after.constraints.is_some() && matches!(node.kind, NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section) {
+                if after.constraints.is_some()
+                    && matches!(
+                        node.kind,
+                        NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section
+                    )
+                {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if !after.stroke_weights.is_empty()
@@ -2162,8 +2440,14 @@ impl Document {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if after.stroke_align != StrokeAlign::Inside
-                    && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Polygon | NodeKind::Star)
-                        || after.arc_data.is_some())
+                    && (!matches!(
+                        node.kind,
+                        NodeKind::Frame
+                            | NodeKind::Rectangle
+                            | NodeKind::Ellipse
+                            | NodeKind::Polygon
+                            | NodeKind::Star
+                    ) || after.arc_data.is_some())
                 {
                     return Err(CommandError::InvalidAppearance);
                 }
@@ -2263,7 +2547,7 @@ impl Document {
                 node.visible = after.visible;
                 node.locked = after.locked;
                 node.contents_hidden = after.contents_hidden;
-                node.clips_content = after.clips_content.unwrap_or(node.kind == NodeKind::Frame);
+                node.clips_content = after.clips_content.unwrap_or(is_frame_like(&node.kind));
                 self.node_bytes = self
                     .node_bytes
                     .saturating_sub(before_bytes)
@@ -2292,18 +2576,30 @@ impl Document {
             }
             Command::SetBooleanOperation { id, operation } => {
                 self.assert_mutable(*id)?;
-                let node = self.nodes.get_mut(id).ok_or(CommandError::MissingNode { id: *id })?;
+                let node = self
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
                 if node.kind != NodeKind::BooleanOperation {
                     return Err(CommandError::InvalidGeometry);
                 }
-                let before = node.boolean_operation.ok_or(CommandError::InvalidGeometry)?;
+                let before = node
+                    .boolean_operation
+                    .ok_or(CommandError::InvalidGeometry)?;
                 node.boolean_operation = Some(*operation);
-                Ok(AppliedChange::BooleanOperationChanged { id: *id, before, after: *operation })
+                Ok(AppliedChange::BooleanOperationChanged {
+                    id: *id,
+                    before,
+                    after: *operation,
+                })
             }
             Command::SetMask { id, enabled } => {
                 self.assert_mutable(*id)?;
                 let (before, before_bytes, after_bytes) = {
-                    let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
+                    let node = self
+                        .nodes
+                        .get(id)
+                        .ok_or(CommandError::MissingNode { id: *id })?;
                     if is_structural_container(&node.kind)
                         || matches!(node.kind, NodeKind::Section | NodeKind::Slice)
                     {
@@ -2313,7 +2609,9 @@ impl Document {
                     let before_bytes = node.estimated_bytes();
                     let mut after = node.clone();
                     if *enabled {
-                        after.extensions.insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
+                        after
+                            .extensions
+                            .insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
                     } else {
                         after.extensions.remove(ALPHA_MASK_EXTENSION_KEY);
                     }
@@ -2322,13 +2620,62 @@ impl Document {
                 if *enabled && !self.has_following_sibling(*id) {
                     return Err(CommandError::InvalidGeometry);
                 }
-                if self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes) > MAX_DOCUMENT_BYTES {
+                if self
+                    .node_bytes
+                    .saturating_sub(before_bytes)
+                    .saturating_add(after_bytes)
+                    > MAX_DOCUMENT_BYTES
+                {
                     return Err(CommandError::ResourceLimit);
                 }
                 self.set_mask(*id, *enabled);
-                Ok(AppliedChange::MaskChanged { id: *id, before, after: *enabled })
+                Ok(AppliedChange::MaskChanged {
+                    id: *id,
+                    before,
+                    after: *enabled,
+                })
             }
-            Command::MoveVectorPoint { id, point_id, position } => {
+            Command::SetNodeExtensions { id, extensions } => {
+                self.assert_mutable(*id)?;
+                if !valid_extensions(extensions) || !self.valid_prototype_extensions(extensions) {
+                    return Err(CommandError::InvalidAppearance);
+                }
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                let before_bytes = node.estimated_bytes();
+                let mut candidate = node.clone();
+                candidate.extensions = extensions.clone();
+                let after_bytes = candidate.estimated_bytes();
+                if self
+                    .node_bytes
+                    .saturating_sub(before_bytes)
+                    .saturating_add(after_bytes)
+                    > MAX_DOCUMENT_BYTES
+                {
+                    return Err(CommandError::ResourceLimit);
+                }
+                let node = self
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                let before = std::mem::replace(&mut node.extensions, extensions.clone());
+                self.node_bytes = self
+                    .node_bytes
+                    .saturating_sub(before_bytes)
+                    .saturating_add(after_bytes);
+                Ok(AppliedChange::ExtensionsChanged {
+                    id: *id,
+                    before,
+                    after: extensions.clone(),
+                })
+            }
+            Command::MoveVectorPoint {
+                id,
+                point_id,
+                position,
+            } => {
                 self.assert_mutable(*id)?;
                 let mut path = self.vector_path_for_node(*id)?;
                 let point = path
@@ -2340,7 +2687,11 @@ impl Document {
                 point.position = *position;
                 self.replace_vector_path(*id, path)
             }
-            Command::SetVectorSubpathClosed { id, subpath_index, closed } => {
+            Command::SetVectorSubpathClosed {
+                id,
+                subpath_index,
+                closed,
+            } => {
                 self.assert_mutable(*id)?;
                 let mut path = self.vector_path_for_node(*id)?;
                 let subpath = path
@@ -2350,10 +2701,20 @@ impl Document {
                 subpath.closed = *closed;
                 self.replace_vector_path(*id, path)
             }
-            Command::InsertVectorPoint { id, subpath_index, after_point_id, point } => {
+            Command::InsertVectorPoint {
+                id,
+                subpath_index,
+                after_point_id,
+                point,
+            } => {
                 self.assert_mutable(*id)?;
                 let mut path = self.vector_path_for_node(*id)?;
-                if path.subpaths.iter().flat_map(|subpath| &subpath.points).any(|candidate| candidate.id == point.id) {
+                if path
+                    .subpaths
+                    .iter()
+                    .flat_map(|subpath| &subpath.points)
+                    .any(|candidate| candidate.id == point.id)
+                {
                     return Err(CommandError::InvalidGeometry);
                 }
                 let subpath = path
@@ -2372,21 +2733,62 @@ impl Document {
                 subpath.points.insert(insertion_index, point.clone());
                 self.replace_vector_path(*id, path)
             }
-            Command::SplitVectorSegment { id, subpath_index, after_point_id, t, point_id } => {
+            Command::SplitVectorSegment {
+                id,
+                subpath_index,
+                after_point_id,
+                t,
+                point_id,
+            } => {
                 self.assert_mutable(*id)?;
-                if !t.is_finite() || *t <= 0.0 || *t >= 1.0 { return Err(CommandError::InvalidGeometry); }
-                let mut path = self.vector_path_for_node(*id)?;
-                if path.subpaths.iter().flat_map(|subpath| &subpath.points).any(|candidate| candidate.id == *point_id) {
+                if !t.is_finite() || *t <= 0.0 || *t >= 1.0 {
                     return Err(CommandError::InvalidGeometry);
                 }
-                let subpath = path.subpaths.get_mut(*subpath_index as usize).ok_or(CommandError::InvalidGeometry)?;
-                let after_index = subpath.points.iter().position(|candidate| candidate.id == *after_point_id).ok_or(CommandError::InvalidGeometry)?;
-                let next_index = if after_index + 1 < subpath.points.len() { after_index + 1 } else if subpath.closed { 0 } else { return Err(CommandError::InvalidGeometry); };
+                let mut path = self.vector_path_for_node(*id)?;
+                if path
+                    .subpaths
+                    .iter()
+                    .flat_map(|subpath| &subpath.points)
+                    .any(|candidate| candidate.id == *point_id)
+                {
+                    return Err(CommandError::InvalidGeometry);
+                }
+                let subpath = path
+                    .subpaths
+                    .get_mut(*subpath_index as usize)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                let after_index = subpath
+                    .points
+                    .iter()
+                    .position(|candidate| candidate.id == *after_point_id)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                let next_index = if after_index + 1 < subpath.points.len() {
+                    after_index + 1
+                } else if subpath.closed {
+                    0
+                } else {
+                    return Err(CommandError::InvalidGeometry);
+                };
                 let from = subpath.points[after_index].clone();
                 let to = subpath.points[next_index].clone();
-                let control_from = from.handle_out.map(|handle| Point { x: from.position.x + handle.x, y: from.position.y + handle.y }).unwrap_or(from.position);
-                let control_to = to.handle_in.map(|handle| Point { x: to.position.x + handle.x, y: to.position.y + handle.y }).unwrap_or(to.position);
-                let interpolate = |left: Point, right: Point| Point { x: left.x + (right.x - left.x) * *t, y: left.y + (right.y - left.y) * *t };
+                let control_from = from
+                    .handle_out
+                    .map(|handle| Point {
+                        x: from.position.x + handle.x,
+                        y: from.position.y + handle.y,
+                    })
+                    .unwrap_or(from.position);
+                let control_to = to
+                    .handle_in
+                    .map(|handle| Point {
+                        x: to.position.x + handle.x,
+                        y: to.position.y + handle.y,
+                    })
+                    .unwrap_or(to.position);
+                let interpolate = |left: Point, right: Point| Point {
+                    x: left.x + (right.x - left.x) * *t,
+                    y: left.y + (right.y - left.y) * *t,
+                };
                 let first = interpolate(from.position, control_from);
                 let second = interpolate(control_from, control_to);
                 let third = interpolate(control_to, to.position);
@@ -2394,34 +2796,84 @@ impl Document {
                 let fifth = interpolate(second, third);
                 let position = interpolate(fourth, fifth);
                 let curved = from.handle_out.is_some() || to.handle_in.is_some();
-                subpath.points[after_index].handle_out = curved.then_some(Point { x: first.x - from.position.x, y: first.y - from.position.y });
-                subpath.points[next_index].handle_in = curved.then_some(Point { x: third.x - to.position.x, y: third.y - to.position.y });
-                subpath.points.insert(after_index + 1, VectorPoint {
-                    id: *point_id,
-                    position,
-                    handle_in: curved.then_some(Point { x: fourth.x - position.x, y: fourth.y - position.y }),
-                    handle_out: curved.then_some(Point { x: fifth.x - position.x, y: fifth.y - position.y }),
-                    point_type: if curved { VectorPointType::Asymmetric } else { VectorPointType::Corner },
+                subpath.points[after_index].handle_out = curved.then_some(Point {
+                    x: first.x - from.position.x,
+                    y: first.y - from.position.y,
                 });
+                subpath.points[next_index].handle_in = curved.then_some(Point {
+                    x: third.x - to.position.x,
+                    y: third.y - to.position.y,
+                });
+                subpath.points.insert(
+                    after_index + 1,
+                    VectorPoint {
+                        id: *point_id,
+                        position,
+                        handle_in: curved.then_some(Point {
+                            x: fourth.x - position.x,
+                            y: fourth.y - position.y,
+                        }),
+                        handle_out: curved.then_some(Point {
+                            x: fifth.x - position.x,
+                            y: fifth.y - position.y,
+                        }),
+                        point_type: if curved {
+                            VectorPointType::Asymmetric
+                        } else {
+                            VectorPointType::Corner
+                        },
+                    },
+                );
                 self.replace_vector_path(*id, path)
             }
-            Command::ConnectVectorEndpoints { id, first_subpath_index, first_point_id, second_subpath_index, second_point_id } => {
+            Command::ConnectVectorEndpoints {
+                id,
+                first_subpath_index,
+                first_point_id,
+                second_subpath_index,
+                second_point_id,
+            } => {
                 self.assert_mutable(*id)?;
                 let mut path = self.vector_path_for_node(*id)?;
                 let first_index = *first_subpath_index as usize;
                 let second_index = *second_subpath_index as usize;
-                let first = path.subpaths.get(first_index).ok_or(CommandError::InvalidGeometry)?;
-                let second = path.subpaths.get(second_index).ok_or(CommandError::InvalidGeometry)?;
+                let first = path
+                    .subpaths
+                    .get(first_index)
+                    .ok_or(CommandError::InvalidGeometry)?;
+                let second = path
+                    .subpaths
+                    .get(second_index)
+                    .ok_or(CommandError::InvalidGeometry)?;
                 let endpoint = |subpath: &VectorSubpath, point_id: PointId| {
-                    if subpath.closed || subpath.points.is_empty() { return None; }
-                    if subpath.points.first().is_some_and(|point| point.id == point_id) { Some(true) }
-                    else if subpath.points.last().is_some_and(|point| point.id == point_id) { Some(false) }
-                    else { None }
+                    if subpath.closed || subpath.points.is_empty() {
+                        return None;
+                    }
+                    if subpath
+                        .points
+                        .first()
+                        .is_some_and(|point| point.id == point_id)
+                    {
+                        Some(true)
+                    } else if subpath
+                        .points
+                        .last()
+                        .is_some_and(|point| point.id == point_id)
+                    {
+                        Some(false)
+                    } else {
+                        None
+                    }
                 };
-                let first_at_start = endpoint(first, *first_point_id).ok_or(CommandError::InvalidGeometry)?;
-                let second_at_start = endpoint(second, *second_point_id).ok_or(CommandError::InvalidGeometry)?;
+                let first_at_start =
+                    endpoint(first, *first_point_id).ok_or(CommandError::InvalidGeometry)?;
+                let second_at_start =
+                    endpoint(second, *second_point_id).ok_or(CommandError::InvalidGeometry)?;
                 if first_index == second_index {
-                    if first_point_id == second_point_id || first_at_start == second_at_start || first.points.len() < 3 {
+                    if first_point_id == second_point_id
+                        || first_at_start == second_at_start
+                        || first.points.len() < 3
+                    {
                         return Err(CommandError::InvalidGeometry);
                     }
                     path.subpaths[first_index].closed = true;
@@ -2435,13 +2887,29 @@ impl Document {
                         std::mem::swap(&mut point.handle_in, &mut point.handle_out);
                     }
                 };
-                if first_at_start { reverse(&mut first); }
-                if !second_at_start { reverse(&mut second); }
-                if first.points.last().is_some_and(|left| second.points.first().is_some_and(|right| left.position == right.position)) {
+                if first_at_start {
+                    reverse(&mut first);
+                }
+                if !second_at_start {
+                    reverse(&mut second);
+                }
+                if first.points.last().is_some_and(|left| {
+                    second
+                        .points
+                        .first()
+                        .is_some_and(|right| left.position == right.position)
+                }) {
                     let joined = second.points.remove(0);
-                    let last = first.points.last_mut().ok_or(CommandError::InvalidGeometry)?;
+                    let last = first
+                        .points
+                        .last_mut()
+                        .ok_or(CommandError::InvalidGeometry)?;
                     last.handle_out = joined.handle_out;
-                    last.point_type = if last.handle_in.is_some() || last.handle_out.is_some() { VectorPointType::Asymmetric } else { VectorPointType::Corner };
+                    last.point_type = if last.handle_in.is_some() || last.handle_out.is_some() {
+                        VectorPointType::Asymmetric
+                    } else {
+                        VectorPointType::Corner
+                    };
                 }
                 first.points.extend(second.points);
                 let insertion_index = first_index.min(second_index);
@@ -2457,17 +2925,31 @@ impl Document {
                 let subpath = path
                     .subpaths
                     .iter_mut()
-                    .find(|subpath| subpath.points.iter().any(|candidate| candidate.id == *point_id))
+                    .find(|subpath| {
+                        subpath
+                            .points
+                            .iter()
+                            .any(|candidate| candidate.id == *point_id)
+                    })
                     .ok_or(CommandError::InvalidGeometry)?;
                 if subpath.points.len() <= if subpath.closed { 3 } else { 1 } {
                     return Err(CommandError::InvalidGeometry);
                 }
-                let point_index = subpath.points.iter().position(|candidate| candidate.id == *point_id)
+                let point_index = subpath
+                    .points
+                    .iter()
+                    .position(|candidate| candidate.id == *point_id)
                     .ok_or(CommandError::InvalidGeometry)?;
                 subpath.points.remove(point_index);
                 self.replace_vector_path(*id, path)
             }
-            Command::SetVectorPointHandles { id, point_id, handle_in, handle_out, point_type } => {
+            Command::SetVectorPointHandles {
+                id,
+                point_id,
+                handle_in,
+                handle_out,
+                point_type,
+            } => {
                 self.assert_mutable(*id)?;
                 let mut path = self.vector_path_for_node(*id)?;
                 let point = path
@@ -2577,17 +3059,30 @@ impl Document {
             }
             Command::SetAutoLayout { id, layout } => {
                 self.assert_mutable(*id)?;
-                let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
-                if !valid_auto_layout(layout) || (layout.mode != LayoutMode::None && node.kind != NodeKind::Frame) {
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
+                if !valid_auto_layout(layout)
+                    || (layout.mode != LayoutMode::None && !is_frame_like(&node.kind))
+                {
                     return Err(CommandError::InvalidAutoLayout);
                 }
                 let before = self.node_auto_layout.get(id).cloned();
                 let after = (layout != &AutoLayout::default()).then_some(layout.clone());
                 match &after {
-                    Some(layout) => { self.node_auto_layout.insert(*id, layout.clone()); }
-                    None => { self.node_auto_layout.remove(id); }
+                    Some(layout) => {
+                        self.node_auto_layout.insert(*id, layout.clone());
+                    }
+                    None => {
+                        self.node_auto_layout.remove(id);
+                    }
                 }
-                Ok(AppliedChange::AutoLayoutChanged { id: *id, before, after })
+                Ok(AppliedChange::AutoLayoutChanged {
+                    id: *id,
+                    before,
+                    after,
+                })
             }
             Command::SetNodePosition { id, position } => {
                 self.assert_mutable(*id)?;
@@ -2633,38 +3128,61 @@ impl Document {
                 position,
             } => {
                 self.assert_mutable(*id)?;
-                let node = self.nodes.get(id).ok_or(CommandError::MissingNode { id: *id })?;
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
                 let page_id = self.node_pages.get(id).copied().unwrap_or(DEFAULT_PAGE_ID);
                 let before_parent_id = node.parent_id;
                 let before_position = node.position;
                 if *parent_id == Some(*id) {
                     return Err(CommandError::InvalidParent { id: *id });
                 }
+                if parent_id.is_none() && matches!(node.kind, NodeKind::Slide | NodeKind::SlideRow)
+                {
+                    return Err(CommandError::InvalidParent { id: *id });
+                }
                 if let Some(next_parent_id) = parent_id {
-                    let parent = self
-                        .nodes
-                        .get(next_parent_id)
-                        .ok_or(CommandError::MissingParent { id: *next_parent_id })?;
+                    let parent =
+                        self.nodes
+                            .get(next_parent_id)
+                            .ok_or(CommandError::MissingParent {
+                                id: *next_parent_id,
+                            })?;
                     if self.is_effectively_locked(*next_parent_id) {
                         return Err(CommandError::EffectivelyLocked {
                             id: *next_parent_id,
                         });
                     }
-                    if self.node_pages.get(next_parent_id).copied().unwrap_or(DEFAULT_PAGE_ID) != page_id
-                        || !can_contain_children(&parent.kind)
+                    if self
+                        .node_pages
+                        .get(next_parent_id)
+                        .copied()
+                        .unwrap_or(DEFAULT_PAGE_ID)
+                        != page_id
+                        || !can_parent_contain_child(&parent.kind, &node.kind)
                     {
-                        return Err(CommandError::InvalidParent { id: *next_parent_id });
+                        return Err(CommandError::InvalidParent {
+                            id: *next_parent_id,
+                        });
                     }
                     let mut ancestor = parent.parent_id;
                     while let Some(ancestor_id) = ancestor {
                         if ancestor_id == *id {
-                            return Err(CommandError::InvalidParent { id: *next_parent_id });
+                            return Err(CommandError::InvalidParent {
+                                id: *next_parent_id,
+                            });
                         }
-                        ancestor = self.nodes.get(&ancestor_id).and_then(|candidate| candidate.parent_id);
+                        ancestor = self
+                            .nodes
+                            .get(&ancestor_id)
+                            .and_then(|candidate| candidate.parent_id);
                     }
                 }
                 if (*parent_id != before_parent_id || *position != before_position)
-                    && self.sibling_positions.contains(&(page_id, *parent_id, *position))
+                    && self
+                        .sibling_positions
+                        .contains(&(page_id, *parent_id, *position))
                 {
                     return Err(CommandError::DuplicatePosition {
                         parent_id: *parent_id,
@@ -2678,8 +3196,12 @@ impl Document {
                     .collect::<Vec<_>>();
                 self.sibling_positions
                     .remove(&(page_id, before_parent_id, before_position));
-                self.sibling_positions.insert((page_id, *parent_id, *position));
-                let node = self.nodes.get_mut(id).ok_or(CommandError::MissingNode { id: *id })?;
+                self.sibling_positions
+                    .insert((page_id, *parent_id, *position));
+                let node = self
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(CommandError::MissingNode { id: *id })?;
                 node.parent_id = *parent_id;
                 node.position = *position;
                 self.refresh_group_bounds(before_parent_id);
@@ -2694,26 +3216,42 @@ impl Document {
                 }];
                 changes.extend(before_bounds.into_iter().filter_map(|(id, before)| {
                     let after = self.geometry_for(id)?;
-                    (before != after).then_some(AppliedChange::GeometryChanged { id, before, after })
+                    (before != after).then_some(AppliedChange::GeometryChanged {
+                        id,
+                        before,
+                        after,
+                    })
                 }));
                 changes.extend(
                     dissolved_groups
                         .into_iter()
                         .map(|node| AppliedChange::NodeDeleted { node }),
                 );
-                Ok(if changes.len() == 1 { changes.remove(0) } else { AppliedChange::Composite { changes } })
+                Ok(if changes.len() == 1 {
+                    changes.remove(0)
+                } else {
+                    AppliedChange::Composite { changes }
+                })
             }
             Command::Delete { id } => {
                 self.assert_mutable(*id)?;
                 if self.nodes.values().any(|node| node.parent_id == Some(*id)) {
                     return Err(CommandError::NodeHasChildren { id: *id });
                 }
-                let node = self.nodes.get(id).cloned().ok_or(CommandError::MissingNode { id: *id })?;
+                let node = self
+                    .nodes
+                    .get(id)
+                    .cloned()
+                    .ok_or(CommandError::MissingNode { id: *id })?;
                 let affected_groups = self.group_ancestor_ids([node.parent_id]);
                 let before_bounds = affected_groups
                     .iter()
-                    .filter_map(|group_id| self.geometry_for(*group_id).map(|geometry| (*group_id, geometry)))
+                    .filter_map(|group_id| {
+                        self.geometry_for(*group_id)
+                            .map(|geometry| (*group_id, geometry))
+                    })
                     .collect::<Vec<_>>();
+                let reference_changes = self.clear_prototype_destination(*id);
                 self.nodes.remove(id);
                 self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
                 if let Some(properties) = self.node_text_properties.remove(id) {
@@ -2731,6 +3269,7 @@ impl Document {
                 self.refresh_group_bounds(node.parent_id);
                 let dissolved_groups = self.dissolve_empty_groups_from(node.parent_id);
                 let mut changes = vec![AppliedChange::NodeDeleted { node }];
+                changes.extend(reference_changes);
                 changes.extend(before_bounds.into_iter().filter_map(|(group_id, before)| {
                     let after = self.geometry_for(group_id)?;
                     (before != after).then_some(AppliedChange::GeometryChanged {
@@ -2794,11 +3333,16 @@ impl Document {
             AppliedChange::AutoLayoutChanged { id, before, .. } => {
                 self.replace_auto_layout_option(*id, before.clone());
             }
-            AppliedChange::VectorPathChanged { id, before, .. } => self.set_vector_path(*id, before),
+            AppliedChange::VectorPathChanged { id, before, .. } => {
+                self.set_vector_path(*id, before)
+            }
             AppliedChange::BooleanOperationChanged { id, before, .. } => {
-                if let Some(node) = self.nodes.get_mut(id) { node.boolean_operation = Some(*before); }
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.boolean_operation = Some(*before);
+                }
             }
             AppliedChange::MaskChanged { id, before, .. } => self.set_mask(*id, *before),
+            AppliedChange::ExtensionsChanged { id, before, .. } => self.set_extensions(*id, before),
             AppliedChange::NodeAssetChanged { id, before, .. } => self.set_node_asset(*id, *before),
             AppliedChange::TextChanged {
                 id,
@@ -2856,9 +3400,12 @@ impl Document {
             }
             AppliedChange::VectorPathChanged { id, after, .. } => self.set_vector_path(*id, after),
             AppliedChange::BooleanOperationChanged { id, after, .. } => {
-                if let Some(node) = self.nodes.get_mut(id) { node.boolean_operation = Some(*after); }
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.boolean_operation = Some(*after);
+                }
             }
             AppliedChange::MaskChanged { id, after, .. } => self.set_mask(*id, *after),
+            AppliedChange::ExtensionsChanged { id, after, .. } => self.set_extensions(*id, after),
             AppliedChange::NodeAssetChanged { id, after, .. } => self.set_node_asset(*id, *after),
             AppliedChange::TextChanged {
                 id,
@@ -2930,7 +3477,9 @@ impl Document {
             node.visible = appearance.visible;
             node.locked = appearance.locked;
             node.contents_hidden = appearance.contents_hidden;
-            node.clips_content = appearance.clips_content.unwrap_or(node.kind == NodeKind::Frame);
+            node.clips_content = appearance
+                .clips_content
+                .unwrap_or(is_frame_like(&node.kind));
             self.node_bytes = self
                 .node_bytes
                 .saturating_sub(before_bytes)
@@ -2940,28 +3489,59 @@ impl Document {
 
     fn replace_auto_layout_option(&mut self, id: NodeId, layout: Option<AutoLayout>) {
         match layout {
-            Some(layout) => { self.node_auto_layout.insert(id, layout); }
-            None => { self.node_auto_layout.remove(&id); }
+            Some(layout) => {
+                self.node_auto_layout.insert(id, layout);
+            }
+            None => {
+                self.node_auto_layout.remove(&id);
+            }
         }
     }
 
     /// The dirty set follows touched nodes only through their ancestor chain;
     /// it never defaults to an all-page layout scan.
-    fn auto_layout_dirty_frames(&self, commands: &[Command], before_transaction: &Document) -> Vec<NodeId> {
+    fn auto_layout_dirty_frames(
+        &self,
+        commands: &[Command],
+        before_transaction: &Document,
+    ) -> Vec<NodeId> {
         let mut touched = BTreeSet::new();
         for command in commands {
             match command {
-                Command::Create(node) => { touched.insert(node.id); }
-                Command::CreateInPage { node, .. } | Command::CreateImageInPage { node, .. } | Command::RestoreNode { node, .. } => { touched.insert(node.id); }
-                Command::UpdateGeometry { id, .. } | Command::Rename { id, .. } | Command::SetAppearance { id, .. }
-                | Command::SetVectorPath { id, .. } | Command::SetBooleanOperation { id, .. } | Command::SetMask { id, .. }
-                | Command::MoveVectorPoint { id, .. } | Command::SetVectorSubpathClosed { id, .. }
-                | Command::InsertVectorPoint { id, .. } | Command::SplitVectorSegment { id, .. } | Command::ConnectVectorEndpoints { id, .. }
-                | Command::DeleteVectorPoint { id, .. } | Command::SetVectorPointHandles { id, .. }
-                | Command::SetNodeAsset { id, .. } | Command::SetText { id, .. } | Command::SetTextProperties { id, .. }
-                | Command::SetAutoLayout { id, .. } | Command::SetNodePosition { id, .. } | Command::SetNodeParent { id, .. }
-                | Command::Delete { id } => { touched.insert(*id); }
-                Command::CreatePage(_) | Command::SetDocumentColorProfile { .. } | Command::RegisterAsset { .. } => {}
+                Command::Create(node) => {
+                    touched.insert(node.id);
+                }
+                Command::CreateInPage { node, .. }
+                | Command::CreateImageInPage { node, .. }
+                | Command::RestoreNode { node, .. } => {
+                    touched.insert(node.id);
+                }
+                Command::UpdateGeometry { id, .. }
+                | Command::Rename { id, .. }
+                | Command::SetAppearance { id, .. }
+                | Command::SetVectorPath { id, .. }
+                | Command::SetBooleanOperation { id, .. }
+                | Command::SetMask { id, .. }
+                | Command::SetNodeExtensions { id, .. }
+                | Command::MoveVectorPoint { id, .. }
+                | Command::SetVectorSubpathClosed { id, .. }
+                | Command::InsertVectorPoint { id, .. }
+                | Command::SplitVectorSegment { id, .. }
+                | Command::ConnectVectorEndpoints { id, .. }
+                | Command::DeleteVectorPoint { id, .. }
+                | Command::SetVectorPointHandles { id, .. }
+                | Command::SetNodeAsset { id, .. }
+                | Command::SetText { id, .. }
+                | Command::SetTextProperties { id, .. }
+                | Command::SetAutoLayout { id, .. }
+                | Command::SetNodePosition { id, .. }
+                | Command::SetNodeParent { id, .. }
+                | Command::Delete { id } => {
+                    touched.insert(*id);
+                }
+                Command::CreatePage(_)
+                | Command::SetDocumentColorProfile { .. }
+                | Command::RegisterAsset { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -2973,10 +3553,18 @@ impl Document {
                 let mut current = Some(id);
                 let mut visited = BTreeSet::new();
                 while let Some(id) = current {
-                    if !visited.insert(id) { break; }
-                    let Some(node) = document.nodes.get(&id) else { break; };
-                    if self.nodes.get(&id).is_some_and(|current_node| current_node.kind == NodeKind::Frame)
-                        && self.auto_layout_for_node(id).mode != LayoutMode::None {
+                    if !visited.insert(id) {
+                        break;
+                    }
+                    let Some(node) = document.nodes.get(&id) else {
+                        break;
+                    };
+                    if self
+                        .nodes
+                        .get(&id)
+                        .is_some_and(|current_node| is_frame_like(&current_node.kind))
+                        && self.auto_layout_for_node(id).mode != LayoutMode::None
+                    {
                         frames.insert(id);
                     }
                     current = node.parent_id;
@@ -2993,7 +3581,7 @@ impl Document {
         for root_id in dirty_roots {
             for candidate in self.nodes.values() {
                 if candidate.id == root_id
-                    || candidate.kind != NodeKind::Frame
+                    || !is_frame_like(&candidate.kind)
                     || self.auto_layout_for_node(candidate.id).mode == LayoutMode::None
                 {
                     continue;
@@ -3001,7 +3589,9 @@ impl Document {
                 let mut current = candidate.parent_id;
                 let mut visited = BTreeSet::new();
                 while let Some(parent_id) = current {
-                    if !visited.insert(parent_id) { break; }
+                    if !visited.insert(parent_id) {
+                        break;
+                    }
                     if parent_id == root_id {
                         frames.insert(candidate.id);
                         break;
@@ -3020,9 +3610,13 @@ impl Document {
         let mut visited = BTreeSet::new();
         let mut depth = 0;
         while let Some(id) = current {
-            if !visited.insert(id) { return usize::MAX; }
+            if !visited.insert(id) {
+                return usize::MAX;
+            }
             current = self.nodes.get(&id).and_then(|node| node.parent_id);
-            if current.is_some() { depth += 1; }
+            if current.is_some() {
+                depth += 1;
+            }
         }
         depth
     }
@@ -3036,7 +3630,9 @@ impl Document {
         let line_height = properties
             .and_then(|value| value.paragraph.line_height)
             .unwrap_or(20.0);
-        let paragraph_spacing = properties.map(|value| value.paragraph.paragraph_spacing).unwrap_or(0.0);
+        let paragraph_spacing = properties
+            .map(|value| value.paragraph.paragraph_spacing)
+            .unwrap_or(0.0);
         let runs = properties.map(|value| value.runs.as_slice()).unwrap_or(&[]);
         // Height-auto text keeps its authored width. Measure its soft wraps in
         // Core as well, so snapshot replay does not depend on a browser font
@@ -3061,32 +3657,66 @@ impl Document {
                 paragraph_breaks += 1;
                 continue;
             }
-            let run = runs.iter().find(|run| (run.start as usize) <= offset && offset < run.end as usize);
+            let run = runs
+                .iter()
+                .find(|run| (run.start as usize) <= offset && offset < run.end as usize);
             let font_size = run.map(|run| run.font_size).unwrap_or(31.0);
             let letter_spacing = run.map(|run| run.letter_spacing).unwrap_or(0.0);
             // A fallback advance is attributed to one legal editing grapheme,
             // so combining marks and Emoji ZWJ sequences cannot manufacture
             // soft-wrap lines that the text editor cannot address.
             let advance = font_size * 0.6;
-            let spacing = (glyphs_on_line > 0).then_some(letter_spacing).unwrap_or(0.0);
-            if glyphs_on_line > 0 && wrap_width.is_some_and(|width| line_width + spacing + advance > width) {
+            let spacing = (glyphs_on_line > 0)
+                .then_some(letter_spacing)
+                .unwrap_or(0.0);
+            if glyphs_on_line > 0
+                && wrap_width.is_some_and(|width| line_width + spacing + advance > width)
+            {
                 widest = widest.max(line_width);
                 line_width = 0.0;
                 glyphs_on_line = 0;
                 lines += 1;
             }
-            if glyphs_on_line > 0 { line_width += letter_spacing; }
+            if glyphs_on_line > 0 {
+                line_width += letter_spacing;
+            }
             line_width += advance;
             glyphs_on_line += 1;
         }
         widest = widest.max(line_width);
         (
             normalize_layout_number(widest.max(1.0)),
-            normalize_layout_number((lines as f64 * line_height + paragraph_breaks as f64 * paragraph_spacing).max(1.0)),
+            normalize_layout_number(
+                (lines as f64 * line_height + paragraph_breaks as f64 * paragraph_spacing).max(1.0),
+            ),
         )
     }
 
-    fn reflow_auto_layout(&mut self, dirty_frames: Vec<NodeId>) -> Result<Vec<AppliedChange>, CommandError> {
+    /// Core has no platform font dependency during snapshot replay. Its
+    /// baseline therefore mirrors Canvas' deterministic `cssLineBoxBaseline`
+    /// fallback: center the nominal font box in the declared line box and put
+    /// the alphabetic baseline at 80% of the nominal font size. A non-text
+    /// layer contributes its lower edge, matching Figma's documented
+    /// text-baseline behavior when it shares a horizontal row with text.
+    fn auto_layout_baseline_offset(&self, node: &Node, counter_extent: f64) -> f64 {
+        if node.kind != NodeKind::Text {
+            return counter_extent.max(0.0);
+        }
+        let properties = self.node_text_properties.get(&node.id);
+        let line_height = properties
+            .and_then(|value| value.paragraph.line_height)
+            .unwrap_or(20.0);
+        let font_size = properties
+            .and_then(|value| value.runs.first())
+            .map(|run| run.font_size)
+            .unwrap_or(31.0);
+        normalize_layout_number((line_height - font_size) / 2.0 + font_size * 0.8)
+    }
+
+    fn reflow_auto_layout(
+        &mut self,
+        dirty_frames: Vec<NodeId>,
+    ) -> Result<Vec<AppliedChange>, CommandError> {
         const MAX_LAYOUT_NODES: usize = 10_000;
         const MAX_LAYOUT_ITERATIONS: usize = 32;
         let mut changes = Vec::new();
@@ -3094,242 +3724,589 @@ impl Document {
         for _iteration in 0..MAX_LAYOUT_ITERATIONS {
             let changes_before_iteration = changes.len();
             for frame_id in dirty_frames.iter().copied() {
-            let layout = self.auto_layout_for_node(frame_id);
-            if layout.mode == LayoutMode::None { continue; }
-            let frame = self.nodes.get(&frame_id).cloned().ok_or(CommandError::MissingNode { id: frame_id })?;
-            if frame.kind != NodeKind::Frame || frame.relative_transform.is_some() { return Err(CommandError::AutoLayoutUnsupported); }
-            let mut children = self.nodes.values()
-                .filter(|node| node.parent_id == Some(frame_id))
-                .cloned().collect::<Vec<_>>();
-            children.sort_unstable_by_key(|node| (node.position, node.id));
-            visited_nodes = visited_nodes.saturating_add(children.len());
-            if visited_nodes > MAX_LAYOUT_NODES { return Err(CommandError::AutoLayoutLimit); }
-            let flow = children.into_iter().filter(|node| !self.auto_layout_for_node(node.id).absolute).collect::<Vec<_>>();
-            if flow.iter().any(|node| node.relative_transform.is_some()) { return Err(CommandError::AutoLayoutUnsupported); }
-            let horizontal = layout.mode == LayoutMode::Horizontal;
-            if flow.iter().any(|node| {
-                let child = self.auto_layout_for_node(node.id);
-                let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(node, horizontal);
-                let text_auto_size = self.node_text_properties.get(&node.id).map(|properties| properties.auto_size);
-                let text_supports_primary_hug = node.kind == NodeKind::Text
-                    && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
-                        || (!horizontal && matches!(text_auto_size, Some(TextAutoSize::Height))));
-                let text_supports_counter_hug = node.kind == NodeKind::Text
-                    && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
-                        || (horizontal && matches!(text_auto_size, Some(TextAutoSize::Height))));
-                (primary_sizing == LayoutSizing::Hug
-                    && node.kind != NodeKind::Frame
-                    && !text_supports_primary_hug)
-                    || (counter_sizing == LayoutSizing::Hug
-                        && node.kind != NodeKind::Frame
-                        && !text_supports_counter_hug)
-                    || child.wrap
-            }) { return Err(CommandError::AutoLayoutUnsupported); }
-            let [top, right, bottom, left] = layout.padding;
-            let intrinsic_primary = flow.iter().map(|node| {
-                let (primary_sizing, _) = self.auto_layout_child_sizing(node, horizontal);
-                let (text_width, text_height) = (node.kind == NodeKind::Text).then(|| self.auto_layout_text_size(node)).unwrap_or((node.width, node.height));
-                if primary_sizing == LayoutSizing::Hug {
-                    if horizontal { text_width } else { text_height }
-                } else if horizontal { node.width } else { node.height }
-            }).sum::<f64>()
-                + layout.item_spacing * flow.len().saturating_sub(1) as f64;
-            let intrinsic_counter = flow.iter().map(|node| {
-                let (_, counter_sizing) = self.auto_layout_child_sizing(node, horizontal);
-                let (text_width, text_height) = (node.kind == NodeKind::Text).then(|| self.auto_layout_text_size(node)).unwrap_or((node.width, node.height));
-                if counter_sizing == LayoutSizing::Hug {
-                    if horizontal { text_height } else { text_width }
-                } else if horizontal { node.height } else { node.width }
-            }).fold(0.0, f64::max);
-            let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
-                max.map(|limit| value.min(limit)).unwrap_or(value).max(min.unwrap_or(0.0))
-            };
-            let (candidate_width, candidate_height) = if horizontal {
-                (
-                    clamp_size(if layout.primary_sizing == LayoutSizing::Hug { left + intrinsic_primary + right } else { frame.width }, layout.min_width, layout.max_width),
-                    clamp_size(if layout.counter_sizing == LayoutSizing::Hug { top + intrinsic_counter + bottom } else { frame.height }, layout.min_height, layout.max_height),
-                )
-            } else {
-                (
-                    clamp_size(if layout.counter_sizing == LayoutSizing::Hug { left + intrinsic_counter + right } else { frame.width }, layout.min_width, layout.max_width),
-                    clamp_size(if layout.primary_sizing == LayoutSizing::Hug { top + intrinsic_primary + bottom } else { frame.height }, layout.min_height, layout.max_height),
-                )
-            };
-            if frame.width != candidate_width || frame.height != candidate_height {
-                let before = Geometry { x: frame.x, y: frame.y, width: frame.width, height: frame.height, rotation: frame.rotation };
-                let after = Geometry { x: frame.x, y: frame.y, width: normalize_layout_number(candidate_width), height: normalize_layout_number(candidate_height), rotation: frame.rotation };
-                let node = self.nodes.get_mut(&frame_id).expect("layout frame exists");
-                (node.width, node.height) = (after.width, after.height);
-                changes.push(AppliedChange::GeometryChanged { id: frame_id, before, after });
-            }
-            let frame = self.nodes.get(&frame_id).cloned().expect("layout frame exists");
-            let primary_extent = if horizontal { frame.width - left - right } else { frame.height - top - bottom };
-            let counter_extent = if horizontal { frame.height - top - bottom } else { frame.width - left - right };
-            if primary_extent < 0.0 || counter_extent < 0.0 { return Err(CommandError::InvalidAutoLayout); }
-            if layout.wrap {
-                if layout.primary_sizing != LayoutSizing::Fixed || layout.counter_sizing != LayoutSizing::Fixed
-                    || flow.iter().any(|child| {
-                        let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(child, horizontal);
-                        primary_sizing != LayoutSizing::Fixed || counter_sizing != LayoutSizing::Fixed
-                    }) {
+                let layout = self.auto_layout_for_node(frame_id);
+                if layout.mode == LayoutMode::None {
+                    continue;
+                }
+                let frame = self
+                    .nodes
+                    .get(&frame_id)
+                    .cloned()
+                    .ok_or(CommandError::MissingNode { id: frame_id })?;
+                if !is_frame_like(&frame.kind) || frame.relative_transform.is_some() {
                     return Err(CommandError::AutoLayoutUnsupported);
                 }
-                let mut lines = Vec::<Vec<(Node, f64, f64)>>::new();
-                let mut line_primary = 0.0;
-                for child in flow {
-                    let child_layout = self.auto_layout_for_node(child.id);
-                    let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
-                        (child_layout.min_width, child_layout.max_width, child_layout.min_height, child_layout.max_height)
-                    } else {
-                        (child_layout.min_height, child_layout.max_height, child_layout.min_width, child_layout.max_width)
-                    };
-                    let primary = clamp_size(if horizontal { child.width } else { child.height }, primary_min, primary_max);
-                    let counter = clamp_size(if horizontal { child.height } else { child.width }, counter_min, counter_max);
-                    let next_primary = if lines.last().is_some_and(|line| !line.is_empty()) {
-                        line_primary + layout.item_spacing + primary
-                    } else { primary };
-                    if next_primary > primary_extent && lines.last().is_some_and(|line| !line.is_empty()) {
-                        lines.push(Vec::new());
-                        line_primary = 0.0;
-                    }
-                    if lines.is_empty() { lines.push(Vec::new()); }
-                    let line = lines.last_mut().expect("wrap line exists");
-                    line_primary = if line.is_empty() { primary } else { line_primary + layout.item_spacing + primary };
-                    line.push((child, primary, counter));
+                let mut children = self
+                    .nodes
+                    .values()
+                    .filter(|node| node.parent_id == Some(frame_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                children.sort_unstable_by_key(|node| (node.position, node.id));
+                visited_nodes = visited_nodes.saturating_add(children.len());
+                if visited_nodes > MAX_LAYOUT_NODES {
+                    return Err(CommandError::AutoLayoutLimit);
                 }
-                let mut counter_cursor = 0.0;
-                for (line_index, line) in lines.iter().enumerate() {
-                    let content_primary = line.iter().map(|(_, primary, _)| *primary).sum::<f64>();
-                    let regular_spacing = layout.item_spacing * line.len().saturating_sub(1) as f64;
-                    let (mut primary_cursor, spacing) = match layout.primary_alignment {
-                        LayoutAlignment::Start => (0.0, layout.item_spacing),
-                        LayoutAlignment::Center => (((primary_extent - content_primary - regular_spacing).max(0.0)) / 2.0, layout.item_spacing),
-                        LayoutAlignment::End => ((primary_extent - content_primary - regular_spacing).max(0.0), layout.item_spacing),
-                        LayoutAlignment::SpaceBetween if line.len() > 1 => (0.0, ((primary_extent - content_primary).max(0.0)) / (line.len() - 1) as f64),
-                        LayoutAlignment::SpaceBetween => (0.0, 0.0),
-                    };
-                    let line_counter = line.iter().map(|(_, _, counter)| *counter).fold(0.0, f64::max);
-                    for (child, primary, counter) in line {
-                        let counter_offset = match layout.counter_alignment {
-                            LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
-                            LayoutAlignment::Center => ((line_counter - *counter).max(0.0)) / 2.0,
-                            LayoutAlignment::End => (line_counter - *counter).max(0.0),
-                        };
-                        let (x, y) = if horizontal {
-                            (frame.x + left + primary_cursor, frame.y + top + counter_cursor + counter_offset)
+                let flow = children
+                    .into_iter()
+                    .filter(|node| !self.auto_layout_for_node(node.id).absolute)
+                    .collect::<Vec<_>>();
+                if flow.iter().any(|node| node.relative_transform.is_some()) {
+                    return Err(CommandError::AutoLayoutUnsupported);
+                }
+                let horizontal = layout.mode == LayoutMode::Horizontal;
+                if flow.iter().any(|node| {
+                    let child = self.auto_layout_for_node(node.id);
+                    let (primary_sizing, counter_sizing) =
+                        self.auto_layout_child_sizing(node, horizontal);
+                    let text_auto_size = self
+                        .node_text_properties
+                        .get(&node.id)
+                        .map(|properties| properties.auto_size);
+                    let text_supports_primary_hug = node.kind == NodeKind::Text
+                        && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
+                            || (!horizontal
+                                && matches!(text_auto_size, Some(TextAutoSize::Height))));
+                    let text_supports_counter_hug = node.kind == NodeKind::Text
+                        && (matches!(text_auto_size, Some(TextAutoSize::WidthAndHeight))
+                            || (horizontal
+                                && matches!(text_auto_size, Some(TextAutoSize::Height))));
+                    (primary_sizing == LayoutSizing::Hug
+                        && !is_frame_like(&node.kind)
+                        && !text_supports_primary_hug)
+                        || (counter_sizing == LayoutSizing::Hug
+                            && !is_frame_like(&node.kind)
+                            && !text_supports_counter_hug)
+                        || child.wrap
+                }) {
+                    return Err(CommandError::AutoLayoutUnsupported);
+                }
+                let [top, right, bottom, left] = layout.padding;
+                let intrinsic_primary = flow
+                    .iter()
+                    .map(|node| {
+                        let (primary_sizing, _) = self.auto_layout_child_sizing(node, horizontal);
+                        let (text_width, text_height) = (node.kind == NodeKind::Text)
+                            .then(|| self.auto_layout_text_size(node))
+                            .unwrap_or((node.width, node.height));
+                        if primary_sizing == LayoutSizing::Hug {
+                            if horizontal { text_width } else { text_height }
+                        } else if horizontal {
+                            node.width
                         } else {
-                            (frame.x + left + counter_cursor + counter_offset, frame.y + top + primary_cursor)
+                            node.height
+                        }
+                    })
+                    .sum::<f64>()
+                    + layout.item_spacing * flow.len().saturating_sub(1) as f64;
+                let intrinsic_counter = flow
+                    .iter()
+                    .map(|node| {
+                        let (_, counter_sizing) = self.auto_layout_child_sizing(node, horizontal);
+                        let (text_width, text_height) = (node.kind == NodeKind::Text)
+                            .then(|| self.auto_layout_text_size(node))
+                            .unwrap_or((node.width, node.height));
+                        if counter_sizing == LayoutSizing::Hug {
+                            if horizontal { text_height } else { text_width }
+                        } else if horizontal {
+                            node.height
+                        } else {
+                            node.width
+                        }
+                    })
+                    .fold(0.0, f64::max);
+                let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
+                    max.map(|limit| value.min(limit))
+                        .unwrap_or(value)
+                        .max(min.unwrap_or(0.0))
+                };
+                let (candidate_width, candidate_height) = if horizontal {
+                    (
+                        clamp_size(
+                            if layout.primary_sizing == LayoutSizing::Hug {
+                                left + intrinsic_primary + right
+                            } else {
+                                frame.width
+                            },
+                            layout.min_width,
+                            layout.max_width,
+                        ),
+                        clamp_size(
+                            if layout.counter_sizing == LayoutSizing::Hug {
+                                top + intrinsic_counter + bottom
+                            } else {
+                                frame.height
+                            },
+                            layout.min_height,
+                            layout.max_height,
+                        ),
+                    )
+                } else {
+                    (
+                        clamp_size(
+                            if layout.counter_sizing == LayoutSizing::Hug {
+                                left + intrinsic_counter + right
+                            } else {
+                                frame.width
+                            },
+                            layout.min_width,
+                            layout.max_width,
+                        ),
+                        clamp_size(
+                            if layout.primary_sizing == LayoutSizing::Hug {
+                                top + intrinsic_primary + bottom
+                            } else {
+                                frame.height
+                            },
+                            layout.min_height,
+                            layout.max_height,
+                        ),
+                    )
+                };
+                if frame.width != candidate_width || frame.height != candidate_height {
+                    let before = Geometry {
+                        x: frame.x,
+                        y: frame.y,
+                        width: frame.width,
+                        height: frame.height,
+                        rotation: frame.rotation,
+                    };
+                    let after = Geometry {
+                        x: frame.x,
+                        y: frame.y,
+                        width: normalize_layout_number(candidate_width),
+                        height: normalize_layout_number(candidate_height),
+                        rotation: frame.rotation,
+                    };
+                    let node = self.nodes.get_mut(&frame_id).expect("layout frame exists");
+                    (node.width, node.height) = (after.width, after.height);
+                    changes.push(AppliedChange::GeometryChanged {
+                        id: frame_id,
+                        before,
+                        after,
+                    });
+                }
+                let frame = self
+                    .nodes
+                    .get(&frame_id)
+                    .cloned()
+                    .expect("layout frame exists");
+                let primary_extent = if horizontal {
+                    frame.width - left - right
+                } else {
+                    frame.height - top - bottom
+                };
+                let counter_extent = if horizontal {
+                    frame.height - top - bottom
+                } else {
+                    frame.width - left - right
+                };
+                if primary_extent < 0.0 || counter_extent < 0.0 {
+                    return Err(CommandError::InvalidAutoLayout);
+                }
+                if layout.wrap {
+                    if layout.primary_sizing != LayoutSizing::Fixed
+                        || layout.counter_sizing != LayoutSizing::Fixed
+                        || flow.iter().any(|child| {
+                            let (primary_sizing, counter_sizing) =
+                                self.auto_layout_child_sizing(child, horizontal);
+                            primary_sizing != LayoutSizing::Fixed
+                                || counter_sizing != LayoutSizing::Fixed
+                        })
+                    {
+                        return Err(CommandError::AutoLayoutUnsupported);
+                    }
+                    let mut lines = Vec::<Vec<(Node, f64, f64)>>::new();
+                    let mut line_primary = 0.0;
+                    for child in flow {
+                        let child_layout = self.auto_layout_for_node(child.id);
+                        let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
+                            (
+                                child_layout.min_width,
+                                child_layout.max_width,
+                                child_layout.min_height,
+                                child_layout.max_height,
+                            )
+                        } else {
+                            (
+                                child_layout.min_height,
+                                child_layout.max_height,
+                                child_layout.min_width,
+                                child_layout.max_width,
+                            )
                         };
-                        primary_cursor += *primary + spacing;
-                        let after = Geometry {
-                            x: normalize_layout_number(x), y: normalize_layout_number(y),
-                            width: normalize_layout_number(if horizontal { *primary } else { *counter }),
-                            height: normalize_layout_number(if horizontal { *counter } else { *primary }),
-                            rotation: child.rotation,
+                        let primary = clamp_size(
+                            if horizontal {
+                                child.width
+                            } else {
+                                child.height
+                            },
+                            primary_min,
+                            primary_max,
+                        );
+                        let counter = clamp_size(
+                            if horizontal {
+                                child.height
+                            } else {
+                                child.width
+                            },
+                            counter_min,
+                            counter_max,
+                        );
+                        let next_primary = if lines.last().is_some_and(|line| !line.is_empty()) {
+                            line_primary + layout.item_spacing + primary
+                        } else {
+                            primary
                         };
-                        let before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
-                        if before != after {
-                            let node = self.nodes.get_mut(&child.id).expect("layout child exists");
-                            (node.x, node.y, node.width, node.height) = (after.x, after.y, after.width, after.height);
-                            changes.push(AppliedChange::GeometryChanged { id: child.id, before, after });
+                        if next_primary > primary_extent
+                            && lines.last().is_some_and(|line| !line.is_empty())
+                        {
+                            lines.push(Vec::new());
+                            line_primary = 0.0;
+                        }
+                        if lines.is_empty() {
+                            lines.push(Vec::new());
+                        }
+                        let line = lines.last_mut().expect("wrap line exists");
+                        line_primary = if line.is_empty() {
+                            primary
+                        } else {
+                            line_primary + layout.item_spacing + primary
+                        };
+                        line.push((child, primary, counter));
+                    }
+                    let total_track_extent = lines
+                        .iter()
+                        .map(|line| {
+                            line.iter()
+                                .map(|(_, _, counter)| *counter)
+                                .fold(0.0, f64::max)
+                        })
+                        .sum::<f64>();
+                    let track_spacing = match layout.track_alignment {
+                        WrapTrackAlignment::Auto => {
+                            layout.track_spacing.unwrap_or(layout.item_spacing)
+                        }
+                        WrapTrackAlignment::SpaceBetween if lines.len() > 1 => {
+                            ((counter_extent - total_track_extent).max(0.0))
+                                / (lines.len() - 1) as f64
+                        }
+                        WrapTrackAlignment::SpaceBetween => 0.0,
+                    };
+                    let mut counter_cursor = 0.0;
+                    for (line_index, line) in lines.iter().enumerate() {
+                        let content_primary =
+                            line.iter().map(|(_, primary, _)| *primary).sum::<f64>();
+                        let regular_spacing =
+                            layout.item_spacing * line.len().saturating_sub(1) as f64;
+                        let (mut primary_cursor, spacing) = match layout.primary_alignment {
+                            LayoutAlignment::Start => (0.0, layout.item_spacing),
+                            LayoutAlignment::Center => (
+                                ((primary_extent - content_primary - regular_spacing).max(0.0))
+                                    / 2.0,
+                                layout.item_spacing,
+                            ),
+                            LayoutAlignment::End => (
+                                (primary_extent - content_primary - regular_spacing).max(0.0),
+                                layout.item_spacing,
+                            ),
+                            LayoutAlignment::SpaceBetween if line.len() > 1 => (
+                                0.0,
+                                ((primary_extent - content_primary).max(0.0))
+                                    / (line.len() - 1) as f64,
+                            ),
+                            LayoutAlignment::SpaceBetween => (0.0, 0.0),
+                            LayoutAlignment::Baseline => {
+                                return Err(CommandError::InvalidAutoLayout);
+                            }
+                        };
+                        let line_counter = line
+                            .iter()
+                            .map(|(_, _, counter)| *counter)
+                            .fold(0.0, f64::max);
+                        let line_baseline = (horizontal
+                            && layout.counter_alignment == LayoutAlignment::Baseline)
+                            .then(|| {
+                                line.iter()
+                                    .filter(|(child, _, _)| {
+                                        self.auto_layout_for_node(child.id).align_self.is_none()
+                                    })
+                                    .map(|(child, _, counter)| {
+                                        self.auto_layout_baseline_offset(child, *counter)
+                                    })
+                                    .fold(0.0, f64::max)
+                            })
+                            .unwrap_or(0.0);
+                        for (child, primary, counter) in line {
+                            let counter_alignment = self
+                                .auto_layout_for_node(child.id)
+                                .align_self
+                                .unwrap_or(layout.counter_alignment);
+                            let counter_offset = match counter_alignment {
+                                LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
+                                LayoutAlignment::Center => {
+                                    ((line_counter - *counter).max(0.0)) / 2.0
+                                }
+                                LayoutAlignment::End => (line_counter - *counter).max(0.0),
+                                LayoutAlignment::Baseline => {
+                                    line_baseline
+                                        - self.auto_layout_baseline_offset(child, *counter)
+                                }
+                            };
+                            let (x, y) = if horizontal {
+                                (
+                                    frame.x + left + primary_cursor,
+                                    frame.y + top + counter_cursor + counter_offset,
+                                )
+                            } else {
+                                (
+                                    frame.x + left + counter_cursor + counter_offset,
+                                    frame.y + top + primary_cursor,
+                                )
+                            };
+                            primary_cursor += *primary + spacing;
+                            let after = Geometry {
+                                x: normalize_layout_number(x),
+                                y: normalize_layout_number(y),
+                                width: normalize_layout_number(if horizontal {
+                                    *primary
+                                } else {
+                                    *counter
+                                }),
+                                height: normalize_layout_number(if horizontal {
+                                    *counter
+                                } else {
+                                    *primary
+                                }),
+                                rotation: child.rotation,
+                            };
+                            let before = Geometry {
+                                x: child.x,
+                                y: child.y,
+                                width: child.width,
+                                height: child.height,
+                                rotation: child.rotation,
+                            };
+                            if before != after {
+                                let node =
+                                    self.nodes.get_mut(&child.id).expect("layout child exists");
+                                (node.x, node.y, node.width, node.height) =
+                                    (after.x, after.y, after.width, after.height);
+                                changes.push(AppliedChange::GeometryChanged {
+                                    id: child.id,
+                                    before,
+                                    after,
+                                });
+                            }
+                        }
+                        counter_cursor += line_counter;
+                        if line_index + 1 < lines.len() {
+                            counter_cursor += track_spacing;
                         }
                     }
-                    counter_cursor += line_counter;
-                    if line_index + 1 < lines.len() { counter_cursor += layout.item_spacing; }
+                    continue;
                 }
-                continue;
-            }
-            let regular_spacing = layout.item_spacing * flow.len().saturating_sub(1) as f64;
-            let mut sized = flow.into_iter().map(|child| {
-                let child_layout = self.auto_layout_for_node(child.id);
-                let (primary_sizing, counter_sizing) = self.auto_layout_child_sizing(&child, horizontal);
-                let (text_width, text_height) = (child.kind == NodeKind::Text).then(|| self.auto_layout_text_size(&child)).unwrap_or((child.width, child.height));
-                let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
-                    (child_layout.min_width, child_layout.max_width, child_layout.min_height, child_layout.max_height)
-                } else {
-                    (child_layout.min_height, child_layout.max_height, child_layout.min_width, child_layout.max_width)
-                };
-                let primary = if primary_sizing == LayoutSizing::Fill {
-                    primary_min.unwrap_or(0.0)
-                } else if primary_sizing == LayoutSizing::Hug {
-                    clamp_size(if horizontal { text_width } else { text_height }, primary_min, primary_max)
-                } else {
-                    clamp_size(if horizontal { child.width } else { child.height }, primary_min, primary_max)
-                };
-                let counter = if counter_sizing == LayoutSizing::Fill {
-                    if counter_min.is_some_and(|minimum| minimum > counter_extent) {
-                        return Err(CommandError::InvalidAutoLayout);
-                    }
-                    clamp_size(counter_extent, counter_min, counter_max)
-                } else if counter_sizing == LayoutSizing::Hug {
-                    clamp_size(if horizontal { text_height } else { text_width }, counter_min, counter_max)
-                } else {
-                    clamp_size(if horizontal { child.height } else { child.width }, counter_min, counter_max)
-                };
-                Ok((child, primary_sizing, primary, counter, primary_max))
-            }).collect::<Result<Vec<_>, CommandError>>()?;
-            let fixed_content_extent = sized.iter()
-                .filter(|(_, primary_sizing, _, _, _)| *primary_sizing != LayoutSizing::Fill)
-                .map(|(_, _, primary, _, _)| *primary)
-                .sum::<f64>();
-            let fill_indices = sized.iter().enumerate()
-                .filter_map(|(index, (_, primary_sizing, _, _, _))| (*primary_sizing == LayoutSizing::Fill).then_some(index))
-                .collect::<Vec<_>>();
-            let available_fill_extent = primary_extent - fixed_content_extent - regular_spacing;
-            let minimum_fill_extent = fill_indices.iter().map(|index| sized[*index].2).sum::<f64>();
-            if !fill_indices.is_empty() && minimum_fill_extent > available_fill_extent + 1e-6 {
-                return Err(CommandError::InvalidAutoLayout);
-            }
-            let mut remaining_fill_extent = (available_fill_extent - minimum_fill_extent).max(0.0);
-            let mut active_fill_indices = fill_indices;
-            while remaining_fill_extent > 1e-6 && !active_fill_indices.is_empty() {
-                let share = remaining_fill_extent / active_fill_indices.len() as f64;
-                let constrained = active_fill_indices.iter().copied()
-                    .filter(|index| sized[*index].4.is_some_and(|maximum| maximum - sized[*index].2 < share))
+                let regular_spacing = layout.item_spacing * flow.len().saturating_sub(1) as f64;
+                let mut sized = flow
+                    .into_iter()
+                    .map(|child| {
+                        let child_layout = self.auto_layout_for_node(child.id);
+                        let (primary_sizing, counter_sizing) =
+                            self.auto_layout_child_sizing(&child, horizontal);
+                        let (text_width, text_height) = (child.kind == NodeKind::Text)
+                            .then(|| self.auto_layout_text_size(&child))
+                            .unwrap_or((child.width, child.height));
+                        let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
+                            (
+                                child_layout.min_width,
+                                child_layout.max_width,
+                                child_layout.min_height,
+                                child_layout.max_height,
+                            )
+                        } else {
+                            (
+                                child_layout.min_height,
+                                child_layout.max_height,
+                                child_layout.min_width,
+                                child_layout.max_width,
+                            )
+                        };
+                        let primary = if primary_sizing == LayoutSizing::Fill {
+                            primary_min.unwrap_or(0.0)
+                        } else if primary_sizing == LayoutSizing::Hug {
+                            clamp_size(
+                                if horizontal { text_width } else { text_height },
+                                primary_min,
+                                primary_max,
+                            )
+                        } else {
+                            clamp_size(
+                                if horizontal {
+                                    child.width
+                                } else {
+                                    child.height
+                                },
+                                primary_min,
+                                primary_max,
+                            )
+                        };
+                        let counter = if counter_sizing == LayoutSizing::Fill {
+                            if counter_min.is_some_and(|minimum| minimum > counter_extent) {
+                                return Err(CommandError::InvalidAutoLayout);
+                            }
+                            clamp_size(counter_extent, counter_min, counter_max)
+                        } else if counter_sizing == LayoutSizing::Hug {
+                            clamp_size(
+                                if horizontal { text_height } else { text_width },
+                                counter_min,
+                                counter_max,
+                            )
+                        } else {
+                            clamp_size(
+                                if horizontal {
+                                    child.height
+                                } else {
+                                    child.width
+                                },
+                                counter_min,
+                                counter_max,
+                            )
+                        };
+                        Ok((child, primary_sizing, primary, counter, primary_max))
+                    })
+                    .collect::<Result<Vec<_>, CommandError>>()?;
+                let fixed_content_extent = sized
+                    .iter()
+                    .filter(|(_, primary_sizing, _, _, _)| *primary_sizing != LayoutSizing::Fill)
+                    .map(|(_, _, primary, _, _)| *primary)
+                    .sum::<f64>();
+                let fill_indices = sized
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (_, primary_sizing, _, _, _))| {
+                        (*primary_sizing == LayoutSizing::Fill).then_some(index)
+                    })
                     .collect::<Vec<_>>();
-                if constrained.is_empty() {
-                    for index in active_fill_indices { sized[index].2 += share; }
-                    break;
+                let available_fill_extent = primary_extent - fixed_content_extent - regular_spacing;
+                let minimum_fill_extent = fill_indices
+                    .iter()
+                    .map(|index| sized[*index].2)
+                    .sum::<f64>();
+                if !fill_indices.is_empty() && minimum_fill_extent > available_fill_extent + 1e-6 {
+                    return Err(CommandError::InvalidAutoLayout);
                 }
-                for index in constrained {
-                    let maximum = sized[index].4.expect("constrained fill has a maximum");
-                    remaining_fill_extent -= maximum - sized[index].2;
-                    sized[index].2 = maximum;
+                let mut remaining_fill_extent =
+                    (available_fill_extent - minimum_fill_extent).max(0.0);
+                let mut active_fill_indices = fill_indices;
+                while remaining_fill_extent > 1e-6 && !active_fill_indices.is_empty() {
+                    let share = remaining_fill_extent / active_fill_indices.len() as f64;
+                    let constrained = active_fill_indices
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            sized[*index]
+                                .4
+                                .is_some_and(|maximum| maximum - sized[*index].2 < share)
+                        })
+                        .collect::<Vec<_>>();
+                    if constrained.is_empty() {
+                        for index in active_fill_indices {
+                            sized[index].2 += share;
+                        }
+                        break;
+                    }
+                    for index in constrained {
+                        let maximum = sized[index].4.expect("constrained fill has a maximum");
+                        remaining_fill_extent -= maximum - sized[index].2;
+                        sized[index].2 = maximum;
+                    }
+                    active_fill_indices.retain(|index| {
+                        !sized[*index]
+                            .4
+                            .is_some_and(|maximum| (maximum - sized[*index].2).abs() <= 1e-6)
+                    });
                 }
-                active_fill_indices.retain(|index| !sized[*index].4.is_some_and(|maximum| (maximum - sized[*index].2).abs() <= 1e-6));
-            }
-            let content_extent = sized.iter().map(|(_, _, primary, _, _)| *primary).sum::<f64>();
-            let (start_offset, spacing) = match layout.primary_alignment {
-                LayoutAlignment::Start => (0.0, layout.item_spacing),
-                LayoutAlignment::Center => (((primary_extent - content_extent - regular_spacing).max(0.0)) / 2.0, layout.item_spacing),
-                LayoutAlignment::End => ((primary_extent - content_extent - regular_spacing).max(0.0), layout.item_spacing),
-                LayoutAlignment::SpaceBetween if sized.len() > 1 => (0.0, ((primary_extent - content_extent).max(0.0)) / (sized.len() - 1) as f64),
-                LayoutAlignment::SpaceBetween => (0.0, 0.0),
-            };
-            let mut cursor = start_offset;
-            for (child, _primary_sizing, primary, counter, _) in sized {
-                let counter_offset = match layout.counter_alignment {
-                    LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
-                    LayoutAlignment::Center => ((counter_extent - counter).max(0.0)) / 2.0,
-                    LayoutAlignment::End => (counter_extent - counter).max(0.0),
+                let content_extent = sized
+                    .iter()
+                    .map(|(_, _, primary, _, _)| *primary)
+                    .sum::<f64>();
+                let (start_offset, spacing) = match layout.primary_alignment {
+                    LayoutAlignment::Start => (0.0, layout.item_spacing),
+                    LayoutAlignment::Center => (
+                        ((primary_extent - content_extent - regular_spacing).max(0.0)) / 2.0,
+                        layout.item_spacing,
+                    ),
+                    LayoutAlignment::End => (
+                        (primary_extent - content_extent - regular_spacing).max(0.0),
+                        layout.item_spacing,
+                    ),
+                    LayoutAlignment::SpaceBetween if sized.len() > 1 => (
+                        0.0,
+                        ((primary_extent - content_extent).max(0.0)) / (sized.len() - 1) as f64,
+                    ),
+                    LayoutAlignment::SpaceBetween => (0.0, 0.0),
+                    LayoutAlignment::Baseline => return Err(CommandError::InvalidAutoLayout),
                 };
-                let (x, y) = if horizontal { (frame.x + left + cursor, frame.y + top + counter_offset) } else { (frame.x + left + counter_offset, frame.y + top + cursor) };
-                cursor += primary + spacing;
-                let after = Geometry {
-                    x: normalize_layout_number(x),
-                    y: normalize_layout_number(y),
-                    width: normalize_layout_number(if horizontal { primary } else { counter }),
-                    height: normalize_layout_number(if horizontal { counter } else { primary }),
-                    rotation: child.rotation,
-                };
-                let before = Geometry { x: child.x, y: child.y, width: child.width, height: child.height, rotation: child.rotation };
-                if before != after {
-                    let node = self.nodes.get_mut(&child.id).expect("layout child exists");
-                    (node.x, node.y, node.width, node.height) = (after.x, after.y, after.width, after.height);
-                    changes.push(AppliedChange::GeometryChanged { id: child.id, before, after });
+                let baseline = (horizontal
+                    && layout.counter_alignment == LayoutAlignment::Baseline)
+                    .then(|| {
+                        sized
+                            .iter()
+                            .filter(|(child, _, _, _, _)| {
+                                self.auto_layout_for_node(child.id).align_self.is_none()
+                            })
+                            .map(|(child, _, _, counter, _)| {
+                                self.auto_layout_baseline_offset(child, *counter)
+                            })
+                            .fold(0.0, f64::max)
+                    })
+                    .unwrap_or(0.0);
+                let mut cursor = start_offset;
+                for (child, _primary_sizing, primary, counter, _) in sized {
+                    let counter_alignment = self
+                        .auto_layout_for_node(child.id)
+                        .align_self
+                        .unwrap_or(layout.counter_alignment);
+                    let counter_offset = match counter_alignment {
+                        LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
+                        LayoutAlignment::Center => ((counter_extent - counter).max(0.0)) / 2.0,
+                        LayoutAlignment::End => (counter_extent - counter).max(0.0),
+                        LayoutAlignment::Baseline => {
+                            baseline - self.auto_layout_baseline_offset(&child, counter)
+                        }
+                    };
+                    let (x, y) = if horizontal {
+                        (frame.x + left + cursor, frame.y + top + counter_offset)
+                    } else {
+                        (frame.x + left + counter_offset, frame.y + top + cursor)
+                    };
+                    cursor += primary + spacing;
+                    let after = Geometry {
+                        x: normalize_layout_number(x),
+                        y: normalize_layout_number(y),
+                        width: normalize_layout_number(if horizontal { primary } else { counter }),
+                        height: normalize_layout_number(if horizontal { counter } else { primary }),
+                        rotation: child.rotation,
+                    };
+                    let before = Geometry {
+                        x: child.x,
+                        y: child.y,
+                        width: child.width,
+                        height: child.height,
+                        rotation: child.rotation,
+                    };
+                    if before != after {
+                        let node = self.nodes.get_mut(&child.id).expect("layout child exists");
+                        (node.x, node.y, node.width, node.height) =
+                            (after.x, after.y, after.width, after.height);
+                        changes.push(AppliedChange::GeometryChanged {
+                            id: child.id,
+                            before,
+                            after,
+                        });
+                    }
                 }
             }
-        }
             if changes.len() == changes_before_iteration {
                 return Ok(changes);
             }
@@ -3338,67 +4315,258 @@ impl Document {
     }
 
     fn has_following_sibling(&self, id: NodeId) -> bool {
-        let Some(node) = self.nodes.get(&id) else { return false; };
+        let Some(node) = self.nodes.get(&id) else {
+            return false;
+        };
         let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
         self.nodes.values().any(|candidate| {
             candidate.id != id
-                && self.node_pages.get(&candidate.id).copied().unwrap_or(DEFAULT_PAGE_ID) == page_id
+                && self
+                    .node_pages
+                    .get(&candidate.id)
+                    .copied()
+                    .unwrap_or(DEFAULT_PAGE_ID)
+                    == page_id
                 && candidate.parent_id == node.parent_id
                 && candidate.position > node.position
         })
+    }
+
+    /// M3's concrete Core gate for the prototype JSON extension mirror. The
+    /// protobuf messages carry the same vocabulary, but extensions remain the
+    /// forward-compatible storage until every older engine can preserve unknown
+    /// `oneof` variants. Only P0 playable values are accepted on mutation.
+    fn valid_prototype_extensions(&self, extensions: &BTreeMap<String, Vec<u8>>) -> bool {
+        let Some(bytes) = extensions.get(PROTOTYPE_REACTIONS_EXTENSION_KEY) else {
+            return valid_prototype_metadata_extension(
+                extensions.get(PROTOTYPE_METADATA_EXTENSION_KEY),
+            );
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return false;
+        };
+        let Some(reactions) = value.as_array() else {
+            return false;
+        };
+        if reactions.len() > 128 {
+            return false;
+        }
+        for reaction in reactions {
+            let Some(reaction) = reaction.as_object() else {
+                return false;
+            };
+            let Some(trigger) = reaction
+                .get("trigger")
+                .and_then(serde_json::Value::as_object)
+            else {
+                return false;
+            };
+            let Some(trigger_type) = trigger.get("type").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            match trigger_type {
+                "ON_CLICK" | "ON_PRESS" | "ON_HOVER" => {}
+                "AFTER_TIMEOUT" => {
+                    if !prototype_duration(trigger.get("timeout")) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            let Some(actions) = reaction
+                .get("actions")
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            if actions.is_empty() || actions.len() > 16 {
+                return false;
+            }
+            for action in actions {
+                let Some(action) = action.as_object() else {
+                    return false;
+                };
+                match action.get("type").and_then(serde_json::Value::as_str) {
+                    Some("BACK") | Some("CLOSE") => {}
+                    Some("URL") => {
+                        let Some(url) = action.get("url").and_then(serde_json::Value::as_str)
+                        else {
+                            return false;
+                        };
+                        if url.len() > 2_048 || !url.starts_with("https://") {
+                            return false;
+                        }
+                    }
+                    Some("NODE") => {
+                        if !matches!(
+                            action.get("navigation").and_then(serde_json::Value::as_str),
+                            Some("NAVIGATE") | Some("OVERLAY")
+                        ) {
+                            return false;
+                        }
+                        match action.get("destinationId") {
+                            Some(serde_json::Value::String(destination)) => {
+                                let Some(destination) = prototype_node_id(destination) else {
+                                    return false;
+                                };
+                                if !self.nodes.contains_key(&destination) {
+                                    return false;
+                                }
+                            }
+                            // A null target is only produced by Canonical delete
+                            // cleanup; it is retained as an unresolved reference.
+                            Some(serde_json::Value::Null) => {}
+                            _ => return false,
+                        }
+                        if let Some(transition) = action.get("transition") {
+                            if !transition.is_null() && !valid_prototype_transition(transition) {
+                                return false;
+                            }
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        valid_prototype_metadata_extension(extensions.get(PROTOTYPE_METADATA_EXTENSION_KEY))
+    }
+
+    fn clear_prototype_destination(&mut self, target: NodeId) -> Vec<AppliedChange> {
+        let ids = self.nodes.keys().copied().collect::<Vec<_>>();
+        let mut changes = Vec::new();
+        for id in ids {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            let before = node.extensions.clone();
+            let Some(bytes) = before.get(PROTOTYPE_REACTIONS_EXTENSION_KEY) else {
+                continue;
+            };
+            let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                continue;
+            };
+            if !clear_prototype_destination_value(&mut value, target) {
+                continue;
+            }
+            let Ok(bytes) = serde_json::to_vec(&value) else {
+                continue;
+            };
+            let mut after = before.clone();
+            after.insert(PROTOTYPE_REACTIONS_EXTENSION_KEY.into(), bytes);
+            self.set_extensions(id, &after);
+            changes.push(AppliedChange::ExtensionsChanged { id, before, after });
+        }
+        changes
     }
 
     fn set_mask(&mut self, id: NodeId, enabled: bool) {
         let Some((before_bytes, after_bytes)) = self.nodes.get_mut(&id).map(|node| {
             let before_bytes = node.estimated_bytes();
             if enabled {
-                node.extensions.insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
+                node.extensions
+                    .insert(ALPHA_MASK_EXTENSION_KEY.into(), vec![1]);
             } else {
                 node.extensions.remove(ALPHA_MASK_EXTENSION_KEY);
             }
             (before_bytes, node.estimated_bytes())
-        }) else { return; };
-        self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
+        }) else {
+            return;
+        };
+        self.node_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
+    }
+
+    fn set_extensions(&mut self, id: NodeId, extensions: &BTreeMap<String, Vec<u8>>) {
+        let Some((before_bytes, after_bytes)) = self.nodes.get_mut(&id).map(|node| {
+            let before_bytes = node.estimated_bytes();
+            node.extensions = extensions.clone();
+            (before_bytes, node.estimated_bytes())
+        }) else {
+            return;
+        };
+        self.node_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
     }
 
     fn set_vector_path(&mut self, id: NodeId, path: &VectorPath) {
         if let Some(node) = self.nodes.get_mut(&id) {
             let before_bytes = node.estimated_bytes();
             let after_bytes = before_bytes
-                .saturating_sub(node.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0))
+                .saturating_sub(
+                    node.vector_path
+                        .as_ref()
+                        .map(VectorPath::estimated_bytes)
+                        .unwrap_or(0),
+                )
                 .saturating_add(path.estimated_bytes());
             node.vector_path = Some(path.clone());
-            self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
+            self.node_bytes = self
+                .node_bytes
+                .saturating_sub(before_bytes)
+                .saturating_add(after_bytes);
         }
     }
 
     fn vector_path_for_node(&self, id: NodeId) -> Result<VectorPath, CommandError> {
-        let node = self.nodes.get(&id).ok_or(CommandError::MissingNode { id })?;
-        if node.kind != NodeKind::Vector {
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        if !matches!(node.kind, NodeKind::Vector | NodeKind::Highlight) {
             return Err(CommandError::InvalidGeometry);
         }
-        node.vector_path.clone().ok_or(CommandError::InvalidGeometry)
+        node.vector_path
+            .clone()
+            .ok_or(CommandError::InvalidGeometry)
     }
 
-    fn replace_vector_path(&mut self, id: NodeId, path: VectorPath) -> Result<AppliedChange, CommandError> {
+    fn replace_vector_path(
+        &mut self,
+        id: NodeId,
+        path: VectorPath,
+    ) -> Result<AppliedChange, CommandError> {
         if !valid_vector_path(&path) {
             return Err(CommandError::InvalidGeometry);
         }
-        let node = self.nodes.get_mut(&id).ok_or(CommandError::MissingNode { id })?;
-        if node.kind != NodeKind::Vector {
+        let node = self
+            .nodes
+            .get_mut(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        if !matches!(node.kind, NodeKind::Vector | NodeKind::Highlight) {
             return Err(CommandError::InvalidGeometry);
         }
         let before_bytes = node.estimated_bytes();
         let after_bytes = before_bytes
-            .saturating_sub(node.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0))
+            .saturating_sub(
+                node.vector_path
+                    .as_ref()
+                    .map(VectorPath::estimated_bytes)
+                    .unwrap_or(0),
+            )
             .saturating_add(path.estimated_bytes());
-        if self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes) > MAX_DOCUMENT_BYTES {
+        if self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes)
+            > MAX_DOCUMENT_BYTES
+        {
             return Err(CommandError::ResourceLimit);
         }
         let before = std::mem::replace(&mut node.vector_path, Some(path.clone()))
             .ok_or(CommandError::InvalidGeometry)?;
-        self.node_bytes = self.node_bytes.saturating_sub(before_bytes).saturating_add(after_bytes);
-        Ok(AppliedChange::VectorPathChanged { id, before, after: path })
+        self.node_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
+        Ok(AppliedChange::VectorPathChanged {
+            id,
+            before,
+            after: path,
+        })
     }
 
     fn set_node_position(&mut self, id: NodeId, position: PositionId) {
@@ -3419,7 +4587,8 @@ impl Document {
             let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
             self.sibling_positions
                 .remove(&(page_id, node.parent_id, node.position));
-            self.sibling_positions.insert((page_id, parent_id, position));
+            self.sibling_positions
+                .insert((page_id, parent_id, position));
         }
         if let Some(node) = self.nodes.get_mut(&id) {
             node.parent_id = parent_id;
@@ -3441,11 +4610,15 @@ impl Document {
         let mut ids = Vec::new();
         for mut current in parents.into_iter().flatten() {
             loop {
-                let Some(node) = self.nodes.get(&current) else { break };
+                let Some(node) = self.nodes.get(&current) else {
+                    break;
+                };
                 if is_structural_container(&node.kind) && !ids.contains(&current) {
                     ids.push(current);
                 }
-                let Some(parent_id) = node.parent_id else { break };
+                let Some(parent_id) = node.parent_id else {
+                    break;
+                };
                 current = parent_id;
             }
         }
@@ -3461,8 +4634,12 @@ impl Document {
     /// `relative_transform` inherits its parent's world matrix.
     fn refresh_group_bounds(&mut self, mut group_id: Option<NodeId>) {
         while let Some(id) = group_id {
-            let Some(group) = self.nodes.get(&id).cloned() else { break };
-            if !is_structural_container(&group.kind) { break; }
+            let Some(group) = self.nodes.get(&id).cloned() else {
+                break;
+            };
+            if !is_structural_container(&group.kind) {
+                break;
+            }
             // A Relative-v1 Group has already been normalized by the shared
             // matrix resolver before its complete batch crosses into Core.
             // Recomputing it from world AABBs here would overwrite its local
@@ -3478,13 +4655,18 @@ impl Document {
                 .filter(|node| node.parent_id == Some(id))
                 .map(|node| node.id)
                 .collect::<Vec<_>>();
-            if children.is_empty() { break; }
-            let bounds = children.into_iter().filter_map(|child_id| self.node_world_visual_bounds(child_id)).reduce(|left, right| Bounds {
-                left: left.left.min(right.left),
-                top: left.top.min(right.top),
-                right: left.right.max(right.right),
-                bottom: left.bottom.max(right.bottom),
-            });
+            if children.is_empty() {
+                break;
+            }
+            let bounds = children
+                .into_iter()
+                .filter_map(|child_id| self.node_world_visual_bounds(child_id))
+                .reduce(|left, right| Bounds {
+                    left: left.left.min(right.left),
+                    top: left.top.min(right.top),
+                    right: left.right.max(right.right),
+                    bottom: left.bottom.max(right.bottom),
+                });
             if let Some(bounds) = bounds {
                 if let Some(node) = self.nodes.get_mut(&id) {
                     node.x = bounds.left;
@@ -3534,12 +4716,18 @@ impl Document {
         id: NodeId,
         visiting: &mut BTreeSet<NodeId>,
     ) -> Option<AffineTransform> {
-        if !visiting.insert(id) { return None; }
+        if !visiting.insert(id) {
+            return None;
+        }
         let node = self.nodes.get(&id)?;
-        let local = node.relative_transform.unwrap_or(node_legacy_transform(node)?);
+        let local = node
+            .relative_transform
+            .unwrap_or(node_legacy_transform(node)?);
         let world = if node.relative_transform.is_some() {
             match node.parent_id {
-                Some(parent_id) => local.then(self.node_world_transform_inner(parent_id, visiting)?),
+                Some(parent_id) => {
+                    local.then(self.node_world_transform_inner(parent_id, visiting)?)
+                }
                 None => local,
             }
         } else {
@@ -3554,22 +4742,46 @@ impl Document {
         let transform = self.node_world_transform(id)?;
         let corners = [
             Point { x: 0.0, y: 0.0 },
-            Point { x: node.width, y: 0.0 },
-            Point { x: node.width, y: node.height },
-            Point { x: 0.0, y: node.height },
-        ].map(|point| transform.transform_point(point));
+            Point {
+                x: node.width,
+                y: 0.0,
+            },
+            Point {
+                x: node.width,
+                y: node.height,
+            },
+            Point {
+                x: 0.0,
+                y: node.height,
+            },
+        ]
+        .map(|point| transform.transform_point(point));
         Some(Bounds {
-            left: corners.iter().map(|point| point.x).fold(f64::INFINITY, f64::min),
-            top: corners.iter().map(|point| point.y).fold(f64::INFINITY, f64::min),
-            right: corners.iter().map(|point| point.x).fold(f64::NEG_INFINITY, f64::max),
-            bottom: corners.iter().map(|point| point.y).fold(f64::NEG_INFINITY, f64::max),
+            left: corners
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::INFINITY, f64::min),
+            top: corners
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::INFINITY, f64::min),
+            right: corners
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::NEG_INFINITY, f64::max),
+            bottom: corners
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::NEG_INFINITY, f64::max),
         })
     }
 
     fn dissolve_empty_groups_from(&mut self, mut group_id: Option<NodeId>) -> Vec<Node> {
         let mut dissolved = Vec::new();
         while let Some(id) = group_id {
-            let Some(group) = self.nodes.get(&id).cloned() else { break };
+            let Some(group) = self.nodes.get(&id).cloned() else {
+                break;
+            };
             if group.kind != NodeKind::Group
                 || self.nodes.values().any(|node| node.parent_id == Some(id))
             {
@@ -3589,10 +4801,16 @@ impl Document {
     /// command, owns the invariant so alternate clients and operation replay
     /// cannot persist an invalid structural shell.
     fn ensure_non_empty_groups(&self) -> Result<(), CommandError> {
-        if let Some(group) = self.nodes
+        if let Some(group) = self
+            .nodes
             .values()
             .filter(|node| node.kind == NodeKind::Group)
-            .find(|group| !self.nodes.values().any(|node| node.parent_id == Some(group.id)))
+            .find(|group| {
+                !self
+                    .nodes
+                    .values()
+                    .any(|node| node.parent_id == Some(group.id))
+            })
         {
             return Err(CommandError::EmptyGroup { id: group.id });
         }
@@ -3802,15 +5020,25 @@ impl Document {
         if self.nodes.len() >= MAX_DOCUMENT_NODES {
             return Err(CommandError::ResourceLimit);
         }
-        if !valid_dash_pattern(&node.stroke_dash_pattern) || !valid_stroke_weights(&node.stroke_weights) {
+        if !valid_dash_pattern(&node.stroke_dash_pattern)
+            || !valid_stroke_weights(&node.stroke_weights)
+        {
             return Err(CommandError::InvalidAppearance);
         }
-        if !node.stroke_weights.is_empty() && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle) {
+        if !node.stroke_weights.is_empty()
+            && !matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle)
+        {
             return Err(CommandError::InvalidAppearance);
         }
         if node.stroke_align != StrokeAlign::Inside
-            && (!matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Polygon | NodeKind::Star)
-                || node.arc_data.is_some())
+            && (!matches!(
+                node.kind,
+                NodeKind::Frame
+                    | NodeKind::Rectangle
+                    | NodeKind::Ellipse
+                    | NodeKind::Polygon
+                    | NodeKind::Star
+            ) || node.arc_data.is_some())
         {
             return Err(CommandError::InvalidAppearance);
         }
@@ -3919,10 +5147,9 @@ impl Document {
                 return Err(CommandError::InvalidAsset);
             }
         }
-        if text_properties
-            .as_ref()
-            .is_some_and(|properties| node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, properties))
-        {
+        if text_properties.as_ref().is_some_and(|properties| {
+            node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, properties)
+        }) {
             return Err(CommandError::InvalidTextProperties);
         }
         let text_property_bytes = text_properties
@@ -3965,13 +5192,16 @@ impl Document {
         if node.name.trim().is_empty() {
             return Err(CommandError::InvalidName);
         }
-        if !valid_geometry(&node.kind, Geometry {
-            x: node.x,
-            y: node.y,
-            width: node.width,
-            height: node.height,
-            rotation: node.rotation,
-        }) {
+        if !valid_geometry(
+            &node.kind,
+            Geometry {
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                rotation: node.rotation,
+            },
+        ) {
             return Err(CommandError::InvalidGeometry);
         }
         if !valid_appearance(&Appearance {
@@ -4008,28 +5238,50 @@ impl Document {
         if node.contents_hidden && node.kind != NodeKind::Section {
             return Err(CommandError::InvalidAppearance);
         }
-        if node.clips_content && node.kind != NodeKind::Frame {
+        if node.clips_content && !is_frame_like(&node.kind) {
             return Err(CommandError::InvalidAppearance);
         }
-        if node.kind == NodeKind::Slice
-            && !valid_slice_node(node)
-        {
+        if node.kind == NodeKind::Slice && !valid_slice_node(node) {
             return Err(CommandError::InvalidAppearance);
         }
         if !valid_vector_path_for_kind(&node.kind, node.vector_path.as_ref()) {
             return Err(CommandError::InvalidGeometry);
         }
         if node.text.len() > MAX_TEXT_BYTES
-            || (node.kind != NodeKind::Text && !node.text.is_empty())
+            || (!matches!(
+                node.kind,
+                NodeKind::Text
+                    | NodeKind::CodeBlock
+                    | NodeKind::Sticky
+                    | NodeKind::TableCell
+                    | NodeKind::TextPath
+            ) && !node.text.is_empty())
         {
             return Err(CommandError::InvalidText);
+        }
+        if node.kind == NodeKind::SlideGrid
+            && (node.parent_id.is_some()
+                || self.nodes.values().any(|candidate| {
+                    candidate.kind == NodeKind::SlideGrid
+                        && self
+                            .node_pages
+                            .get(&candidate.id)
+                            .copied()
+                            .unwrap_or(DEFAULT_PAGE_ID)
+                            == page_id
+                }))
+        {
+            return Err(CommandError::InvalidParent { id: node.id });
+        }
+        if matches!(node.kind, NodeKind::Slide | NodeKind::SlideRow) && node.parent_id.is_none() {
+            return Err(CommandError::InvalidParent { id: node.id });
         }
         if let Some(parent_id) = node.parent_id {
             let parent = self
                 .nodes
                 .get(&parent_id)
                 .ok_or(CommandError::MissingParent { id: parent_id })?;
-            if !can_contain_children(&parent.kind) {
+            if !can_parent_contain_child(&parent.kind, &node.kind) {
                 return Err(CommandError::InvalidParent { id: parent_id });
             }
             if self
@@ -4188,33 +5440,55 @@ impl Command {
             Command::SetAppearance { appearance, .. } => {
                 std::mem::size_of::<NodeId>() + appearance.estimated_bytes()
             }
-            Command::SetVectorPath { path, .. } => std::mem::size_of::<NodeId>() + path.estimated_bytes(),
-            Command::SetBooleanOperation { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<BooleanOperation>(),
+            Command::SetVectorPath { path, .. } => {
+                std::mem::size_of::<NodeId>() + path.estimated_bytes()
+            }
+            Command::SetBooleanOperation { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<BooleanOperation>()
+            }
             Command::SetMask { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<bool>(),
+            Command::SetNodeExtensions { extensions, .. } => {
+                std::mem::size_of::<NodeId>()
+                    + extensions
+                        .iter()
+                        .map(|(key, value)| key.len() + value.len())
+                        .sum::<usize>()
+            }
             Command::MoveVectorPoint { .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>() + std::mem::size_of::<Point>()
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<PointId>()
+                    + std::mem::size_of::<Point>()
             }
             Command::SetVectorSubpathClosed { .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>() + std::mem::size_of::<bool>()
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<bool>()
             }
             Command::InsertVectorPoint { point, .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>()
-                    + std::mem::size_of::<Option<PointId>>() + std::mem::size_of_val(point)
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<Option<PointId>>()
+                    + std::mem::size_of_val(point)
             }
             Command::SplitVectorSegment { .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>()
-                    + std::mem::size_of::<PointId>() * 2 + std::mem::size_of::<f64>()
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<PointId>() * 2
+                    + std::mem::size_of::<f64>()
             }
             Command::ConnectVectorEndpoints { .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>() * 2
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<u32>() * 2
                     + std::mem::size_of::<PointId>() * 2
             }
             Command::DeleteVectorPoint { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>()
             }
             Command::SetVectorPointHandles { .. } => {
-                std::mem::size_of::<NodeId>() + std::mem::size_of::<PointId>()
-                    + std::mem::size_of::<Option<Point>>() * 2 + std::mem::size_of::<VectorPointType>()
+                std::mem::size_of::<NodeId>()
+                    + std::mem::size_of::<PointId>()
+                    + std::mem::size_of::<Option<Point>>() * 2
+                    + std::mem::size_of::<VectorPointType>()
             }
             Command::SetNodeAsset { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>()
@@ -4223,7 +5497,9 @@ impl Command {
             Command::SetTextProperties { properties, .. } => {
                 std::mem::size_of::<NodeId>() + properties.estimated_bytes()
             }
-            Command::SetAutoLayout { .. } => std::mem::size_of::<NodeId>() + std::mem::size_of::<AutoLayout>(),
+            Command::SetAutoLayout { .. } => {
+                std::mem::size_of::<NodeId>() + std::mem::size_of::<AutoLayout>()
+            }
             Command::SetNodePosition { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<PositionId>()
             }
@@ -4252,16 +5528,30 @@ impl Node {
             + paint_stack_bytes(&self.strokes)
             + self.stroke_dash_pattern.len() * std::mem::size_of::<f64>()
             + self.stroke_weights.len() * std::mem::size_of::<f64>()
-            + self.extensions.iter().map(|(key, value)| key.len() + value.len()).sum::<usize>()
-            + self.vector_path.as_ref().map(VectorPath::estimated_bytes).unwrap_or(0)
+            + self
+                .extensions
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>()
+            + self
+                .vector_path
+                .as_ref()
+                .map(VectorPath::estimated_bytes)
+                .unwrap_or(0)
     }
 }
 
 impl VectorPath {
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.subpaths.iter().map(|subpath| {
-            std::mem::size_of::<VectorSubpath>() + subpath.points.len() * std::mem::size_of::<VectorPoint>()
-        }).sum::<usize>()
+        std::mem::size_of::<Self>()
+            + self
+                .subpaths
+                .iter()
+                .map(|subpath| {
+                    std::mem::size_of::<VectorSubpath>()
+                        + subpath.points.len() * std::mem::size_of::<VectorPoint>()
+                })
+                .sum::<usize>()
     }
 }
 
@@ -4314,13 +5604,13 @@ impl FontReference {
 impl AppliedChange {
     fn estimated_bytes(&self) -> usize {
         match self {
-            AppliedChange::Composite { changes } => changes.iter().map(AppliedChange::estimated_bytes).sum(),
+            AppliedChange::Composite { changes } => {
+                changes.iter().map(AppliedChange::estimated_bytes).sum()
+            }
             AppliedChange::PageCreated { page } => std::mem::size_of::<Page>() + page.name.len(),
             AppliedChange::NodeCreated { node }
             | AppliedChange::NodeDeleted { node }
-            | AppliedChange::NodeRestored { node } => {
-                node.estimated_bytes()
-            }
+            | AppliedChange::NodeRestored { node } => node.estimated_bytes(),
             AppliedChange::GeometryChanged { .. } => {
                 std::mem::size_of::<Geometry>() * 2 + std::mem::size_of::<NodeId>()
             }
@@ -4341,6 +5631,17 @@ impl AppliedChange {
             }
             AppliedChange::MaskChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<bool>() * 2
+            }
+            AppliedChange::ExtensionsChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>()
+                    + before
+                        .iter()
+                        .map(|(key, value)| key.len() + value.len())
+                        .sum::<usize>()
+                    + after
+                        .iter()
+                        .map(|(key, value)| key.len() + value.len())
+                        .sum::<usize>()
             }
             AppliedChange::NodeAssetChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AssetId>>() * 2
@@ -4434,27 +5735,121 @@ fn normalize_layout_number(value: f64) -> f64 {
 }
 
 fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
-    hasher.update([match layout.mode { LayoutMode::None => 0, LayoutMode::Horizontal => 1, LayoutMode::Vertical => 2 }]);
-    for value in layout.padding { hash_number(hasher, value); }
+    hasher.update([match layout.mode {
+        LayoutMode::None => 0,
+        LayoutMode::Horizontal => 1,
+        LayoutMode::Vertical => 2,
+    }]);
+    for value in layout.padding {
+        hash_number(hasher, value);
+    }
     hash_number(hasher, layout.item_spacing);
     hasher.update([u8::from(layout.wrap)]);
-    hasher.update([match layout.primary_alignment { LayoutAlignment::Start => 0, LayoutAlignment::Center => 1, LayoutAlignment::End => 2, LayoutAlignment::SpaceBetween => 3 }]);
-    hasher.update([match layout.counter_alignment { LayoutAlignment::Start => 0, LayoutAlignment::Center => 1, LayoutAlignment::End => 2, LayoutAlignment::SpaceBetween => 3 }]);
-    hasher.update([match layout.primary_sizing { LayoutSizing::Fixed => 0, LayoutSizing::Hug => 1, LayoutSizing::Fill => 2 }]);
-    hasher.update([match layout.counter_sizing { LayoutSizing::Fixed => 0, LayoutSizing::Hug => 1, LayoutSizing::Fill => 2 }]);
-    for value in [layout.min_width, layout.max_width, layout.min_height, layout.max_height] {
-        match value { Some(value) => { hasher.update([1]); hash_number(hasher, value); }, None => hasher.update([0]) }
+    hasher.update([match layout.primary_alignment {
+        LayoutAlignment::Start => 0,
+        LayoutAlignment::Center => 1,
+        LayoutAlignment::End => 2,
+        LayoutAlignment::SpaceBetween => 3,
+        LayoutAlignment::Baseline => 4,
+    }]);
+    hasher.update([match layout.counter_alignment {
+        LayoutAlignment::Start => 0,
+        LayoutAlignment::Center => 1,
+        LayoutAlignment::End => 2,
+        LayoutAlignment::SpaceBetween => 3,
+        LayoutAlignment::Baseline => 4,
+    }]);
+    hasher.update([match layout.primary_sizing {
+        LayoutSizing::Fixed => 0,
+        LayoutSizing::Hug => 1,
+        LayoutSizing::Fill => 2,
+    }]);
+    hasher.update([match layout.counter_sizing {
+        LayoutSizing::Fixed => 0,
+        LayoutSizing::Hug => 1,
+        LayoutSizing::Fill => 2,
+    }]);
+    // Append only when the v21 child override is present so every pre-v21
+    // snapshot retains its established canonical hash.
+    if let Some(align_self) = layout.align_self {
+        hasher.update([
+            0xa1,
+            match align_self {
+                LayoutAlignment::Start => 0,
+                LayoutAlignment::Center => 1,
+                LayoutAlignment::End => 2,
+                LayoutAlignment::SpaceBetween => 3,
+                LayoutAlignment::Baseline => 4,
+            },
+        ]);
+    }
+    for value in [
+        layout.min_width,
+        layout.max_width,
+        layout.min_height,
+        layout.max_height,
+    ] {
+        match value {
+            Some(value) => {
+                hasher.update([1]);
+                hash_number(hasher, value);
+            }
+            None => hasher.update([0]),
+        }
     }
     hasher.update([u8::from(layout.absolute)]);
+    // Added after Snapshot v21. Omission keeps all pre-track-spacing hashes
+    // byte-identical while an explicit zero remains distinguishable.
+    match layout.track_spacing {
+        Some(value) => {
+            hasher.update([1]);
+            hash_number(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+    if layout.track_alignment != WrapTrackAlignment::Auto {
+        hasher.update([match layout.track_alignment {
+            WrapTrackAlignment::Auto => 0,
+            WrapTrackAlignment::SpaceBetween => 1,
+        }]);
+    }
 }
 
 fn valid_auto_layout(layout: &AutoLayout) -> bool {
-    layout.padding.into_iter().all(|value| value.is_finite() && value >= 0.0)
+    layout
+        .padding
+        .into_iter()
+        .all(|value| value.is_finite() && value >= 0.0)
         && layout.item_spacing.is_finite()
-        && [layout.min_width, layout.max_width, layout.min_height, layout.max_height]
-            .into_iter().flatten().all(|value| value.is_finite() && value >= 0.0)
-        && layout.min_width.zip(layout.max_width).is_none_or(|(min, max)| min <= max)
-        && layout.min_height.zip(layout.max_height).is_none_or(|(min, max)| min <= max)
+        && layout
+            .track_spacing
+            .is_none_or(|value| value.is_finite() && value >= 0.0)
+        && (layout.wrap || layout.track_alignment == WrapTrackAlignment::Auto)
+        && [
+            layout.min_width,
+            layout.max_width,
+            layout.min_height,
+            layout.max_height,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| value.is_finite() && value >= 0.0)
+        && layout
+            .min_width
+            .zip(layout.max_width)
+            .is_none_or(|(min, max)| min <= max)
+        && layout
+            .min_height
+            .zip(layout.max_height)
+            .is_none_or(|(min, max)| min <= max)
+        && !matches!(layout.primary_alignment, LayoutAlignment::Baseline)
+        && !matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
+        && !(layout.counter_alignment == LayoutAlignment::Baseline
+            && layout.mode != LayoutMode::Horizontal)
+        && !matches!(
+            layout.align_self,
+            Some(LayoutAlignment::SpaceBetween | LayoutAlignment::Baseline)
+        )
 }
 
 fn hash_color(hasher: &mut Sha256, color: Color) {
@@ -4478,7 +5873,12 @@ fn hash_color(hasher: &mut Sha256, color: Color) {
 }
 
 fn hash_drop_shadow(hasher: &mut Sha256, shadow: DropShadow) {
-    for value in [shadow.offset_x, shadow.offset_y, shadow.blur_radius, shadow.spread] {
+    for value in [
+        shadow.offset_x,
+        shadow.offset_y,
+        shadow.blur_radius,
+        shadow.spread,
+    ] {
         hash_number(hasher, value);
     }
     hash_color(hasher, shadow.color);
@@ -4504,9 +5904,23 @@ fn hash_effect_stack(hasher: &mut Sha256, effects: &[Effect]) {
             }
             Effect::InnerShadow(shadow) => {
                 hasher.update([2]);
-                hash_drop_shadow(hasher, DropShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: shadow.color, visible: shadow.visible });
+                hash_drop_shadow(
+                    hasher,
+                    DropShadow {
+                        offset_x: shadow.offset_x,
+                        offset_y: shadow.offset_y,
+                        blur_radius: shadow.blur_radius,
+                        spread: shadow.spread,
+                        color: shadow.color,
+                        visible: shadow.visible,
+                    },
+                );
             }
-            Effect::BackgroundBlur(blur) => { hasher.update([3]); hash_number(hasher, blur.radius); hasher.update([u8::from(blur.visible)]); }
+            Effect::BackgroundBlur(blur) => {
+                hasher.update([3]);
+                hash_number(hasher, blur.radius);
+                hasher.update([u8::from(blur.visible)]);
+            }
         }
     }
 }
@@ -4670,6 +6084,29 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
         NodeKind::Vector => 10,
         NodeKind::BooleanOperation => 11,
         NodeKind::Slice => 12,
+        NodeKind::CodeBlock => 13,
+        NodeKind::Component => 14,
+        NodeKind::Instance => 15,
+        NodeKind::Slot => 16,
+        NodeKind::ComponentSet => 17,
+        NodeKind::Connector => 18,
+        NodeKind::Embed => 19,
+        NodeKind::Highlight => 20,
+        NodeKind::InteractiveSlideElement => 21,
+        NodeKind::LinkUnfurl => 22,
+        NodeKind::Media => 23,
+        NodeKind::ShapeWithText => 24,
+        NodeKind::SlideGrid => 25,
+        NodeKind::Slide => 26,
+        NodeKind::SlideRow => 27,
+        NodeKind::Stamp => 28,
+        NodeKind::Sticky => 29,
+        NodeKind::Table => 30,
+        NodeKind::TableCell => 31,
+        NodeKind::TextPath => 32,
+        NodeKind::TransformGroup => 33,
+        NodeKind::WashiTape => 34,
+        NodeKind::Widget => 35,
     }]);
     for value in [
         node.x,
@@ -4752,7 +6189,7 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
         // still making the newly meaningful Section state canonical.
         hasher.update([1]);
     }
-    if node.kind == NodeKind::Frame && !node.clips_content {
+    if is_frame_like(&node.kind) && !node.clips_content {
         hasher.update([2]);
     }
     if !node.extensions.is_empty() {
@@ -4922,25 +6359,51 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(id.0.to_be_bytes());
             hasher.update([u8::from(*enabled)]);
         }
-        Command::MoveVectorPoint { id, point_id, position } => {
+        Command::SetNodeExtensions { id, extensions } => {
+            hasher.update([26]);
+            hasher.update(id.0.to_be_bytes());
+            hash_len(hasher, extensions.len());
+            for (key, value) in extensions {
+                hash_text(hasher, key);
+                hash_len(hasher, value.len());
+                hasher.update(value);
+            }
+        }
+        Command::MoveVectorPoint {
+            id,
+            point_id,
+            position,
+        } => {
             hasher.update([17]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(point_id.0.to_be_bytes());
             hash_number(hasher, position.x);
             hash_number(hasher, position.y);
         }
-        Command::SetVectorSubpathClosed { id, subpath_index, closed } => {
+        Command::SetVectorSubpathClosed {
+            id,
+            subpath_index,
+            closed,
+        } => {
             hasher.update([18]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(subpath_index.to_be_bytes());
             hasher.update([u8::from(*closed)]);
         }
-        Command::InsertVectorPoint { id, subpath_index, after_point_id, point } => {
+        Command::InsertVectorPoint {
+            id,
+            subpath_index,
+            after_point_id,
+            point,
+        } => {
             hasher.update([19]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(subpath_index.to_be_bytes());
             match after_point_id {
-                Some(point_id) => { hasher.update([1]); hasher.update(point_id.0.to_be_bytes()); }
+                Some(point_id) => {
+                    hasher.update([1]);
+                    hasher.update(point_id.0.to_be_bytes());
+                }
                 None => hasher.update([0]),
             }
             hasher.update(point.id.0.to_be_bytes());
@@ -4948,18 +6411,32 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hash_number(hasher, point.position.y);
             for handle in [point.handle_in, point.handle_out] {
                 match handle {
-                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    Some(handle) => {
+                        hasher.update([1]);
+                        hash_number(hasher, handle.x);
+                        hash_number(hasher, handle.y);
+                    }
                     None => hasher.update([0]),
                 }
             }
-            hasher.update([match point.point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+            hasher.update([match point.point_type {
+                VectorPointType::Corner => 0,
+                VectorPointType::Mirrored => 1,
+                VectorPointType::Asymmetric => 2,
+            }]);
         }
         Command::DeleteVectorPoint { id, point_id } => {
             hasher.update([20]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(point_id.0.to_be_bytes());
         }
-        Command::SplitVectorSegment { id, subpath_index, after_point_id, t, point_id } => {
+        Command::SplitVectorSegment {
+            id,
+            subpath_index,
+            after_point_id,
+            t,
+            point_id,
+        } => {
             hasher.update([23]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(subpath_index.to_be_bytes());
@@ -4967,7 +6444,13 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hash_number(hasher, *t);
             hasher.update(point_id.0.to_be_bytes());
         }
-        Command::ConnectVectorEndpoints { id, first_subpath_index, first_point_id, second_subpath_index, second_point_id } => {
+        Command::ConnectVectorEndpoints {
+            id,
+            first_subpath_index,
+            first_point_id,
+            second_subpath_index,
+            second_point_id,
+        } => {
             hasher.update([25]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(first_subpath_index.to_be_bytes());
@@ -4975,17 +6458,31 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(second_subpath_index.to_be_bytes());
             hasher.update(second_point_id.0.to_be_bytes());
         }
-        Command::SetVectorPointHandles { id, point_id, handle_in, handle_out, point_type } => {
+        Command::SetVectorPointHandles {
+            id,
+            point_id,
+            handle_in,
+            handle_out,
+            point_type,
+        } => {
             hasher.update([21]);
             hasher.update(id.0.to_be_bytes());
             hasher.update(point_id.0.to_be_bytes());
             for handle in [handle_in, handle_out] {
                 match handle {
-                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    Some(handle) => {
+                        hasher.update([1]);
+                        hash_number(hasher, handle.x);
+                        hash_number(hasher, handle.y);
+                    }
                     None => hasher.update([0]),
                 }
             }
-            hasher.update([match point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+            hasher.update([match point_type {
+                VectorPointType::Corner => 0,
+                VectorPointType::Mirrored => 1,
+                VectorPointType::Asymmetric => 2,
+            }]);
         }
         Command::SetNodeAsset { id, asset_id } => {
             hasher.update([12]);
@@ -5065,18 +6562,25 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
 fn image_fill_supported(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Frame | NodeKind::Section | NodeKind::Rectangle | NodeKind::Ellipse | NodeKind::Image
+        NodeKind::Frame
+            | NodeKind::Section
+            | NodeKind::Rectangle
+            | NodeKind::Ellipse
+            | NodeKind::Image
     )
 }
 
 fn node_legacy_transform(node: &Node) -> Option<AffineTransform> {
-    if !valid_geometry(&node.kind, Geometry {
-        x: node.x,
-        y: node.y,
-        width: node.width,
-        height: node.height,
-        rotation: node.rotation,
-    }) {
+    if !valid_geometry(
+        &node.kind,
+        Geometry {
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+            rotation: node.rotation,
+        },
+    ) {
         return None;
     }
     let radians = node.rotation.to_radians();
@@ -5101,13 +6605,59 @@ fn valid_geometry(kind: &NodeKind, geometry: Geometry) -> bool {
         && geometry.rotation.is_finite()
         && geometry.width > 0.0
         && match kind {
-            NodeKind::Line => geometry.height == 0.0,
+            NodeKind::Line | NodeKind::Connector => geometry.height == 0.0,
+            NodeKind::Slide => {
+                geometry.width == 1920.0 && geometry.height == 1080.0 && geometry.rotation == 0.0
+            }
             _ => geometry.height > 0.0,
         }
 }
 
 fn can_contain_children(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Frame | NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section)
+    matches!(
+        kind,
+        NodeKind::Frame
+            | NodeKind::Component
+            | NodeKind::Instance
+            | NodeKind::Slot
+            | NodeKind::ComponentSet
+            | NodeKind::Group
+            | NodeKind::TransformGroup
+            | NodeKind::BooleanOperation
+            | NodeKind::Section
+            | NodeKind::Slide
+            | NodeKind::SlideGrid
+            | NodeKind::SlideRow
+            | NodeKind::Table
+    )
+}
+
+fn can_parent_contain_child(parent: &NodeKind, child: &NodeKind) -> bool {
+    match parent {
+        NodeKind::ComponentSet => *child == NodeKind::Component,
+        NodeKind::SlideGrid => *child == NodeKind::SlideRow,
+        NodeKind::SlideRow => *child == NodeKind::Slide,
+        NodeKind::Table => *child == NodeKind::TableCell,
+        _ => {
+            can_contain_children(parent)
+                && *child != NodeKind::Slide
+                && *child != NodeKind::SlideRow
+                && *child != NodeKind::SlideGrid
+        }
+    }
+}
+
+/// Components inherit the full Frame container contract, including clipping,
+/// constraints, and Auto Layout.
+fn is_frame_like(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Frame
+            | NodeKind::Component
+            | NodeKind::Instance
+            | NodeKind::Slot
+            | NodeKind::ComponentSet
+    )
 }
 
 fn is_structural_container(kind: &NodeKind) -> bool {
@@ -5154,8 +6704,21 @@ fn valid_slice_node(node: &Node) -> bool {
         && !is_alpha_mask(node)
 }
 
-fn geometry_for_constraints(parent_before: Geometry, parent_after: Geometry, child: Geometry, constraints: Constraints, kind: &NodeKind) -> Result<Geometry, CommandError> {
-    fn axis(position: f64, size: f64, old_parent: f64, new_parent: f64, constraint: ConstraintType, preserve_zero: bool) -> Result<(f64, f64), CommandError> {
+fn geometry_for_constraints(
+    parent_before: Geometry,
+    parent_after: Geometry,
+    child: Geometry,
+    constraints: Constraints,
+    kind: &NodeKind,
+) -> Result<Geometry, CommandError> {
+    fn axis(
+        position: f64,
+        size: f64,
+        old_parent: f64,
+        new_parent: f64,
+        constraint: ConstraintType,
+        preserve_zero: bool,
+    ) -> Result<(f64, f64), CommandError> {
         let delta = new_parent - old_parent;
         Ok(match constraint {
             ConstraintType::Min => (position, size),
@@ -5163,16 +6726,45 @@ fn geometry_for_constraints(parent_before: Geometry, parent_after: Geometry, chi
             ConstraintType::Max => (position + delta, size),
             ConstraintType::Stretch => (position, if preserve_zero { 0.0 } else { size + delta }),
             ConstraintType::Scale => {
-                if old_parent == 0.0 { return Err(CommandError::InvalidGeometry); }
+                if old_parent == 0.0 {
+                    return Err(CommandError::InvalidGeometry);
+                }
                 let ratio = new_parent / old_parent;
-                (position * ratio, if preserve_zero { 0.0 } else { size * ratio })
+                (
+                    position * ratio,
+                    if preserve_zero { 0.0 } else { size * ratio },
+                )
             }
         })
     }
-    let (x, width) = axis(child.x - parent_before.x, child.width, parent_before.width, parent_after.width, constraints.horizontal, false)?;
-    let (y, height) = axis(child.y - parent_before.y, child.height, parent_before.height, parent_after.height, constraints.vertical, *kind == NodeKind::Line)?;
-    let after = Geometry { x: parent_after.x + x, y: parent_after.y + y, width, height, rotation: child.rotation };
-    if valid_geometry(kind, after) { Ok(after) } else { Err(CommandError::InvalidGeometry) }
+    let (x, width) = axis(
+        child.x - parent_before.x,
+        child.width,
+        parent_before.width,
+        parent_after.width,
+        constraints.horizontal,
+        false,
+    )?;
+    let (y, height) = axis(
+        child.y - parent_before.y,
+        child.height,
+        parent_before.height,
+        parent_after.height,
+        constraints.vertical,
+        *kind == NodeKind::Line,
+    )?;
+    let after = Geometry {
+        x: parent_after.x + x,
+        y: parent_after.y + y,
+        width,
+        height,
+        rotation: child.rotation,
+    };
+    if valid_geometry(kind, after) {
+        Ok(after)
+    } else {
+        Err(CommandError::InvalidGeometry)
+    }
 }
 
 /// Keeps the historical x/y/rotation projection populated for a Relative-v1
@@ -5237,6 +6829,137 @@ fn appearance_for_node(node: &Node) -> Appearance {
     }
 }
 
+fn valid_extensions(extensions: &BTreeMap<String, Vec<u8>>) -> bool {
+    const MAX_EXTENSION_ENTRIES: usize = 256;
+    const MAX_EXTENSION_KEY_BYTES: usize = 256;
+    const MAX_EXTENSION_VALUE_BYTES: usize = 256 * 1024;
+    extensions.len() <= MAX_EXTENSION_ENTRIES
+        && extensions.iter().all(|(key, value)| {
+            !key.is_empty()
+                && key.len() <= MAX_EXTENSION_KEY_BYTES
+                && value.len() <= MAX_EXTENSION_VALUE_BYTES
+        })
+}
+
+fn prototype_duration(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|duration| duration.is_finite() && (0.0..=60_000.0).contains(&duration))
+}
+
+fn valid_prototype_transition(value: &serde_json::Value) -> bool {
+    let Some(value) = value.as_object() else {
+        return false;
+    };
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("NONE") => true,
+        Some("DISSOLVE") => prototype_duration(value.get("duration")),
+        Some("DIRECTIONAL") => {
+            prototype_duration(value.get("duration"))
+                && matches!(
+                    value.get("direction").and_then(serde_json::Value::as_str),
+                    Some("LEFT") | Some("RIGHT") | Some("UP") | Some("DOWN")
+                )
+        }
+        _ => false,
+    }
+}
+
+fn valid_prototype_metadata_extension(value: Option<&Vec<u8>>) -> bool {
+    let Some(bytes) = value else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(value) = value.as_object() else {
+        return false;
+    };
+    if let Some(starting_point) = value.get("startingPoint") {
+        if !starting_point.is_boolean() {
+            return false;
+        }
+    }
+    let Some(overlay) = value.get("overlay") else {
+        return true;
+    };
+    let Some(overlay) = overlay.as_object() else {
+        return false;
+    };
+    if !matches!(
+        overlay
+            .get("positionType")
+            .and_then(serde_json::Value::as_str),
+        Some("CENTER") | Some("MANUAL")
+    ) || !matches!(
+        overlay
+            .get("backgroundInteraction")
+            .and_then(serde_json::Value::as_str),
+        Some("CLOSE_ON_CLICK_OUTSIDE") | Some("DO_NOTHING")
+    ) {
+        return false;
+    }
+    match overlay.get("relativePosition") {
+        None => {
+            overlay
+                .get("positionType")
+                .and_then(serde_json::Value::as_str)
+                == Some("CENTER")
+        }
+        Some(position) => position.as_object().is_some_and(|position| {
+            position
+                .get("x")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(f64::is_finite)
+                && position
+                    .get("y")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(f64::is_finite)
+        }),
+    }
+}
+
+fn prototype_node_id(value: &str) -> Option<NodeId> {
+    let compact = value.replace('-', "");
+    (compact.len() == 32)
+        .then(|| u128::from_str_radix(&compact, 16).ok())
+        .flatten()
+        .map(NodeId)
+}
+
+fn clear_prototype_destination_value(value: &mut serde_json::Value, target: NodeId) -> bool {
+    let Some(reactions) = value.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for reaction in reactions {
+        let Some(actions) = reaction
+            .get_mut("actions")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for action in actions {
+            let Some(action) = action.as_object_mut() else {
+                continue;
+            };
+            if action.get("type").and_then(serde_json::Value::as_str) != Some("NODE") {
+                continue;
+            }
+            let matches_target = action
+                .get("destinationId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(prototype_node_id)
+                == Some(target);
+            if matches_target {
+                action.insert("destinationId".into(), serde_json::Value::Null);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn valid_appearance(appearance: &Appearance) -> bool {
     appearance.fill.is_valid()
         && appearance.stroke.is_valid()
@@ -5249,7 +6972,9 @@ fn valid_appearance(appearance: &Appearance) -> bool {
         && valid_dash_pattern(&appearance.stroke_dash_pattern)
         && valid_stroke_weights(&appearance.stroke_weights)
         && appearance.arc_data.is_none_or(valid_arc_data)
-        && appearance.parametric_shape.is_none_or(valid_parametric_shape_value)
+        && appearance
+            .parametric_shape
+            .is_none_or(valid_parametric_shape_value)
         && valid_relative_transform(appearance.relative_transform)
         && appearance.drop_shadow.is_none_or(valid_drop_shadow)
         && valid_effect_stack(&appearance.effect_stack, appearance.drop_shadow)
@@ -5292,15 +7017,28 @@ fn valid_effect_stack(effects: &[Effect], legacy_shadow: Option<DropShadow>) -> 
     effects.len() <= MAX_EFFECTS_PER_NODE
         && effects.iter().all(|effect| match effect {
             Effect::DropShadow(shadow) => valid_drop_shadow(*shadow),
-            Effect::LayerBlur(blur) => blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius),
-            Effect::InnerShadow(shadow) => valid_drop_shadow(DropShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: shadow.color, visible: shadow.visible }),
-            Effect::BackgroundBlur(blur) => blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius),
+            Effect::LayerBlur(blur) => {
+                blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius)
+            }
+            Effect::InnerShadow(shadow) => valid_drop_shadow(DropShadow {
+                offset_x: shadow.offset_x,
+                offset_y: shadow.offset_y,
+                blur_radius: shadow.blur_radius,
+                spread: shadow.spread,
+                color: shadow.color,
+                visible: shadow.visible,
+            }),
+            Effect::BackgroundBlur(blur) => {
+                blur.radius.is_finite() && (0.0..=256.0).contains(&blur.radius)
+            }
         })
         && (effects.is_empty() || first_effect_drop_shadow(effects) == legacy_shadow)
 }
 
 fn hash_constraints(hasher: &mut Sha256, constraints: Option<Constraints>) {
-    let Some(constraints) = constraints else { return; };
+    let Some(constraints) = constraints else {
+        return;
+    };
     let encode = |value| match value {
         ConstraintType::Min => 0,
         ConstraintType::Center => 1,
@@ -5309,7 +7047,11 @@ fn hash_constraints(hasher: &mut Sha256, constraints: Option<Constraints>) {
         ConstraintType::Scale => 4,
     };
     // Legacy nodes do not write this marker and therefore retain their hashes.
-    hasher.update([7, encode(constraints.horizontal), encode(constraints.vertical)]);
+    hasher.update([
+        7,
+        encode(constraints.horizontal),
+        encode(constraints.vertical),
+    ]);
 }
 
 const MAX_PAINT_LAYERS: usize = 16;
@@ -5323,7 +7065,10 @@ fn paint_stack_bytes(paints: &[Paint]) -> usize {
 }
 
 fn valid_corner_radii(radii: &[f64]) -> bool {
-    (radii.is_empty() || radii.len() == 4) && radii.iter().all(|radius| radius.is_finite() && *radius >= 0.0)
+    (radii.is_empty() || radii.len() == 4)
+        && radii
+            .iter()
+            .all(|radius| radius.is_finite() && *radius >= 0.0)
 }
 
 const DEFAULT_STROKE_MITER_LIMIT: f64 = 10.0;
@@ -5331,7 +7076,9 @@ const MAX_STROKE_DASH_SEGMENTS: usize = 32;
 
 fn valid_dash_pattern(pattern: &[f64]) -> bool {
     pattern.len() <= MAX_STROKE_DASH_SEGMENTS
-        && pattern.iter().all(|segment| segment.is_finite() && *segment >= 0.0)
+        && pattern
+            .iter()
+            .all(|segment| segment.is_finite() && *segment >= 0.0)
         && (pattern.is_empty() || pattern.iter().any(|segment| *segment > 0.0))
 }
 
@@ -5341,19 +7088,25 @@ fn canonical_dash_pattern(pattern: &[f64]) -> Vec<f64> {
     if pattern.len() % 2 == 0 {
         return pattern.to_vec();
     }
-    pattern.iter().copied().chain(pattern.iter().copied()).collect()
+    pattern
+        .iter()
+        .copied()
+        .chain(pattern.iter().copied())
+        .collect()
 }
 
 fn valid_stroke_weights(weights: &[f64]) -> bool {
     (weights.is_empty() || weights.len() == 4)
-        && weights.iter().all(|weight| weight.is_finite() && *weight >= 0.0)
+        && weights
+            .iter()
+            .all(|weight| weight.is_finite() && *weight >= 0.0)
 }
 
 fn valid_arc_data(arc: ArcData) -> bool {
     arc.starting_angle.is_finite()
         && arc.ending_angle.is_finite()
         && arc.inner_radius.is_finite()
-        && (0.0..1.0).contains(&arc.inner_radius)
+        && (0.0..=1.0).contains(&arc.inner_radius)
 }
 
 const MIN_PARAMETRIC_POINTS: u32 = 3;
@@ -5364,7 +7117,10 @@ fn valid_parametric_shape_value(shape: ParametricShape) -> bool {
         ParametricShape::Polygon { point_count } => {
             (MIN_PARAMETRIC_POINTS..=MAX_PARAMETRIC_POINTS).contains(&point_count)
         }
-        ParametricShape::Star { point_count, inner_ratio } => {
+        ParametricShape::Star {
+            point_count,
+            inner_ratio,
+        } => {
             (MIN_PARAMETRIC_POINTS..=MAX_PARAMETRIC_POINTS).contains(&point_count)
                 && inner_ratio.is_finite()
                 && (0.05..=0.95).contains(&inner_ratio)
@@ -5398,11 +7154,17 @@ fn valid_vector_path(path: &VectorPath) -> bool {
         if subpath.points.is_empty() || (subpath.closed && subpath.points.len() < 3) {
             return false;
         }
-        if subpath.points.windows(2).any(|pair| pair[0].position == pair[1].position)
+        if subpath
+            .points
+            .windows(2)
+            .any(|pair| pair[0].position == pair[1].position)
             || (subpath.closed
                 && subpath.points.len() > 1
                 && subpath.points.first().is_some_and(|first| {
-                    subpath.points.last().is_some_and(|last| first.position == last.position)
+                    subpath
+                        .points
+                        .last()
+                        .is_some_and(|last| first.position == last.position)
                 }))
         {
             return false;
@@ -5412,8 +7174,18 @@ fn valid_vector_path(path: &VectorPath) -> bool {
             if !ids.insert(point.id)
                 || ![point.position.x, point.position.y]
                     .into_iter()
-                    .chain(point.handle_in.into_iter().flat_map(|handle| [handle.x, handle.y]))
-                    .chain(point.handle_out.into_iter().flat_map(|handle| [handle.x, handle.y]))
+                    .chain(
+                        point
+                            .handle_in
+                            .into_iter()
+                            .flat_map(|handle| [handle.x, handle.y]),
+                    )
+                    .chain(
+                        point
+                            .handle_out
+                            .into_iter()
+                            .flat_map(|handle| [handle.x, handle.y]),
+                    )
                     .all(f64::is_finite)
             {
                 return false;
@@ -5425,8 +7197,10 @@ fn valid_vector_path(path: &VectorPath) -> bool {
 
 fn valid_vector_path_for_kind(kind: &NodeKind, path: Option<&VectorPath>) -> bool {
     match (kind, path) {
-        (NodeKind::Vector, Some(path)) => valid_vector_path(path),
-        (NodeKind::Vector, None) => false,
+        (NodeKind::Vector | NodeKind::Highlight | NodeKind::TextPath, Some(path)) => {
+            valid_vector_path(path)
+        }
+        (NodeKind::Vector | NodeKind::Highlight | NodeKind::TextPath, None) => false,
         (_, None) => true,
         _ => false,
     }
@@ -5446,7 +7220,10 @@ fn is_alpha_mask(node: &Node) -> bool {
 }
 
 fn hash_vector_path(hasher: &mut Sha256, path: &VectorPath) {
-    hasher.update([match path.fill_rule { FillRule::NonZero => 0, FillRule::EvenOdd => 1 }]);
+    hasher.update([match path.fill_rule {
+        FillRule::NonZero => 0,
+        FillRule::EvenOdd => 1,
+    }]);
     hash_len(hasher, path.subpaths.len());
     for subpath in &path.subpaths {
         hasher.update([u8::from(subpath.closed)]);
@@ -5457,11 +7234,19 @@ fn hash_vector_path(hasher: &mut Sha256, path: &VectorPath) {
             hash_number(hasher, point.position.y);
             for handle in [point.handle_in, point.handle_out] {
                 match handle {
-                    Some(handle) => { hasher.update([1]); hash_number(hasher, handle.x); hash_number(hasher, handle.y); }
+                    Some(handle) => {
+                        hasher.update([1]);
+                        hash_number(hasher, handle.x);
+                        hash_number(hasher, handle.y);
+                    }
                     None => hasher.update([0]),
                 }
             }
-            hasher.update([match point.point_type { VectorPointType::Corner => 0, VectorPointType::Mirrored => 1, VectorPointType::Asymmetric => 2 }]);
+            hasher.update([match point.point_type {
+                VectorPointType::Corner => 0,
+                VectorPointType::Mirrored => 1,
+                VectorPointType::Asymmetric => 2,
+            }]);
         }
     }
 }
@@ -5472,7 +7257,10 @@ fn hash_parametric_shape(hasher: &mut Sha256, shape: ParametricShape) {
             hasher.update([0]);
             hasher.update(point_count.to_be_bytes());
         }
-        ParametricShape::Star { point_count, inner_ratio } => {
+        ParametricShape::Star {
+            point_count,
+            inner_ratio,
+        } => {
             hasher.update([1]);
             hasher.update(point_count.to_be_bytes());
             hash_number(hasher, inner_ratio);
@@ -5534,7 +7322,14 @@ fn hash_stroke_style(
             hash_number(hasher, arc.inner_radius);
         }
         if let Some(transform) = relative_transform {
-            for value in [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f] {
+            for value in [
+                transform.a,
+                transform.b,
+                transform.c,
+                transform.d,
+                transform.e,
+                transform.f,
+            ] {
                 hash_number(hasher, value);
             }
         }
@@ -5615,6 +7410,89 @@ mod tests {
     }
 
     #[test]
+    fn prototype_extensions_are_hashed_and_undoable_without_losing_unknown_fields() {
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let before_hash = document.canonical_hash_hex();
+        let extensions = BTreeMap::from([
+            (
+                "makefigma.prototype.reactions.v1".into(),
+                br#"[{"trigger":{"type":"ON_CLICK"},"actions":[{"type":"BACK"}]}]"#.to_vec(),
+            ),
+            ("future.imported.value".into(), vec![0, 255, 1]),
+        ]);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeExtensions {
+                        id: NodeId(1),
+                        extensions: extensions.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().extensions, extensions);
+        assert_ne!(document.canonical_hash_hex(), before_hash);
+        document.undo().unwrap();
+        assert!(document.node(NodeId(1)).unwrap().extensions.is_empty());
+        document.redo().unwrap();
+        assert_eq!(document.node(NodeId(1)).unwrap().extensions, extensions);
+    }
+
+    #[test]
+    fn deleting_a_prototype_destination_nulls_the_reference_and_undo_restores_it() {
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1)), Command::Create(node(2))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let target = "00000000-0000-0000-0000-000000000002";
+        let extensions = BTreeMap::from([(
+            PROTOTYPE_REACTIONS_EXTENSION_KEY.into(),
+            format!(r#"[{{"trigger":{{"type":"ON_CLICK"}},"actions":[{{"type":"NODE","navigation":"NAVIGATE","destinationId":"{target}"}}]}}]"#).into_bytes(),
+        )]);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeExtensions {
+                        id: NodeId(1),
+                        extensions,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(2, vec![Command::Delete { id: NodeId(2) }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let cleared: serde_json::Value = serde_json::from_slice(
+            &document.node(NodeId(1)).unwrap().extensions[PROTOTYPE_REACTIONS_EXTENSION_KEY],
+        )
+        .unwrap();
+        assert!(cleared[0]["actions"][0]["destinationId"].is_null());
+        document.undo().unwrap();
+        let restored: serde_json::Value = serde_json::from_slice(
+            &document.node(NodeId(1)).unwrap().extensions[PROTOTYPE_REACTIONS_EXTENSION_KEY],
+        )
+        .unwrap();
+        assert_eq!(restored[0]["actions"][0]["destinationId"], target);
+        assert!(document.node(NodeId(2)).is_some());
+    }
+
+    #[test]
     fn auto_layout_fixed_horizontal_positions_children_and_undoes_exactly() {
         let mut document = Document::empty();
         let mut frame = node(1);
@@ -5639,20 +7517,343 @@ mod tests {
             counter_alignment: LayoutAlignment::Center,
             ..AutoLayout::default()
         };
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()),
-            Command::Create(first.clone()),
-            Command::Create(second.clone()),
-            Command::SetAutoLayout { id: frame.id, layout },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((50.0, 50.0)));
-        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((88.0, 50.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(first.id).map(|node| (node.x, node.y)),
+            Some((50.0, 50.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((88.0, 50.0))
+        );
         let hash = document.canonical_hash();
         document.undo().unwrap();
         assert!(document.node(first.id).is_none());
         document.redo().unwrap();
         assert_eq!(document.canonical_hash(), hash);
-        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((88.0, 50.0)));
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((88.0, 50.0))
+        );
+    }
+
+    #[test]
+    fn auto_layout_child_align_self_overrides_the_frame_counter_axis() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(frame.id);
+        child.width = 30.0;
+        child.height = 20.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(child.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                counter_alignment: LayoutAlignment::Center,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: child.id,
+                            layout: AutoLayout {
+                                align_self: Some(LayoutAlignment::End),
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(child.id).map(|node| (node.x, node.y)),
+            Some((0.0, 80.0))
+        );
+        let hash = document.canonical_hash();
+        document.undo().unwrap();
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn auto_layout_horizontal_baseline_aligns_text_and_non_text_flow_children() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 60.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.text = "Text".into();
+        text.width = 50.0;
+        text.height = 20.0;
+        let mut rectangle = node(3);
+        rectangle.kind = NodeKind::Rectangle;
+        rectangle.parent_id = Some(frame.id);
+        rectangle.width = 30.0;
+        rectangle.height = 30.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::Create(rectangle.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                counter_alignment: LayoutAlignment::Baseline,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        // The default 31px nominal font is centered in the 20px Core line
+        // box, yielding a 19.3px alphabetic baseline. The Rectangle's lower
+        // edge is at 30px, so the Text shifts by 10.7px.
+        assert_eq!(
+            document.node(text.id).map(|node| (node.x, node.y)),
+            Some((0.0, 10.7))
+        );
+        assert_eq!(
+            document.node(rectangle.id).map(|node| (node.x, node.y)),
+            Some((50.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn auto_layout_baseline_is_rejected_outside_horizontal_frame_counter_axis() {
+        let mut document = Document::empty();
+        let frame = node(1);
+        let result = document.submit(
+            transaction(
+                0,
+                vec![
+                    Command::Create(frame.clone()),
+                    Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Vertical,
+                            counter_alignment: LayoutAlignment::Baseline,
+                            ..AutoLayout::default()
+                        },
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
+        assert_eq!(result, Err(CommandError::InvalidAutoLayout));
+    }
+
+    #[test]
+    fn auto_layout_rejects_space_between_on_the_counter_axis() {
+        let mut document = Document::empty();
+        let frame = node(1);
+        let result = document.submit(
+            transaction(
+                0,
+                vec![
+                    Command::Create(frame.clone()),
+                    Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Horizontal,
+                            counter_alignment: LayoutAlignment::SpaceBetween,
+                            ..AutoLayout::default()
+                        },
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
+        assert_eq!(result, Err(CommandError::InvalidAutoLayout));
+    }
+
+    #[test]
+    fn auto_layout_wrap_aligns_baselines_per_horizontal_track() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 80.0;
+        frame.height = 100.0;
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.parent_id = Some(frame.id);
+        text.text = "Text".into();
+        text.width = 40.0;
+        text.height = 20.0;
+        let mut first_rectangle = node(3);
+        first_rectangle.kind = NodeKind::Rectangle;
+        first_rectangle.parent_id = Some(frame.id);
+        first_rectangle.width = 30.0;
+        first_rectangle.height = 30.0;
+        let mut second_rectangle = node(4);
+        second_rectangle.kind = NodeKind::Rectangle;
+        second_rectangle.parent_id = Some(frame.id);
+        second_rectangle.width = 50.0;
+        second_rectangle.height = 20.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::Create(first_rectangle.clone()),
+                        Command::Create(second_rectangle.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                wrap: true,
+                                item_spacing: 5.0,
+                                track_spacing: Some(7.0),
+                                counter_alignment: LayoutAlignment::Baseline,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        // The first track aligns Text's 19.3px CSS fallback baseline with the
+        // first Rectangle's 30px lower edge. The wrapped track starts only
+        // after that 30px track with its explicit 7px track gap, rather than
+        // inheriting the main-axis 5px gap or the first baseline offset.
+        assert_eq!(
+            document.node(text.id).map(|node| (node.x, node.y)),
+            Some((0.0, 10.7))
+        );
+        assert_eq!(
+            document
+                .node(first_rectangle.id)
+                .map(|node| (node.x, node.y)),
+            Some((45.0, 0.0))
+        );
+        assert_eq!(
+            document
+                .node(second_rectangle.id)
+                .map(|node| (node.x, node.y)),
+            Some((0.0, 37.0))
+        );
+    }
+
+    #[test]
+    fn auto_layout_wrap_space_between_distributes_remaining_counter_axis_space() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 80.0;
+        frame.height = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 30.0;
+        first.height = 30.0;
+        let mut second = node(3);
+        second.kind = NodeKind::Rectangle;
+        second.parent_id = Some(frame.id);
+        second.width = 30.0;
+        second.height = 20.0;
+        let mut third = node(4);
+        third.kind = NodeKind::Rectangle;
+        third.parent_id = Some(frame.id);
+        third.width = 50.0;
+        third.height = 20.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::Create(third.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                wrap: true,
+                                track_alignment: WrapTrackAlignment::SpaceBetween,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        // Tracks are 30px and 20px high. The remaining 50px is placed between
+        // the two tracks, so the second row starts at y=80 rather than y=30.
+        assert_eq!(
+            document.node(first.id).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((30.0, 0.0))
+        );
+        assert_eq!(
+            document.node(third.id).map(|node| (node.x, node.y)),
+            Some((0.0, 80.0))
+        );
+    }
+
+    #[test]
+    fn auto_layout_rejects_wrap_track_space_between_without_wrap() {
+        let mut document = Document::empty();
+        let frame = node(1);
+        let result = document.submit(
+            transaction(
+                0,
+                vec![
+                    Command::Create(frame.clone()),
+                    Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Horizontal,
+                            track_alignment: WrapTrackAlignment::SpaceBetween,
+                            ..AutoLayout::default()
+                        },
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
+        assert_eq!(result, Err(CommandError::InvalidAutoLayout));
     }
 
     #[test]
@@ -5671,21 +7872,47 @@ mod tests {
         fill.parent_id = Some(frame.id);
         fill.width = 1.0;
         fill.height = 1.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()),
-            Command::Create(fixed.clone()),
-            Command::Create(fill.clone()),
-            Command::SetAutoLayout {
-                id: frame.id,
-                layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() },
-            },
-            Command::SetAutoLayout {
-                id: fill.id,
-                layout: AutoLayout { primary_sizing: LayoutSizing::Fill, counter_sizing: LayoutSizing::Fill, ..AutoLayout::default() },
-            },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(fixed.id).map(|node| (node.x, node.y, node.width, node.height)), Some((0.0, 0.0, 30.0, 20.0)));
-        assert_eq!(document.node(fill.id).map(|node| (node.x, node.y, node.width, node.height)), Some((40.0, 0.0, 160.0, 100.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(fixed.clone()),
+                        Command::Create(fill.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                item_spacing: 10.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: fill.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fill,
+                                counter_sizing: LayoutSizing::Fill,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(fixed.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((0.0, 0.0, 30.0, 20.0))
+        );
+        assert_eq!(
+            document
+                .node(fill.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((40.0, 0.0, 160.0, 100.0))
+        );
     }
 
     #[test]
@@ -5702,12 +7929,28 @@ mod tests {
         second.kind = NodeKind::Rectangle;
         second.parent_id = Some(frame.id);
         second.height = 30.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()),
-            Command::Create(first.clone()),
-            Command::Create(second.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Vertical, padding: [8.0, 0.0, 8.0, 0.0], item_spacing: 6.0, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Vertical,
+                                padding: [8.0, 0.0, 8.0, 0.0],
+                                item_spacing: 6.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(second.id).map(|node| node.y), Some(44.0));
     }
 
@@ -5727,27 +7970,46 @@ mod tests {
         second.parent_id = Some(frame.id);
         second.width = 40.0;
         second.height = 50.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()),
-            Command::Create(first.clone()),
-            Command::Create(second.clone()),
-            Command::SetAutoLayout {
-                id: frame.id,
-                layout: AutoLayout {
-                    mode: LayoutMode::Horizontal,
-                    padding: [2.0, 3.0, 4.0, 5.0],
-                    item_spacing: 6.0,
-                    primary_sizing: LayoutSizing::Hug,
-                    counter_sizing: LayoutSizing::Hug,
-                    min_width: Some(90.0),
-                    max_height: Some(52.0),
-                    ..AutoLayout::default()
-                },
-            },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((90.0, 52.0)));
-        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((5.0, 2.0)));
-        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((41.0, 2.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [2.0, 3.0, 4.0, 5.0],
+                                item_spacing: 6.0,
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Hug,
+                                min_width: Some(90.0),
+                                max_height: Some(52.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(frame.id)
+                .map(|node| (node.width, node.height)),
+            Some((90.0, 52.0))
+        );
+        assert_eq!(
+            document.node(first.id).map(|node| (node.x, node.y)),
+            Some((5.0, 2.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((41.0, 2.0))
+        );
     }
 
     #[test]
@@ -5763,16 +8025,45 @@ mod tests {
         leaf.parent_id = Some(inner.id);
         leaf.width = 20.0;
         leaf.height = 10.0;
-        let hug = AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() };
-        document.submit(transaction(0, vec![
-            Command::Create(outer.clone()),
-            Command::Create(inner.clone()),
-            Command::Create(leaf.clone()),
-            Command::SetAutoLayout { id: outer.id, layout: hug.clone() },
-            Command::SetAutoLayout { id: inner.id, layout: hug },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(inner.id).map(|node| (node.width, node.height, node.x, node.y)), Some((20.0, 10.0, 0.0, 0.0)));
-        assert_eq!(document.node(outer.id).map(|node| (node.width, node.height)), Some((20.0, 10.0)));
+        let hug = AutoLayout {
+            mode: LayoutMode::Horizontal,
+            primary_sizing: LayoutSizing::Hug,
+            counter_sizing: LayoutSizing::Hug,
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(outer.clone()),
+                        Command::Create(inner.clone()),
+                        Command::Create(leaf.clone()),
+                        Command::SetAutoLayout {
+                            id: outer.id,
+                            layout: hug.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: inner.id,
+                            layout: hug,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(inner.id)
+                .map(|node| (node.width, node.height, node.x, node.y)),
+            Some((20.0, 10.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            document
+                .node(outer.id)
+                .map(|node| (node.width, node.height)),
+            Some((20.0, 10.0))
+        );
     }
 
     #[test]
@@ -5790,24 +8081,43 @@ mod tests {
         leaf.parent_id = Some(inner.id);
         leaf.width = 20.0;
         leaf.height = 10.0;
-        document.submit(transaction(0, vec![
-            Command::Create(outer.clone()),
-            Command::Create(inner.clone()),
-            Command::Create(leaf.clone()),
-            Command::SetAutoLayout { id: outer.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-            Command::SetAutoLayout {
-                id: inner.id,
-                layout: AutoLayout {
-                    mode: LayoutMode::Vertical,
-                    // Vertical primary is the inner Frame's height; its
-                    // counter axis is width and should Fill the outer row.
-                    primary_sizing: LayoutSizing::Hug,
-                    counter_sizing: LayoutSizing::Fill,
-                    ..AutoLayout::default()
-                },
-            },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(inner.id).map(|node| (node.width, node.height)), Some((200.0, 10.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(outer.clone()),
+                        Command::Create(inner.clone()),
+                        Command::Create(leaf.clone()),
+                        Command::SetAutoLayout {
+                            id: outer.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: inner.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Vertical,
+                                // Vertical primary is the inner Frame's height; its
+                                // counter axis is width and should Fill the outer row.
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Fill,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(inner.id)
+                .map(|node| (node.width, node.height)),
+            Some((200.0, 10.0))
+        );
     }
 
     #[test]
@@ -5825,14 +8135,53 @@ mod tests {
         let mut free_fill = node(4);
         free_fill.kind = NodeKind::Rectangle;
         free_fill.parent_id = Some(frame.id);
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(fixed.clone()), Command::Create(capped_fill.clone()), Command::Create(free_fill.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: capped_fill.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(50.0), max_width: Some(80.0), ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: free_fill.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(capped_fill.id).map(|node| (node.x, node.width)), Some((20.0, 80.0)));
-        assert_eq!(document.node(free_fill.id).map(|node| (node.x, node.width)), Some((100.0, 100.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(fixed.clone()),
+                        Command::Create(capped_fill.clone()),
+                        Command::Create(free_fill.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: capped_fill.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fill,
+                                min_width: Some(50.0),
+                                max_width: Some(80.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: free_fill.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fill,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(capped_fill.id)
+                .map(|node| (node.x, node.width)),
+            Some((20.0, 80.0))
+        );
+        assert_eq!(
+            document.node(free_fill.id).map(|node| (node.x, node.width)),
+            Some((100.0, 100.0))
+        );
     }
 
     #[test]
@@ -5846,12 +8195,40 @@ mod tests {
         let mut second = node(3);
         second.kind = NodeKind::Rectangle;
         second.parent_id = Some(frame.id);
-        let result = document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: first.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(60.0), ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: second.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, min_width: Some(60.0), ..AutoLayout::default() } },
-        ]), Origin::LocalUser);
+        let result = document.submit(
+            transaction(
+                0,
+                vec![
+                    Command::Create(frame.clone()),
+                    Command::Create(first.clone()),
+                    Command::Create(second.clone()),
+                    Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Horizontal,
+                            ..AutoLayout::default()
+                        },
+                    },
+                    Command::SetAutoLayout {
+                        id: first.id,
+                        layout: AutoLayout {
+                            primary_sizing: LayoutSizing::Fill,
+                            min_width: Some(60.0),
+                            ..AutoLayout::default()
+                        },
+                    },
+                    Command::SetAutoLayout {
+                        id: second.id,
+                        layout: AutoLayout {
+                            primary_sizing: LayoutSizing::Fill,
+                            min_width: Some(60.0),
+                            ..AutoLayout::default()
+                        },
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
         assert_eq!(result, Err(CommandError::InvalidAutoLayout));
         assert_eq!(document.revision, 0);
         assert_eq!(document.nodes().count(), 0);
@@ -5878,16 +8255,41 @@ mod tests {
         third.parent_id = Some(frame.id);
         third.width = 40.0;
         third.height = 20.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()), Command::Create(third.clone()),
-            Command::SetAutoLayout {
-                id: frame.id,
-                layout: AutoLayout { mode: LayoutMode::Horizontal, wrap: true, item_spacing: 10.0, ..AutoLayout::default() },
-            },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(first.id).map(|node| (node.x, node.y)), Some((0.0, 0.0)));
-        assert_eq!(document.node(second.id).map(|node| (node.x, node.y)), Some((50.0, 0.0)));
-        assert_eq!(document.node(third.id).map(|node| (node.x, node.y)), Some((0.0, 30.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::Create(third.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                wrap: true,
+                                item_spacing: 10.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(first.id).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((50.0, 0.0))
+        );
+        assert_eq!(
+            document.node(third.id).map(|node| (node.x, node.y)),
+            Some((0.0, 30.0))
+        );
     }
 
     #[test]
@@ -5898,11 +8300,31 @@ mod tests {
         let mut child = node(2);
         child.kind = NodeKind::Rectangle;
         child.parent_id = Some(frame.id);
-        let result = document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(child.clone()),
-            Command::SetAutoLayout { id: child.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fill, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, wrap: true, ..AutoLayout::default() } },
-        ]), Origin::LocalUser);
+        let result = document.submit(
+            transaction(
+                0,
+                vec![
+                    Command::Create(frame.clone()),
+                    Command::Create(child.clone()),
+                    Command::SetAutoLayout {
+                        id: child.id,
+                        layout: AutoLayout {
+                            primary_sizing: LayoutSizing::Fill,
+                            ..AutoLayout::default()
+                        },
+                    },
+                    Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Horizontal,
+                            wrap: true,
+                            ..AutoLayout::default()
+                        },
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
         assert_eq!(result, Err(CommandError::AutoLayoutUnsupported));
         assert_eq!(document.revision, 0);
         assert_eq!(document.nodes().count(), 0);
@@ -5921,14 +8343,44 @@ mod tests {
         second.kind = NodeKind::Rectangle;
         second.parent_id = Some(frame.id);
         second.width = 20.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                item_spacing: 10.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(second.id).map(|node| node.x), Some(30.0));
-        document.submit(transaction(1, vec![Command::SetNodeParent {
-            id: first.id, parent_id: None, position: PositionId { key: 10, actor: ActorId(1) },
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeParent {
+                        id: first.id,
+                        parent_id: None,
+                        position: PositionId {
+                            key: 10,
+                            actor: ActorId(1),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(second.id).map(|node| node.x), Some(0.0));
     }
 
@@ -5945,19 +8397,67 @@ mod tests {
         text.height = 1.0;
         text.text = "hello".into();
         let properties = TextProperties {
-            runs: vec![TextStyleRun { start: 0, end: 5, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
-            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 10.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: Some(12.0),
+                paragraph_spacing: 0.0,
+            },
             auto_size: TextAutoSize::WidthAndHeight,
             fallback_fonts: Vec::new(),
         };
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(text.clone()),
-            Command::SetTextProperties { id: text.id, properties },
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((30.0, 12.0)));
-        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((30.0, 12.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::SetTextProperties {
+                            id: text.id,
+                            properties,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: text.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(text.id).map(|node| (node.width, node.height)),
+            Some((30.0, 12.0))
+        );
+        assert_eq!(
+            document
+                .node(frame.id)
+                .map(|node| (node.width, node.height)),
+            Some((30.0, 12.0))
+        );
     }
 
     #[test]
@@ -5971,19 +8471,67 @@ mod tests {
         text.parent_id = Some(frame.id);
         text.text = "ab\r\n中".into();
         let properties = TextProperties {
-            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
-            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 3.0 },
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: text.text.len() as u32,
+                font: None,
+                font_size: 10.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: Some(12.0),
+                paragraph_spacing: 3.0,
+            },
             auto_size: TextAutoSize::WidthAndHeight,
             fallback_fonts: Vec::new(),
         };
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(text.clone()),
-            Command::SetTextProperties { id: text.id, properties },
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 27.0)));
-        assert_eq!(document.node(frame.id).map(|node| (node.width, node.height)), Some((12.0, 27.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::SetTextProperties {
+                            id: text.id,
+                            properties,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: text.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Hug,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(text.id).map(|node| (node.width, node.height)),
+            Some((12.0, 27.0))
+        );
+        assert_eq!(
+            document
+                .node(frame.id)
+                .map(|node| (node.width, node.height)),
+            Some((12.0, 27.0))
+        );
     }
 
     #[test]
@@ -5998,18 +8546,59 @@ mod tests {
         text.width = 12.0;
         text.text = "ab中d".into();
         let properties = TextProperties {
-            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
-            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: text.text.len() as u32,
+                font: None,
+                font_size: 10.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: Some(12.0),
+                paragraph_spacing: 0.0,
+            },
             auto_size: TextAutoSize::Height,
             fallback_fonts: Vec::new(),
         };
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(text.clone()),
-            Command::SetTextProperties { id: text.id, properties },
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fixed, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 24.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::SetTextProperties {
+                            id: text.id,
+                            properties,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: text.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fixed,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(text.id).map(|node| (node.width, node.height)),
+            Some((12.0, 24.0))
+        );
     }
 
     #[test]
@@ -6023,20 +8612,61 @@ mod tests {
         text.width = 12.0;
         text.text = "👩‍💻e\u{301}x".into();
         let properties = TextProperties {
-            runs: vec![TextStyleRun { start: 0, end: text.text.len() as u32, font: None, font_size: 10.0, font_weight: 400, italic: false, letter_spacing: 0.0, color: None }],
-            paragraph: ParagraphStyle { alignment: TextAlign::Left, line_height: Some(12.0), paragraph_spacing: 0.0 },
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: text.text.len() as u32,
+                font: None,
+                font_size: 10.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: Some(12.0),
+                paragraph_spacing: 0.0,
+            },
             auto_size: TextAutoSize::Height,
             fallback_fonts: Vec::new(),
         };
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(text.clone()),
-            Command::SetTextProperties { id: text.id, properties },
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: text.id, layout: AutoLayout { primary_sizing: LayoutSizing::Fixed, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(text.clone()),
+                        Command::SetTextProperties {
+                            id: text.id,
+                            properties,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: text.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fixed,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         // Three graphemes at 6px each form two 12px lines, rather than the
         // eight Unicode scalars creating four unstable lines.
-        assert_eq!(document.node(text.id).map(|node| (node.width, node.height)), Some((12.0, 24.0)));
+        assert_eq!(
+            document.node(text.id).map(|node| (node.width, node.height)),
+            Some((12.0, 24.0))
+        );
     }
 
     #[test]
@@ -6057,13 +8687,44 @@ mod tests {
         absolute.y = 60.0;
         absolute.width = 10.0;
         absolute.height = 10.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(flow.clone()), Command::Create(absolute.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, padding: [5.0, 5.0, 5.0, 5.0], ..AutoLayout::default() } },
-            Command::SetAutoLayout { id: absolute.id, layout: AutoLayout { absolute: true, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(flow.id).map(|node| (node.x, node.y)), Some((5.0, 5.0)));
-        assert_eq!(document.node(absolute.id).map(|node| (node.x, node.y, node.width, node.height)), Some((70.0, 60.0, 10.0, 10.0)));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(flow.clone()),
+                        Command::Create(absolute.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [5.0, 5.0, 5.0, 5.0],
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: absolute.id,
+                            layout: AutoLayout {
+                                absolute: true,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(flow.id).map(|node| (node.x, node.y)),
+            Some((5.0, 5.0))
+        );
+        assert_eq!(
+            document
+                .node(absolute.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((70.0, 60.0, 10.0, 10.0))
+        );
     }
 
     #[test]
@@ -6079,15 +8740,43 @@ mod tests {
         leaf.parent_id = Some(inner.id);
         leaf.width = 24.0;
         leaf.height = 16.0;
-        let hug = AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Hug, counter_sizing: LayoutSizing::Hug, ..AutoLayout::default() };
-        document.submit(transaction(0, vec![
-            Command::Create(outer.clone()), Command::Create(middle.clone()), Command::Create(inner.clone()), Command::Create(leaf.clone()),
-            Command::SetAutoLayout { id: outer.id, layout: hug.clone() },
-            Command::SetAutoLayout { id: middle.id, layout: hug.clone() },
-            Command::SetAutoLayout { id: inner.id, layout: hug },
-        ]), Origin::LocalUser).unwrap();
+        let hug = AutoLayout {
+            mode: LayoutMode::Horizontal,
+            primary_sizing: LayoutSizing::Hug,
+            counter_sizing: LayoutSizing::Hug,
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(outer.clone()),
+                        Command::Create(middle.clone()),
+                        Command::Create(inner.clone()),
+                        Command::Create(leaf.clone()),
+                        Command::SetAutoLayout {
+                            id: outer.id,
+                            layout: hug.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: middle.id,
+                            layout: hug.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: inner.id,
+                            layout: hug,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         for id in [outer.id, middle.id, inner.id] {
-            assert_eq!(document.node(id).map(|node| (node.width, node.height)), Some((24.0, 16.0)));
+            assert_eq!(
+                document.node(id).map(|node| (node.width, node.height)),
+                Some((24.0, 16.0))
+            );
         }
     }
 
@@ -6106,19 +8795,56 @@ mod tests {
         leaf.parent_id = Some(inner.id);
         leaf.width = 20.0;
         leaf.height = 20.0;
-        document.submit(transaction(0, vec![
-            Command::Create(outer.clone()), Command::Create(inner.clone()), Command::Create(leaf.clone()),
-            Command::SetAutoLayout { id: outer.id, layout: AutoLayout { mode: LayoutMode::Vertical, ..AutoLayout::default() } },
-            // As a vertical parent's counter-axis child, this horizontal Frame
-            // fills the parent's width. Its own end alignment must be rerun
-            // whenever the parent changes that width.
-            Command::SetAutoLayout { id: inner.id, layout: AutoLayout { mode: LayoutMode::Horizontal, primary_sizing: LayoutSizing::Fill, primary_alignment: LayoutAlignment::End, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(outer.clone()),
+                        Command::Create(inner.clone()),
+                        Command::Create(leaf.clone()),
+                        Command::SetAutoLayout {
+                            id: outer.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Vertical,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        // As a vertical parent's counter-axis child, this horizontal Frame
+                        // fills the parent's width. Its own end alignment must be rerun
+                        // whenever the parent changes that width.
+                        Command::SetAutoLayout {
+                            id: inner.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                primary_sizing: LayoutSizing::Fill,
+                                primary_alignment: LayoutAlignment::End,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(leaf.id).map(|node| node.x), Some(80.0));
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: outer.id, x: 0.0, y: 0.0, width: 200.0, height: 100.0, rotation: 0.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: outer.id,
+                        x: 0.0,
+                        y: 0.0,
+                        width: 200.0,
+                        height: 100.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         assert_eq!(document.node(inner.id).map(|node| node.width), Some(200.0));
         assert_eq!(document.node(leaf.id).map(|node| node.x), Some(180.0));
@@ -6137,13 +8863,42 @@ mod tests {
         second.kind = NodeKind::Rectangle;
         second.parent_id = Some(frame.id);
         second.width = 20.0;
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(first.clone()), Command::Create(second.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, item_spacing: 10.0, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::SetNodePosition {
-            id: first.id, position: PositionId { key: 4, actor: ActorId(0) },
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                item_spacing: 10.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodePosition {
+                        id: first.id,
+                        position: PositionId {
+                            key: 4,
+                            actor: ActorId(0),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(second.id).map(|node| node.x), Some(0.0));
         assert_eq!(document.node(first.id).map(|node| node.x), Some(30.0));
     }
@@ -6159,16 +8914,55 @@ mod tests {
         child.parent_id = Some(frame.id);
         child.width = 20.0;
         child.height = 20.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Stretch });
-        document.submit(transaction(0, vec![
-            Command::Create(frame.clone()), Command::Create(child.clone()),
-            Command::SetAutoLayout { id: frame.id, layout: AutoLayout { mode: LayoutMode::Horizontal, ..AutoLayout::default() } },
-        ]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: frame.id, x: 0.0, y: 0.0, width: 200.0, height: 200.0, rotation: 0.0,
-        }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(child.id).map(|node| (node.x, node.y, node.width, node.height)), Some((0.0, 0.0, 20.0, 20.0)));
-        assert_eq!(document.node(child.id).and_then(|node| node.constraints), child.constraints);
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Stretch,
+            vertical: ConstraintType::Stretch,
+        });
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(child.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: frame.id,
+                        x: 0.0,
+                        y: 0.0,
+                        width: 200.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(child.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((0.0, 0.0, 20.0, 20.0))
+        );
+        assert_eq!(
+            document.node(child.id).and_then(|node| node.constraints),
+            child.constraints
+        );
     }
 
     #[test]
@@ -6176,18 +8970,74 @@ mod tests {
         let mut document = Document::empty();
         let mut rectangle = node(1);
         rectangle.kind = NodeKind::Rectangle;
-        document.submit(transaction(0, vec![Command::Create(rectangle.clone())]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(rectangle.clone())]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(
-            document.submit(transaction(1, vec![Command::SetAutoLayout {
-                id: rectangle.id,
-                layout: AutoLayout { mode: LayoutMode::Vertical, ..AutoLayout::default() },
-            }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    1,
+                    vec![Command::SetAutoLayout {
+                        id: rectangle.id,
+                        layout: AutoLayout {
+                            mode: LayoutMode::Vertical,
+                            ..AutoLayout::default()
+                        },
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAutoLayout),
         );
     }
 
     #[test]
-    fn line_accepts_zero_height_but_other_nodes_do_not() {
+    fn component_inherits_frame_children_clip_and_auto_layout_contract() {
+        let mut document = Document::empty();
+        let mut component = node(1);
+        component.kind = NodeKind::Component;
+        component.name = "Card component".into();
+        component.width = 200.0;
+        component.height = 100.0;
+        component.clips_content = true;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(component.id);
+        child.width = 30.0;
+        child.height = 20.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(component.clone()),
+                        Command::Create(child.clone()),
+                        Command::SetAutoLayout {
+                            id: component.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [8.0, 0.0, 0.0, 12.0],
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert!(document.node(component.id).unwrap().clips_content);
+        assert_eq!(
+            document.node(child.id).map(|node| (node.x, node.y)),
+            Some((12.0, 8.0))
+        );
+    }
+
+    #[test]
+    fn line_and_connector_accept_zero_height_but_closed_nodes_do_not() {
         let mut document = Document::empty();
         let mut line = node(1);
         line.kind = NodeKind::Line;
@@ -6199,14 +9049,32 @@ mod tests {
         line.stroke_width = 1.0;
 
         document
-            .submit(transaction(0, vec![Command::Create(line)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(line)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut connector = node(3);
+        connector.kind = NodeKind::Connector;
+        connector.name = "Connector".into();
+        connector.width = 120.0;
+        connector.height = 0.0;
+        connector.fill = "#00000000".into();
+        connector.stroke = "#000".into();
+        connector.stroke_width = 1.0;
+        document
+            .submit(
+                transaction(1, vec![Command::Create(connector)]),
+                Origin::LocalUser,
+            )
             .unwrap();
 
         let mut rectangle = node(2);
         rectangle.height = 0.0;
         assert_eq!(
             document.submit(
-                transaction(1, vec![Command::Create(rectangle)]),
+                transaction(2, vec![Command::Create(rectangle)]),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidGeometry)
@@ -6390,15 +9258,15 @@ mod tests {
                             opacity: 1.0,
                             blend_mode: BlendMode::Normal,
                             drop_shadow: None,
-            effect_stack: Vec::new(),
+                            effect_stack: Vec::new(),
                             corner_radius: 0.0,
-            corner_radii: Vec::new(),
+                            corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
-            constraints: None,
+                            constraints: None,
                             visible: true,
                             locked: false,
                             contents_hidden: false,
-            clips_content: Some(false),
+                            clips_content: Some(false),
                         },
                     },
                 ],
@@ -6629,15 +9497,15 @@ mod tests {
                             opacity: 1.0,
                             blend_mode: BlendMode::Normal,
                             drop_shadow: None,
-            effect_stack: Vec::new(),
+                            effect_stack: Vec::new(),
                             corner_radius: 0.0,
-            corner_radii: Vec::new(),
+                            corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
-            constraints: None,
+                            constraints: None,
                             visible: true,
                             locked: false,
                             contents_hidden: false,
-            clips_content: Some(false),
+                            clips_content: Some(false),
                         },
                     }],
                 ),
@@ -6649,16 +9517,25 @@ mod tests {
             Paint::Solid(Color::from_srgb_u8([37, 99, 235], 255))
         );
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 3.0);
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::ArrowLines);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke_cap_end,
+            StrokeCap::ArrowLines
+        );
         assert_ne!(document.canonical_hash_hex(), baseline_hash);
 
         document.undo().unwrap();
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 0.0);
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::None);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke_cap_end,
+            StrokeCap::None
+        );
         assert_eq!(document.canonical_hash_hex(), baseline_hash);
         document.redo().unwrap();
         assert_eq!(document.node(NodeId(1)).unwrap().stroke_width, 3.0);
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke_cap_end, StrokeCap::ArrowLines);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke_cap_end,
+            StrokeCap::ArrowLines
+        );
     }
 
     #[test]
@@ -6745,15 +9622,15 @@ mod tests {
                             opacity: 1.0,
                             blend_mode: BlendMode::Normal,
                             drop_shadow: None,
-            effect_stack: Vec::new(),
+                            effect_stack: Vec::new(),
                             corner_radius: 0.0,
-            corner_radii: Vec::new(),
+                            corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
-            constraints: None,
+                            constraints: None,
                             visible: true,
                             locked: false,
                             contents_hidden: false,
-            clips_content: Some(false),
+                            clips_content: Some(false),
                         },
                     }],
                 ),
@@ -6893,7 +9770,10 @@ mod tests {
             )
             .unwrap();
         let baseline = document.canonical_hash_hex();
-        let position = PositionId { key: 7, actor: ActorId(9) };
+        let position = PositionId {
+            key: 7,
+            actor: ActorId(9),
+        };
         document
             .submit(
                 transaction(
@@ -6950,7 +9830,10 @@ mod tests {
             )
             .unwrap();
         let group = document.node(NodeId(1)).unwrap();
-        assert_eq!((group.x, group.y, group.width, group.height, group.rotation), (10.0, 20.0, 30.0, 40.0, 0.0));
+        assert_eq!(
+            (group.x, group.y, group.width, group.height, group.rotation),
+            (10.0, 20.0, 30.0, 40.0, 0.0)
+        );
         let updated_hash = document.canonical_hash_hex();
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), grouped_hash);
@@ -6977,34 +9860,84 @@ mod tests {
         child.parent_id = Some(NodeId(1));
         child.width = 30.0;
         child.height = 40.0;
-        child.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 100.0, f: 50.0 });
+        child.relative_transform = Some(AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 100.0,
+            f: 50.0,
+        });
         document
-            .submit(transaction(0, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         // Before the move the child's world origin is its local origin.
-        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (100.0, 50.0));
+        assert_eq!(
+            (
+                document.node_world_transform(NodeId(2)).unwrap().e,
+                document.node_world_transform(NodeId(2)).unwrap().f
+            ),
+            (100.0, 50.0)
+        );
         let grouped_hash = document.canonical_hash_hex();
 
         // Move the child by (+40, +40): against the identity frame the new local
         // origin is simply the new world origin.
         let mut appearance = appearance_for_node(document.node(NodeId(2)).unwrap());
-        appearance.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 140.0, f: 90.0 });
+        appearance.relative_transform = Some(AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 140.0,
+            f: 90.0,
+        });
         document
-            .submit(transaction(1, vec![Command::SetAppearance { id: NodeId(2), appearance }]), Origin::LocalUser)
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
             .unwrap();
 
         // The child lands exactly where dropped — no compounding jump from a
         // spurious Group-box refresh dragging the anchor.
-        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (140.0, 90.0));
+        assert_eq!(
+            (
+                document.node_world_transform(NodeId(2)).unwrap().e,
+                document.node_world_transform(NodeId(2)).unwrap().f
+            ),
+            (140.0, 90.0)
+        );
         let moved_hash = document.canonical_hash_hex();
         assert_ne!(moved_hash, grouped_hash);
 
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), grouped_hash);
-        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (100.0, 50.0));
+        assert_eq!(
+            (
+                document.node_world_transform(NodeId(2)).unwrap().e,
+                document.node_world_transform(NodeId(2)).unwrap().f
+            ),
+            (100.0, 50.0)
+        );
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), moved_hash);
-        assert_eq!((document.node_world_transform(NodeId(2)).unwrap().e, document.node_world_transform(NodeId(2)).unwrap().f), (140.0, 90.0));
+        assert_eq!(
+            (
+                document.node_world_transform(NodeId(2)).unwrap().e,
+                document.node_world_transform(NodeId(2)).unwrap().f
+            ),
+            (140.0, 90.0)
+        );
     }
 
     #[test]
@@ -7036,13 +9969,51 @@ mod tests {
         second_child.height = 20.0;
         second_child.relative_transform = Some(AffineTransform::IDENTITY);
 
-        document.submit(transaction(0, vec![Command::Create(first_group), Command::Create(first_child), Command::Create(second_group), Command::Create(second_child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 50.0, y: 60.0, width: 30.0, height: 20.0, rotation: 0.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(first_group),
+                        Command::Create(first_child),
+                        Command::Create(second_group),
+                        Command::Create(second_child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 50.0,
+                        y: 60.0,
+                        width: 30.0,
+                        height: 20.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        assert_eq!((document.node(NodeId(1)).unwrap().x, document.node(NodeId(1)).unwrap().y), (50.0, 60.0));
-        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (200.0, 220.0));
+        assert_eq!(
+            (
+                document.node(NodeId(1)).unwrap().x,
+                document.node(NodeId(1)).unwrap().y
+            ),
+            (50.0, 60.0)
+        );
+        assert_eq!(
+            (
+                document.node(NodeId(3)).unwrap().x,
+                document.node(NodeId(3)).unwrap().y
+            ),
+            (200.0, 220.0)
+        );
         assert_eq!(document.node_world_transform(NodeId(2)).unwrap().e, 50.0);
         assert_eq!(document.node_world_transform(NodeId(2)).unwrap().f, 60.0);
         assert_eq!(document.node_world_transform(NodeId(4)).unwrap().e, 200.0);
@@ -7061,14 +10032,42 @@ mod tests {
         child.y = 0.0;
         child.width = 30.0;
         child.height = 40.0;
-        child.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 100.0, f: 50.0 });
-        document.submit(transaction(0, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        child.relative_transform = Some(AffineTransform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 100.0,
+            f: 50.0,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(2), x: 0.0, y: 0.0, width: 30.0, height: 40.0, rotation: 0.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(2),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 30.0,
+                        height: 40.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let group = document.node(NodeId(1)).unwrap();
-        assert_eq!((group.x, group.y, group.width, group.height), (60.0, 50.0, 40.0, 30.0));
+        assert_eq!(
+            (group.x, group.y, group.width, group.height),
+            (60.0, 50.0, 40.0, 30.0)
+        );
     }
 
     #[test]
@@ -7092,7 +10091,10 @@ mod tests {
                     vec![Command::SetNodeParent {
                         id: NodeId(2),
                         parent_id: None,
-                        position: PositionId { key: 3, actor: ActorId(1) },
+                        position: PositionId {
+                            key: 3,
+                            actor: ActorId(1),
+                        },
                     }],
                 ),
                 Origin::LocalUser,
@@ -7117,7 +10119,10 @@ mod tests {
         let before_hash = document.canonical_hash_hex();
 
         assert_eq!(
-            document.submit(transaction(0, vec![Command::Create(group)]), Origin::LocalUser),
+            document.submit(
+                transaction(0, vec![Command::Create(group)]),
+                Origin::LocalUser
+            ),
             Err(CommandError::EmptyGroup { id: NodeId(1) }),
         );
         assert_eq!(document.revision, 0);
@@ -7131,30 +10136,70 @@ mod tests {
         // child-first in one transaction; Undo must restore IDs, sibling order, the
         // parent hierarchy, and every property exactly.
         let mut document = Document::empty();
-        let mut outer = node(1); outer.name = "Outer".into();
-        let mut inner = node(2); inner.name = "Inner".into(); inner.parent_id = Some(NodeId(1)); inner.x = 10.0; inner.y = 10.0;
-        let mut rect = node(3); rect.kind = NodeKind::Rectangle; rect.name = "Rect".into(); rect.parent_id = Some(NodeId(2)); rect.corner_radii = vec![4.0, 8.0, 12.0, 16.0];
-        let mut ellipse = node(4); ellipse.kind = NodeKind::Ellipse; ellipse.name = "Ellipse".into(); ellipse.parent_id = Some(NodeId(2)); ellipse.x = 40.0;
-        let mut text = node(5); text.kind = NodeKind::Text; text.name = "Text".into(); text.parent_id = Some(NodeId(1)); text.text = "Hi".into(); text.y = 80.0;
-        document.submit(transaction(0, vec![
-            Command::Create(outer), Command::Create(inner),
-            Command::Create(rect), Command::Create(ellipse), Command::Create(text),
-        ]), Origin::LocalUser).unwrap();
+        let mut outer = node(1);
+        outer.name = "Outer".into();
+        let mut inner = node(2);
+        inner.name = "Inner".into();
+        inner.parent_id = Some(NodeId(1));
+        inner.x = 10.0;
+        inner.y = 10.0;
+        let mut rect = node(3);
+        rect.kind = NodeKind::Rectangle;
+        rect.name = "Rect".into();
+        rect.parent_id = Some(NodeId(2));
+        rect.corner_radii = vec![4.0, 8.0, 12.0, 16.0];
+        let mut ellipse = node(4);
+        ellipse.kind = NodeKind::Ellipse;
+        ellipse.name = "Ellipse".into();
+        ellipse.parent_id = Some(NodeId(2));
+        ellipse.x = 40.0;
+        let mut text = node(5);
+        text.kind = NodeKind::Text;
+        text.name = "Text".into();
+        text.parent_id = Some(NodeId(1));
+        text.text = "Hi".into();
+        text.y = 80.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(outer),
+                        Command::Create(inner),
+                        Command::Create(rect),
+                        Command::Create(ellipse),
+                        Command::Create(text),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let ordered_before: Vec<(NodeId, Option<NodeId>)> = document
-            .ordered_nodes_on_page(DEFAULT_PAGE_ID).unwrap()
-            .iter().map(|n| (n.id, n.parent_id)).collect();
+            .ordered_nodes_on_page(DEFAULT_PAGE_ID)
+            .unwrap()
+            .iter()
+            .map(|n| (n.id, n.parent_id))
+            .collect();
         let rect_radii_before = document.node(NodeId(3)).unwrap().corner_radii.clone();
         let built_hash = document.canonical_hash_hex();
 
         // Child-first single-transaction subtree delete: deepest leaves, then Inner, then Outer.
-        document.submit(transaction(1, vec![
-            Command::Delete { id: NodeId(3) },
-            Command::Delete { id: NodeId(4) },
-            Command::Delete { id: NodeId(2) },
-            Command::Delete { id: NodeId(5) },
-            Command::Delete { id: NodeId(1) },
-        ]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![
+                        Command::Delete { id: NodeId(3) },
+                        Command::Delete { id: NodeId(4) },
+                        Command::Delete { id: NodeId(2) },
+                        Command::Delete { id: NodeId(5) },
+                        Command::Delete { id: NodeId(1) },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node_count(), 0);
 
         document.undo().unwrap();
@@ -7162,10 +10207,16 @@ mod tests {
         // specific ID / order / parent / property expectations the plan names.
         assert_eq!(document.canonical_hash_hex(), built_hash);
         let ordered_after: Vec<(NodeId, Option<NodeId>)> = document
-            .ordered_nodes_on_page(DEFAULT_PAGE_ID).unwrap()
-            .iter().map(|n| (n.id, n.parent_id)).collect();
+            .ordered_nodes_on_page(DEFAULT_PAGE_ID)
+            .unwrap()
+            .iter()
+            .map(|n| (n.id, n.parent_id))
+            .collect();
         assert_eq!(ordered_after, ordered_before);
-        assert_eq!(document.node(NodeId(3)).unwrap().corner_radii, rect_radii_before);
+        assert_eq!(
+            document.node(NodeId(3)).unwrap().corner_radii,
+            rect_radii_before
+        );
         assert_eq!(document.node(NodeId(5)).unwrap().text, "Hi");
         assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
 
@@ -7180,7 +10231,10 @@ mod tests {
         section.kind = NodeKind::Section;
         section.name = "Section".into();
         document
-            .submit(transaction(0, vec![Command::Create(section)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(section)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let baseline = document.canonical_hash_hex();
         document
@@ -7208,11 +10262,11 @@ mod tests {
                             opacity: 1.0,
                             blend_mode: BlendMode::Normal,
                             drop_shadow: None,
-            effect_stack: Vec::new(),
+                            effect_stack: Vec::new(),
                             corner_radius: 0.0,
-            corner_radii: Vec::new(),
+                            corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
-            constraints: None,
+                            constraints: None,
                             visible: true,
                             locked: false,
                             contents_hidden: true,
@@ -7239,24 +10293,60 @@ mod tests {
         frame.kind = NodeKind::Frame;
         frame.name = "Frame".into();
         frame.clips_content = true;
-        document.submit(transaction(0, vec![Command::Create(frame)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#000".into(), fills: vec!["#e6edff".into(), "#0048ff".into()], strokes: vec!["#000".into(), "#2563eb".into()], stroke_width: 1.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
-            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0,
+            fill: "#fff".into(),
+            stroke: "#000".into(),
+            fills: vec!["#e6edff".into(), "#0048ff".into()],
+            strokes: vec!["#000".into(), "#2563eb".into()],
+            stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            parametric_shape: None,
+            relative_transform: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
             corner_radii: Vec::new(),
             corner_smoothing: 0.0,
             constraints: None,
-            visible: true, locked: false, contents_hidden: false, clips_content: Some(false),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: Some(false),
         };
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert!(!document.node(NodeId(1)).unwrap().clips_content);
         assert_eq!(document.node(NodeId(1)).unwrap().fills, appearance.fills);
-        assert_eq!(document.node(NodeId(1)).unwrap().strokes, appearance.strokes);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().strokes,
+            appearance.strokes
+        );
         let unclipped = document.canonical_hash_hex();
         assert_ne!(unclipped, baseline);
         document.undo().unwrap();
@@ -7267,8 +10357,28 @@ mod tests {
         let mut rectangle = node(2);
         rectangle.kind = NodeKind::Rectangle;
         rectangle.name = "Rectangle".into();
-        document.submit(transaction(4, vec![Command::Create(rectangle)]), Origin::LocalUser).unwrap();
-        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: Appearance { clips_content: Some(true), ..appearance } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        document
+            .submit(
+                transaction(4, vec![Command::Create(rectangle)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance: Appearance {
+                            clips_content: Some(true),
+                            ..appearance
+                        }
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
     }
 
     #[test]
@@ -7278,10 +10388,26 @@ mod tests {
         mask.kind = NodeKind::Rectangle;
         let mut target = node(2);
         target.kind = NodeKind::Rectangle;
-        document.submit(transaction(0, vec![Command::Create(mask), Command::Create(target)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(mask), Command::Create(target)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
 
-        document.submit(transaction(1, vec![Command::SetMask { id: NodeId(1), enabled: true }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetMask {
+                        id: NodeId(1),
+                        enabled: true,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert!(is_alpha_mask(document.node(NodeId(1)).unwrap()));
         let masked = document.canonical_hash_hex();
         assert_ne!(masked, baseline);
@@ -7291,7 +10417,19 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), masked);
 
-        assert_eq!(document.submit(transaction(4, vec![Command::SetMask { id: NodeId(2), enabled: true }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetMask {
+                        id: NodeId(2),
+                        enabled: true
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
@@ -7306,15 +10444,59 @@ mod tests {
         slice.stroke_align = StrokeAlign::Inside;
         let mut target = node(2);
         target.kind = NodeKind::Rectangle;
-        document.submit(transaction(0, vec![Command::Create(slice), Command::Create(target)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(slice), Command::Create(target)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let baseline = document.canonical_hash_hex();
         let mut painted = appearance_for_node(document.node(NodeId(1)).unwrap());
         painted.fill = "#ffffff".into();
-        assert_eq!(document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: painted }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
-        assert_eq!(document.submit(transaction(1, vec![Command::SetMask { id: NodeId(1), enabled: true }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: painted
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    1,
+                    vec![Command::SetMask {
+                        id: NodeId(1),
+                        enabled: true
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 24.0, y: 12.0, width: 240.0, height: 160.0, rotation: 15.0 }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 24.0,
+                        y: 12.0,
+                        width: 240.0,
+                        height: 160.0,
+                        rotation: 15.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_ne!(document.canonical_hash_hex(), baseline);
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), baseline);
@@ -7323,7 +10505,13 @@ mod tests {
         let mut child = node(3);
         child.parent_id = Some(NodeId(1));
         child.kind = NodeKind::Rectangle;
-        assert_eq!(document.submit(transaction(4, vec![Command::Create(child)]), Origin::LocalUser), Err(CommandError::InvalidParent { id: NodeId(1) }));
+        assert_eq!(
+            document.submit(
+                transaction(4, vec![Command::Create(child)]),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidParent { id: NodeId(1) })
+        );
     }
 
     #[test]
@@ -7332,25 +10520,64 @@ mod tests {
         let mut frame = node(1);
         frame.name = "Frame".into();
         frame.clips_content = true;
-        document.submit(transaction(0, vec![Command::Create(frame)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
-            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0,
+            fill: "#fff".into(),
+            stroke: "#000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            parametric_shape: None,
+            relative_transform: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
             corner_radii: vec![4.0, 8.0, 12.0, 16.0],
             corner_smoothing: 0.65,
             constraints: None,
-            visible: true, locked: false, contents_hidden: false, clips_content: Some(true),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: Some(true),
         };
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().corner_radii, appearance.corner_radii);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().corner_radii,
+            appearance.corner_radii
+        );
         assert_eq!(document.node(NodeId(1)).unwrap().corner_smoothing, 0.65);
         assert_eq!(document.node(NodeId(1)).unwrap().fills, appearance.fills);
-        assert_eq!(document.node(NodeId(1)).unwrap().strokes, appearance.strokes);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().strokes,
+            appearance.strokes
+        );
         let rounded_hash = document.canonical_hash_hex();
         assert_ne!(rounded_hash, baseline);
         document.undo().unwrap();
@@ -7363,27 +10590,117 @@ mod tests {
         line.kind = NodeKind::Line;
         line.name = "Line".into();
         line.height = 0.0;
-        document.submit(transaction(4, vec![Command::Create(line)]), Origin::LocalUser).unwrap();
-        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: appearance.clone() }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
-        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { corner_radii: vec![1.0, 2.0], ..appearance.clone() } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
-        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { corner_smoothing: 1.1, ..appearance } }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        document
+            .submit(
+                transaction(4, vec![Command::Create(line)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance: appearance.clone()
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: Appearance {
+                            corner_radii: vec![1.0, 2.0],
+                            ..appearance.clone()
+                        }
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: Appearance {
+                            corner_smoothing: 1.1,
+                            ..appearance
+                        }
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
     }
 
     #[test]
     fn constraints_are_hashed_undoable_and_reject_structural_nodes() {
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#00000000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 0.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None, stroke_join: StrokeJoin::Miter,
-            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT, stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: None, parametric_shape: None, relative_transform: None, opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0, corner_radii: Vec::new(), corner_smoothing: 0.0,
-            constraints: Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Center }), visible: true, locked: false, contents_hidden: false, clips_content: Some(true),
+            fill: "#fff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: None,
+            parametric_shape: None,
+            relative_transform: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: Some(Constraints {
+                horizontal: ConstraintType::Stretch,
+                vertical: ConstraintType::Center,
+            }),
+            visible: true,
+            locked: false,
+            contents_hidden: false,
+            clips_content: Some(true),
         };
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().constraints, appearance.constraints);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().constraints,
+            appearance.constraints
+        );
         let constrained = document.canonical_hash_hex();
         assert_ne!(constrained, baseline);
         document.undo().unwrap();
@@ -7396,8 +10713,25 @@ mod tests {
         group.name = "Group".into();
         let mut child = node(3);
         child.parent_id = Some(NodeId(2));
-        document.submit(transaction(4, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
-        assert_eq!(document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        document
+            .submit(
+                transaction(4, vec![Command::Create(group), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
     }
 
     #[test]
@@ -7414,14 +10748,43 @@ mod tests {
         child.y = 20.0;
         child.width = 100.0;
         child.height = 30.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Center });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Stretch,
+            vertical: ConstraintType::Center,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let child = document.node(NodeId(2)).unwrap();
-        assert_eq!((child.x, child.y, child.width, child.height), (20.0, 70.0, 200.0, 30.0));
+        assert_eq!(
+            (child.x, child.y, child.width, child.height),
+            (20.0, 70.0, 200.0, 30.0)
+        );
         document.undo().unwrap();
         let child = document.node(NodeId(2)).unwrap();
-        assert_eq!((child.x, child.y, child.width, child.height), (20.0, 20.0, 100.0, 30.0));
+        assert_eq!(
+            (child.x, child.y, child.width, child.height),
+            (20.0, 20.0, 100.0, 30.0)
+        );
         document.redo().unwrap();
         assert_eq!(document.node(NodeId(2)).unwrap().width, 200.0);
     }
@@ -7429,22 +10792,132 @@ mod tests {
     #[test]
     fn frame_resize_resolves_min_max_and_scale_axes() {
         let mut document = Document::empty();
-        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
-        let child = |id, constraints| { let mut value = node(id); value.kind = NodeKind::Rectangle; value.name = format!("Child {id}"); value.parent_id = Some(NodeId(1)); value.x = 20.0; value.y = 10.0; value.width = 40.0; value.height = 20.0; value.constraints = Some(constraints); value };
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child(2, Constraints { horizontal: ConstraintType::Min, vertical: ConstraintType::Min })), Command::Create(child(3, Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max })), Command::Create(child(4, Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Scale }))]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 400.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
-        assert_eq!((document.node(NodeId(2)).unwrap().x, document.node(NodeId(2)).unwrap().y), (20.0, 10.0));
-        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (220.0, 110.0));
-        assert_eq!((document.node(NodeId(4)).unwrap().x, document.node(NodeId(4)).unwrap().y, document.node(NodeId(4)).unwrap().width, document.node(NodeId(4)).unwrap().height), (40.0, 20.0, 80.0, 40.0));
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let child = |id, constraints| {
+            let mut value = node(id);
+            value.kind = NodeKind::Rectangle;
+            value.name = format!("Child {id}");
+            value.parent_id = Some(NodeId(1));
+            value.x = 20.0;
+            value.y = 10.0;
+            value.width = 40.0;
+            value.height = 20.0;
+            value.constraints = Some(constraints);
+            value
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(child(
+                            2,
+                            Constraints {
+                                horizontal: ConstraintType::Min,
+                                vertical: ConstraintType::Min,
+                            },
+                        )),
+                        Command::Create(child(
+                            3,
+                            Constraints {
+                                horizontal: ConstraintType::Max,
+                                vertical: ConstraintType::Max,
+                            },
+                        )),
+                        Command::Create(child(
+                            4,
+                            Constraints {
+                                horizontal: ConstraintType::Scale,
+                                vertical: ConstraintType::Scale,
+                            },
+                        )),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 400.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                document.node(NodeId(2)).unwrap().x,
+                document.node(NodeId(2)).unwrap().y
+            ),
+            (20.0, 10.0)
+        );
+        assert_eq!(
+            (
+                document.node(NodeId(3)).unwrap().x,
+                document.node(NodeId(3)).unwrap().y
+            ),
+            (220.0, 110.0)
+        );
+        assert_eq!(
+            (
+                document.node(NodeId(4)).unwrap().x,
+                document.node(NodeId(4)).unwrap().y,
+                document.node(NodeId(4)).unwrap().width,
+                document.node(NodeId(4)).unwrap().height
+            ),
+            (40.0, 20.0, 80.0, 40.0)
+        );
     }
 
     #[test]
     fn rotated_frame_resize_migrates_legacy_direct_constraints_to_local_matrix_space() {
         let mut document = Document::empty();
-        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
-        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 20.0; child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0 }]), Origin::LocalUser).unwrap();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Child".into();
+        child.parent_id = Some(NodeId(1));
+        child.x = 20.0;
+        child.y = 20.0;
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let child = document.node(NodeId(2)).unwrap();
         assert_eq!(child.relative_transform.unwrap().e, 120.0);
         assert_eq!(child.relative_transform.unwrap().f, 120.0);
@@ -7480,26 +10953,84 @@ mod tests {
         child.y = 10.0;
         child.width = 40.0;
         child.height = 20.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
 
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(group),
+                        Command::Create(child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let group = document.node(NodeId(2)).unwrap();
         let child = document.node(NodeId(3)).unwrap();
-        assert_eq!((group.relative_transform.unwrap().e, group.relative_transform.unwrap().f), (20.0, 10.0));
+        assert_eq!(
+            (
+                group.relative_transform.unwrap().e,
+                group.relative_transform.unwrap().f
+            ),
+            (20.0, 10.0)
+        );
         // The constrained child is (120, 110) in Frame-local space. Its
         // immediate parent is the migrated Group at (20, 10), so the durable
         // matrix stores the local delta rather than a stale world coordinate.
-        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (100.0, 100.0));
+        assert_eq!(
+            (
+                child.relative_transform.unwrap().e,
+                child.relative_transform.unwrap().f
+            ),
+            (100.0, 100.0)
+        );
         let constrained_hash = document.canonical_hash_hex();
 
         document.undo().unwrap();
-        assert!(document.node(NodeId(2)).unwrap().relative_transform.is_none());
-        assert!(document.node(NodeId(3)).unwrap().relative_transform.is_none());
-        assert_eq!((document.node(NodeId(3)).unwrap().x, document.node(NodeId(3)).unwrap().y), (20.0, 10.0));
+        assert!(
+            document
+                .node(NodeId(2))
+                .unwrap()
+                .relative_transform
+                .is_none()
+        );
+        assert!(
+            document
+                .node(NodeId(3))
+                .unwrap()
+                .relative_transform
+                .is_none()
+        );
+        assert_eq!(
+            (
+                document.node(NodeId(3)).unwrap().x,
+                document.node(NodeId(3)).unwrap().y
+            ),
+            (20.0, 10.0)
+        );
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), constrained_hash);
     }
@@ -7534,19 +11065,66 @@ mod tests {
         child.y = 30.0;
         child.width = 40.0;
         child.height = 20.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
 
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(outer), Command::Create(inner), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(outer),
+                        Command::Create(inner),
+                        Command::Create(child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let outer = document.node(NodeId(2)).unwrap();
         let inner = document.node(NodeId(3)).unwrap();
         let child = document.node(NodeId(4)).unwrap();
-        assert_eq!((outer.relative_transform.unwrap().e, outer.relative_transform.unwrap().f), (40.0, 30.0));
-        assert_eq!((inner.relative_transform.unwrap().e, inner.relative_transform.unwrap().f), (0.0, 0.0));
-        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (100.0, 100.0));
+        assert_eq!(
+            (
+                outer.relative_transform.unwrap().e,
+                outer.relative_transform.unwrap().f
+            ),
+            (40.0, 30.0)
+        );
+        assert_eq!(
+            (
+                inner.relative_transform.unwrap().e,
+                inner.relative_transform.unwrap().f
+            ),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            (
+                child.relative_transform.unwrap().e,
+                child.relative_transform.unwrap().f
+            ),
+            (100.0, 100.0)
+        );
     }
 
     #[test]
@@ -7571,23 +11149,125 @@ mod tests {
         child.y = 10.0;
         child.width = 40.0;
         child.height = 20.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(group),
+                        Command::Create(child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
-        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (100.0, 100.0));
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .e,
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .f
+            ),
+            (100.0, 100.0)
+        );
 
-        document.submit(transaction(2, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 200.0, height: 100.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
-        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (0.0, 0.0));
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 200.0,
+                        height: 100.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .e,
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .f
+            ),
+            (0.0, 0.0)
+        );
 
-        document.submit(transaction(3, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
-        assert_eq!((document.node(NodeId(3)).unwrap().relative_transform.unwrap().e, document.node(NodeId(3)).unwrap().relative_transform.unwrap().f), (100.0, 100.0));
+        document
+            .submit(
+                transaction(
+                    3,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .e,
+                document
+                    .node(NodeId(3))
+                    .unwrap()
+                    .relative_transform
+                    .unwrap()
+                    .f
+            ),
+            (100.0, 100.0)
+        );
     }
 
     #[test]
@@ -7620,20 +11300,73 @@ mod tests {
         nested_child.y = 40.0;
         nested_child.width = 20.0;
         nested_child.height = 10.0;
-        nested_child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(nested_frame), Command::Create(nested_child)]), Origin::LocalUser).unwrap();
+        nested_child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(group),
+                        Command::Create(nested_frame),
+                        Command::Create(nested_child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 30.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 30.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         // The outer Group becomes Relative-v1, but the nested Frame keeps its
         // own legacy layout boundary. Its child must not receive the outer
         // Frame's +100/+100 Max movement.
-        assert!(document.node(NodeId(2)).unwrap().relative_transform.is_some());
-        assert!(document.node(NodeId(3)).unwrap().relative_transform.is_none());
-        assert!(document.node(NodeId(4)).unwrap().relative_transform.is_none());
-        assert_eq!((document.node(NodeId(4)).unwrap().x, document.node(NodeId(4)).unwrap().y), (50.0, 40.0));
+        assert!(
+            document
+                .node(NodeId(2))
+                .unwrap()
+                .relative_transform
+                .is_some()
+        );
+        assert!(
+            document
+                .node(NodeId(3))
+                .unwrap()
+                .relative_transform
+                .is_none()
+        );
+        assert!(
+            document
+                .node(NodeId(4))
+                .unwrap()
+                .relative_transform
+                .is_none()
+        );
+        assert_eq!(
+            (
+                document.node(NodeId(4)).unwrap().x,
+                document.node(NodeId(4)).unwrap().y
+            ),
+            (50.0, 40.0)
+        );
     }
 
     #[test]
@@ -7644,23 +11377,64 @@ mod tests {
         frame.height = 100.0;
         // Horizontal reflection is intentionally on the containing Frame. The
         // child's constraints must continue to use its unmirrored local axes.
-        frame.relative_transform = Some(AffineTransform { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: 200.0, f: 0.0 });
+        frame.relative_transform = Some(AffineTransform {
+            a: -1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 200.0,
+            f: 0.0,
+        });
         let mut child = node(2);
         child.kind = NodeKind::Rectangle;
         child.name = "Mirrored frame child".into();
         child.parent_id = Some(NodeId(1));
         child.width = 40.0;
         child.height = 20.0;
-        child.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 20.0, f: 10.0 });
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Max });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        child.relative_transform = Some(AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 20.0,
+            f: 10.0,
+        });
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        document.submit(transaction(1, vec![Command::UpdateGeometry {
-            id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0,
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let child = document.node(NodeId(2)).unwrap();
-        assert_eq!((child.relative_transform.unwrap().e, child.relative_transform.unwrap().f), (120.0, 110.0));
+        assert_eq!(
+            (
+                child.relative_transform.unwrap().e,
+                child.relative_transform.unwrap().f
+            ),
+            (120.0, 110.0)
+        );
         assert_eq!((child.width, child.height), (40.0, 20.0));
     }
 
@@ -7672,7 +11446,14 @@ mod tests {
         frame.height = 100.0;
         // A rotated Frame proves that the constraint calculation is independent
         // of the canvas/world axes.
-        frame.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 300.0, f: 200.0 });
+        frame.relative_transform = Some(AffineTransform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 300.0,
+            f: 200.0,
+        });
 
         let mut direct = node(2);
         direct.kind = NodeKind::Rectangle;
@@ -7680,25 +11461,80 @@ mod tests {
         direct.parent_id = Some(NodeId(1));
         direct.width = 40.0;
         direct.height = 20.0;
-        direct.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 20.0, f: 10.0 });
-        direct.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center });
+        direct.relative_transform = Some(AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 20.0,
+            f: 10.0,
+        });
+        direct.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Center,
+        });
 
         let mut group = node(3);
         group.kind = NodeKind::Group;
         group.name = "Rotated group".into();
         group.parent_id = Some(NodeId(1));
-        group.relative_transform = Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 50.0, f: 20.0 });
+        group.relative_transform = Some(AffineTransform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 50.0,
+            f: 20.0,
+        });
         let mut nested = node(4);
         nested.kind = NodeKind::Rectangle;
         nested.name = "Nested matrix child".into();
         nested.parent_id = Some(NodeId(3));
         nested.width = 40.0;
         nested.height = 20.0;
-        nested.relative_transform = Some(AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 10.0, f: 5.0 });
-        nested.constraints = Some(Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Max });
+        nested.relative_transform = Some(AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 10.0,
+            f: 5.0,
+        });
+        nested.constraints = Some(Constraints {
+            horizontal: ConstraintType::Stretch,
+            vertical: ConstraintType::Max,
+        });
 
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(direct), Command::Create(group), Command::Create(nested)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(direct),
+                        Command::Create(group),
+                        Command::Create(nested),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
         let direct = document.node(NodeId(2)).unwrap();
         assert_eq!(direct.relative_transform.unwrap().e, 120.0);
@@ -7713,21 +11549,89 @@ mod tests {
 
         document.undo().unwrap();
         let direct = document.node(NodeId(2)).unwrap();
-        assert_eq!((direct.relative_transform.unwrap().e, direct.relative_transform.unwrap().f), (20.0, 10.0));
+        assert_eq!(
+            (
+                direct.relative_transform.unwrap().e,
+                direct.relative_transform.unwrap().f
+            ),
+            (20.0, 10.0)
+        );
         let nested = document.node(NodeId(4)).unwrap();
-        assert_eq!((nested.relative_transform.unwrap().e, nested.relative_transform.unwrap().f, nested.width), (10.0, 5.0, 40.0));
+        assert_eq!(
+            (
+                nested.relative_transform.unwrap().e,
+                nested.relative_transform.unwrap().f,
+                nested.width
+            ),
+            (10.0, 5.0, 40.0)
+        );
         document.redo().unwrap();
-        assert_eq!(document.node(NodeId(4)).unwrap().relative_transform.unwrap().e, 110.0);
+        assert_eq!(
+            document
+                .node(NodeId(4))
+                .unwrap()
+                .relative_transform
+                .unwrap()
+                .e,
+            110.0
+        );
     }
 
     #[test]
     fn frame_resize_propagates_through_groups_and_refreshes_group_bounds() {
         let mut document = Document::empty();
-        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
-        let mut group = node(2); group.kind = NodeKind::Group; group.name = "Group".into(); group.parent_id = Some(NodeId(1)); group.x = 20.0; group.y = 10.0; group.width = 40.0; group.height = 20.0;
-        let mut child = node(3); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(2)); child.x = 20.0; child.y = 10.0; child.width = 40.0; child.height = 20.0; child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Min });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 100.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut group = node(2);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        group.parent_id = Some(NodeId(1));
+        group.x = 20.0;
+        group.y = 10.0;
+        group.width = 40.0;
+        group.height = 20.0;
+        let mut child = node(3);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Child".into();
+        child.parent_id = Some(NodeId(2));
+        child.x = 20.0;
+        child.y = 10.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Min,
+        });
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(group),
+                        Command::Create(child),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 100.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         assert_eq!(document.node(NodeId(3)).unwrap().x, 120.0);
         assert_eq!(document.node(NodeId(2)).unwrap().x, 120.0);
         document.undo().unwrap();
@@ -7738,13 +11642,54 @@ mod tests {
     #[test]
     fn frame_resize_rejects_scale_from_a_zero_sized_axis() {
         let mut document = Document::empty();
-        let mut frame = node(1); frame.width = 1.0; frame.height = 100.0;
-        let constraints = Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Min };
-        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.constraints = Some(constraints);
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
+        let mut frame = node(1);
+        frame.width = 1.0;
+        frame.height = 100.0;
+        let constraints = Constraints {
+            horizontal: ConstraintType::Scale,
+            vertical: ConstraintType::Min,
+        };
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Child".into();
+        child.parent_id = Some(NodeId(1));
+        child.constraints = Some(constraints);
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         // Canonical geometry disallows a zero Frame, so the scale guard is exercised
         // directly through the shared pure geometry rule.
-        assert_eq!(geometry_for_constraints(Geometry { x: 0.0, y: 0.0, width: 0.0, height: 100.0, rotation: 0.0 }, Geometry { x: 0.0, y: 0.0, width: 10.0, height: 100.0, rotation: 0.0 }, Geometry { x: 1.0, y: 1.0, width: 10.0, height: 10.0, rotation: 0.0 }, constraints, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
+        assert_eq!(
+            geometry_for_constraints(
+                Geometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 100.0,
+                    rotation: 0.0
+                },
+                Geometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 100.0,
+                    rotation: 0.0
+                },
+                Geometry {
+                    x: 1.0,
+                    y: 1.0,
+                    width: 10.0,
+                    height: 10.0,
+                    rotation: 0.0
+                },
+                constraints,
+                &NodeKind::Rectangle
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     // --- P1-5: named unit fixtures directly over `geometry_for_constraints` ---
@@ -7752,53 +11697,124 @@ mod tests {
     // pinned independently of the transaction plumbing that consumes them.
 
     // A 100x40 parent doubling to 200x80, child at local (20,10) sized 40x20.
-    const PARENT_BEFORE: Geometry = Geometry { x: 10.0, y: 20.0, width: 100.0, height: 40.0, rotation: 0.0 };
-    const PARENT_AFTER: Geometry = Geometry { x: 10.0, y: 20.0, width: 200.0, height: 80.0, rotation: 0.0 };
+    const PARENT_BEFORE: Geometry = Geometry {
+        x: 10.0,
+        y: 20.0,
+        width: 100.0,
+        height: 40.0,
+        rotation: 0.0,
+    };
+    const PARENT_AFTER: Geometry = Geometry {
+        x: 10.0,
+        y: 20.0,
+        width: 200.0,
+        height: 80.0,
+        rotation: 0.0,
+    };
     // World-space child: parent origin (10,20) + local (20,10).
-    const CHILD: Geometry = Geometry { x: 30.0, y: 30.0, width: 40.0, height: 20.0, rotation: 0.0 };
+    const CHILD: Geometry = Geometry {
+        x: 30.0,
+        y: 30.0,
+        width: 40.0,
+        height: 20.0,
+        rotation: 0.0,
+    };
 
-    fn constrained(horizontal: ConstraintType, vertical: ConstraintType, kind: &NodeKind) -> Geometry {
-        geometry_for_constraints(PARENT_BEFORE, PARENT_AFTER, CHILD, Constraints { horizontal, vertical }, kind).unwrap()
+    fn constrained(
+        horizontal: ConstraintType,
+        vertical: ConstraintType,
+        kind: &NodeKind,
+    ) -> Geometry {
+        geometry_for_constraints(
+            PARENT_BEFORE,
+            PARENT_AFTER,
+            CHILD,
+            Constraints {
+                horizontal,
+                vertical,
+            },
+            kind,
+        )
+        .unwrap()
     }
 
     #[test]
     fn constraint_axis_min_pins_leading_edge_and_keeps_size() {
-        let after = constrained(ConstraintType::Min, ConstraintType::Min, &NodeKind::Rectangle);
+        let after = constrained(
+            ConstraintType::Min,
+            ConstraintType::Min,
+            &NodeKind::Rectangle,
+        );
         // Local offset preserved from the new parent origin; size unchanged.
-        assert_eq!((after.x, after.y, after.width, after.height), (30.0, 30.0, 40.0, 20.0));
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (30.0, 30.0, 40.0, 20.0)
+        );
     }
 
     #[test]
     fn constraint_axis_max_tracks_trailing_edge() {
-        let after = constrained(ConstraintType::Max, ConstraintType::Max, &NodeKind::Rectangle);
+        let after = constrained(
+            ConstraintType::Max,
+            ConstraintType::Max,
+            &NodeKind::Rectangle,
+        );
         // Width delta +100, height delta +40 shift the local position by the full delta.
-        assert_eq!((after.x, after.y, after.width, after.height), (130.0, 70.0, 40.0, 20.0));
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (130.0, 70.0, 40.0, 20.0)
+        );
     }
 
     #[test]
     fn constraint_axis_center_tracks_half_delta() {
-        let after = constrained(ConstraintType::Center, ConstraintType::Center, &NodeKind::Rectangle);
-        assert_eq!((after.x, after.y, after.width, after.height), (80.0, 50.0, 40.0, 20.0));
+        let after = constrained(
+            ConstraintType::Center,
+            ConstraintType::Center,
+            &NodeKind::Rectangle,
+        );
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (80.0, 50.0, 40.0, 20.0)
+        );
     }
 
     #[test]
     fn constraint_axis_stretch_grows_size_by_delta() {
-        let after = constrained(ConstraintType::Stretch, ConstraintType::Stretch, &NodeKind::Rectangle);
+        let after = constrained(
+            ConstraintType::Stretch,
+            ConstraintType::Stretch,
+            &NodeKind::Rectangle,
+        );
         // Leading edge fixed; size absorbs the parent delta on each axis.
-        assert_eq!((after.x, after.y, after.width, after.height), (30.0, 30.0, 140.0, 60.0));
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (30.0, 30.0, 140.0, 60.0)
+        );
     }
 
     #[test]
     fn constraint_axis_scale_multiplies_position_and_size_by_ratio() {
-        let after = constrained(ConstraintType::Scale, ConstraintType::Scale, &NodeKind::Rectangle);
+        let after = constrained(
+            ConstraintType::Scale,
+            ConstraintType::Scale,
+            &NodeKind::Rectangle,
+        );
         // Ratio 2x horizontal, 2x vertical over local (20,10) sized 40x20.
-        assert_eq!((after.x, after.y, after.width, after.height), (50.0, 40.0, 80.0, 40.0));
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (50.0, 40.0, 80.0, 40.0)
+        );
     }
 
     #[test]
     fn constraint_mixed_axes_resolve_independently() {
         // Horizontal Max + vertical Scale prove the two axes never share state.
-        let after = constrained(ConstraintType::Max, ConstraintType::Scale, &NodeKind::Rectangle);
+        let after = constrained(
+            ConstraintType::Max,
+            ConstraintType::Scale,
+            &NodeKind::Rectangle,
+        );
         assert_eq!((after.x, after.width), (130.0, 40.0));
         assert_eq!((after.y, after.height), (40.0, 40.0));
     }
@@ -7807,47 +11823,191 @@ mod tests {
     fn constraint_line_stretch_preserves_zero_height() {
         // A Line's height must stay exactly zero even under a Stretch vertical
         // rule, matching `valid_geometry`'s Line invariant.
-        let line = Geometry { x: 30.0, y: 30.0, width: 40.0, height: 0.0, rotation: 0.0 };
-        let after = geometry_for_constraints(PARENT_BEFORE, PARENT_AFTER, line, Constraints { horizontal: ConstraintType::Stretch, vertical: ConstraintType::Stretch }, &NodeKind::Line).unwrap();
+        let line = Geometry {
+            x: 30.0,
+            y: 30.0,
+            width: 40.0,
+            height: 0.0,
+            rotation: 0.0,
+        };
+        let after = geometry_for_constraints(
+            PARENT_BEFORE,
+            PARENT_AFTER,
+            line,
+            Constraints {
+                horizontal: ConstraintType::Stretch,
+                vertical: ConstraintType::Stretch,
+            },
+            &NodeKind::Line,
+        )
+        .unwrap();
         assert_eq!((after.width, after.height), (140.0, 0.0));
     }
 
     #[test]
     fn constraint_scale_rejects_zero_sized_source_axis_per_axis() {
         // Guard fires the moment either source extent is zero, independent of which axis scales.
-        let zero_width = Geometry { x: 0.0, y: 0.0, width: 0.0, height: 40.0, rotation: 0.0 };
-        assert_eq!(geometry_for_constraints(zero_width, PARENT_AFTER, CHILD, Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Min }, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
-        let zero_height = Geometry { x: 0.0, y: 0.0, width: 100.0, height: 0.0, rotation: 0.0 };
-        assert_eq!(geometry_for_constraints(zero_height, PARENT_AFTER, CHILD, Constraints { horizontal: ConstraintType::Min, vertical: ConstraintType::Scale }, &NodeKind::Rectangle), Err(CommandError::InvalidGeometry));
+        let zero_width = Geometry {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 40.0,
+            rotation: 0.0,
+        };
+        assert_eq!(
+            geometry_for_constraints(
+                zero_width,
+                PARENT_AFTER,
+                CHILD,
+                Constraints {
+                    horizontal: ConstraintType::Scale,
+                    vertical: ConstraintType::Min
+                },
+                &NodeKind::Rectangle
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
+        let zero_height = Geometry {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+            rotation: 0.0,
+        };
+        assert_eq!(
+            geometry_for_constraints(
+                zero_height,
+                PARENT_AFTER,
+                CHILD,
+                Constraints {
+                    horizontal: ConstraintType::Min,
+                    vertical: ConstraintType::Scale
+                },
+                &NodeKind::Rectangle
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
-    fn constrained_child_under_a_clipping_frame_still_resolves_and_reparent_preserves_the_constraint() {
+    fn constrained_child_under_a_clipping_frame_still_resolves_and_reparent_preserves_the_constraint()
+     {
         let mut document = Document::empty();
-        let mut frame = node(1); frame.width = 200.0; frame.height = 100.0; frame.clips_content = true;
-        let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 20.0; child.width = 40.0; child.height = 20.0;
-        child.constraints = Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center });
-        document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
-        document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 300.0, height: 200.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        frame.clips_content = true;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.name = "Child".into();
+        child.parent_id = Some(NodeId(1));
+        child.x = 20.0;
+        child.y = 20.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Center,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         // Clip state does not alter constraint math: Max x shifts by +100.
         assert_eq!(document.node(NodeId(2)).unwrap().x, 120.0);
         assert!(document.node(NodeId(1)).unwrap().clips_content);
 
         // Reparenting the constrained child into a Group keeps its constraint record verbatim.
-        let mut group = node(3); group.kind = NodeKind::Group; group.name = "Group".into();
-        document.submit(transaction(2, vec![Command::Create(group), Command::SetNodeParent { id: NodeId(2), parent_id: Some(NodeId(3)), position: PositionId { key: 5, actor: ActorId(1) } }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(NodeId(2)).unwrap().constraints, Some(Constraints { horizontal: ConstraintType::Max, vertical: ConstraintType::Center }));
+        let mut group = node(3);
+        group.kind = NodeKind::Group;
+        group.name = "Group".into();
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![
+                        Command::Create(group),
+                        Command::SetNodeParent {
+                            id: NodeId(2),
+                            parent_id: Some(NodeId(3)),
+                            position: PositionId {
+                                key: 5,
+                                actor: ActorId(1),
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(2)).unwrap().constraints,
+            Some(Constraints {
+                horizontal: ConstraintType::Max,
+                vertical: ConstraintType::Center
+            })
+        );
     }
 
     #[test]
     fn constrained_resize_is_hash_stable_across_replay_and_undo_redo() {
         let build = || {
             let mut document = Document::empty();
-            let mut frame = node(1); frame.width = 200.0; frame.height = 100.0;
-            let mut child = node(2); child.kind = NodeKind::Rectangle; child.name = "Child".into(); child.parent_id = Some(NodeId(1)); child.x = 20.0; child.y = 10.0; child.width = 40.0; child.height = 20.0;
-            child.constraints = Some(Constraints { horizontal: ConstraintType::Scale, vertical: ConstraintType::Max });
-            document.submit(transaction(0, vec![Command::Create(frame), Command::Create(child)]), Origin::LocalUser).unwrap();
-            document.submit(transaction(1, vec![Command::UpdateGeometry { id: NodeId(1), x: 0.0, y: 0.0, width: 400.0, height: 260.0, rotation: 0.0 }]), Origin::LocalUser).unwrap();
+            let mut frame = node(1);
+            frame.width = 200.0;
+            frame.height = 100.0;
+            let mut child = node(2);
+            child.kind = NodeKind::Rectangle;
+            child.name = "Child".into();
+            child.parent_id = Some(NodeId(1));
+            child.x = 20.0;
+            child.y = 10.0;
+            child.width = 40.0;
+            child.height = 20.0;
+            child.constraints = Some(Constraints {
+                horizontal: ConstraintType::Scale,
+                vertical: ConstraintType::Max,
+            });
+            document
+                .submit(
+                    transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                    Origin::LocalUser,
+                )
+                .unwrap();
+            document
+                .submit(
+                    transaction(
+                        1,
+                        vec![Command::UpdateGeometry {
+                            id: NodeId(1),
+                            x: 0.0,
+                            y: 0.0,
+                            width: 400.0,
+                            height: 260.0,
+                            rotation: 0.0,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                )
+                .unwrap();
             document
         };
         let first = build();
@@ -7873,7 +12033,10 @@ mod tests {
         line.width = 120.0;
         line.height = 0.0;
         document
-            .submit(transaction(0, vec![Command::Create(line)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(line)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let baseline = document.canonical_hash_hex();
         document
@@ -7901,15 +12064,15 @@ mod tests {
                             opacity: 1.0,
                             blend_mode: BlendMode::Normal,
                             drop_shadow: None,
-            effect_stack: Vec::new(),
+                            effect_stack: Vec::new(),
                             corner_radius: 0.0,
-            corner_radii: Vec::new(),
+                            corner_radii: Vec::new(),
                             corner_smoothing: 0.0,
-            constraints: None,
+                            constraints: None,
                             visible: true,
                             locked: false,
                             contents_hidden: false,
-            clips_content: Some(false),
+                            clips_content: Some(false),
                         },
                     }],
                 ),
@@ -7918,7 +12081,10 @@ mod tests {
             .unwrap();
         let styled = document.node(NodeId(1)).unwrap();
         assert_eq!(styled.stroke_join, StrokeJoin::Round);
-        assert_eq!(styled.stroke_dash_pattern, vec![8.0, 4.0, 2.0, 8.0, 4.0, 2.0]);
+        assert_eq!(
+            styled.stroke_dash_pattern,
+            vec![8.0, 4.0, 2.0, 8.0, 4.0, 2.0]
+        );
         let styled_hash = document.canonical_hash_hex();
         assert_ne!(styled_hash, baseline);
         document.undo().unwrap();
@@ -7928,27 +12094,65 @@ mod tests {
     }
 
     #[test]
-    fn rectangle_per_side_stroke_weights_and_ellipse_stroke_align_are_hashed_and_reject_unsupported_nodes() {
+    fn rectangle_per_side_stroke_weights_and_ellipse_stroke_align_are_hashed_and_reject_unsupported_nodes()
+     {
         let mut document = Document::empty();
         document
-            .submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#2563eb".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
-            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: vec![1.0, 2.0, 3.0, 4.0], stroke_align: StrokeAlign::Outside, arc_data: None, parametric_shape: None, relative_transform: None,
-            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0,
-            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            fill: "#fff".into(),
+            stroke: "#2563eb".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: vec![1.0, 2.0, 3.0, 4.0],
+            stroke_align: StrokeAlign::Outside,
+            arc_data: None,
+            parametric_shape: None,
+            relative_transform: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            visible: true,
+            locked: false,
+            contents_hidden: false,
             clips_content: Some(false),
         };
         document
-            .submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser)
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
             .unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke_weights, vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(document.node(NodeId(1)).unwrap().stroke_align, StrokeAlign::Outside);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke_weights,
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().stroke_align,
+            StrokeAlign::Outside
+        );
         let weighted = document.canonical_hash_hex();
         assert_ne!(weighted, baseline);
         document.undo().unwrap();
@@ -7962,10 +12166,22 @@ mod tests {
         line.width = 20.0;
         line.height = 0.0;
         document
-            .submit(transaction(4, vec![Command::Create(line)]), Origin::LocalUser)
+            .submit(
+                transaction(4, vec![Command::Create(line)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         assert_eq!(
-            document.submit(transaction(5, vec![Command::SetAppearance { id: NodeId(2), appearance: appearance.clone() }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    5,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance: appearance.clone()
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance),
         );
 
@@ -7973,7 +12189,10 @@ mod tests {
         ellipse.kind = NodeKind::Ellipse;
         ellipse.name = "Ellipse".into();
         document
-            .submit(transaction(5, vec![Command::Create(ellipse)]), Origin::LocalUser)
+            .submit(
+                transaction(5, vec![Command::Create(ellipse)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let ellipse_appearance = Appearance {
             stroke_weights: Vec::new(),
@@ -7981,15 +12200,40 @@ mod tests {
             ..appearance.clone()
         };
         document
-            .submit(transaction(6, vec![Command::SetAppearance { id: NodeId(3), appearance: ellipse_appearance.clone() }]), Origin::LocalUser)
+            .submit(
+                transaction(
+                    6,
+                    vec![Command::SetAppearance {
+                        id: NodeId(3),
+                        appearance: ellipse_appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
             .unwrap();
-        assert_eq!(document.node(NodeId(3)).unwrap().stroke_align, StrokeAlign::Outside);
+        assert_eq!(
+            document.node(NodeId(3)).unwrap().stroke_align,
+            StrokeAlign::Outside
+        );
         let arc_appearance = Appearance {
-            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 90.0, inner_radius: 0.0 }),
+            arc_data: Some(ArcData {
+                starting_angle: 0.0,
+                ending_angle: 90.0,
+                inner_radius: 0.0,
+            }),
             ..ellipse_appearance
         };
         assert_eq!(
-            document.submit(transaction(7, vec![Command::SetAppearance { id: NodeId(3), appearance: arc_appearance }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    7,
+                    vec![Command::SetAppearance {
+                        id: NodeId(3),
+                        appearance: arc_appearance
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance),
         );
     }
@@ -8000,48 +12244,151 @@ mod tests {
         let mut ellipse = node(1);
         ellipse.kind = NodeKind::Ellipse;
         ellipse.name = "Arc".into();
-        document.submit(transaction(0, vec![Command::Create(ellipse)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(ellipse)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 1.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
-            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
-            arc_data: Some(ArcData { starting_angle: 0.0, ending_angle: 180.0, inner_radius: 0.4 }), parametric_shape: None, relative_transform: None,
-            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0,
-            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            fill: "#fff".into(),
+            stroke: "#000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 1.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
+            arc_data: Some(ArcData {
+                starting_angle: 0.0,
+                ending_angle: 180.0,
+                inner_radius: 0.4,
+            }),
+            parametric_shape: None,
+            relative_transform: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            visible: true,
+            locked: false,
+            contents_hidden: false,
             clips_content: Some(false),
         };
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().arc_data, appearance.arc_data);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().arc_data,
+            appearance.arc_data
+        );
         let arc_hash = document.canonical_hash_hex();
         assert_ne!(arc_hash, baseline);
-        document.undo().unwrap(); assert_eq!(document.canonical_hash_hex(), baseline);
-        document.redo().unwrap(); assert_eq!(document.canonical_hash_hex(), arc_hash);
-        assert_eq!(document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: Appearance { arc_data: None, ..appearance } }]), Origin::LocalUser).unwrap().accepted_revision, 5);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), arc_hash);
+        assert_eq!(
+            document
+                .submit(
+                    transaction(
+                        4,
+                        vec![Command::SetAppearance {
+                            id: NodeId(1),
+                            appearance: Appearance {
+                                arc_data: None,
+                                ..appearance
+                            }
+                        }]
+                    ),
+                    Origin::LocalUser
+                )
+                .unwrap()
+                .accepted_revision,
+            5
+        );
     }
 
     #[test]
     fn relative_transform_is_hashed_undoable_and_rejects_singular_matrices() {
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let appearance = Appearance {
-            fill: "#fff".into(), stroke: "#00000000".into(), fills: Vec::new(), strokes: Vec::new(), stroke_width: 0.0,
-            stroke_cap_start: StrokeCap::None, stroke_cap_end: StrokeCap::None,
-            stroke_join: StrokeJoin::Miter, stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
-            stroke_dash_pattern: Vec::new(), stroke_weights: Vec::new(), stroke_align: StrokeAlign::Inside,
+            fill: "#fff".into(),
+            stroke: "#00000000".into(),
+            fills: Vec::new(),
+            strokes: Vec::new(),
+            stroke_width: 0.0,
+            stroke_cap_start: StrokeCap::None,
+            stroke_cap_end: StrokeCap::None,
+            stroke_join: StrokeJoin::Miter,
+            stroke_miter_limit: DEFAULT_STROKE_MITER_LIMIT,
+            stroke_dash_pattern: Vec::new(),
+            stroke_weights: Vec::new(),
+            stroke_align: StrokeAlign::Inside,
             arc_data: None,
             parametric_shape: None,
-            relative_transform: Some(AffineTransform { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: 40.0, f: 20.0 }),
-            opacity: 1.0, blend_mode: BlendMode::Normal, drop_shadow: None,
-            effect_stack: Vec::new(), corner_radius: 0.0,
-            corner_radii: Vec::new(), corner_smoothing: 0.0, constraints: None, visible: true, locked: false, contents_hidden: false,
+            relative_transform: Some(AffineTransform {
+                a: 0.0,
+                b: 1.0,
+                c: -1.0,
+                d: 0.0,
+                e: 40.0,
+                f: 20.0,
+            }),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            drop_shadow: None,
+            effect_stack: Vec::new(),
+            corner_radius: 0.0,
+            corner_radii: Vec::new(),
+            corner_smoothing: 0.0,
+            constraints: None,
+            visible: true,
+            locked: false,
+            contents_hidden: false,
             clips_content: Some(false),
         };
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().relative_transform, appearance.relative_transform);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().relative_transform,
+            appearance.relative_transform
+        );
         let transformed = document.canonical_hash_hex();
         assert_ne!(transformed, baseline);
         document.undo().unwrap();
@@ -8050,9 +12397,28 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), transformed);
 
-        let singular = Appearance { relative_transform: Some(AffineTransform { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 }), ..appearance };
+        let singular = Appearance {
+            relative_transform: Some(AffineTransform {
+                a: 0.0,
+                b: 0.0,
+                c: 0.0,
+                d: 0.0,
+                e: 0.0,
+                f: 0.0,
+            }),
+            ..appearance
+        };
         assert_eq!(
-            document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: singular }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: singular
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance),
         );
     }
@@ -8107,6 +12473,48 @@ mod tests {
             Err(CommandError::InvalidParent { id: NodeId(1) })
         );
         assert_eq!(document.node_count(), 1);
+    }
+
+    #[test]
+    fn slides_hierarchy_requires_one_grid_then_rows_then_fixed_size_slides() {
+        let mut document = Document::empty();
+        let mut grid = node(1);
+        grid.kind = NodeKind::SlideGrid;
+        document.seed_node(grid).unwrap();
+
+        let mut row = node(2);
+        row.kind = NodeKind::SlideRow;
+        row.parent_id = Some(NodeId(1));
+        document.seed_node(row).unwrap();
+
+        let mut slide = node(3);
+        slide.kind = NodeKind::Slide;
+        slide.parent_id = Some(NodeId(2));
+        slide.width = 1920.0;
+        slide.height = 1080.0;
+        document.seed_node(slide).unwrap();
+
+        let mut second_grid = node(4);
+        second_grid.kind = NodeKind::SlideGrid;
+        assert_eq!(
+            document.seed_node(second_grid),
+            Err(CommandError::InvalidParent { id: NodeId(4) })
+        );
+        let mut top_level_row = node(5);
+        top_level_row.kind = NodeKind::SlideRow;
+        assert_eq!(
+            document.seed_node(top_level_row),
+            Err(CommandError::InvalidParent { id: NodeId(5) })
+        );
+        let mut malformed_slide = node(6);
+        malformed_slide.kind = NodeKind::Slide;
+        malformed_slide.parent_id = Some(NodeId(2));
+        malformed_slide.width = 1919.0;
+        malformed_slide.height = 1080.0;
+        assert_eq!(
+            document.seed_node(malformed_slide),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
@@ -8421,7 +12829,10 @@ mod tests {
         text.text = "AB".into();
         let mut document = Document::empty();
         document
-            .submit(transaction(0, vec![Command::Create(text)]), Origin::LocalUser)
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
             .unwrap();
         let baseline = document.canonical_hash_hex();
         let properties = TextProperties {
@@ -8439,7 +12850,13 @@ mod tests {
         };
         document
             .submit(
-                transaction(1, vec![Command::SetTextProperties { id: NodeId(1), properties: properties.clone() }]),
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(1),
+                        properties: properties.clone(),
+                    }],
+                ),
                 Origin::LocalUser,
             )
             .unwrap();
@@ -8450,10 +12867,20 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), colored_hash);
         let mut invalid = properties;
-        invalid.runs[0].color = Some(Color { space: ColorSpace::Srgb, components: [f32::NAN, 0.0, 0.0], alpha: 1.0 });
+        invalid.runs[0].color = Some(Color {
+            space: ColorSpace::Srgb,
+            components: [f32::NAN, 0.0, 0.0],
+            alpha: 1.0,
+        });
         assert_eq!(
             document.submit(
-                transaction(document.revision, vec![Command::SetTextProperties { id: NodeId(1), properties: invalid }]),
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(1),
+                        properties: invalid
+                    }]
+                ),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidTextProperties),
@@ -8463,7 +12890,12 @@ mod tests {
     #[test]
     fn drop_shadow_is_hashed_undoable_and_rejects_invalid_or_structural_usage() {
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
         appearance.drop_shadow = Some(DropShadow {
@@ -8477,11 +12909,28 @@ mod tests {
         // New clients persist the ordered stack and retain the first entry in
         // the legacy field so R3 readers continue to render the same shadow.
         appearance.effect_stack = vec![Effect::DropShadow(appearance.drop_shadow.unwrap())];
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance: appearance.clone() }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let shadowed = document.canonical_hash_hex();
         assert_ne!(shadowed, baseline);
-        assert_eq!(document.node(NodeId(1)).unwrap().drop_shadow, appearance.drop_shadow);
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, appearance.effect_stack);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().drop_shadow,
+            appearance.drop_shadow
+        );
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            appearance.effect_stack
+        );
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), baseline);
         document.redo().unwrap();
@@ -8489,75 +12938,170 @@ mod tests {
 
         let mut invalid = appearance.clone();
         invalid.drop_shadow.as_mut().unwrap().blur_radius = f64::NAN;
-        assert_eq!(document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: invalid
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
 
         let mut conflicting_legacy = appearance.clone();
         conflicting_legacy.drop_shadow = None;
         assert_eq!(
             document.submit(
-                transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: conflicting_legacy }]),
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: conflicting_legacy
+                    }]
+                ),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidAppearance),
         );
 
         let mut multiple_effects = appearance.clone();
-        multiple_effects.effect_stack.push(Effect::DropShadow(DropShadow {
-            offset_x: -2.0,
-            offset_y: 3.0,
-            blur_radius: 4.0,
-            spread: 0.0,
-            color: Color::from_srgb_u8([255, 255, 255], 64),
-            visible: true,
-        }));
-        document.submit(
-            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: multiple_effects.clone() }]),
-            Origin::LocalUser,
-        ).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, multiple_effects.effect_stack);
+        multiple_effects
+            .effect_stack
+            .push(Effect::DropShadow(DropShadow {
+                offset_x: -2.0,
+                offset_y: 3.0,
+                blur_radius: 4.0,
+                spread: 0.0,
+                color: Color::from_srgb_u8([255, 255, 255], 64),
+                visible: true,
+            }));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: multiple_effects.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            multiple_effects.effect_stack
+        );
 
         let mut layer_blurred = multiple_effects.clone();
-        layer_blurred.effect_stack.push(Effect::LayerBlur(LayerBlur { radius: 24.0, visible: true }));
-        document.submit(
-            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: layer_blurred.clone() }]),
-            Origin::LocalUser,
-        ).unwrap();
+        layer_blurred
+            .effect_stack
+            .push(Effect::LayerBlur(LayerBlur {
+                radius: 24.0,
+                visible: true,
+            }));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: layer_blurred.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let blurred_hash = document.canonical_hash_hex();
         assert_ne!(blurred_hash, shadowed);
         document.undo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, multiple_effects.effect_stack);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            multiple_effects.effect_stack
+        );
         document.redo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, layer_blurred.effect_stack);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            layer_blurred.effect_stack
+        );
 
         let mut inner_shadowed = layer_blurred.clone();
-        inner_shadowed.effect_stack.push(Effect::InnerShadow(InnerShadow {
-            offset_x: -3.0, offset_y: 5.0, blur_radius: 10.0, spread: 1.0,
-            color: Color::from_srgb_u8([2, 6, 23], 80), visible: true,
-        }));
-        document.submit(
-            transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: inner_shadowed.clone() }]),
-            Origin::LocalUser,
-        ).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, inner_shadowed.effect_stack);
+        inner_shadowed
+            .effect_stack
+            .push(Effect::InnerShadow(InnerShadow {
+                offset_x: -3.0,
+                offset_y: 5.0,
+                blur_radius: 10.0,
+                spread: 1.0,
+                color: Color::from_srgb_u8([2, 6, 23], 80),
+                visible: true,
+            }));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: inner_shadowed.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            inner_shadowed.effect_stack
+        );
         document.undo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, layer_blurred.effect_stack);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            layer_blurred.effect_stack
+        );
         document.redo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().effect_stack, inner_shadowed.effect_stack);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().effect_stack,
+            inner_shadowed.effect_stack
+        );
 
         let mut invalid_layer_blur = layer_blurred.clone();
-        invalid_layer_blur.effect_stack.push(Effect::LayerBlur(LayerBlur { radius: 257.0, visible: true }));
+        invalid_layer_blur
+            .effect_stack
+            .push(Effect::LayerBlur(LayerBlur {
+                radius: 257.0,
+                visible: true,
+            }));
         assert_eq!(
-            document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid_layer_blur }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: invalid_layer_blur
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance),
         );
 
         let mut too_many_effects = multiple_effects;
         while too_many_effects.effect_stack.len() <= MAX_EFFECTS_PER_NODE {
-            too_many_effects.effect_stack.push(Effect::DropShadow(appearance.drop_shadow.unwrap()));
+            too_many_effects
+                .effect_stack
+                .push(Effect::DropShadow(appearance.drop_shadow.unwrap()));
         }
         assert_eq!(
             document.submit(
-                transaction(document.revision, vec![Command::SetAppearance { id: NodeId(1), appearance: too_many_effects }]),
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: too_many_effects
+                    }]
+                ),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidAppearance),
@@ -8569,10 +13113,30 @@ mod tests {
         let mut child = node(3);
         child.kind = NodeKind::Rectangle;
         child.parent_id = Some(NodeId(2));
-        document.submit(transaction(document.revision, vec![Command::Create(group), Command::Create(child)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::Create(group), Command::Create(child)],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let mut group_appearance = appearance_for_node(document.node(NodeId(2)).unwrap());
         group_appearance.drop_shadow = appearance.drop_shadow;
-        assert_eq!(document.submit(transaction(document.revision, vec![Command::SetAppearance { id: NodeId(2), appearance: group_appearance }]), Origin::LocalUser), Err(CommandError::InvalidAppearance));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance: group_appearance
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidAppearance)
+        );
     }
 
     #[test]
@@ -9005,12 +13569,28 @@ mod tests {
         polygon.kind = NodeKind::Polygon;
         polygon.name = "Polygon".into();
         polygon.parametric_shape = Some(ParametricShape::Polygon { point_count: 5 });
-        document.submit(transaction(0, vec![Command::Create(polygon)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(polygon)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let five_points = document.canonical_hash_hex();
 
         let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
         appearance.parametric_shape = Some(ParametricShape::Polygon { point_count: 6 });
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let six_points = document.canonical_hash_hex();
         assert_ne!(five_points, six_points);
         document.undo().unwrap();
@@ -9019,9 +13599,21 @@ mod tests {
         assert_eq!(document.canonical_hash_hex(), six_points);
 
         let mut invalid = appearance_for_node(document.node(NodeId(1)).unwrap());
-        invalid.parametric_shape = Some(ParametricShape::Star { point_count: 5, inner_ratio: 0.5 });
+        invalid.parametric_shape = Some(ParametricShape::Star {
+            point_count: 5,
+            inner_ratio: 0.5,
+        });
         assert_eq!(
-            document.submit(transaction(4, vec![Command::SetAppearance { id: NodeId(1), appearance: invalid }]), Origin::LocalUser),
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: invalid
+                    }]
+                ),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidAppearance),
         );
     }
@@ -9051,32 +13643,48 @@ mod tests {
         let mut union_document = Document::empty();
         let mut union_commands = vec![Command::Create(union)];
         union_commands.extend(operands());
-        union_document.submit(transaction(0, union_commands), Origin::LocalUser).unwrap();
+        union_document
+            .submit(transaction(0, union_commands), Origin::LocalUser)
+            .unwrap();
         let mut subtract_document = Document::empty();
         let mut subtract_commands = vec![Command::Create(subtract)];
         subtract_commands.extend(operands());
-        subtract_document.submit(transaction(0, subtract_commands), Origin::LocalUser).unwrap();
-        assert_ne!(union_document.canonical_hash_hex(), subtract_document.canonical_hash_hex());
+        subtract_document
+            .submit(transaction(0, subtract_commands), Origin::LocalUser)
+            .unwrap();
+        assert_ne!(
+            union_document.canonical_hash_hex(),
+            subtract_document.canonical_hash_hex()
+        );
 
         let mut incomplete = node(6);
         incomplete.kind = NodeKind::BooleanOperation;
         incomplete.boolean_operation = Some(BooleanOperation::Union);
         assert_eq!(
-            Document::empty().submit(transaction(0, vec![Command::Create(incomplete)]), Origin::LocalUser),
+            Document::empty().submit(
+                transaction(0, vec![Command::Create(incomplete)]),
+                Origin::LocalUser
+            ),
             Err(CommandError::InsufficientBooleanOperands { id: NodeId(6) }),
         );
 
         let mut missing_operation = node(2);
         missing_operation.kind = NodeKind::BooleanOperation;
         assert_eq!(
-            Document::empty().submit(transaction(0, vec![Command::Create(missing_operation)]), Origin::LocalUser),
+            Document::empty().submit(
+                transaction(0, vec![Command::Create(missing_operation)]),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidGeometry),
         );
 
         let mut misplaced_operation = node(3);
         misplaced_operation.boolean_operation = Some(BooleanOperation::Union);
         assert_eq!(
-            Document::empty().submit(transaction(0, vec![Command::Create(misplaced_operation)]), Origin::LocalUser),
+            Document::empty().submit(
+                transaction(0, vec![Command::Create(misplaced_operation)]),
+                Origin::LocalUser
+            ),
             Err(CommandError::InvalidGeometry),
         );
     }
@@ -9130,7 +13738,10 @@ mod tests {
             .unwrap();
         let live_hash = document.canonical_hash_hex();
         let boolean = document.node(NodeId(3)).unwrap();
-        assert_eq!((boolean.x, boolean.y, boolean.width, boolean.height), (10.0, 20.0, 100.0, 100.0));
+        assert_eq!(
+            (boolean.x, boolean.y, boolean.width, boolean.height),
+            (10.0, 20.0, 100.0, 100.0)
+        );
 
         assert_eq!(
             document.submit(
@@ -9171,19 +13782,39 @@ mod tests {
         second.kind = NodeKind::Ellipse;
         second.parent_id = Some(NodeId(1));
         let mut document = Document::empty();
-        document.submit(
-            transaction(0, vec![Command::Create(boolean), Command::Create(first), Command::Create(second)]),
-            Origin::LocalUser,
-        ).unwrap();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(boolean),
+                        Command::Create(first),
+                        Command::Create(second),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let union = document.canonical_hash_hex();
 
-        document.submit(
-            transaction(1, vec![Command::SetBooleanOperation { id: NodeId(1), operation: BooleanOperation::Subtract }]),
-            Origin::LocalUser,
-        ).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetBooleanOperation {
+                        id: NodeId(1),
+                        operation: BooleanOperation::Subtract,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let subtract = document.canonical_hash_hex();
         assert_ne!(union, subtract);
-        assert_eq!(document.node(NodeId(1)).unwrap().boolean_operation, Some(BooleanOperation::Subtract));
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().boolean_operation,
+            Some(BooleanOperation::Subtract)
+        );
         assert_eq!(document.node(NodeId(2)).unwrap().parent_id, Some(NodeId(1)));
         assert_eq!(document.node(NodeId(3)).unwrap().parent_id, Some(NodeId(1)));
         document.undo().unwrap();
@@ -9199,9 +13830,27 @@ mod tests {
             subpaths: vec![VectorSubpath {
                 closed: true,
                 points: vec![
-                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(2), position: Point { x: 100.0, y: 0.0 }, handle_in: None, handle_out: Some(Point { x: 8.0, y: 0.0 }), point_type: VectorPointType::Asymmetric },
-                    VectorPoint { id: PointId(3), position: Point { x: 50.0, y: 100.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 100.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: Some(Point { x: 8.0, y: 0.0 }),
+                        point_type: VectorPointType::Asymmetric,
+                    },
+                    VectorPoint {
+                        id: PointId(3),
+                        position: Point { x: 50.0, y: 100.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
                 ],
             }],
         };
@@ -9210,12 +13859,28 @@ mod tests {
         vector.name = "Triangle".into();
         vector.vector_path = Some(path.clone());
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(vector)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
 
         let mut updated = path.clone();
         updated.fill_rule = FillRule::EvenOdd;
-        document.submit(transaction(1, vec![Command::SetVectorPath { id: NodeId(1), path: updated }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetVectorPath {
+                        id: NodeId(1),
+                        path: updated,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let changed = document.canonical_hash_hex();
         assert_ne!(changed, baseline);
         document.undo().unwrap();
@@ -9223,15 +13888,57 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), changed);
 
-        let duplicate = VectorPath { fill_rule: FillRule::NonZero, subpaths: vec![VectorSubpath { closed: false, points: vec![
-            VectorPoint { id: PointId(9), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-            VectorPoint { id: PointId(9), position: Point { x: 20.0, y: 20.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-        ] }] };
-        assert_eq!(document.submit(transaction(4, vec![Command::SetVectorPath { id: NodeId(1), path: duplicate }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+        let duplicate = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                points: vec![
+                    VectorPoint {
+                        id: PointId(9),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(9),
+                        position: Point { x: 20.0, y: 20.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                ],
+            }],
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetVectorPath {
+                        id: NodeId(1),
+                        path: duplicate
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
 
         let mut degenerate = path;
         degenerate.subpaths[0].points[1].position = degenerate.subpaths[0].points[0].position;
-        assert_eq!(document.submit(transaction(4, vec![Command::SetVectorPath { id: NodeId(1), path: degenerate }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetVectorPath {
+                        id: NodeId(1),
+                        path: degenerate
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
@@ -9241,9 +13948,27 @@ mod tests {
             subpaths: vec![VectorSubpath {
                 closed: true,
                 points: vec![
-                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(2), position: Point { x: 100.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(3), position: Point { x: 50.0, y: 100.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 100.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(3),
+                        position: Point { x: 50.0, y: 100.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
                 ],
             }],
         };
@@ -9251,21 +13976,39 @@ mod tests {
         vector.kind = NodeKind::Vector;
         vector.vector_path = Some(path);
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(vector)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
 
-        document.submit(
-            transaction(1, vec![Command::MoveVectorPoint {
-                id: NodeId(1),
-                point_id: PointId(2),
-                position: Point { x: 120.0, y: 10.0 },
-            }]),
-            Origin::LocalUser,
-        ).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::MoveVectorPoint {
+                        id: NodeId(1),
+                        point_id: PointId(2),
+                        position: Point { x: 120.0, y: 10.0 },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let moved = document.canonical_hash_hex();
         assert_ne!(moved, baseline);
         assert_eq!(
-            document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[1].position,
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points[1]
+                .position,
             Point { x: 120.0, y: 10.0 },
         );
         document.undo().unwrap();
@@ -9273,95 +14016,210 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), moved);
 
-        document.submit(
-            transaction(document.revision, vec![Command::SetVectorSubpathClosed {
-                id: NodeId(1),
-                subpath_index: 0,
-                closed: false,
-            }]),
-            Origin::LocalUser,
-        ).unwrap();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetVectorSubpathClosed {
+                        id: NodeId(1),
+                        subpath_index: 0,
+                        closed: false,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let open = document.canonical_hash_hex();
         assert_ne!(open, moved);
-        assert!(!document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].closed);
+        assert!(
+            !document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .closed
+        );
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), moved);
 
-        document.submit(
-            transaction(document.revision, vec![Command::SetVectorPointHandles {
-                id: NodeId(1),
-                point_id: PointId(2),
-                handle_in: Some(Point { x: -12.0, y: 4.0 }),
-                handle_out: Some(Point { x: 18.0, y: -6.0 }),
-                point_type: VectorPointType::Asymmetric,
-            }]),
-            Origin::LocalUser,
-        ).unwrap();
-        let point = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[1];
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetVectorPointHandles {
+                        id: NodeId(1),
+                        point_id: PointId(2),
+                        handle_in: Some(Point { x: -12.0, y: 4.0 }),
+                        handle_out: Some(Point { x: 18.0, y: -6.0 }),
+                        point_type: VectorPointType::Asymmetric,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let point = &document
+            .node(NodeId(1))
+            .unwrap()
+            .vector_path
+            .as_ref()
+            .unwrap()
+            .subpaths[0]
+            .points[1];
         assert_eq!(point.handle_in, Some(Point { x: -12.0, y: 4.0 }));
         assert_eq!(point.point_type, VectorPointType::Asymmetric);
 
         assert_eq!(
             document.submit(
-                transaction(document.revision, vec![Command::MoveVectorPoint {
-                    id: NodeId(1),
-                    point_id: PointId(99),
-                    position: Point { x: 10.0, y: 10.0 },
-                }]),
+                transaction(
+                    document.revision,
+                    vec![Command::MoveVectorPoint {
+                        id: NodeId(1),
+                        point_id: PointId(99),
+                        position: Point { x: 10.0, y: 10.0 },
+                    }]
+                ),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidGeometry),
         );
         assert_eq!(
             document.submit(
-                transaction(document.revision, vec![Command::SetVectorSubpathClosed {
-                    id: NodeId(1),
-                    subpath_index: 99,
-                    closed: false,
-                }]),
+                transaction(
+                    document.revision,
+                    vec![Command::SetVectorSubpathClosed {
+                        id: NodeId(1),
+                        subpath_index: 99,
+                        closed: false,
+                    }]
+                ),
                 Origin::LocalUser,
             ),
             Err(CommandError::InvalidGeometry),
         );
 
-        document.submit(
-            transaction(document.revision, vec![Command::InsertVectorPoint {
-                id: NodeId(1),
-                subpath_index: 0,
-                after_point_id: Some(PointId(2)),
-                point: VectorPoint { id: PointId(4), position: Point { x: 80.0, y: 40.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-            }]),
-            Origin::LocalUser,
-        ).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[2].id, PointId(4));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::InsertVectorPoint {
+                        id: NodeId(1),
+                        subpath_index: 0,
+                        after_point_id: Some(PointId(2)),
+                        point: VectorPoint {
+                            id: PointId(4),
+                            position: Point { x: 80.0, y: 40.0 },
+                            handle_in: None,
+                            handle_out: None,
+                            point_type: VectorPointType::Corner,
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points[2]
+                .id,
+            PointId(4)
+        );
         document.undo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points.len(), 3);
+        assert_eq!(
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points
+                .len(),
+            3
+        );
 
-        document.submit(
-            transaction(document.revision, vec![Command::SetVectorSubpathClosed { id: NodeId(1), subpath_index: 0, closed: false }]),
-            Origin::LocalUser,
-        ).unwrap();
-        document.submit(
-            transaction(document.revision, vec![Command::DeleteVectorPoint { id: NodeId(1), point_id: PointId(2) }]),
-            Origin::LocalUser,
-        ).unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points.len(), 2);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetVectorSubpathClosed {
+                        id: NodeId(1),
+                        subpath_index: 0,
+                        closed: false,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVectorPoint {
+                        id: NodeId(1),
+                        point_id: PointId(2),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn blend_mode_is_hashed_and_undoable() {
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(node(1))]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
         let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
         appearance.blend_mode = BlendMode::Multiply;
 
-        document.submit(transaction(1, vec![Command::SetAppearance { id: NodeId(1), appearance }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let blended = document.canonical_hash_hex();
-        assert_eq!(document.node(NodeId(1)).unwrap().blend_mode, BlendMode::Multiply);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().blend_mode,
+            BlendMode::Multiply
+        );
         assert_ne!(blended, baseline);
         document.undo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().blend_mode, BlendMode::Normal);
+        assert_eq!(
+            document.node(NodeId(1)).unwrap().blend_mode,
+            BlendMode::Normal
+        );
         assert_eq!(document.canonical_hash_hex(), baseline);
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), blended);
@@ -9374,8 +14232,20 @@ mod tests {
             subpaths: vec![VectorSubpath {
                 closed: false,
                 points: vec![
-                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: Some(Point { x: 0.0, y: 10.0 }), point_type: VectorPointType::Asymmetric },
-                    VectorPoint { id: PointId(2), position: Point { x: 10.0, y: 0.0 }, handle_in: Some(Point { x: 0.0, y: 10.0 }), handle_out: None, point_type: VectorPointType::Asymmetric },
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: Some(Point { x: 0.0, y: 10.0 }),
+                        point_type: VectorPointType::Asymmetric,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 10.0, y: 0.0 },
+                        handle_in: Some(Point { x: 0.0, y: 10.0 }),
+                        handle_out: None,
+                        point_type: VectorPointType::Asymmetric,
+                    },
                 ],
             }],
         };
@@ -9383,26 +14253,72 @@ mod tests {
         vector.kind = NodeKind::Vector;
         vector.vector_path = Some(path);
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(vector)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
 
-        document.submit(transaction(1, vec![Command::SplitVectorSegment {
-            id: NodeId(1), subpath_index: 0, after_point_id: PointId(1), t: 0.5, point_id: PointId(3),
-        }]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SplitVectorSegment {
+                        id: NodeId(1),
+                        subpath_index: 0,
+                        after_point_id: PointId(1),
+                        t: 0.5,
+                        point_id: PointId(3),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let split = document.canonical_hash_hex();
-        let points = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].points;
+        let points = &document
+            .node(NodeId(1))
+            .unwrap()
+            .vector_path
+            .as_ref()
+            .unwrap()
+            .subpaths[0]
+            .points;
         assert_eq!(points.len(), 3);
         assert_eq!(points[0].handle_out, Some(Point { x: 0.0, y: 5.0 }));
-        assert_eq!(points[1], VectorPoint { id: PointId(3), position: Point { x: 5.0, y: 7.5 }, handle_in: Some(Point { x: -2.5, y: 0.0 }), handle_out: Some(Point { x: 2.5, y: 0.0 }), point_type: VectorPointType::Asymmetric });
+        assert_eq!(
+            points[1],
+            VectorPoint {
+                id: PointId(3),
+                position: Point { x: 5.0, y: 7.5 },
+                handle_in: Some(Point { x: -2.5, y: 0.0 }),
+                handle_out: Some(Point { x: 2.5, y: 0.0 }),
+                point_type: VectorPointType::Asymmetric
+            }
+        );
         assert_eq!(points[2].handle_in, Some(Point { x: 0.0, y: 5.0 }));
         assert_ne!(split, baseline);
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), baseline);
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), split);
-        assert_eq!(document.submit(transaction(document.revision, vec![Command::SplitVectorSegment {
-            id: NodeId(1), subpath_index: 0, after_point_id: PointId(3), t: 1.0, point_id: PointId(4),
-        }]), Origin::LocalUser), Err(CommandError::InvalidGeometry));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SplitVectorSegment {
+                        id: NodeId(1),
+                        subpath_index: 0,
+                        after_point_id: PointId(3),
+                        t: 1.0,
+                        point_id: PointId(4),
+                    }]
+                ),
+                Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
     }
 
     #[test]
@@ -9410,55 +14326,172 @@ mod tests {
         let path = VectorPath {
             fill_rule: FillRule::NonZero,
             subpaths: vec![
-                VectorSubpath { closed: false, points: vec![
-                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(2), position: Point { x: 10.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                ] },
-                VectorSubpath { closed: false, points: vec![
-                    VectorPoint { id: PointId(3), position: Point { x: 20.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(4), position: Point { x: 30.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                ] },
+                VectorSubpath {
+                    closed: false,
+                    points: vec![
+                        VectorPoint {
+                            id: PointId(1),
+                            position: Point { x: 0.0, y: 0.0 },
+                            handle_in: None,
+                            handle_out: None,
+                            point_type: VectorPointType::Corner,
+                        },
+                        VectorPoint {
+                            id: PointId(2),
+                            position: Point { x: 10.0, y: 0.0 },
+                            handle_in: None,
+                            handle_out: None,
+                            point_type: VectorPointType::Corner,
+                        },
+                    ],
+                },
+                VectorSubpath {
+                    closed: false,
+                    points: vec![
+                        VectorPoint {
+                            id: PointId(3),
+                            position: Point { x: 20.0, y: 0.0 },
+                            handle_in: None,
+                            handle_out: None,
+                            point_type: VectorPointType::Corner,
+                        },
+                        VectorPoint {
+                            id: PointId(4),
+                            position: Point { x: 30.0, y: 0.0 },
+                            handle_in: None,
+                            handle_out: None,
+                            point_type: VectorPointType::Corner,
+                        },
+                    ],
+                },
             ],
         };
         let mut vector = node(1);
         vector.kind = NodeKind::Vector;
         vector.vector_path = Some(path);
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(vector)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
         let baseline = document.canonical_hash_hex();
 
-        document.submit(transaction(1, vec![Command::ConnectVectorEndpoints {
-            id: NodeId(1), first_subpath_index: 0, first_point_id: PointId(2), second_subpath_index: 1, second_point_id: PointId(3),
-        }]), Origin::LocalUser).unwrap();
-        let subpaths = &document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::ConnectVectorEndpoints {
+                        id: NodeId(1),
+                        first_subpath_index: 0,
+                        first_point_id: PointId(2),
+                        second_subpath_index: 1,
+                        second_point_id: PointId(3),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let subpaths = &document
+            .node(NodeId(1))
+            .unwrap()
+            .vector_path
+            .as_ref()
+            .unwrap()
+            .subpaths;
         assert_eq!(subpaths.len(), 1);
-        assert_eq!(subpaths[0].points.iter().map(|point| point.id).collect::<Vec<_>>(), vec![PointId(1), PointId(2), PointId(3), PointId(4)]);
+        assert_eq!(
+            subpaths[0]
+                .points
+                .iter()
+                .map(|point| point.id)
+                .collect::<Vec<_>>(),
+            vec![PointId(1), PointId(2), PointId(3), PointId(4)]
+        );
         assert!(!subpaths[0].closed);
         document.undo().unwrap();
         assert_eq!(document.canonical_hash_hex(), baseline);
         document.redo().unwrap();
-        assert_eq!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths.len(), 1);
+        assert_eq!(
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn connect_vector_endpoints_closes_opposite_ends_of_one_subpath() {
         let path = VectorPath {
             fill_rule: FillRule::NonZero,
-            subpaths: vec![VectorSubpath { closed: false, points: vec![
-                VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                VectorPoint { id: PointId(2), position: Point { x: 20.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                VectorPoint { id: PointId(3), position: Point { x: 10.0, y: 20.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-            ] }],
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                points: vec![
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 20.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(3),
+                        position: Point { x: 10.0, y: 20.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                ],
+            }],
         };
         let mut vector = node(1);
         vector.kind = NodeKind::Vector;
         vector.vector_path = Some(path);
         let mut document = Document::empty();
-        document.submit(transaction(0, vec![Command::Create(vector)]), Origin::LocalUser).unwrap();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(vector)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
 
-        document.submit(transaction(1, vec![Command::ConnectVectorEndpoints {
-            id: NodeId(1), first_subpath_index: 0, first_point_id: PointId(1), second_subpath_index: 0, second_point_id: PointId(3),
-        }]), Origin::LocalUser).unwrap();
-        assert!(document.node(NodeId(1)).unwrap().vector_path.as_ref().unwrap().subpaths[0].closed);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::ConnectVectorEndpoints {
+                        id: NodeId(1),
+                        first_subpath_index: 0,
+                        first_point_id: PointId(1),
+                        second_subpath_index: 0,
+                        second_point_id: PointId(3),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(
+            document
+                .node(NodeId(1))
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .closed
+        );
     }
 }

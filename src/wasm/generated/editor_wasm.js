@@ -172,6 +172,32 @@ export class DocumentEngine {
         return BigInt.asUintN(64, ret[0]);
     }
     /**
+     * Creates a Page at an explicit Canonical PositionId. REST imports use
+     * this path so their source order is not replaced by ID-derived order in
+     * the browser before the equivalent protobuf operation reaches Service.
+     * @param {string} transaction_id
+     * @param {bigint} base_revision
+     * @param {string} page_id
+     * @param {string} name
+     * @param {string} position_id
+     * @returns {bigint}
+     */
+    create_page_at_position(transaction_id, base_revision, page_id, name, position_id) {
+        const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(page_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(position_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_create_page_at_position(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2, ptr3, len3);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return BigInt.asUintN(64, ret[0]);
+    }
+    /**
      * `node_ids` is a comma-separated sequence of validated UUIDs. The format is
      * intentionally narrow because this is an internal Worker-to-WASM boundary.
      * @param {string} transaction_id

@@ -256,45 +256,84 @@ impl<R: CanonicalReducer> DocumentService<R> {
         source_hash: Hash,
         cloned: DocumentState,
     ) -> Result<(), ServiceError> {
-        if cloned.snapshot.len() > MAX_SNAPSHOT_BYTES { return Err(ServiceError::ResourceLimit); }
+        if cloned.snapshot.len() > MAX_SNAPSHOT_BYTES {
+            return Err(ServiceError::ResourceLimit);
+        }
         let mut connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|_| ServiceError::Storage)?;
-        let source = load_document(&transaction, source_document_id)?.ok_or(ServiceError::MissingDocument)?;
-        if source.tenant_id != principal.tenant_id || source.document_hash != source_hash || cloned.tenant_id != principal.tenant_id {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ServiceError::Storage)?;
+        let source = load_document(&transaction, source_document_id)?
+            .ok_or(ServiceError::MissingDocument)?;
+        if source.tenant_id != principal.tenant_id
+            || source.document_hash != source_hash
+            || cloned.tenant_id != principal.tenant_id
+        {
             return Err(ServiceError::PermissionDenied);
         }
-        let editor = transaction.query_row(
-            "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
-            params![source_document_id.as_slice(), principal.actor_id.as_slice()], |_| Ok(()),
-        ).optional().map_err(|_| ServiceError::Storage)?;
-        if editor.is_none() { return Err(ServiceError::PermissionDenied); }
+        let editor = transaction
+            .query_row(
+                "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
+                params![source_document_id.as_slice(), principal.actor_id.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| ServiceError::Storage)?;
+        if editor.is_none() {
+            return Err(ServiceError::PermissionDenied);
+        }
         if load_document(&transaction, cloned.document_id)?.is_some() {
-            return Err(ServiceError::BaseRevisionConflict { expected: 0, actual: 0 });
+            return Err(ServiceError::BaseRevisionConflict {
+                expected: 0,
+                actual: 0,
+            });
         }
         transaction.execute(
             "INSERT INTO documents (document_id, tenant_id, accepted_revision, document_hash, snapshot) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![cloned.document_id.as_slice(), cloned.tenant_id.as_slice(), cloned.accepted_revision, cloned.document_hash.as_slice(), cloned.snapshot],
         ).map_err(|_| ServiceError::Storage)?;
-        transaction.execute(
-            "INSERT INTO document_editors (document_id, actor_id) VALUES (?1, ?2)",
-            params![cloned.document_id.as_slice(), principal.actor_id.as_slice()],
-        ).map_err(|_| ServiceError::Storage)?;
+        transaction
+            .execute(
+                "INSERT INTO document_editors (document_id, actor_id) VALUES (?1, ?2)",
+                params![cloned.document_id.as_slice(), principal.actor_id.as_slice()],
+            )
+            .map_err(|_| ServiceError::Storage)?;
         transaction.commit().map_err(|_| ServiceError::Storage)
     }
 
     /// Removes a document and its operation/editor rows in one durable
     /// transaction. SQLite foreign keys clean the dependent rows.
-    pub fn delete_document(&self, principal: TrustedPrincipal, document_id: Id) -> Result<(), ServiceError> {
+    pub fn delete_document(
+        &self,
+        principal: TrustedPrincipal,
+        document_id: Id,
+    ) -> Result<(), ServiceError> {
         let mut connection = self.connection.lock().map_err(|_| ServiceError::Storage)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|_| ServiceError::Storage)?;
-        let document = load_document(&transaction, document_id)?.ok_or(ServiceError::MissingDocument)?;
-        if document.tenant_id != principal.tenant_id { return Err(ServiceError::PermissionDenied); }
-        let editor = transaction.query_row(
-            "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
-            params![document_id.as_slice(), principal.actor_id.as_slice()], |_| Ok(()),
-        ).optional().map_err(|_| ServiceError::Storage)?;
-        if editor.is_none() { return Err(ServiceError::PermissionDenied); }
-        transaction.execute("DELETE FROM documents WHERE document_id = ?1", params![document_id.as_slice()]).map_err(|_| ServiceError::Storage)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ServiceError::Storage)?;
+        let document =
+            load_document(&transaction, document_id)?.ok_or(ServiceError::MissingDocument)?;
+        if document.tenant_id != principal.tenant_id {
+            return Err(ServiceError::PermissionDenied);
+        }
+        let editor = transaction
+            .query_row(
+                "SELECT 1 FROM document_editors WHERE document_id = ?1 AND actor_id = ?2",
+                params![document_id.as_slice(), principal.actor_id.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| ServiceError::Storage)?;
+        if editor.is_none() {
+            return Err(ServiceError::PermissionDenied);
+        }
+        transaction
+            .execute(
+                "DELETE FROM documents WHERE document_id = ?1",
+                params![document_id.as_slice()],
+            )
+            .map_err(|_| ServiceError::Storage)?;
         transaction.commit().map_err(|_| ServiceError::Storage)
     }
 
@@ -313,8 +352,8 @@ impl<R: CanonicalReducer> DocumentService<R> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ServiceError::Storage)?;
-        let current = load_document(&transaction, state.document_id)?
-            .ok_or(ServiceError::MissingDocument)?;
+        let current =
+            load_document(&transaction, state.document_id)?.ok_or(ServiceError::MissingDocument)?;
         if current.tenant_id != principal.tenant_id || state.tenant_id != principal.tenant_id {
             return Err(ServiceError::PermissionDenied);
         }
@@ -333,10 +372,12 @@ impl<R: CanonicalReducer> DocumentService<R> {
             "UPDATE documents SET accepted_revision = ?2, document_hash = ?3, snapshot = ?4 WHERE document_id = ?1",
             params![state.document_id.as_slice(), state.accepted_revision, state.document_hash.as_slice(), state.snapshot],
         ).map_err(|_| ServiceError::Storage)?;
-        transaction.execute(
-            "DELETE FROM operations WHERE document_id = ?1",
-            params![state.document_id.as_slice()],
-        ).map_err(|_| ServiceError::Storage)?;
+        transaction
+            .execute(
+                "DELETE FROM operations WHERE document_id = ?1",
+                params![state.document_id.as_slice()],
+            )
+            .map_err(|_| ServiceError::Storage)?;
         transaction.commit().map_err(|_| ServiceError::Storage)
     }
 
@@ -626,8 +667,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let service = DocumentService::in_memory(TestReducer { calls }).unwrap();
         service.create_document(state(), &[id(7)]).unwrap();
-        let principal = TrustedPrincipal { tenant_id: id(2), actor_id: id(7) };
-        service.submit(principal, &envelope(9, 0, 99, b"before-reset")).unwrap();
+        let principal = TrustedPrincipal {
+            tenant_id: id(2),
+            actor_id: id(7),
+        };
+        service
+            .submit(principal, &envelope(9, 0, 99, b"before-reset"))
+            .unwrap();
 
         let snapshot = b"reset-root".to_vec();
         let replacement = DocumentState {
@@ -640,7 +686,9 @@ mod tests {
         service.replace_document(principal, replacement).unwrap();
         assert_eq!(service.load_document(id(1)).unwrap().snapshot, snapshot);
 
-        let replay = service.submit(principal, &envelope(9, 0, 99, b"after-reset")).unwrap();
+        let replay = service
+            .submit(principal, &envelope(9, 0, 99, b"after-reset"))
+            .unwrap();
         assert!(!replay.idempotent_replay);
         assert_eq!(replay.accepted_revision, 1);
     }
@@ -707,7 +755,10 @@ mod tests {
             service.create_document(oversized_state, &[id(7)]),
             Err(ServiceError::ResourceLimit)
         );
-        assert_eq!(service.load_document(id(1)), Err(ServiceError::MissingDocument));
+        assert_eq!(
+            service.load_document(id(1)),
+            Err(ServiceError::MissingDocument)
+        );
 
         service.create_document(state(), &[id(7)]).unwrap();
         let principal = TrustedPrincipal {

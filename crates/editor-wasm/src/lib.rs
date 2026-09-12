@@ -4,12 +4,27 @@
 //! canvas/GPU resources while this adapter owns only durable document semantics.
 
 use editor_core::{
-    ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, Command, ConstraintType, Constraints, DEFAULT_PAGE_ID, Document, DocumentId,
-    BlendMode, BooleanOperation, BackgroundBlur, DropShadow, Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, Node, NodeId, NodeKind, OperationEnvelope, OperationId, Origin, Page, PageId, ParametricShape, PointId, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun,
-    Transaction, TransactionId,
+    ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
+    BooleanOperation, Command, ConstraintType, Constraints, DEFAULT_PAGE_ID, Document, DocumentId,
+    DropShadow, Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment,
+    LayoutMode, LayoutSizing, Node, NodeId, NodeKind, OperationEnvelope, OperationId, Origin, Page,
+    PageId, ParagraphStyle, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap,
+    StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun, Transaction, TransactionId,
+    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
-    geometry::{Bounds, DecorativeCapStyle, PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle, StrokeStyle, boolean_vector_paths, decorative_cap_mesh, flatten_vector_path, nearest_vector_path_segment, outline_stroke_mesh, outline_vector_path, outline_vector_path_with_caps, parametric_shape_outline, point_in_polygon, stroke_mesh_for_continuous_rounded_rectangle_with_radii, stroke_mesh_for_dashed_line, stroke_mesh_for_dashed_polyline, stroke_mesh_for_dashed_rounded_rectangle_with_radii, stroke_mesh_for_polyline, stroke_mesh_for_polyline_with_caps, stroke_mesh_for_rounded_rectangle, stroke_mesh_for_rounded_rectangle_with_radii, stroke_meshes_for_per_side_rectangle, stroke_meshes_for_per_side_rectangle_with_dash, vector_path_contains as core_vector_path_contains, vector_path_dashed_stroke_mesh, vector_path_stroke_mesh},
+    geometry::{
+        Bounds, DecorativeCapStyle, PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle,
+        StrokeStyle, boolean_vector_paths, decorative_cap_mesh, flatten_vector_path,
+        nearest_vector_path_segment, outline_stroke_mesh, outline_vector_path,
+        outline_vector_path_with_caps, parametric_shape_outline, point_in_polygon,
+        stroke_mesh_for_continuous_rounded_rectangle_with_radii, stroke_mesh_for_dashed_line,
+        stroke_mesh_for_dashed_polyline, stroke_mesh_for_dashed_rounded_rectangle_with_radii,
+        stroke_mesh_for_polyline, stroke_mesh_for_polyline_with_caps,
+        stroke_mesh_for_rounded_rectangle, stroke_mesh_for_rounded_rectangle_with_radii,
+        stroke_meshes_for_per_side_rectangle, stroke_meshes_for_per_side_rectangle_with_dash,
+        vector_path_contains as core_vector_path_contains, vector_path_dashed_stroke_mesh,
+        vector_path_stroke_mesh,
+    },
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -237,6 +252,13 @@ impl DocumentEngine {
         let mut commands = Vec::new();
         for command in batch {
             match command {
+                BatchCommand::CreatePage { page } => {
+                    commands.push(Command::CreatePage(Page {
+                        id: parse_page_id(&page.id)?,
+                        name: page.name,
+                        position: parse_position_id(&page.position_id)?,
+                    }));
+                }
                 // Resource Index admission must be reducible alongside the
                 // nodes that reference it. This lets paste remain one Core
                 // transaction instead of briefly exposing an orphan asset or
@@ -277,14 +299,21 @@ impl DocumentEngine {
                         commands.push(Command::CreateInPage { page_id, node });
                     }
                     if let Some(properties) = text_properties {
-                        commands.push(Command::SetTextProperties { id: node_id, properties });
+                        commands.push(Command::SetTextProperties {
+                            id: node_id,
+                            properties,
+                        });
                     }
                     if auto_layout != AutoLayout::default() {
-                        commands.push(Command::SetAutoLayout { id: node_id, layout: auto_layout });
+                        commands.push(Command::SetAutoLayout {
+                            id: node_id,
+                            layout: auto_layout,
+                        });
                     }
                 }
                 BatchCommand::Restore { node } => {
-                    let text_properties = text_properties_from_projection(node.text_properties.as_ref())?;
+                    let text_properties =
+                        text_properties_from_projection(node.text_properties.as_ref())?;
                     let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
                     let page_id = node
                         .page_id
@@ -310,7 +339,10 @@ impl DocumentEngine {
                             Some(Command::RestoreNode { node, .. }) => node.id,
                             _ => return Err(JsValue::from_str("INVALID_TRANSACTION")),
                         };
-                        commands.push(Command::SetAutoLayout { id, layout: auto_layout });
+                        commands.push(Command::SetAutoLayout {
+                            id,
+                            layout: auto_layout,
+                        });
                     }
                 }
                 // The Worker resolves a partial Inspector patch to this complete node
@@ -379,7 +411,9 @@ impl DocumentEngine {
                     // that matrix before validating its derived geometry;
                     // otherwise the legacy Group gate rejects a valid nested
                     // Group as an invalid edit.
-                    if matches!(node.kind, NodeKind::Group | NodeKind::BooleanOperation) && node.relative_transform.is_some() {
+                    if matches!(node.kind, NodeKind::Group | NodeKind::BooleanOperation)
+                        && node.relative_transform.is_some()
+                    {
                         commands.extend([appearance, geometry, rename]);
                     } else {
                         commands.extend([geometry, rename, appearance]);
@@ -388,7 +422,10 @@ impl DocumentEngine {
                         commands.push(Command::SetVectorPath { id: node.id, path });
                     }
                     if let Some(operation) = boolean_operation {
-                        commands.push(Command::SetBooleanOperation { id: node.id, operation });
+                        commands.push(Command::SetBooleanOperation {
+                            id: node.id,
+                            operation,
+                        });
                     }
                     if node.kind != NodeKind::Text {
                         if self.document.asset_for_node(node.id) != asset_id {
@@ -413,7 +450,10 @@ impl DocumentEngine {
                         return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES"));
                     }
                     if auto_layout != self.document.auto_layout_for_node(node.id) {
-                        commands.push(Command::SetAutoLayout { id: node.id, layout: auto_layout });
+                        commands.push(Command::SetAutoLayout {
+                            id: node.id,
+                            layout: auto_layout,
+                        });
                     }
                 }
                 BatchCommand::MoveVectorPoint { id, point_id, x, y } => {
@@ -424,22 +464,41 @@ impl DocumentEngine {
                             .map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?,
                     });
                 }
-                BatchCommand::SetVectorSubpathClosed { id, subpath_index, closed } => {
+                BatchCommand::SetVectorSubpathClosed {
+                    id,
+                    subpath_index,
+                    closed,
+                } => {
                     commands.push(Command::SetVectorSubpathClosed {
                         id: parse_id(&id)?,
                         subpath_index,
                         closed,
                     });
                 }
-                BatchCommand::InsertVectorPoint { id, subpath_index, after_point_id, point } => {
+                BatchCommand::InsertVectorPoint {
+                    id,
+                    subpath_index,
+                    after_point_id,
+                    point,
+                } => {
                     commands.push(Command::InsertVectorPoint {
                         id: parse_id(&id)?,
                         subpath_index,
-                        after_point_id: after_point_id.as_deref().map(parse_id).transpose()?.map(|id| PointId(id.0)),
+                        after_point_id: after_point_id
+                            .as_deref()
+                            .map(parse_id)
+                            .transpose()?
+                            .map(|id| PointId(id.0)),
                         point: vector_point_from_projection(point)?,
                     });
                 }
-                BatchCommand::SplitVectorSegment { id, subpath_index, after_point_id, t, point_id } => {
+                BatchCommand::SplitVectorSegment {
+                    id,
+                    subpath_index,
+                    after_point_id,
+                    t,
+                    point_id,
+                } => {
                     commands.push(Command::SplitVectorSegment {
                         id: parse_id(&id)?,
                         subpath_index,
@@ -448,7 +507,13 @@ impl DocumentEngine {
                         point_id: PointId(parse_id(&point_id)?.0),
                     });
                 }
-                BatchCommand::ConnectVectorEndpoints { id, first_subpath_index, first_point_id, second_subpath_index, second_point_id } => {
+                BatchCommand::ConnectVectorEndpoints {
+                    id,
+                    first_subpath_index,
+                    first_point_id,
+                    second_subpath_index,
+                    second_point_id,
+                } => {
                     commands.push(Command::ConnectVectorEndpoints {
                         id: parse_id(&id)?,
                         first_subpath_index,
@@ -458,7 +523,16 @@ impl DocumentEngine {
                     });
                 }
                 BatchCommand::SetMask { id, enabled } => {
-                    commands.push(Command::SetMask { id: parse_id(&id)?, enabled });
+                    commands.push(Command::SetMask {
+                        id: parse_id(&id)?,
+                        enabled,
+                    });
+                }
+                BatchCommand::SetExtensions { id, extensions } => {
+                    commands.push(Command::SetNodeExtensions {
+                        id: parse_id(&id)?,
+                        extensions,
+                    });
                 }
                 BatchCommand::DeleteVectorPoint { id, point_id } => {
                     commands.push(Command::DeleteVectorPoint {
@@ -466,16 +540,27 @@ impl DocumentEngine {
                         point_id: PointId(parse_id(&point_id)?.0),
                     });
                 }
-                BatchCommand::SetVectorPointHandles { id, point_id, handle_in, handle_out, point_type } => {
+                BatchCommand::SetVectorPointHandles {
+                    id,
+                    point_id,
+                    handle_in,
+                    handle_out,
+                    point_type,
+                } => {
                     let point_type = match point_type.as_str() {
                         "corner" => VectorPointType::Corner,
                         "mirrored" => VectorPointType::Mirrored,
                         "asymmetric" => VectorPointType::Asymmetric,
                         _ => return Err(JsValue::from_str("INVALID_VECTOR_POINT_TYPE")),
                     };
-                    let handle = |value: Option<ProjectionVectorHandle>| value
-                        .map(|handle| Point::new(handle.x, handle.y).map_err(|_| JsValue::from_str("INVALID_VECTOR_HANDLE")))
-                        .transpose();
+                    let handle = |value: Option<ProjectionVectorHandle>| {
+                        value
+                            .map(|handle| {
+                                Point::new(handle.x, handle.y)
+                                    .map_err(|_| JsValue::from_str("INVALID_VECTOR_HANDLE"))
+                            })
+                            .transpose()
+                    };
                     commands.push(Command::SetVectorPointHandles {
                         id: parse_id(&id)?,
                         point_id: PointId(parse_id(&point_id)?.0),
@@ -685,7 +770,8 @@ struct ProjectionNode {
     stroke_width: f64,
     /// v16 persists Figma-compatible open-path endpoint styles, v17 adds
     /// independent closed-shape corner radii, v18 adds continuous corner
-    /// smoothing, and v19 adds ordered fill/stroke stacks. Earlier snapshots
+    /// smoothing, v19 adds ordered fill/stroke stacks, and v21 adds child
+    /// Auto Layout `alignSelf`. Earlier snapshots
     /// migrate to their singular-paint defaults.
     #[serde(default = "default_stroke_cap")]
     stroke_cap_start: String,
@@ -788,6 +874,10 @@ struct ProjectionAutoLayout {
     mode: String,
     padding: [f64; 4],
     item_spacing: f64,
+    #[serde(default)]
+    track_spacing: Option<f64>,
+    #[serde(default)]
+    track_alignment: Option<String>,
     wrap: bool,
     primary_alignment: String,
     counter_alignment: String,
@@ -803,6 +893,8 @@ struct ProjectionAutoLayout {
     max_height: Option<f64>,
     #[serde(default)]
     absolute: bool,
+    #[serde(default)]
+    align_self: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -854,11 +946,21 @@ struct ProjectionVectorHandle {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ProjectionTransform { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64 }
+struct ProjectionTransform {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectionConstraints { horizontal: String, vertical: String }
+struct ProjectionConstraints {
+    horizontal: String,
+    vertical: String,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -923,15 +1025,28 @@ struct ProjectionDropShadow {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectionLayerBlur { radius: f64, visible: bool }
+struct ProjectionLayerBlur {
+    radius: f64,
+    visible: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectionInnerShadow { offset_x: f64, offset_y: f64, blur_radius: f64, spread: f64, color: ProjectionColor, visible: bool }
+struct ProjectionInnerShadow {
+    offset_x: f64,
+    offset_y: f64,
+    blur_radius: f64,
+    spread: f64,
+    color: ProjectionColor,
+    visible: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectionBackgroundBlur { radius: f64, visible: bool }
+struct ProjectionBackgroundBlur {
+    radius: f64,
+    visible: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -968,8 +1083,15 @@ struct ProjectionGradientStop {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum BatchCommand {
+    CreatePage {
+        page: ProjectionPage,
+    },
     RegisterAsset {
         asset: ProjectionAsset,
     },
@@ -1016,6 +1138,10 @@ enum BatchCommand {
     SetMask {
         id: String,
         enabled: bool,
+    },
+    SetExtensions {
+        id: String,
+        extensions: std::collections::BTreeMap<String, Vec<u8>>,
     },
     DeleteVectorPoint {
         id: String,
@@ -1110,7 +1236,7 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let snapshot = CoreSnapshot {
-            schema_version: 20,
+            schema_version: 21,
             document_id: format_document_id(self.document.id()),
             revision: self.document.revision,
             can_undo: self.document.can_undo(),
@@ -1215,10 +1341,39 @@ impl DocumentEngine {
                         NodeKind::Section => makefigma_renderer_wgpu::SceneNodeKind::Section,
                         // Canvas owns generated parametric outlines until the
                         // GPU path gains matching primitive representations.
-                        NodeKind::Polygon | NodeKind::Star => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Polygon | NodeKind::Star => {
+                            makefigma_renderer_wgpu::SceneNodeKind::Group
+                        }
                         NodeKind::Vector => makefigma_renderer_wgpu::SceneNodeKind::Group,
                         NodeKind::BooleanOperation => makefigma_renderer_wgpu::SceneNodeKind::Group,
                         NodeKind::Slice => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::CodeBlock => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Component => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Instance => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Slot => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::ComponentSet => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Connector => makefigma_renderer_wgpu::SceneNodeKind::Line,
+                        NodeKind::Embed => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Highlight => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::InteractiveSlideElement => {
+                            makefigma_renderer_wgpu::SceneNodeKind::Rectangle
+                        }
+                        NodeKind::LinkUnfurl => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Media => makefigma_renderer_wgpu::SceneNodeKind::Image,
+                        NodeKind::ShapeWithText => {
+                            makefigma_renderer_wgpu::SceneNodeKind::Rectangle
+                        }
+                        NodeKind::SlideGrid => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Slide => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::SlideRow => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Stamp => makefigma_renderer_wgpu::SceneNodeKind::Ellipse,
+                        NodeKind::Sticky => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Table => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::TableCell => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::TextPath => makefigma_renderer_wgpu::SceneNodeKind::Text,
+                        NodeKind::TransformGroup => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::WashiTape => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Widget => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
                     },
                     bounds: makefigma_renderer_wgpu::Rect {
                         x: node.x as f32,
@@ -1267,7 +1422,10 @@ impl DocumentEngine {
                 if !node.visible {
                     return None;
                 }
-                if matches!(node.kind, NodeKind::Polygon | NodeKind::Star | NodeKind::Vector) {
+                if matches!(
+                    node.kind,
+                    NodeKind::Polygon | NodeKind::Star | NodeKind::Vector
+                ) {
                     return None;
                 }
                 let (Paint::Solid(fill), Paint::Solid(stroke)) = (&node.fill, &node.stroke) else {
@@ -1275,7 +1433,9 @@ impl DocumentEngine {
                 };
                 let stroke_rgba = css_executor_rgba(*stroke, node.opacity);
                 if matches!(node.kind, NodeKind::Frame | NodeKind::Rectangle)
-                    && (!node.stroke_weights.is_empty() || !node.corner_radii.is_empty() || node.corner_smoothing != 0.0)
+                    && (!node.stroke_weights.is_empty()
+                        || !node.corner_radii.is_empty()
+                        || node.corner_smoothing != 0.0)
                 {
                     return None;
                 }
@@ -1297,10 +1457,41 @@ impl DocumentEngine {
                         NodeKind::Line => makefigma_renderer_wgpu::SceneNodeKind::Line,
                         NodeKind::Group => makefigma_renderer_wgpu::SceneNodeKind::Group,
                         NodeKind::Section => makefigma_renderer_wgpu::SceneNodeKind::Section,
-                        NodeKind::Polygon | NodeKind::Star => unreachable!("parametric shapes use Canvas fallback"),
+                        NodeKind::Polygon | NodeKind::Star => {
+                            unreachable!("parametric shapes use Canvas fallback")
+                        }
                         NodeKind::Vector => unreachable!("Vector paths use Canvas fallback"),
-                        NodeKind::BooleanOperation => unreachable!("Boolean paths use Canvas fallback"),
+                        NodeKind::BooleanOperation => {
+                            unreachable!("Boolean paths use Canvas fallback")
+                        }
                         NodeKind::Slice => unreachable!("Slice never paints"),
+                        NodeKind::CodeBlock => unreachable!("Code blocks use Canvas fallback"),
+                        NodeKind::Component => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Instance => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Slot => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::ComponentSet => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::Connector => makefigma_renderer_wgpu::SceneNodeKind::Line,
+                        NodeKind::Embed => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Highlight => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::InteractiveSlideElement => {
+                            makefigma_renderer_wgpu::SceneNodeKind::Rectangle
+                        }
+                        NodeKind::LinkUnfurl => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Media => makefigma_renderer_wgpu::SceneNodeKind::Image,
+                        NodeKind::ShapeWithText => {
+                            makefigma_renderer_wgpu::SceneNodeKind::Rectangle
+                        }
+                        NodeKind::SlideGrid => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Slide => makefigma_renderer_wgpu::SceneNodeKind::Frame,
+                        NodeKind::SlideRow => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::Stamp => makefigma_renderer_wgpu::SceneNodeKind::Ellipse,
+                        NodeKind::Sticky => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Table => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::TableCell => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::TextPath => makefigma_renderer_wgpu::SceneNodeKind::Text,
+                        NodeKind::TransformGroup => makefigma_renderer_wgpu::SceneNodeKind::Group,
+                        NodeKind::WashiTape => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
+                        NodeKind::Widget => makefigma_renderer_wgpu::SceneNodeKind::Rectangle,
                     },
                     bounds: makefigma_renderer_wgpu::Rect {
                         x: node.x as f32,
@@ -1367,14 +1558,16 @@ impl DocumentEngine {
     pub fn load_snapshot_json(&mut self, value: &str) -> Result<u64, JsValue> {
         let snapshot = serde_json::from_str::<CoreSnapshot>(value)
             .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))?;
-        if !(1..=20).contains(&snapshot.schema_version) {
+        if !(1..=21).contains(&snapshot.schema_version) {
             return Err(JsValue::from_str("UNSUPPORTED_CORE_SNAPSHOT"));
         }
         let mut document = Document::with_id(parse_document_id(&snapshot.document_id)?);
         document.seed_color_profile(parse_document_color_profile(&snapshot.color_profile)?);
         for page in snapshot.pages.clone().unwrap_or_default() {
             let page = page_from_projection(page)?;
-            if page.id != DEFAULT_PAGE_ID {
+            if page.id == DEFAULT_PAGE_ID {
+                document.seed_default_page(page).map_err(core_error)?;
+            } else {
                 document.seed_page(page).map_err(core_error)?;
             }
         }
@@ -1429,7 +1622,8 @@ impl DocumentEngine {
         // shape nodes (both use the existing node-level AssetId field).
         // v16 adds StrokeCap endpoint semantics to open paths, v17 adds
         // independent TL/TR/BR/BL corner radii, v18 adds continuous corner
-        // smoothing, v19 adds ordered fill/stroke stacks, and v20 adds Auto Layout.
+        // smoothing, v19 adds ordered fill/stroke stacks, v20 adds Auto Layout,
+        // and v21 adds an optional child cross-axis alignment override.
         // v10 snapshots verify against the deterministic legacy DocumentId(0); v14
         // persists every current field.
         if snapshot.schema_version >= 16
@@ -1449,6 +1643,11 @@ impl DocumentEngine {
     pub fn seed_batch_json(&mut self, value: &str) -> Result<u64, JsValue> {
         let batch = serde_json::from_str::<Vec<BatchCommand>>(value)
             .map_err(|_| JsValue::from_str("INVALID_SEED_BATCH"))?;
+        // A Canonical batch defers `SetMask` until every sibling has been
+        // created. Preserve that ordering during one-time hydration too: Core
+        // validates a mask source against its following sibling, while the
+        // seed API deliberately remains history-free.
+        let mut deferred_masks = Vec::new();
         for command in batch {
             match command {
                 BatchCommand::Create { node } => {
@@ -1470,7 +1669,8 @@ impl DocumentEngine {
                     let node = node_from_projection(node)?;
                     let node_id = node.id;
                     if let Some(asset_id) = asset_id {
-                        self.document.seed_image_node_on_page(page_id, node, asset_id)
+                        self.document
+                            .seed_image_node_on_page(page_id, node, asset_id)
                     } else {
                         self.document.seed_node_on_page(page_id, node)
                     }
@@ -1484,7 +1684,11 @@ impl DocumentEngine {
                         .seed_auto_layout(node_id, auto_layout)
                         .map_err(core_error)?;
                 }
-                BatchCommand::RegisterAsset { .. }
+                BatchCommand::SetMask { id, enabled } => {
+                    deferred_masks.push((parse_id(&id)?, enabled));
+                }
+                BatchCommand::CreatePage { .. }
+                | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::MoveVectorPoint { .. }
@@ -1492,9 +1696,9 @@ impl DocumentEngine {
                 | BatchCommand::InsertVectorPoint { .. }
                 | BatchCommand::SplitVectorSegment { .. }
                 | BatchCommand::ConnectVectorEndpoints { .. }
-                | BatchCommand::SetMask { .. }
                 | BatchCommand::DeleteVectorPoint { .. }
                 | BatchCommand::SetVectorPointHandles { .. }
+                | BatchCommand::SetExtensions { .. }
                 | BatchCommand::Reposition { .. }
                 | BatchCommand::Reparent { .. }
                 | BatchCommand::Delete { .. } => {
@@ -1505,7 +1709,12 @@ impl DocumentEngine {
         // A seed batch is the one-time creation path for fixtures and legacy
         // projections. It has no user transaction, so explicitly run the same
         // deterministic placement pass after all nested Frame layouts exist.
-        self.document.reflow_seeded_auto_layout().map_err(core_error)?;
+        self.document
+            .reflow_seeded_auto_layout()
+            .map_err(core_error)?;
+        for (id, enabled) in deferred_masks {
+            self.document.seed_mask(id, enabled).map_err(core_error)?;
+        }
         Ok(self.document.revision)
     }
 
@@ -1570,6 +1779,30 @@ impl DocumentEngine {
                 id: page_id,
                 name: name.into(),
                 position: PositionId::for_node(NodeId(page_id.0)),
+            },
+        )
+        .map_err(core_error)
+    }
+
+    /// Creates a Page at an explicit Canonical PositionId. REST imports use
+    /// this path so their source order is not replaced by ID-derived order in
+    /// the browser before the equivalent protobuf operation reaches Service.
+    #[wasm_bindgen]
+    pub fn create_page_at_position(
+        &mut self,
+        transaction_id: &str,
+        base_revision: u64,
+        page_id: &str,
+        name: &str,
+        position_id: &str,
+    ) -> Result<u64, JsValue> {
+        self.submit_create_page(
+            parse_id(transaction_id)?,
+            base_revision,
+            Page {
+                id: parse_page_id(page_id)?,
+                name: name.into(),
+                position: parse_position_id(position_id)?,
             },
         )
         .map_err(core_error)
@@ -1880,15 +2113,15 @@ impl DocumentEngine {
                 opacity,
                 blend_mode: BlendMode::Normal,
                 drop_shadow: None,
-            effect_stack: Vec::new(),
+                effect_stack: Vec::new(),
                 corner_radius,
                 corner_radii: Vec::new(),
                 corner_smoothing: 0.0,
-            constraints: None,
+                constraints: None,
                 visible,
                 locked,
                 contents_hidden: false,
-            clips_content: Some(false),
+                clips_content: Some(false),
             },
             text.into(),
         )
@@ -2034,13 +2267,19 @@ pub fn vector_path_nearest_segment_json(
         Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?,
         tolerance,
         max_distance,
-    ).map_err(|_| JsValue::from_str("INVALID_VECTOR_GEOMETRY"))?;
-    Ok(hit.map(|hit| serde_json::json!({
-        "subpathIndex": hit.subpath_index,
-        "afterPointIndex": hit.after_point_index,
-        "t": hit.t,
-        "distance": hit.distance,
-    })).unwrap_or(serde_json::Value::Null).to_string())
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_GEOMETRY"))?;
+    Ok(hit
+        .map(|hit| {
+            serde_json::json!({
+                "subpathIndex": hit.subpath_index,
+                "afterPointIndex": hit.after_point_index,
+                "t": hit.t,
+                "distance": hit.distance,
+            })
+        })
+        .unwrap_or(serde_json::Value::Null)
+        .to_string())
 }
 
 /// Returns the one Core-derived local contour for an ADR 0026 Polygon or Star.
@@ -2055,8 +2294,16 @@ pub fn parametric_shape_outline_json(
     let projection = serde_json::from_str::<ProjectionParametricShape>(shape_json)
         .map_err(|_| JsValue::from_str("INVALID_PARAMETRIC_SHAPE"))?;
     let shape = match projection {
-        ProjectionParametricShape::Polygon { point_count } => ParametricShape::Polygon { point_count },
-        ProjectionParametricShape::Star { point_count, inner_ratio } => ParametricShape::Star { point_count, inner_ratio },
+        ProjectionParametricShape::Polygon { point_count } => {
+            ParametricShape::Polygon { point_count }
+        }
+        ProjectionParametricShape::Star {
+            point_count,
+            inner_ratio,
+        } => ParametricShape::Star {
+            point_count,
+            inner_ratio,
+        },
     };
     let points = parametric_shape_outline(width, height, shape)
         .map_err(|_| JsValue::from_str("INVALID_PARAMETRIC_GEOMETRY"))?;
@@ -2068,7 +2315,8 @@ pub fn parametric_shape_outline_json(
             "min": [bounds.min.x, bounds.min.y],
             "max": [bounds.max.x, bounds.max.y],
         },
-    }).to_string())
+    })
+    .to_string())
 }
 
 /// Canonical non-zero fill containment for editable Polygon/Star nodes. The
@@ -2084,13 +2332,25 @@ pub fn parametric_shape_contains_point_json(
     let projection = serde_json::from_str::<ProjectionParametricShape>(shape_json)
         .map_err(|_| JsValue::from_str("INVALID_PARAMETRIC_SHAPE"))?;
     let shape = match projection {
-        ProjectionParametricShape::Polygon { point_count } => ParametricShape::Polygon { point_count },
-        ProjectionParametricShape::Star { point_count, inner_ratio } => ParametricShape::Star { point_count, inner_ratio },
+        ProjectionParametricShape::Polygon { point_count } => {
+            ParametricShape::Polygon { point_count }
+        }
+        ProjectionParametricShape::Star {
+            point_count,
+            inner_ratio,
+        } => ParametricShape::Star {
+            point_count,
+            inner_ratio,
+        },
     };
     let outline = parametric_shape_outline(width, height, shape)
         .map_err(|_| JsValue::from_str("INVALID_PARAMETRIC_GEOMETRY"))?;
     let point = Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_PARAMETRIC_POINT"))?;
-    Ok(point_in_polygon(point, &outline, editor_core::geometry::FillRule::NonZero))
+    Ok(point_in_polygon(
+        point,
+        &outline,
+        editor_core::geometry::FillRule::NonZero,
+    ))
 }
 
 /// Returns one transient Boolean outline for two or more VectorPath operands.
@@ -2136,8 +2396,12 @@ pub fn vector_path_contains_json(
     let path = serde_json::from_str::<ProjectionVectorPath>(path_json)
         .map_err(|_| JsValue::from_str("INVALID_VECTOR_PATH"))?;
     let path = vector_path_from_projection(path)?;
-    core_vector_path_contains(&path, Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?, tolerance)
-        .map_err(|_| JsValue::from_str("INVALID_VECTOR_GEOMETRY"))
+    core_vector_path_contains(
+        &path,
+        Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?,
+        tolerance,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_GEOMETRY"))
 }
 
 /// Projects the Core VectorPath stroke mesh for Canvas fallback or a future
@@ -2155,12 +2419,17 @@ pub fn vector_path_stroke_mesh_json(
     let path = serde_json::from_str::<ProjectionVectorPath>(path_json)
         .map_err(|_| JsValue::from_str("INVALID_VECTOR_PATH"))?;
     let path = vector_path_from_projection(path)?;
-    let mesh = vector_path_stroke_mesh(&path, tolerance, StrokeStyle {
-        width,
-        cap: parse_geometry_stroke_cap(cap)?,
-        join: parse_geometry_stroke_join(join)?,
-        miter_limit,
-    }).map_err(|_| JsValue::from_str("INVALID_VECTOR_STROKE"))?;
+    let mesh = vector_path_stroke_mesh(
+        &path,
+        tolerance,
+        StrokeStyle {
+            width,
+            cap: parse_geometry_stroke_cap(cap)?,
+            join: parse_geometry_stroke_join(join)?,
+            miter_limit,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_STROKE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| serde_json::json!({ "min": [bounds.min.x, bounds.min.y], "max": [bounds.max.x, bounds.max.y] })),
@@ -2182,12 +2451,17 @@ pub fn vector_path_outline_json(
     let path = serde_json::from_str::<ProjectionVectorPath>(path_json)
         .map_err(|_| JsValue::from_str("INVALID_VECTOR_PATH"))?;
     let path = vector_path_from_projection(path)?;
-    let outlined = outline_vector_path(&path, tolerance, StrokeStyle {
-        width,
-        cap: parse_geometry_stroke_cap(cap)?,
-        join: parse_geometry_stroke_join(join)?,
-        miter_limit,
-    }).map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?;
+    let outlined = outline_vector_path(
+        &path,
+        tolerance,
+        StrokeStyle {
+            width,
+            cap: parse_geometry_stroke_cap(cap)?,
+            join: parse_geometry_stroke_join(join)?,
+            miter_limit,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?;
     Ok(serde_json::json!({
         "fillRule": "nonZero",
         "subpaths": outlined.subpaths.into_iter().map(|subpath| serde_json::json!({
@@ -2216,12 +2490,18 @@ pub fn vector_path_outline_with_caps_json(
         .map_err(|_| JsValue::from_str("INVALID_VECTOR_PATH"))?;
     let path = vector_path_from_projection(path)?;
     let cap = parse_geometry_stroke_cap(start_cap)?;
-    let outlined = outline_vector_path_with_caps(&path, tolerance, StrokeStyle {
-        width,
+    let outlined = outline_vector_path_with_caps(
+        &path,
+        tolerance,
+        StrokeStyle {
+            width,
+            cap,
+            join: parse_geometry_stroke_join(join)?,
+            miter_limit,
+        },
         cap,
-        join: parse_geometry_stroke_join(join)?,
-        miter_limit,
-    }, cap, parse_geometry_stroke_cap(end_cap)?)
+        parse_geometry_stroke_cap(end_cap)?,
+    )
     .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?;
     Ok(serde_json::json!({
         "fillRule": "nonZero",
@@ -2250,10 +2530,17 @@ pub fn vector_path_dashed_outline_json(
     let path = vector_path_from_projection(path)?;
     let dash = serde_json::from_str::<Vec<f64>>(dash_json)
         .map_err(|_| JsValue::from_str("INVALID_STROKE_DASH"))?;
-    let style = StrokeStyle { width, cap: parse_geometry_stroke_cap(cap)?, join: parse_geometry_stroke_join(join)?, miter_limit };
-    let outlined = outline_stroke_mesh(vector_path_dashed_stroke_mesh(&path, tolerance, style, &dash)
-        .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?)
-        .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?;
+    let style = StrokeStyle {
+        width,
+        cap: parse_geometry_stroke_cap(cap)?,
+        join: parse_geometry_stroke_join(join)?,
+        miter_limit,
+    };
+    let outlined = outline_stroke_mesh(
+        vector_path_dashed_stroke_mesh(&path, tolerance, style, &dash)
+            .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_OUTLINE"))?;
     Ok(serde_json::json!({ "fillRule": "nonZero", "subpaths": outlined.subpaths.into_iter().map(|subpath| serde_json::json!({ "closed": subpath.closed, "points": subpath.points.into_iter().map(|point| [point.x, point.y]).collect::<Vec<_>>() })).collect::<Vec<_>>() }).to_string())
 }
 
@@ -2271,12 +2558,17 @@ pub fn vector_path_stroke_contains_json(
     let path = serde_json::from_str::<ProjectionVectorPath>(path_json)
         .map_err(|_| JsValue::from_str("INVALID_VECTOR_PATH"))?;
     let path = vector_path_from_projection(path)?;
-    let mesh = vector_path_stroke_mesh(&path, tolerance, StrokeStyle {
-        width,
-        cap: parse_geometry_stroke_cap(cap)?,
-        join: parse_geometry_stroke_join(join)?,
-        miter_limit,
-    }).map_err(|_| JsValue::from_str("INVALID_VECTOR_STROKE"))?;
+    let mesh = vector_path_stroke_mesh(
+        &path,
+        tolerance,
+        StrokeStyle {
+            width,
+            cap: parse_geometry_stroke_cap(cap)?,
+            join: parse_geometry_stroke_join(join)?,
+            miter_limit,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_VECTOR_STROKE"))?;
     Ok(mesh.contains(Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?))
 }
 
@@ -2411,14 +2703,42 @@ pub fn line_outline_json(
         "circleFilled" => Some(DecorativeCapStyle::CircleFilled),
         _ => None,
     };
-    let start = standard(start_cap).or_else(|| decorative(start_cap).map(|_| StrokeCapStyle::Butt)).ok_or_else(|| JsValue::from_str("INVALID_LINE_CAP"))?;
-    let end = standard(end_cap).or_else(|| decorative(end_cap).map(|_| StrokeCapStyle::Butt)).ok_or_else(|| JsValue::from_str("INVALID_LINE_CAP"))?;
-    let style = StrokeStyle { width: stroke_width, cap: StrokeCapStyle::Butt, join: parse_geometry_stroke_join(join)?, miter_limit };
-    let mut mesh = stroke_mesh_for_polyline_with_caps(&[Point { x: 0.0, y: 0.0 }, Point { x: width, y: 0.0 }], style, start, end, false)
-        .map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?;
-    if let Some(cap) = decorative(start_cap) { mesh.triangles.extend(decorative_cap_mesh(cap, 0.0, -1.0, stroke_width).map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?.triangles); }
-    if let Some(cap) = decorative(end_cap) { mesh.triangles.extend(decorative_cap_mesh(cap, width, 1.0, stroke_width).map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?.triangles); }
-    let outlined = outline_stroke_mesh(mesh).map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?;
+    let start = standard(start_cap)
+        .or_else(|| decorative(start_cap).map(|_| StrokeCapStyle::Butt))
+        .ok_or_else(|| JsValue::from_str("INVALID_LINE_CAP"))?;
+    let end = standard(end_cap)
+        .or_else(|| decorative(end_cap).map(|_| StrokeCapStyle::Butt))
+        .ok_or_else(|| JsValue::from_str("INVALID_LINE_CAP"))?;
+    let style = StrokeStyle {
+        width: stroke_width,
+        cap: StrokeCapStyle::Butt,
+        join: parse_geometry_stroke_join(join)?,
+        miter_limit,
+    };
+    let mut mesh = stroke_mesh_for_polyline_with_caps(
+        &[Point { x: 0.0, y: 0.0 }, Point { x: width, y: 0.0 }],
+        style,
+        start,
+        end,
+        false,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?;
+    if let Some(cap) = decorative(start_cap) {
+        mesh.triangles.extend(
+            decorative_cap_mesh(cap, 0.0, -1.0, stroke_width)
+                .map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?
+                .triangles,
+        );
+    }
+    if let Some(cap) = decorative(end_cap) {
+        mesh.triangles.extend(
+            decorative_cap_mesh(cap, width, 1.0, stroke_width)
+                .map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?
+                .triangles,
+        );
+    }
+    let outlined =
+        outline_stroke_mesh(mesh).map_err(|_| JsValue::from_str("INVALID_LINE_OUTLINE"))?;
     Ok(serde_json::json!({ "fillRule": "nonZero", "subpaths": outlined.subpaths.into_iter().map(|subpath| serde_json::json!({ "closed": subpath.closed, "points": subpath.points.into_iter().map(|point| [point.x, point.y]).collect::<Vec<_>>() })).collect::<Vec<_>>() }).to_string())
 }
 
@@ -2441,7 +2761,8 @@ pub fn dashed_line_outline_json(
     };
     let mesh = stroke_mesh_for_dashed_line(width, style, &dash_pattern)
         .map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_OUTLINE"))?;
-    let outlined = outline_stroke_mesh(mesh).map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_OUTLINE"))?;
+    let outlined =
+        outline_stroke_mesh(mesh).map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_OUTLINE"))?;
     Ok(serde_json::json!({ "fillRule": "nonZero", "subpaths": outlined.subpaths.into_iter().map(|subpath| serde_json::json!({ "closed": subpath.closed, "points": subpath.points.into_iter().map(|point| [point.x, point.y]).collect::<Vec<_>>() })).collect::<Vec<_>>() }).to_string())
 }
 
@@ -2470,8 +2791,17 @@ pub fn stroke_mesh_for_dashed_line_json(
         "round" => StrokeJoinStyle::Round,
         _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
     };
-    let mesh = stroke_mesh_for_dashed_line(width, StrokeStyle { width: stroke_width, cap, join, miter_limit }, &dash_pattern)
-        .map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_STROKE_STYLE"))?;
+    let mesh = stroke_mesh_for_dashed_line(
+        width,
+        StrokeStyle {
+            width: stroke_width,
+            cap,
+            join,
+            miter_limit,
+        },
+        &dash_pattern,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_DASHED_LINE_STROKE_STYLE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| serde_json::json!({
@@ -2495,7 +2825,8 @@ pub fn stroke_mesh_for_dashed_polyline_json(
 ) -> Result<String, JsValue> {
     let raw_points = serde_json::from_str::<Vec<[f64; 2]>>(points_json)
         .map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS"))?;
-    let points = raw_points.into_iter()
+    let points = raw_points
+        .into_iter()
         .map(|[x, y]| Point::new(x, y).map_err(|_| JsValue::from_str("INVALID_STROKE_MESH_POINTS")))
         .collect::<Result<Vec<_>, _>>()?;
     let dash_pattern = serde_json::from_str::<Vec<f64>>(dash_json)
@@ -2512,8 +2843,18 @@ pub fn stroke_mesh_for_dashed_polyline_json(
         "round" => StrokeJoinStyle::Round,
         _ => return Err(JsValue::from_str("INVALID_STROKE_JOIN")),
     };
-    let mesh = stroke_mesh_for_dashed_polyline(&points, StrokeStyle { width: stroke_width, cap, join, miter_limit }, &dash_pattern, closed)
-        .map_err(|_| JsValue::from_str("INVALID_DASHED_POLYLINE_STROKE_STYLE"))?;
+    let mesh = stroke_mesh_for_dashed_polyline(
+        &points,
+        StrokeStyle {
+            width: stroke_width,
+            cap,
+            join,
+            miter_limit,
+        },
+        &dash_pattern,
+        closed,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_DASHED_POLYLINE_STROKE_STYLE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| serde_json::json!({
@@ -2573,8 +2914,9 @@ pub fn stroke_meshes_for_per_side_rectangle_with_dash_json(
         "outside" => PerSideStrokeAlign::Outside,
         _ => return Err(JsValue::from_str("INVALID_STROKE_ALIGN")),
     };
-    let meshes = stroke_meshes_for_per_side_rectangle_with_dash(width, height, weights, align, Some(&dash))
-        .map_err(|_| JsValue::from_str("INVALID_DASHED_PER_SIDE_RECTANGLE_STROKE_STYLE"))?;
+    let meshes =
+        stroke_meshes_for_per_side_rectangle_with_dash(width, height, weights, align, Some(&dash))
+            .map_err(|_| JsValue::from_str("INVALID_DASHED_PER_SIDE_RECTANGLE_STROKE_STYLE"))?;
     Ok(serde_json::json!({
         "meshes": meshes.into_iter().map(|mesh| serde_json::json!({
             "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
@@ -2696,9 +3038,15 @@ pub fn stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(
         width,
         height,
         radii,
-        StrokeStyle { width: stroke_width, cap: StrokeCapStyle::Butt, join, miter_limit },
+        StrokeStyle {
+            width: stroke_width,
+            cap: StrokeCapStyle::Butt,
+            join,
+            miter_limit,
+        },
         &dash_pattern,
-    ).map_err(|_| JsValue::from_str("INVALID_DASHED_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    )
+    .map_err(|_| JsValue::from_str("INVALID_DASHED_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| serde_json::json!({
@@ -2735,9 +3083,15 @@ pub fn stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(
         height,
         radii,
         smoothing,
-        StrokeStyle { width: stroke_width, cap: StrokeCapStyle::Butt, join, miter_limit },
+        StrokeStyle {
+            width: stroke_width,
+            cap: StrokeCapStyle::Butt,
+            join,
+            miter_limit,
+        },
         (!dash_pattern.is_empty()).then_some(dash_pattern.as_slice()),
-    ).map_err(|_| JsValue::from_str("INVALID_CONTINUOUS_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
+    )
+    .map_err(|_| JsValue::from_str("INVALID_CONTINUOUS_ROUNDED_RECTANGLE_STROKE_STYLE"))?;
     Ok(serde_json::json!({
         "triangles": mesh.triangles.into_iter().map(|triangle| triangle.map(|point| [point.x, point.y])).collect::<Vec<_>>(),
         "bounds": mesh.bounds.map(|bounds| serde_json::json!({
@@ -3070,6 +3424,29 @@ fn parse_kind(value: &str) -> Result<NodeKind, JsValue> {
         "vector" => Ok(NodeKind::Vector),
         "booleanOperation" => Ok(NodeKind::BooleanOperation),
         "slice" => Ok(NodeKind::Slice),
+        "codeBlock" => Ok(NodeKind::CodeBlock),
+        "component" => Ok(NodeKind::Component),
+        "instance" => Ok(NodeKind::Instance),
+        "slot" => Ok(NodeKind::Slot),
+        "componentSet" => Ok(NodeKind::ComponentSet),
+        "connector" => Ok(NodeKind::Connector),
+        "embed" => Ok(NodeKind::Embed),
+        "highlight" => Ok(NodeKind::Highlight),
+        "interactiveSlideElement" => Ok(NodeKind::InteractiveSlideElement),
+        "linkUnfurl" => Ok(NodeKind::LinkUnfurl),
+        "media" => Ok(NodeKind::Media),
+        "shapeWithText" => Ok(NodeKind::ShapeWithText),
+        "slideGrid" => Ok(NodeKind::SlideGrid),
+        "slide" => Ok(NodeKind::Slide),
+        "slideRow" => Ok(NodeKind::SlideRow),
+        "stamp" => Ok(NodeKind::Stamp),
+        "sticky" => Ok(NodeKind::Sticky),
+        "table" => Ok(NodeKind::Table),
+        "tableCell" => Ok(NodeKind::TableCell),
+        "textPath" => Ok(NodeKind::TextPath),
+        "transformGroup" => Ok(NodeKind::TransformGroup),
+        "washiTape" => Ok(NodeKind::WashiTape),
+        "widget" => Ok(NodeKind::Widget),
         _ => Err(JsValue::from_str("UNSUPPORTED_NODE_KIND")),
     }
 }
@@ -3084,7 +3461,8 @@ fn format_boolean_operation(operation: BooleanOperation) -> String {
         BooleanOperation::Intersect => "intersect",
         BooleanOperation::Subtract => "subtract",
         BooleanOperation::Exclude => "exclude",
-    }.into()
+    }
+    .into()
 }
 
 fn parse_boolean_operation(value: &str) -> Result<BooleanOperation, JsValue> {
@@ -3100,7 +3478,10 @@ fn parse_boolean_operation(value: &str) -> Result<BooleanOperation, JsValue> {
 fn default_parametric_shape(kind: &NodeKind) -> Option<ParametricShape> {
     match kind {
         NodeKind::Polygon => Some(ParametricShape::Polygon { point_count: 5 }),
-        NodeKind::Star => Some(ParametricShape::Star { point_count: 5, inner_ratio: 0.5 }),
+        NodeKind::Star => Some(ParametricShape::Star {
+            point_count: 5,
+            inner_ratio: 0.5,
+        }),
         _ => None,
     }
 }
@@ -3167,8 +3548,10 @@ fn shape_gpu_stroke_outset(
     stroke_width: f64,
     stroke_alpha: f32,
 ) -> f32 {
-    if !matches!(kind, NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse)
-        || (kind == NodeKind::Ellipse && has_arc_data)
+    if !matches!(
+        kind,
+        NodeKind::Frame | NodeKind::Rectangle | NodeKind::Ellipse
+    ) || (kind == NodeKind::Ellipse && has_arc_data)
         || stroke_width <= 0.0
         || stroke_alpha <= 0.0
     {
@@ -3417,6 +3800,29 @@ fn projection_node(
             NodeKind::Vector => "vector",
             NodeKind::BooleanOperation => "booleanOperation",
             NodeKind::Slice => "slice",
+            NodeKind::CodeBlock => "codeBlock",
+            NodeKind::Component => "component",
+            NodeKind::Instance => "instance",
+            NodeKind::Slot => "slot",
+            NodeKind::ComponentSet => "componentSet",
+            NodeKind::Connector => "connector",
+            NodeKind::Embed => "embed",
+            NodeKind::Highlight => "highlight",
+            NodeKind::InteractiveSlideElement => "interactiveSlideElement",
+            NodeKind::LinkUnfurl => "linkUnfurl",
+            NodeKind::Media => "media",
+            NodeKind::ShapeWithText => "shapeWithText",
+            NodeKind::SlideGrid => "slideGrid",
+            NodeKind::Slide => "slide",
+            NodeKind::SlideRow => "slideRow",
+            NodeKind::Stamp => "stamp",
+            NodeKind::Sticky => "sticky",
+            NodeKind::Table => "table",
+            NodeKind::TableCell => "tableCell",
+            NodeKind::TextPath => "textPath",
+            NodeKind::TransformGroup => "transformGroup",
+            NodeKind::WashiTape => "washiTape",
+            NodeKind::Widget => "widget",
         }
         .into(),
         x: node.x,
@@ -3427,17 +3833,33 @@ fn projection_node(
         fill,
         fill_color,
         fill_gradient,
-        fills: node.fills.iter().map(|paint| {
-            let (css, color, gradient) = project_paint(paint);
-            ProjectionPaint { css, color, gradient }
-        }).collect(),
+        fills: node
+            .fills
+            .iter()
+            .map(|paint| {
+                let (css, color, gradient) = project_paint(paint);
+                ProjectionPaint {
+                    css,
+                    color,
+                    gradient,
+                }
+            })
+            .collect(),
         stroke,
         stroke_color,
         stroke_gradient,
-        strokes: node.strokes.iter().map(|paint| {
-            let (css, color, gradient) = project_paint(paint);
-            ProjectionPaint { css, color, gradient }
-        }).collect(),
+        strokes: node
+            .strokes
+            .iter()
+            .map(|paint| {
+                let (css, color, gradient) = project_paint(paint);
+                ProjectionPaint {
+                    css,
+                    color,
+                    gradient,
+                }
+            })
+            .collect(),
         stroke_width: node.stroke_width,
         stroke_cap_start: format_stroke_cap(node.stroke_cap_start),
         stroke_cap_end: format_stroke_cap(node.stroke_cap_end),
@@ -3446,14 +3868,33 @@ fn projection_node(
         stroke_dash_pattern: node.stroke_dash_pattern.clone(),
         stroke_weights: node.stroke_weights.clone(),
         stroke_align: format_stroke_align(node.stroke_align),
-        arc_data: node.arc_data.map(|arc| ProjectionArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }),
+        arc_data: node.arc_data.map(|arc| ProjectionArcData {
+            starting_angle: arc.starting_angle,
+            ending_angle: arc.ending_angle,
+            inner_radius: arc.inner_radius,
+        }),
         parametric_shape: node.parametric_shape.map(|shape| match shape {
-            ParametricShape::Polygon { point_count } => ProjectionParametricShape::Polygon { point_count },
-            ParametricShape::Star { point_count, inner_ratio } => ProjectionParametricShape::Star { point_count, inner_ratio },
+            ParametricShape::Polygon { point_count } => {
+                ProjectionParametricShape::Polygon { point_count }
+            }
+            ParametricShape::Star {
+                point_count,
+                inner_ratio,
+            } => ProjectionParametricShape::Star {
+                point_count,
+                inner_ratio,
+            },
         }),
         vector_path: node.vector_path.as_ref().map(projection_vector_path),
         boolean_operation: node.boolean_operation.map(format_boolean_operation),
-        relative_transform: node.relative_transform.map(|matrix| ProjectionTransform { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }),
+        relative_transform: node.relative_transform.map(|matrix| ProjectionTransform {
+            a: matrix.a,
+            b: matrix.b,
+            c: matrix.c,
+            d: matrix.d,
+            e: matrix.e,
+            f: matrix.f,
+        }),
         position_id: Some(format_position_id(node.position)),
         page_id: Some(format_page_id(page_id)),
         asset_id: asset_id.map(|id| format_uuid(NodeId(id.0))),
@@ -3468,18 +3909,29 @@ fn projection_node(
             color: projection_color(shadow.color),
             visible: shadow.visible,
         }),
-        effect_stack: node.effect_stack.iter().copied().map(projection_effect).collect(),
+        effect_stack: node
+            .effect_stack
+            .iter()
+            .copied()
+            .map(projection_effect)
+            .collect(),
         corner_radius: node.corner_radius,
         corner_radii: node.corner_radii.clone(),
         corner_smoothing: node.corner_smoothing,
-        constraints: node.constraints.map(|value| ProjectionConstraints { horizontal: format_constraint_type(value.horizontal).into(), vertical: format_constraint_type(value.vertical).into() }),
+        constraints: node.constraints.map(|value| ProjectionConstraints {
+            horizontal: format_constraint_type(value.horizontal).into(),
+            vertical: format_constraint_type(value.vertical).into(),
+        }),
         auto_layout: projection_auto_layout(auto_layout),
         text: node.text.clone(),
         visible: node.visible,
         locked: node.locked,
         contents_hidden: node.contents_hidden,
         clips_content: Some(node.clips_content),
-        is_mask: node.extensions.get("makefigma.mask.alpha.v1").is_some_and(|value| value.as_slice() == [1]),
+        is_mask: node
+            .extensions
+            .get("makefigma.mask.alpha.v1")
+            .is_some_and(|value| value.as_slice() == [1]),
         extensions: node.extensions.clone().into_iter().collect(),
     }
 }
@@ -3612,8 +4064,20 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         node.stroke_color.as_ref(),
         node.stroke_gradient.as_ref(),
     )?;
-    let fills = node.fills.iter().map(|paint| paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())).collect::<Result<Vec<_>, _>>()?;
-    let strokes = node.strokes.iter().map(|paint| paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())).collect::<Result<Vec<_>, _>>()?;
+    let fills = node
+        .fills
+        .iter()
+        .map(|paint| {
+            paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let strokes = node
+        .strokes
+        .iter()
+        .map(|paint| {
+            paint_from_projection(&paint.css, paint.color.as_ref(), paint.gradient.as_ref())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let id = parse_id(&node.id)?;
     let position = node
         .position_id
@@ -3623,7 +4087,12 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         .unwrap_or_else(|| PositionId::for_node(id));
     let kind = parse_kind(&node.kind)?;
     let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
-    let boolean_operation = node.boolean_operation.as_deref().map(parse_boolean_operation).transpose()?.or_else(|| default_boolean_operation(&kind));
+    let boolean_operation = node
+        .boolean_operation
+        .as_deref()
+        .map(parse_boolean_operation)
+        .transpose()?
+        .or_else(|| default_boolean_operation(&kind));
     Ok(Node {
         id,
         parent_id: node.parent_id.as_deref().map(parse_id).transpose()?,
@@ -3647,29 +4116,70 @@ fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
         stroke_dash_pattern: node.stroke_dash_pattern,
         stroke_weights: node.stroke_weights,
         stroke_align: parse_stroke_align(&node.stroke_align)?,
-        arc_data: node.arc_data.map(|arc| ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }),
-        parametric_shape: node.parametric_shape.map(|shape| match shape {
-            ProjectionParametricShape::Polygon { point_count } => ParametricShape::Polygon { point_count },
-            ProjectionParametricShape::Star { point_count, inner_ratio } => ParametricShape::Star { point_count, inner_ratio },
+        arc_data: node.arc_data.map(|arc| ArcData {
+            starting_angle: arc.starting_angle,
+            ending_angle: arc.ending_angle,
+            inner_radius: arc.inner_radius,
         }),
-        vector_path: node.vector_path.map(vector_path_from_projection).transpose()?,
+        parametric_shape: node.parametric_shape.map(|shape| match shape {
+            ProjectionParametricShape::Polygon { point_count } => {
+                ParametricShape::Polygon { point_count }
+            }
+            ProjectionParametricShape::Star {
+                point_count,
+                inner_ratio,
+            } => ParametricShape::Star {
+                point_count,
+                inner_ratio,
+            },
+        }),
+        vector_path: node
+            .vector_path
+            .map(vector_path_from_projection)
+            .transpose()?,
         boolean_operation,
-        relative_transform: node.relative_transform.map(|matrix| editor_core::geometry::AffineTransform { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }),
+        relative_transform: node.relative_transform.map(|matrix| {
+            editor_core::geometry::AffineTransform {
+                a: matrix.a,
+                b: matrix.b,
+                c: matrix.c,
+                d: matrix.d,
+                e: matrix.e,
+                f: matrix.f,
+            }
+        }),
         opacity: node.opacity,
         blend_mode: parse_blend_mode(&node.blend_mode)?,
-        drop_shadow: node.drop_shadow.map(|shadow| Ok::<DropShadow, JsValue>(DropShadow {
-            offset_x: shadow.offset_x,
-            offset_y: shadow.offset_y,
-            blur_radius: shadow.blur_radius,
-            spread: shadow.spread,
-            color: color_from_projection(&shadow.color)?,
-            visible: shadow.visible,
-        })).transpose()?,
-        effect_stack: node.effect_stack.into_iter().map(effect_from_projection).collect::<Result<Vec<_>, _>>()?,
+        drop_shadow: node
+            .drop_shadow
+            .map(|shadow| {
+                Ok::<DropShadow, JsValue>(DropShadow {
+                    offset_x: shadow.offset_x,
+                    offset_y: shadow.offset_y,
+                    blur_radius: shadow.blur_radius,
+                    spread: shadow.spread,
+                    color: color_from_projection(&shadow.color)?,
+                    visible: shadow.visible,
+                })
+            })
+            .transpose()?,
+        effect_stack: node
+            .effect_stack
+            .into_iter()
+            .map(effect_from_projection)
+            .collect::<Result<Vec<_>, _>>()?,
         corner_radius: node.corner_radius,
         corner_radii: node.corner_radii,
         corner_smoothing: node.corner_smoothing,
-        constraints: node.constraints.map(|value| Ok::<Constraints, JsValue>(Constraints { horizontal: parse_constraint_type(&value.horizontal)?, vertical: parse_constraint_type(&value.vertical)? })).transpose()?,
+        constraints: node
+            .constraints
+            .map(|value| {
+                Ok::<Constraints, JsValue>(Constraints {
+                    horizontal: parse_constraint_type(&value.horizontal)?,
+                    vertical: parse_constraint_type(&value.vertical)?,
+                })
+            })
+            .transpose()?,
         text: node.text,
         visible: node.visible,
         locked: node.locked,
@@ -3689,6 +4199,9 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
         .into(),
         padding: layout.padding,
         item_spacing: layout.item_spacing,
+        track_spacing: layout.track_spacing,
+        track_alignment: (layout.track_alignment != WrapTrackAlignment::Auto)
+            .then(|| format_wrap_track_alignment(layout.track_alignment).to_owned()),
         wrap: layout.wrap,
         primary_alignment: format_layout_alignment(layout.primary_alignment).into(),
         counter_alignment: format_layout_alignment(layout.counter_alignment).into(),
@@ -3699,21 +4212,48 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
         min_height: layout.min_height,
         max_height: layout.max_height,
         absolute: layout.absolute,
+        align_self: layout
+            .align_self
+            .map(format_layout_alignment)
+            .map(str::to_owned),
     })
 }
 
-fn auto_layout_from_projection(value: Option<&ProjectionAutoLayout>) -> Result<AutoLayout, JsValue> {
-    let Some(value) = value else { return Ok(AutoLayout::default()); };
+fn auto_layout_from_projection(
+    value: Option<&ProjectionAutoLayout>,
+) -> Result<AutoLayout, JsValue> {
+    let Some(value) = value else {
+        return Ok(AutoLayout::default());
+    };
     let mode = match value.mode.as_str() {
         "none" => LayoutMode::None,
         "horizontal" => LayoutMode::Horizontal,
         "vertical" => LayoutMode::Vertical,
         _ => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     };
-    Ok(AutoLayout {
+    let align_self = value
+        .align_self
+        .as_deref()
+        .map(parse_layout_alignment)
+        .transpose()?;
+    if matches!(
+        align_self,
+        Some(LayoutAlignment::SpaceBetween | LayoutAlignment::Baseline)
+    ) {
+        return Err(JsValue::from_str("INVALID_AUTO_LAYOUT"));
+    }
+    let track_alignment = value
+        .track_alignment
+        .as_deref()
+        .map(parse_wrap_track_alignment)
+        .transpose()?
+        .unwrap_or(WrapTrackAlignment::Auto);
+    let layout = AutoLayout {
         mode,
         padding: value.padding,
         item_spacing: value.item_spacing,
+        track_spacing: value.track_spacing,
+        track_alignment,
         wrap: value.wrap,
         primary_alignment: parse_layout_alignment(&value.primary_alignment)?,
         counter_alignment: parse_layout_alignment(&value.counter_alignment)?,
@@ -3724,7 +4264,17 @@ fn auto_layout_from_projection(value: Option<&ProjectionAutoLayout>) -> Result<A
         min_height: value.min_height,
         max_height: value.max_height,
         absolute: value.absolute,
-    })
+        align_self,
+    };
+    if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
+        || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
+        || (layout.counter_alignment == LayoutAlignment::Baseline
+            && layout.mode != LayoutMode::Horizontal)
+        || (!layout.wrap && layout.track_alignment != WrapTrackAlignment::Auto)
+    {
+        return Err(JsValue::from_str("INVALID_AUTO_LAYOUT"));
+    }
+    Ok(layout)
 }
 
 fn format_layout_alignment(value: LayoutAlignment) -> &'static str {
@@ -3733,6 +4283,7 @@ fn format_layout_alignment(value: LayoutAlignment) -> &'static str {
         LayoutAlignment::Center => "center",
         LayoutAlignment::End => "end",
         LayoutAlignment::SpaceBetween => "spaceBetween",
+        LayoutAlignment::Baseline => "baseline",
     }
 }
 
@@ -3742,6 +4293,22 @@ fn parse_layout_alignment(value: &str) -> Result<LayoutAlignment, JsValue> {
         "center" => Ok(LayoutAlignment::Center),
         "end" => Ok(LayoutAlignment::End),
         "spaceBetween" => Ok(LayoutAlignment::SpaceBetween),
+        "baseline" => Ok(LayoutAlignment::Baseline),
+        _ => Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
+    }
+}
+
+fn format_wrap_track_alignment(value: WrapTrackAlignment) -> &'static str {
+    match value {
+        WrapTrackAlignment::Auto => "auto",
+        WrapTrackAlignment::SpaceBetween => "spaceBetween",
+    }
+}
+
+fn parse_wrap_track_alignment(value: &str) -> Result<WrapTrackAlignment, JsValue> {
+    match value {
+        "auto" => Ok(WrapTrackAlignment::Auto),
+        "spaceBetween" => Ok(WrapTrackAlignment::SpaceBetween),
         _ => Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     }
 }
@@ -3773,9 +4340,24 @@ fn projection_effect(effect: Effect) -> ProjectionEffect {
             color: projection_color(shadow.color),
             visible: shadow.visible,
         }),
-        Effect::LayerBlur(blur) => ProjectionEffect::LayerBlur(ProjectionLayerBlur { radius: blur.radius, visible: blur.visible }),
-        Effect::InnerShadow(shadow) => ProjectionEffect::InnerShadow(ProjectionInnerShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: projection_color(shadow.color), visible: shadow.visible }),
-        Effect::BackgroundBlur(blur) => ProjectionEffect::BackgroundBlur(ProjectionBackgroundBlur { radius: blur.radius, visible: blur.visible }),
+        Effect::LayerBlur(blur) => ProjectionEffect::LayerBlur(ProjectionLayerBlur {
+            radius: blur.radius,
+            visible: blur.visible,
+        }),
+        Effect::InnerShadow(shadow) => ProjectionEffect::InnerShadow(ProjectionInnerShadow {
+            offset_x: shadow.offset_x,
+            offset_y: shadow.offset_y,
+            blur_radius: shadow.blur_radius,
+            spread: shadow.spread,
+            color: projection_color(shadow.color),
+            visible: shadow.visible,
+        }),
+        Effect::BackgroundBlur(blur) => {
+            ProjectionEffect::BackgroundBlur(ProjectionBackgroundBlur {
+                radius: blur.radius,
+                visible: blur.visible,
+            })
+        }
     }
 }
 
@@ -3789,34 +4371,89 @@ fn effect_from_projection(effect: ProjectionEffect) -> Result<Effect, JsValue> {
             color: color_from_projection(&shadow.color)?,
             visible: shadow.visible,
         })),
-        ProjectionEffect::LayerBlur(blur) => Ok(Effect::LayerBlur(LayerBlur { radius: blur.radius, visible: blur.visible })),
-        ProjectionEffect::InnerShadow(shadow) => Ok(Effect::InnerShadow(InnerShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: color_from_projection(&shadow.color)?, visible: shadow.visible })),
-        ProjectionEffect::BackgroundBlur(blur) => Ok(Effect::BackgroundBlur(BackgroundBlur { radius: blur.radius, visible: blur.visible })),
+        ProjectionEffect::LayerBlur(blur) => Ok(Effect::LayerBlur(LayerBlur {
+            radius: blur.radius,
+            visible: blur.visible,
+        })),
+        ProjectionEffect::InnerShadow(shadow) => Ok(Effect::InnerShadow(InnerShadow {
+            offset_x: shadow.offset_x,
+            offset_y: shadow.offset_y,
+            blur_radius: shadow.blur_radius,
+            spread: shadow.spread,
+            color: color_from_projection(&shadow.color)?,
+            visible: shadow.visible,
+        })),
+        ProjectionEffect::BackgroundBlur(blur) => Ok(Effect::BackgroundBlur(BackgroundBlur {
+            radius: blur.radius,
+            visible: blur.visible,
+        })),
     }
 }
 
 fn projection_vector_path(path: &VectorPath) -> ProjectionVectorPath {
     ProjectionVectorPath {
-        fill_rule: match path.fill_rule { FillRule::NonZero => "nonZero", FillRule::EvenOdd => "evenOdd" }.into(),
-        subpaths: path.subpaths.iter().map(|subpath| ProjectionVectorSubpath {
-            closed: subpath.closed,
-            points: subpath.points.iter().map(|point| ProjectionVectorPoint {
-                id: format_uuid(NodeId(point.id.0)), x: point.position.x, y: point.position.y,
-                handle_in: point.handle_in.map(|handle| ProjectionVectorHandle { x: handle.x, y: handle.y }),
-                handle_out: point.handle_out.map(|handle| ProjectionVectorHandle { x: handle.x, y: handle.y }),
-                point_type: match point.point_type { VectorPointType::Corner => "corner", VectorPointType::Mirrored => "mirrored", VectorPointType::Asymmetric => "asymmetric" }.into(),
-            }).collect(),
-        }).collect(),
+        fill_rule: match path.fill_rule {
+            FillRule::NonZero => "nonZero",
+            FillRule::EvenOdd => "evenOdd",
+        }
+        .into(),
+        subpaths: path
+            .subpaths
+            .iter()
+            .map(|subpath| ProjectionVectorSubpath {
+                closed: subpath.closed,
+                points: subpath
+                    .points
+                    .iter()
+                    .map(|point| ProjectionVectorPoint {
+                        id: format_uuid(NodeId(point.id.0)),
+                        x: point.position.x,
+                        y: point.position.y,
+                        handle_in: point.handle_in.map(|handle| ProjectionVectorHandle {
+                            x: handle.x,
+                            y: handle.y,
+                        }),
+                        handle_out: point.handle_out.map(|handle| ProjectionVectorHandle {
+                            x: handle.x,
+                            y: handle.y,
+                        }),
+                        point_type: match point.point_type {
+                            VectorPointType::Corner => "corner",
+                            VectorPointType::Mirrored => "mirrored",
+                            VectorPointType::Asymmetric => "asymmetric",
+                        }
+                        .into(),
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
 fn vector_path_from_projection(path: ProjectionVectorPath) -> Result<VectorPath, JsValue> {
-    let fill_rule = match path.fill_rule.as_str() { "nonZero" => FillRule::NonZero, "evenOdd" => FillRule::EvenOdd, _ => return Err(JsValue::from_str("INVALID_VECTOR_PATH")) };
-    let subpaths = path.subpaths.into_iter().map(|subpath| Ok(VectorSubpath {
-        closed: subpath.closed,
-        points: subpath.points.into_iter().map(vector_point_from_projection).collect::<Result<Vec<_>, JsValue>>()?,
-    })).collect::<Result<Vec<_>, JsValue>>()?;
-    Ok(VectorPath { fill_rule, subpaths })
+    let fill_rule = match path.fill_rule.as_str() {
+        "nonZero" => FillRule::NonZero,
+        "evenOdd" => FillRule::EvenOdd,
+        _ => return Err(JsValue::from_str("INVALID_VECTOR_PATH")),
+    };
+    let subpaths = path
+        .subpaths
+        .into_iter()
+        .map(|subpath| {
+            Ok(VectorSubpath {
+                closed: subpath.closed,
+                points: subpath
+                    .points
+                    .into_iter()
+                    .map(vector_point_from_projection)
+                    .collect::<Result<Vec<_>, JsValue>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, JsValue>>()?;
+    Ok(VectorPath {
+        fill_rule,
+        subpaths,
+    })
 }
 
 fn vector_point_from_projection(point: ProjectionVectorPoint) -> Result<VectorPoint, JsValue> {
@@ -3826,9 +4463,11 @@ fn vector_point_from_projection(point: ProjectionVectorPoint) -> Result<VectorPo
         "asymmetric" => VectorPointType::Asymmetric,
         _ => return Err(JsValue::from_str("INVALID_VECTOR_PATH")),
     };
-    let position = Point::new(point.x, point.y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?;
-    let handle = |handle: ProjectionVectorHandle| Point::new(handle.x, handle.y)
-        .map_err(|_| JsValue::from_str("INVALID_VECTOR_HANDLE"));
+    let position =
+        Point::new(point.x, point.y).map_err(|_| JsValue::from_str("INVALID_VECTOR_POINT"))?;
+    let handle = |handle: ProjectionVectorHandle| {
+        Point::new(handle.x, handle.y).map_err(|_| JsValue::from_str("INVALID_VECTOR_HANDLE"))
+    };
     Ok(VectorPoint {
         id: PointId(parse_id(&point.id)?.0),
         position,
@@ -3903,12 +4542,13 @@ mod tests {
     fn projection_parametric_shapes_accept_browser_camel_case_fields() {
         let polygon: ProjectionParametricShape =
             serde_json::from_str(r#"{"kind":"polygon","pointCount":5}"#).unwrap();
-        assert!(matches!(polygon, ProjectionParametricShape::Polygon { point_count: 5 }));
+        assert!(matches!(
+            polygon,
+            ProjectionParametricShape::Polygon { point_count: 5 }
+        ));
 
-        let star: ProjectionParametricShape = serde_json::from_str(
-            r#"{"kind":"star","pointCount":6,"innerRatio":0.45}"#,
-        )
-        .unwrap();
+        let star: ProjectionParametricShape =
+            serde_json::from_str(r#"{"kind":"star","pointCount":6,"innerRatio":0.45}"#).unwrap();
         assert!(matches!(
             star,
             ProjectionParametricShape::Star {
@@ -3929,7 +4569,8 @@ mod tests {
             "text": "", "visible": true, "locked": false, "contentsHidden": false,
             "positionId": "00000000000000000000000000000061:00000000000000000000000000000000",
             "parametricShape": { "kind": "polygon", "pointCount": 3 }
-        })).unwrap();
+        }))
+        .unwrap();
         let mut root = polygon.clone();
         root.id = "00000000-0000-4000-8000-000000000610".into();
         root.name = "Root".into();
@@ -3941,44 +4582,116 @@ mod tests {
         root.parametric_shape = None;
         root.parent_id = None;
         root.relative_transform = None;
-        root.position_id = Some("00000000000000000000000000000060:00000000000000000000000000000000".into());
+        root.position_id =
+            Some("00000000000000000000000000000060:00000000000000000000000000000000".into());
         polygon.parent_id = Some(root.id.clone());
-        polygon.relative_transform = Some(ProjectionTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 10.0, f: 20.0 });
-        engine.submit_batch(NodeId(0x611), 0, vec![BatchCommand::Create { node: root }, BatchCommand::Create { node: polygon.clone() }]).unwrap();
+        polygon.relative_transform = Some(ProjectionTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 10.0,
+            f: 20.0,
+        });
+        engine
+            .submit_batch(
+                NodeId(0x611),
+                0,
+                vec![
+                    BatchCommand::Create { node: root },
+                    BatchCommand::Create {
+                        node: polygon.clone(),
+                    },
+                ],
+            )
+            .unwrap();
 
         polygon.id = "00000000-0000-4000-8000-000000000612".into();
         polygon.name = "Polygon vector".into();
         polygon.kind = "vector".into();
-        polygon.position_id = Some("00000000000000000000000000000612:00000000000000000000000000000000".into());
+        polygon.position_id =
+            Some("00000000000000000000000000000612:00000000000000000000000000000000".into());
         polygon.parametric_shape = None;
         polygon.vector_path = Some(ProjectionVectorPath {
             fill_rule: "nonZero".into(),
-            subpaths: vec![ProjectionVectorSubpath { closed: true, points: vec![
-                ProjectionVectorPoint { id: "00000000-0000-4000-8000-000000000613".into(), x: 45.0, y: 0.0, handle_in: None, handle_out: None, point_type: "corner".into() },
-                ProjectionVectorPoint { id: "00000000-0000-4000-8000-000000000614".into(), x: 90.0, y: 50.0, handle_in: None, handle_out: None, point_type: "corner".into() },
-                ProjectionVectorPoint { id: "00000000-0000-4000-8000-000000000615".into(), x: 0.0, y: 50.0, handle_in: None, handle_out: None, point_type: "corner".into() },
-            ] }],
+            subpaths: vec![ProjectionVectorSubpath {
+                closed: true,
+                points: vec![
+                    ProjectionVectorPoint {
+                        id: "00000000-0000-4000-8000-000000000613".into(),
+                        x: 45.0,
+                        y: 0.0,
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: "corner".into(),
+                    },
+                    ProjectionVectorPoint {
+                        id: "00000000-0000-4000-8000-000000000614".into(),
+                        x: 90.0,
+                        y: 50.0,
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: "corner".into(),
+                    },
+                    ProjectionVectorPoint {
+                        id: "00000000-0000-4000-8000-000000000615".into(),
+                        x: 0.0,
+                        y: 50.0,
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: "corner".into(),
+                    },
+                ],
+            }],
         });
-        engine.submit_batch(NodeId(0x612), 1, vec![
-            BatchCommand::Create { node: polygon },
-            BatchCommand::Delete { ids: vec!["00000000-0000-4000-8000-000000000611".into()] },
-            BatchCommand::Reposition { position_ids: vec![PositionUpdate {
-                id: "00000000-0000-4000-8000-000000000612".into(),
-                position_id: "00000000000000000000000000000061:00000000000000000000000000000000".into(),
-            }] },
-        ]).unwrap();
+        engine
+            .submit_batch(
+                NodeId(0x612),
+                1,
+                vec![
+                    BatchCommand::Create { node: polygon },
+                    BatchCommand::Delete {
+                        ids: vec!["00000000-0000-4000-8000-000000000611".into()],
+                    },
+                    BatchCommand::Reposition {
+                        position_ids: vec![PositionUpdate {
+                            id: "00000000-0000-4000-8000-000000000612".into(),
+                            position_id:
+                                "00000000000000000000000000000061:00000000000000000000000000000000"
+                                    .into(),
+                        }],
+                    },
+                ],
+            )
+            .unwrap();
 
         assert_eq!(engine.document.revision, 2);
-        assert_eq!(engine.document.node(parse_id("00000000-0000-4000-8000-000000000612").unwrap()).unwrap().kind, NodeKind::Vector);
+        assert_eq!(
+            engine
+                .document
+                .node(parse_id("00000000-0000-4000-8000-000000000612").unwrap())
+                .unwrap()
+                .kind,
+            NodeKind::Vector
+        );
         engine.document.undo().unwrap();
-        assert_eq!(engine.document.node(parse_id("00000000-0000-4000-8000-000000000611").unwrap()).unwrap().kind, NodeKind::Polygon);
+        assert_eq!(
+            engine
+                .document
+                .node(parse_id("00000000-0000-4000-8000-000000000611").unwrap())
+                .unwrap()
+                .kind,
+            NodeKind::Polygon
+        );
     }
 
     #[test]
     fn parametric_shape_geometry_bridge_returns_core_derived_clockwise_outline() {
         let polygon: serde_json::Value = serde_json::from_str(
-            &parametric_shape_outline_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#).unwrap(),
-        ).unwrap();
+            &parametric_shape_outline_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#)
+                .unwrap(),
+        )
+        .unwrap();
         let points = polygon["points"].as_array().unwrap();
         assert_eq!(points.len(), 5);
         assert_eq!(points[0], serde_json::json!([50.0, 0.0]));
@@ -3986,16 +4699,49 @@ mod tests {
         assert!(polygon["bounds"]["max"][0].as_f64().unwrap() <= 100.0);
 
         let star: serde_json::Value = serde_json::from_str(
-            &parametric_shape_outline_json(100.0, 80.0, r#"{"kind":"star","pointCount":5,"innerRatio":0.4}"#).unwrap(),
-        ).unwrap();
+            &parametric_shape_outline_json(
+                100.0,
+                80.0,
+                r#"{"kind":"star","pointCount":5,"innerRatio":0.4}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(star["points"].as_array().unwrap().len(), 10);
     }
 
     #[test]
     fn parametric_shape_hit_bridge_uses_core_non_zero_fill() {
-        assert!(parametric_shape_contains_point_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#, 50.0, 40.0).unwrap());
-        assert!(!parametric_shape_contains_point_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#, 0.0, 79.0).unwrap());
-        assert!(parametric_shape_contains_point_json(100.0, 100.0, r#"{"kind":"star","pointCount":5,"innerRatio":0.4}"#, 50.0, 50.0).unwrap());
+        assert!(
+            parametric_shape_contains_point_json(
+                100.0,
+                80.0,
+                r#"{"kind":"polygon","pointCount":5}"#,
+                50.0,
+                40.0
+            )
+            .unwrap()
+        );
+        assert!(
+            !parametric_shape_contains_point_json(
+                100.0,
+                80.0,
+                r#"{"kind":"polygon","pointCount":5}"#,
+                0.0,
+                79.0
+            )
+            .unwrap()
+        );
+        assert!(
+            parametric_shape_contains_point_json(
+                100.0,
+                100.0,
+                r#"{"kind":"star","pointCount":5,"innerRatio":0.4}"#,
+                50.0,
+                50.0
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -4017,20 +4763,31 @@ mod tests {
         node["kind"] = serde_json::json!("image");
         node["assetId"] = serde_json::json!("00000000-0000-4000-8000-00000000a001");
         node["clipsContent"] = serde_json::json!(false);
-        node["cornerRadius"] = node.get("radius").cloned().unwrap_or_else(|| serde_json::json!(0));
-        node["locked"] = node.get("locked").cloned().unwrap_or_else(|| serde_json::json!(false));
+        node["cornerRadius"] = node
+            .get("radius")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(0));
+        node["locked"] = node
+            .get("locked")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(false));
 
         engine
-            .seed_batch_json(&serde_json::to_string(&vec![serde_json::json!({
-                "type": "create",
-                "node": node,
-            })])
-            .unwrap())
+            .seed_batch_json(
+                &serde_json::to_string(&vec![serde_json::json!({
+                    "type": "create",
+                    "node": node,
+                })])
+                .unwrap(),
+            )
             .unwrap();
 
         let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
         assert_eq!(snapshot["resourceIndex"].as_array().map(Vec::len), Some(1));
-        assert_eq!(snapshot["nodes"][0]["assetId"], "00000000-0000-4000-8000-00000000a001");
+        assert_eq!(
+            snapshot["nodes"][0]["assetId"],
+            "00000000-0000-4000-8000-00000000a001"
+        );
     }
 
     fn existing_rect(id: NodeId) -> Node {
@@ -4088,7 +4845,11 @@ mod tests {
         .unwrap();
         assert_eq!(mesh["bounds"]["min"], serde_json::json!([-2.0, -2.0]));
         assert_eq!(mesh["bounds"]["max"], serde_json::json!([12.0, 2.0]));
-        assert!(mesh["triangles"].as_array().is_some_and(|triangles| triangles.len() > 2));
+        assert!(
+            mesh["triangles"]
+                .as_array()
+                .is_some_and(|triangles| triangles.len() > 2)
+        );
 
         let closed = serde_json::from_str::<serde_json::Value>(
             &stroke_mesh_for_polyline_json(
@@ -4106,36 +4867,74 @@ mod tests {
         assert_eq!(closed["bounds"]["max"], serde_json::json!([11.0, 7.0]));
 
         let rounded = serde_json::from_str::<serde_json::Value>(
-            &stroke_mesh_for_rounded_rectangle_json(100.0, 60.0, 12.0, 8.0, "round", 4.0)
-                .unwrap(),
+            &stroke_mesh_for_rounded_rectangle_json(100.0, 60.0, 12.0, 8.0, "round", 4.0).unwrap(),
         )
         .unwrap();
         assert_eq!(rounded["bounds"]["min"], serde_json::json!([-4.0, -4.0]));
         assert_eq!(rounded["bounds"]["max"], serde_json::json!([104.0, 64.0]));
 
         let independent = serde_json::from_str::<serde_json::Value>(
-            &stroke_mesh_for_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 8.0, "round", 4.0)
-                .unwrap(),
+            &stroke_mesh_for_rounded_rectangle_with_radii_json(
+                100.0,
+                60.0,
+                "[12,24,8,16]",
+                8.0,
+                "round",
+                4.0,
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(independent["bounds"]["min"], serde_json::json!([-4.0, -4.0]));
-        assert_eq!(independent["bounds"]["max"], serde_json::json!([104.0, 64.0]));
+        assert_eq!(
+            independent["bounds"]["min"],
+            serde_json::json!([-4.0, -4.0])
+        );
+        assert_eq!(
+            independent["bounds"]["max"],
+            serde_json::json!([104.0, 64.0])
+        );
 
         let dashed_independent = serde_json::from_str::<serde_json::Value>(
-            &stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 8.0, "[18,8]", "round", 4.0)
-                .unwrap(),
-        ).unwrap();
-        assert!(dashed_independent["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+            &stroke_mesh_for_dashed_rounded_rectangle_with_radii_json(
+                100.0,
+                60.0,
+                "[12,24,8,16]",
+                8.0,
+                "[18,8]",
+                "round",
+                4.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            dashed_independent["triangles"]
+                .as_array()
+                .is_some_and(|triangles| !triangles.is_empty())
+        );
 
         let continuous = serde_json::from_str::<serde_json::Value>(
-            &stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(100.0, 60.0, "[12,24,8,16]", 0.5, 8.0, "[18,8]", "round", 4.0)
-                .unwrap(),
-        ).unwrap();
-        assert!(continuous["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+            &stroke_mesh_for_continuous_rounded_rectangle_with_radii_json(
+                100.0,
+                60.0,
+                "[12,24,8,16]",
+                0.5,
+                8.0,
+                "[18,8]",
+                "round",
+                4.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            continuous["triangles"]
+                .as_array()
+                .is_some_and(|triangles| !triangles.is_empty())
+        );
 
         let dashed = serde_json::from_str::<serde_json::Value>(
-            &stroke_mesh_for_dashed_line_json(94.0, 10.0, "[8,4]", "square", "miter", 4.0)
-                .unwrap(),
+            &stroke_mesh_for_dashed_line_json(94.0, 10.0, "[8,4]", "square", "miter", 4.0).unwrap(),
         )
         .unwrap();
         assert_eq!(dashed["bounds"]["min"], serde_json::json!([-5.0, -5.0]));
@@ -4147,21 +4946,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(per_side["meshes"].as_array().map(Vec::len), Some(4));
-        assert_eq!(per_side["meshes"][0]["bounds"]["min"], serde_json::json!([0.0, -6.0]));
+        assert_eq!(
+            per_side["meshes"][0]["bounds"]["min"],
+            serde_json::json!([0.0, -6.0])
+        );
 
         let dashed_per_side = serde_json::from_str::<serde_json::Value>(
-            &stroke_meshes_for_per_side_rectangle_with_dash_json(100.0, 80.0, "[6,2,4,8]", "outside", "[12,8]")
-                .unwrap(),
+            &stroke_meshes_for_per_side_rectangle_with_dash_json(
+                100.0,
+                80.0,
+                "[6,2,4,8]",
+                "outside",
+                "[12,8]",
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(dashed_per_side["meshes"][0]["bounds"]["max"], serde_json::json!([92.0, 0.0]));
+        assert_eq!(
+            dashed_per_side["meshes"][0]["bounds"]["max"],
+            serde_json::json!([92.0, 0.0])
+        );
 
         let dashed_closed = serde_json::from_str::<serde_json::Value>(
             &stroke_mesh_for_dashed_polyline_json(
-                "[[0,0],[100,0],[100,60],[0,60]]", 4.0, "[120,20]", "butt", "miter", 4.0, true,
-            ).unwrap(),
-        ).unwrap();
-        assert!(dashed_closed["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+                "[[0,0],[100,0],[100,60],[0,60]]",
+                4.0,
+                "[120,20]",
+                "butt",
+                "miter",
+                4.0,
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            dashed_closed["triangles"]
+                .as_array()
+                .is_some_and(|triangles| !triangles.is_empty())
+        );
     }
 
     #[test]
@@ -4173,7 +4996,11 @@ mod tests {
         .unwrap();
         assert_eq!(arrow["bounds"]["min"][0], serde_json::json!(100.0));
         assert_eq!(arrow["bounds"]["max"][0], serde_json::json!(112.0));
-        assert!(arrow["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty()));
+        assert!(
+            arrow["triangles"]
+                .as_array()
+                .is_some_and(|triangles| !triangles.is_empty())
+        );
 
         // Start dot: centred on the endpoint, radius size/2 = 8.
         let dot = serde_json::from_str::<serde_json::Value>(
@@ -4192,8 +5019,12 @@ mod tests {
         .unwrap();
         let subpaths = outline["subpaths"].as_array().unwrap();
         assert!(!subpaths.is_empty());
-        assert!(subpaths.iter().all(|path| path["closed"] == serde_json::json!(true)
-            && path["points"].as_array().is_some_and(|points| points.len() >= 3)));
+        assert!(subpaths.iter().all(|path| {
+            path["closed"] == serde_json::json!(true)
+                && path["points"]
+                    .as_array()
+                    .is_some_and(|points| points.len() >= 3)
+        }));
     }
 
     #[test]
@@ -4204,7 +5035,11 @@ mod tests {
         .unwrap();
         let subpaths = outline["subpaths"].as_array().unwrap();
         assert_eq!(subpaths.len(), 4);
-        assert!(subpaths.iter().all(|path| path["closed"] == serde_json::json!(true)));
+        assert!(
+            subpaths
+                .iter()
+                .all(|path| path["closed"] == serde_json::json!(true))
+        );
     }
 
     #[test]
@@ -4538,11 +5373,26 @@ mod tests {
 
     #[test]
     fn maps_uniform_closed_shape_alignments_to_gpu_outsets() {
-        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Outside, 8.0, 1.0), 8.0);
-        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Center, 8.0, 1.0), 4.0);
-        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Inside, 8.0, 1.0), 0.0);
-        assert_eq!(shape_gpu_stroke_outset(NodeKind::Ellipse, true, StrokeAlign::Outside, 8.0, 1.0), 0.0);
-        assert_eq!(shape_gpu_stroke_outset(NodeKind::Rectangle, false, StrokeAlign::Outside, 8.0, 1.0), 8.0);
+        assert_eq!(
+            shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Outside, 8.0, 1.0),
+            8.0
+        );
+        assert_eq!(
+            shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Center, 8.0, 1.0),
+            4.0
+        );
+        assert_eq!(
+            shape_gpu_stroke_outset(NodeKind::Ellipse, false, StrokeAlign::Inside, 8.0, 1.0),
+            0.0
+        );
+        assert_eq!(
+            shape_gpu_stroke_outset(NodeKind::Ellipse, true, StrokeAlign::Outside, 8.0, 1.0),
+            0.0
+        );
+        assert_eq!(
+            shape_gpu_stroke_outset(NodeKind::Rectangle, false, StrokeAlign::Outside, 8.0, 1.0),
+            8.0
+        );
     }
 
     #[test]
@@ -4560,7 +5410,7 @@ mod tests {
             })
             .unwrap();
         let snapshot = source.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":20"));
+        assert!(snapshot.contains("\"schemaVersion\":21"));
         assert!(snapshot.contains("\"documentId\":\"00000000-0000-0000-0000-00000000002a\""));
         let mut restored = DocumentEngine::new();
         restored.load_snapshot_json(&snapshot).unwrap();
@@ -4670,13 +5520,18 @@ mod tests {
         let local_snapshot = service_rehydrated.snapshot_json();
 
         let mut browser_rehydrated = DocumentEngine::new();
-        browser_rehydrated.load_snapshot_json(&local_snapshot).unwrap();
+        browser_rehydrated
+            .load_snapshot_json(&local_snapshot)
+            .unwrap();
         assert_eq!(browser_rehydrated.canonical_hash(), source.canonical_hash());
     }
 
     #[test]
     fn phase2_common_nodes_fixture_survives_service_wire_and_local_snapshot_round_trip() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/documents/phase2-common-nodes.fixture.json")).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/documents/phase2-common-nodes.fixture.json"
+        ))
+        .unwrap();
         let nodes = fixture["nodes"].as_array().unwrap();
         let batch = nodes
             .iter()
@@ -4686,57 +5541,137 @@ mod tests {
                 // projected to the Canonical `cornerRadius`, and absent
                 // editable flags receive their deterministic defaults.
                 let mut node = source.clone();
-                node["cornerRadius"] = node.get("radius").cloned().unwrap_or_else(|| serde_json::json!(0));
-                node["locked"] = node.get("locked").cloned().unwrap_or_else(|| serde_json::json!(false));
+                node["cornerRadius"] = node
+                    .get("radius")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(0));
+                node["locked"] = node
+                    .get("locked")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(false));
                 serde_json::json!({ "type": "create", "node": node })
             })
             .collect::<Vec<_>>();
 
         let mut source = DocumentEngine::new();
-        source.seed_batch_json(&serde_json::to_string(&batch).unwrap()).unwrap();
+        source
+            .seed_batch_json(&serde_json::to_string(&batch).unwrap())
+            .unwrap();
         let source_hash = source.canonical_hash();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&source.snapshot_json()).unwrap()["nodes"].as_array().map(Vec::len), Some(nodes.len()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&source.snapshot_json()).unwrap()["nodes"]
+                .as_array()
+                .map(Vec::len),
+            Some(nodes.len())
+        );
 
         // The Protobuf payload is the durable service boundary; the JSON
         // projection is the browser-local recovery boundary.
         let service_wire = source.snapshot_protobuf().unwrap();
         let mut service_rehydrated = DocumentEngine::new();
-        service_rehydrated.load_snapshot_protobuf(&service_wire).unwrap();
+        service_rehydrated
+            .load_snapshot_protobuf(&service_wire)
+            .unwrap();
         assert_eq!(service_rehydrated.canonical_hash(), source_hash);
 
         let mut browser_rehydrated = DocumentEngine::new();
-        browser_rehydrated.load_snapshot_json(&service_rehydrated.snapshot_json()).unwrap();
+        browser_rehydrated
+            .load_snapshot_json(&service_rehydrated.snapshot_json())
+            .unwrap();
         assert_eq!(browser_rehydrated.canonical_hash(), source_hash);
     }
 
     #[test]
     fn effect_stack_fixture_node_accepts_a_third_ordered_shadow_update() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/documents/phase2-common-nodes.fixture.json")).unwrap();
-        let batch = fixture["nodes"].as_array().unwrap().iter().map(|source| {
-            let mut node = source.clone();
-            node["cornerRadius"] = node.get("radius").cloned().unwrap_or_else(|| serde_json::json!(0));
-            node["locked"] = node.get("locked").cloned().unwrap_or_else(|| serde_json::json!(false));
-            serde_json::json!({ "type": "create", "node": node })
-        }).collect::<Vec<_>>();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/documents/phase2-common-nodes.fixture.json"
+        ))
+        .unwrap();
+        let batch = fixture["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| {
+                let mut node = source.clone();
+                node["cornerRadius"] = node
+                    .get("radius")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(0));
+                node["locked"] = node
+                    .get("locked")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(false));
+                serde_json::json!({ "type": "create", "node": node })
+            })
+            .collect::<Vec<_>>();
         let mut engine = DocumentEngine::new();
-        engine.seed_batch_json(&serde_json::to_string(&batch).unwrap()).unwrap();
-        let mut card = serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap()["nodes"].as_array().unwrap().iter().find(|node| node["name"] == "Asymmetric Card").unwrap().clone();
+        engine
+            .seed_batch_json(&serde_json::to_string(&batch).unwrap())
+            .unwrap();
+        let mut card = serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap()
+            ["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["name"] == "Asymmetric Card")
+            .unwrap()
+            .clone();
         let third = card["effectStack"].as_array().unwrap()[0].clone();
         card["effectStack"].as_array_mut().unwrap().push(third);
-        engine.apply_transaction_json("00000000-0000-4000-8000-00000000e101", engine.document.revision, &serde_json::to_string(&vec![serde_json::json!({ "type": "update", "node": card })]).unwrap()).unwrap();
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-00000000e101",
+                engine.document.revision,
+                &serde_json::to_string(&vec![
+                    serde_json::json!({ "type": "update", "node": card }),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
-        assert_eq!(snapshot["nodes"].as_array().unwrap().iter().find(|node| node["name"] == "Asymmetric Card").unwrap()["effectStack"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            snapshot["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["name"] == "Asymmetric Card")
+                .unwrap()["effectStack"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]
     fn nested_auto_layout_frames_can_be_created_in_one_concrete_batch() {
         let mut template = DocumentEngine::new();
-        template.create_node(
-            "00000000-0000-0000-0000-000000000001", 0,
-            "00000000-0000-4000-8000-00000000f100", "frame", "Template",
-            0.0, 0.0, 400.0, 300.0, 0.0, "#ffffff", "#00000000", 0.0, 1.0, 0.0, true, false, "",
-        ).unwrap();
-        let base = serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"][0].clone();
+        template
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-4000-8000-00000000f100",
+                "frame",
+                "Template",
+                0.0,
+                0.0,
+                400.0,
+                300.0,
+                0.0,
+                "#ffffff",
+                "#00000000",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        let base =
+            serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"]
+                [0]
+            .clone();
         let mut parent = base.clone();
         parent["id"] = serde_json::json!("00000000-0000-4000-8000-00000000f101");
         parent["name"] = serde_json::json!("Parent layout");
@@ -4747,24 +5682,150 @@ mod tests {
         child["name"] = serde_json::json!("Child layout");
         child["width"] = serde_json::json!(200.0);
         child["height"] = serde_json::json!(100.0);
-        child["autoLayout"] = serde_json::json!({ "mode": "horizontal", "padding": [8, 8, 8, 8], "itemSpacing": 8, "wrap": false, "primaryAlignment": "start", "counterAlignment": "start", "primarySizing": "fixed", "counterSizing": "fixed", "absolute": false });
+        child["autoLayout"] = serde_json::json!({ "mode": "horizontal", "padding": [8, 8, 8, 8], "itemSpacing": 8, "wrap": false, "primaryAlignment": "start", "counterAlignment": "start", "primarySizing": "fixed", "counterSizing": "fixed", "absolute": false, "alignSelf": "end" });
         let mut engine = DocumentEngine::new();
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-00000000f103",
+                0,
+                &serde_json::to_string(&vec![
+                    serde_json::json!({ "type": "create", "node": parent }),
+                    serde_json::json!({ "type": "create", "node": child }),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        let snapshot = serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap();
+        assert_eq!(snapshot["nodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            snapshot["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["id"] == child["id"])
+                .unwrap()["autoLayout"]["alignSelf"],
+            "end"
+        );
+    }
+
+    #[test]
+    fn runtime_bridge_frame_batch_is_core_compatible() {
+        let mut template = DocumentEngine::new();
+        template
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-4000-8000-00000000f200",
+                "frame",
+                "Template",
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+                0.0,
+                "#00000000",
+                "#00000000",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        let mut frame = serde_json::from_str::<serde_json::Value>(&template.snapshot_json())
+            .unwrap()["nodes"][0]
+            .clone();
+        frame["id"] = serde_json::json!("00000000-0000-4000-8000-00000000f201");
+        frame["name"] = serde_json::json!("M1 card");
+        frame["x"] = serde_json::json!(48.0);
+        frame["y"] = serde_json::json!(64.0);
+        frame["width"] = serde_json::json!(320.0);
+        frame["height"] = serde_json::json!(180.0);
+        frame["positionId"] =
+            serde_json::json!("0000000000004000800000000000f201:00000000000000000000000000000000");
+        frame["pageId"] = serde_json::json!("00000000-0000-0000-0000-000000000001");
+
+        let mut engine = DocumentEngine::new();
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-00000000f202",
+                0,
+                &serde_json::to_string(&vec![
+                    serde_json::json!({ "type": "create", "node": frame.clone() }),
+                    serde_json::json!({ "type": "update", "node": frame }),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(engine.document.revision, 1);
+    }
+
+    #[test]
+    fn prototype_extension_batch_reaches_the_canonical_reducer() {
+        let mut engine = DocumentEngine::new();
+        engine
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-4000-8000-00000000f301",
+                "frame",
+                "Prototype",
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+                0.0,
+                "#ffffff",
+                "#00000000",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        let extensions = serde_json::json!({
+            "makefigma.prototype.metadata.v1": [123, 34, 115, 116, 97, 114, 116, 105, 110, 103, 80, 111, 105, 110, 116, 34, 58, 116, 114, 117, 101, 125]
+        });
         engine.apply_transaction_json(
-            "00000000-0000-4000-8000-00000000f103", 0,
-            &serde_json::to_string(&vec![serde_json::json!({ "type": "create", "node": parent }), serde_json::json!({ "type": "create", "node": child })]).unwrap(),
+            "00000000-0000-4000-8000-00000000f302", engine.document.revision,
+            &serde_json::to_string(&vec![serde_json::json!({ "type": "setExtensions", "id": "00000000-0000-4000-8000-00000000f301", "extensions": extensions })]).unwrap(),
         ).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap()["nodes"].as_array().map(Vec::len), Some(2));
+        let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert!(snapshot["nodes"][0]["extensions"]["makefigma.prototype.metadata.v1"].is_array());
     }
 
     #[test]
     fn seeded_auto_layout_frames_reflow_after_the_entire_batch_is_hydrated() {
         let mut template = DocumentEngine::new();
-        template.create_node(
-            "00000000-0000-0000-0000-000000000001", 0,
-            "00000000-0000-4000-8000-00000000f120", "frame", "Template",
-            0.0, 0.0, 400.0, 300.0, 0.0, "#ffffff", "#00000000", 0.0, 1.0, 0.0, true, false, "",
-        ).unwrap();
-        let base = serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"][0].clone();
+        template
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-4000-8000-00000000f120",
+                "frame",
+                "Template",
+                0.0,
+                0.0,
+                400.0,
+                300.0,
+                0.0,
+                "#ffffff",
+                "#00000000",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        let base =
+            serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"]
+                [0]
+            .clone();
         let layout = |mode: &str, padding: [u32; 4], spacing: u32| serde_json::json!({ "mode": mode, "padding": padding, "itemSpacing": spacing, "wrap": false, "primaryAlignment": "start", "counterAlignment": "start", "primarySizing": "fixed", "counterSizing": "fixed", "absolute": false });
         let mut parent = base.clone();
         parent["id"] = serde_json::json!("00000000-0000-4000-8000-00000000f121");
@@ -4783,31 +5844,70 @@ mod tests {
         child["autoLayout"] = layout("horizontal", [8, 8, 8, 8], 6);
 
         let mut engine = DocumentEngine::new();
-        engine.seed_batch_json(&serde_json::to_string(&vec![
-            serde_json::json!({ "type": "create", "node": parent }),
-            serde_json::json!({ "type": "create", "node": child }),
-        ]).unwrap()).unwrap();
+        engine
+            .seed_batch_json(
+                &serde_json::to_string(&vec![
+                    serde_json::json!({ "type": "create", "node": parent }),
+                    serde_json::json!({ "type": "create", "node": child }),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
 
         let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
-        let child = snapshot["nodes"].as_array().unwrap().iter().find(|node| node["id"] == "00000000-0000-4000-8000-00000000f122").unwrap();
-        assert_eq!((child["x"].as_f64(), child["y"].as_f64()), (Some(60.0), Some(80.0)));
+        let child = snapshot["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "00000000-0000-4000-8000-00000000f122")
+            .unwrap();
+        assert_eq!(
+            (child["x"].as_f64(), child["y"].as_f64()),
+            (Some(60.0), Some(80.0))
+        );
         assert_eq!(engine.document.revision, 0);
     }
 
     #[test]
     fn nested_auto_layout_subtree_can_be_pasted_beside_its_source_frame() {
         let mut template = DocumentEngine::new();
-        template.create_node(
-            "00000000-0000-0000-0000-000000000001", 0,
-            "00000000-0000-4000-8000-00000000f110", "frame", "Template",
-            0.0, 0.0, 400.0, 300.0, 0.0, "#ffffff", "#00000000", 0.0, 1.0, 0.0, true, false, "",
-        ).unwrap();
-        let base = serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"][0].clone();
+        template
+            .create_node(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-4000-8000-00000000f110",
+                "frame",
+                "Template",
+                0.0,
+                0.0,
+                400.0,
+                300.0,
+                0.0,
+                "#ffffff",
+                "#00000000",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        let base =
+            serde_json::from_str::<serde_json::Value>(&template.snapshot_json()).unwrap()["nodes"]
+                [0]
+            .clone();
         let layout = |mode: &str, padding: [u32; 4], spacing: u32| serde_json::json!({ "mode": mode, "padding": padding, "itemSpacing": spacing, "wrap": false, "primaryAlignment": "start", "counterAlignment": "start", "primarySizing": "fixed", "counterSizing": "fixed", "absolute": false });
-        let frame = |id: &str, parent_id: Option<&str>, width: u32, height: u32, auto_layout: serde_json::Value| {
+        let frame = |id: &str,
+                     parent_id: Option<&str>,
+                     width: u32,
+                     height: u32,
+                     auto_layout: serde_json::Value| {
             let mut node = base.clone();
             node["id"] = serde_json::json!(id);
-            node["parentId"] = parent_id.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null);
+            node["parentId"] = parent_id
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null);
             node["positionId"] = serde_json::Value::Null;
             node["width"] = serde_json::json!(width);
             node["height"] = serde_json::json!(height);
@@ -4820,13 +5920,49 @@ mod tests {
         let two_id = "00000000-0000-4000-8000-00000000f113";
         let three_id = "00000000-0000-4000-8000-00000000f114";
         let root = frame(root_id, None, 960, 680, serde_json::Value::Null);
-        let one = frame(one_id, Some(root_id), 400, 430, layout("vertical", [20, 20, 20, 20], 16));
-        let two = frame(two_id, Some(one_id), 360, 150, layout("horizontal", [16, 16, 16, 16], 12));
-        let three = frame(three_id, Some(two_id), 210, 118, layout("vertical", [8, 8, 8, 8], 6));
+        let one = frame(
+            one_id,
+            Some(root_id),
+            400,
+            430,
+            layout("vertical", [20, 20, 20, 20], 16),
+        );
+        let two = frame(
+            two_id,
+            Some(one_id),
+            360,
+            150,
+            layout("horizontal", [16, 16, 16, 16], 12),
+        );
+        let three = frame(
+            three_id,
+            Some(two_id),
+            210,
+            118,
+            layout("vertical", [8, 8, 8, 8], 6),
+        );
         let mut engine = DocumentEngine::new();
-        engine.seed_batch_json(&serde_json::to_string(&vec![root, one, two, three].into_iter().map(|node| serde_json::json!({ "type": "create", "node": node })).collect::<Vec<_>>()).unwrap()).unwrap();
+        engine
+            .seed_batch_json(
+                &serde_json::to_string(
+                    &vec![root, one, two, three]
+                        .into_iter()
+                        .map(|node| serde_json::json!({ "type": "create", "node": node }))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let snapshot = serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap();
-        let find = |id: &str| snapshot["nodes"].as_array().unwrap().iter().find(|node| node["id"] == id).unwrap().clone();
+        let find = |id: &str| {
+            snapshot["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["id"] == id)
+                .unwrap()
+                .clone()
+        };
         let copied_one_id = "00000000-0000-4000-8000-00000000f115";
         let copied_two_id = "00000000-0000-4000-8000-00000000f116";
         let copied_three_id = "00000000-0000-4000-8000-00000000f117";
@@ -4842,11 +5978,25 @@ mod tests {
         copied_three["id"] = serde_json::json!(copied_three_id);
         copied_three["parentId"] = serde_json::json!(copied_two_id);
         copied_three["positionId"] = serde_json::Value::Null;
-        engine.apply_transaction_json(
-            "00000000-0000-4000-8000-00000000f118", engine.document.revision,
-            &serde_json::to_string(&vec![copied_one, copied_two, copied_three].into_iter().map(|node| serde_json::json!({ "type": "create", "node": node })).collect::<Vec<_>>()).unwrap(),
-        ).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap()["nodes"].as_array().map(Vec::len), Some(7));
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-00000000f118",
+                engine.document.revision,
+                &serde_json::to_string(
+                    &vec![copied_one, copied_two, copied_three]
+                        .into_iter()
+                        .map(|node| serde_json::json!({ "type": "create", "node": node }))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&engine.snapshot_json()).unwrap()["nodes"]
+                .as_array()
+                .map(Vec::len),
+            Some(7)
+        );
     }
 
     #[test]
@@ -4874,8 +6024,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -4916,7 +6066,10 @@ mod tests {
         // durable Protobuf service boundary and the browser-local JSON boundary
         // byte-for-byte, without ever surfacing as an editable field.
         let mut extensions = std::collections::BTreeMap::new();
-        extensions.insert("phase3.autoLayout".to_string(), vec![0x00, 0xff, 0x7f, 0x80, 0x00]);
+        extensions.insert(
+            "phase3.autoLayout".to_string(),
+            vec![0x00, 0xff, 0x7f, 0x80, 0x00],
+        );
         extensions.insert("phase3.blend".to_string(), Vec::<u8>::new());
 
         let id = NodeId(1);
@@ -4965,7 +6118,9 @@ mod tests {
         };
 
         let mut source = DocumentEngine::new();
-        source.submit_create(NodeId(16), 0, node, Origin::LocalUser).unwrap();
+        source
+            .submit_create(NodeId(16), 0, node, Origin::LocalUser)
+            .unwrap();
         // Operation replay preserved the payloads verbatim.
         assert_eq!(source.document.node(id).unwrap().extensions, extensions);
         let source_hash = source.canonical_hash();
@@ -4973,14 +6128,24 @@ mod tests {
         // Durable Protobuf service boundary.
         let service_wire = source.snapshot_protobuf().unwrap();
         let mut service_rehydrated = DocumentEngine::new();
-        service_rehydrated.load_snapshot_protobuf(&service_wire).unwrap();
-        assert_eq!(service_rehydrated.document.node(id).unwrap().extensions, extensions);
+        service_rehydrated
+            .load_snapshot_protobuf(&service_wire)
+            .unwrap();
+        assert_eq!(
+            service_rehydrated.document.node(id).unwrap().extensions,
+            extensions
+        );
         assert_eq!(service_rehydrated.canonical_hash(), source_hash);
 
         // Browser-local JSON recovery boundary.
         let mut browser_rehydrated = DocumentEngine::new();
-        browser_rehydrated.load_snapshot_json(&service_rehydrated.snapshot_json()).unwrap();
-        assert_eq!(browser_rehydrated.document.node(id).unwrap().extensions, extensions);
+        browser_rehydrated
+            .load_snapshot_json(&service_rehydrated.snapshot_json())
+            .unwrap();
+        assert_eq!(
+            browser_rehydrated.document.node(id).unwrap().extensions,
+            extensions
+        );
         assert_eq!(browser_rehydrated.canonical_hash(), source_hash);
     }
 
@@ -5034,14 +6199,17 @@ mod tests {
             extensions: std::collections::BTreeMap::new(),
         };
         let mut source = DocumentEngine::new();
-        source.submit_create(NodeId(16), 0, node, Origin::LocalUser).unwrap();
+        source
+            .submit_create(NodeId(16), 0, node, Origin::LocalUser)
+            .unwrap();
         let wire = source.snapshot_protobuf().unwrap();
 
-        let mut decoded = makefigma_protocol::v1::DocumentSnapshot::decode(wire.as_slice()).unwrap();
+        let mut decoded =
+            makefigma_protocol::v1::DocumentSnapshot::decode(wire.as_slice()).unwrap();
         let reference = &mut decoded.page_chunks[0].nodes[0];
         let mut inner =
             makefigma_protocol::v1::SceneNode::decode(reference.canonical_node.as_slice()).unwrap();
-        inner.kind = 14; // beyond NODE_KIND_SLICE = 13
+        inner.kind = 999; // a positive NodeKind tag no current engine defines
         reference.canonical_node = inner.encode_to_vec();
         let future_wire = decoded.encode_to_vec();
 
@@ -5051,7 +6219,9 @@ mod tests {
         // assert the rejection at the codec layer directly: constructing the
         // wasm-bindgen JsValue error is not possible in a native test.
         let mut engine = DocumentEngine::new();
-        engine.submit_create(NodeId(17), 0, existing_rect(NodeId(2)), Origin::LocalUser).unwrap();
+        engine
+            .submit_create(NodeId(17), 0, existing_rect(NodeId(2)), Origin::LocalUser)
+            .unwrap();
         let hash_before = engine.canonical_hash();
 
         assert_eq!(
@@ -5100,8 +6270,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -5151,28 +6321,28 @@ mod tests {
                         fills: Vec::new(),
                         strokes: Vec::new(),
                         stroke_width: 0.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
-            arc_data: None,
-            parametric_shape: None,
-            relative_transform: None,
-            opacity: 1.0,
-            blend_mode: BlendMode::Normal,
-            drop_shadow: None,
-            effect_stack: Vec::new(),
+                        stroke_cap_start: Default::default(),
+                        stroke_cap_end: Default::default(),
+                        stroke_join: Default::default(),
+                        stroke_miter_limit: 10.0,
+                        stroke_dash_pattern: Vec::new(),
+                        stroke_weights: Vec::new(),
+                        stroke_align: Default::default(),
+                        arc_data: None,
+                        parametric_shape: None,
+                        relative_transform: None,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        drop_shadow: None,
+                        effect_stack: Vec::new(),
                         corner_radius: 12.0,
                         corner_radii: Vec::new(),
                         corner_smoothing: 0.0,
-            constraints: None,
+                        constraints: None,
                         visible: true,
                         locked: false,
                         contents_hidden: false,
-            clips_content: Some(false),
+                        clips_content: Some(false),
                     },
                     String::new(),
                 )
@@ -5213,8 +6383,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -5330,8 +6500,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -5448,7 +6618,7 @@ mod tests {
                 "{version}"
             );
             let projection = migrated.snapshot_json();
-            assert!(projection.contains(r#""schemaVersion":20"#), "{version}");
+            assert!(projection.contains(r#""schemaVersion":21"#), "{version}");
 
             let mut round_trip = DocumentEngine::new();
             round_trip.load_snapshot_json(&projection).unwrap();
@@ -5491,7 +6661,12 @@ mod tests {
             (
                 "v20",
                 include_str!("../../../fixtures/documents/phase2-snapshot-v20.fixture.json"),
-                "433c7599a939e437ac9775b982923fb91baab084edfbc5915022921d9884496a",
+                "c6cda08ca5cb9e47bd16e23e2293f01b4e45117f949cd869f472291b614099e7",
+            ),
+            (
+                "v21",
+                include_str!("../../../fixtures/documents/phase2-snapshot-v21.fixture.json"),
+                "aa7f66fb504872eb556cac1af60bbab41ca498e189ba60134f931c23f5153f63",
             ),
         ];
         let line_id = parse_id("00000000-0000-4000-8000-000000000102").unwrap();
@@ -5521,17 +6696,46 @@ mod tests {
                 assert_eq!(panel.strokes.len(), 2, "{version}");
             }
             if version >= "v20" {
-                let root = migrated.document.node(parse_id("00000000-0000-4000-8000-000000000101").unwrap()).unwrap();
-                assert_eq!(migrated.document.auto_layout_for_node(root.id).mode, LayoutMode::Horizontal, "{version}");
+                let root = migrated
+                    .document
+                    .node(parse_id("00000000-0000-4000-8000-000000000101").unwrap())
+                    .unwrap();
+                assert_eq!(
+                    migrated.document.auto_layout_for_node(root.id).mode,
+                    LayoutMode::Horizontal,
+                    "{version}"
+                );
+            }
+            if version >= "v21" {
+                let root = migrated
+                    .document
+                    .node(parse_id("00000000-0000-4000-8000-000000000101").unwrap())
+                    .unwrap();
+                let root_layout = migrated.document.auto_layout_for_node(root.id);
+                assert_eq!(root_layout.track_spacing, Some(20.0), "{version}");
+                assert_eq!(
+                    root_layout.track_alignment,
+                    WrapTrackAlignment::SpaceBetween,
+                    "{version}"
+                );
+                assert_eq!(
+                    migrated.document.auto_layout_for_node(panel.id).align_self,
+                    Some(LayoutAlignment::End),
+                    "{version}"
+                );
             }
 
             let projection = migrated.snapshot_json();
-            assert!(projection.contains(r#""schemaVersion":20"#), "{version}");
+            assert!(projection.contains(r#""schemaVersion":21"#), "{version}");
 
             // Re-migrating the current projection is idempotent and Hash-stable.
             let mut round_trip = DocumentEngine::new();
             round_trip.load_snapshot_json(&projection).unwrap();
-            assert_eq!(round_trip.canonical_hash(), migrated.canonical_hash(), "{version}");
+            assert_eq!(
+                round_trip.canonical_hash(),
+                migrated.canonical_hash(),
+                "{version}"
+            );
             assert_eq!(migrated.canonical_hash(), expected_hash, "{version}");
         }
     }
@@ -5558,7 +6762,9 @@ mod tests {
             .unwrap();
         match &root.stroke {
             Paint::Solid(color) => assert_eq!(color.alpha, 0.0),
-            _ => panic!("transparent stroke must remain a Solid transparent paint, not a gradient/empty"),
+            _ => panic!(
+                "transparent stroke must remain a Solid transparent paint, not a gradient/empty"
+            ),
         }
     }
 
@@ -5586,8 +6792,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
+            stroke_weights: Vec::new(),
+            stroke_align: Default::default(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -5641,32 +6847,32 @@ mod tests {
                         fills: Vec::new(),
                         strokes: Vec::new(),
                         stroke_width: 0.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
-            arc_data: None,
-            parametric_shape: None,
-            vector_path: None,
-            boolean_operation: None,
-            relative_transform: None,
-           opacity: 1.0,
-           blend_mode: BlendMode::Normal,
-           drop_shadow: None,
-            effect_stack: Vec::new(),
+                        stroke_cap_start: Default::default(),
+                        stroke_cap_end: Default::default(),
+                        stroke_join: Default::default(),
+                        stroke_miter_limit: 10.0,
+                        stroke_dash_pattern: Vec::new(),
+                        stroke_weights: Vec::new(),
+                        stroke_align: Default::default(),
+                        arc_data: None,
+                        parametric_shape: None,
+                        vector_path: None,
+                        boolean_operation: None,
+                        relative_transform: None,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        drop_shadow: None,
+                        effect_stack: Vec::new(),
                         corner_radius: 12.0,
                         corner_radii: Vec::new(),
                         corner_smoothing: 0.0,
-            constraints: None,
+                        constraints: None,
                         text: String::new(),
                         visible: true,
                         locked: false,
-            contents_hidden: false,
-            clips_content: false,
-            extensions: Default::default(),
+                        contents_hidden: false,
+                        clips_content: false,
+                        extensions: Default::default(),
                     },
                     Origin::LocalUser,
                 )
@@ -5697,32 +6903,32 @@ mod tests {
                     fills: Vec::new(),
                     strokes: Vec::new(),
                     stroke_width: 0.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
-            arc_data: None,
-            parametric_shape: None,
-            vector_path: None,
-            boolean_operation: None,
-            relative_transform: None,
-           opacity: 1.0,
-           blend_mode: BlendMode::Normal,
-           drop_shadow: None,
-            effect_stack: Vec::new(),
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                    stroke_weights: Vec::new(),
+                    stroke_align: Default::default(),
+                    arc_data: None,
+                    parametric_shape: None,
+                    vector_path: None,
+                    boolean_operation: None,
+                    relative_transform: None,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    drop_shadow: None,
+                    effect_stack: Vec::new(),
                     corner_radius: 12.0,
                     corner_radii: Vec::new(),
                     corner_smoothing: 0.0,
-            constraints: None,
+                    constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
-            contents_hidden: false,
-            clips_content: false,
-            extensions: Default::default(),
+                    contents_hidden: false,
+                    clips_content: false,
+                    extensions: Default::default(),
                 },
                 Origin::LocalUser,
             )
@@ -5770,8 +6976,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: "inside".into(),
+            stroke_weights: Vec::new(),
+            stroke_align: "inside".into(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -5846,20 +7052,43 @@ mod tests {
                         parent_ids: vec![ParentUpdate {
                             id: "00000000-0000-4000-8000-000000000001".into(),
                             parent_id: Some(group_id.into()),
-                            position_id: "00000000000000000000000000000001:00000000000000000000000000000000".into(),
+                            position_id:
+                                "00000000000000000000000000000001:00000000000000000000000000000000"
+                                    .into(),
                         }],
                     },
-                    BatchCommand::Update { node: first_as_group_child },
+                    BatchCommand::Update {
+                        node: first_as_group_child,
+                    },
                 ],
             )
             .unwrap();
-        assert_eq!(engine.document.node(first_id).unwrap().parent_id, Some(group_core_id));
-        assert_eq!(engine.document.node(first_id).unwrap().relative_transform, Some(editor_core::geometry::AffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }));
+        assert_eq!(
+            engine.document.node(first_id).unwrap().parent_id,
+            Some(group_core_id)
+        );
+        assert_eq!(
+            engine.document.node(first_id).unwrap().relative_transform,
+            Some(editor_core::geometry::AffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0
+            })
+        );
         engine.document.undo().unwrap();
         assert_eq!(engine.document.node(first_id).unwrap().parent_id, None);
-        assert_eq!(engine.document.node(first_id).unwrap().relative_transform, None);
+        assert_eq!(
+            engine.document.node(first_id).unwrap().relative_transform,
+            None
+        );
         engine.document.redo().unwrap();
-        assert_eq!(engine.document.node(first_id).unwrap().parent_id, Some(group_core_id));
+        assert_eq!(
+            engine.document.node(first_id).unwrap().parent_id,
+            Some(group_core_id)
+        );
 
         // A Group is itself a valid Group child. Re-wrapping it must carry the
         // same parent-relative transform protocol as a shape child.
@@ -5891,14 +7120,19 @@ mod tests {
                         parent_ids: vec![ParentUpdate {
                             id: group_id.into(),
                             parent_id: Some(outer_group_id.into()),
-                            position_id: "00000000000000000000000000000003:00000000000000000000000000000000".into(),
+                            position_id:
+                                "00000000000000000000000000000003:00000000000000000000000000000000"
+                                    .into(),
                         }],
                     },
                     BatchCommand::Update { node: nested_group },
                 ],
-        )
+            )
             .unwrap();
-        assert_eq!(engine.document.node(group_core_id).unwrap().parent_id, Some(outer_group_core_id));
+        assert_eq!(
+            engine.document.node(group_core_id).unwrap().parent_id,
+            Some(outer_group_core_id)
+        );
 
         let asset_id = "00000000-0000-4000-8000-000000000019";
         let image_id = "00000000-0000-4000-8000-000000000020";
@@ -5928,11 +7162,31 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert!(paste_engine.document.asset(AssetId(parse_id(asset_id).unwrap().0)).is_some());
-        assert!(paste_engine.document.node(parse_id(image_id).unwrap()).is_some());
+        assert!(
+            paste_engine
+                .document
+                .asset(AssetId(parse_id(asset_id).unwrap().0))
+                .is_some()
+        );
+        assert!(
+            paste_engine
+                .document
+                .node(parse_id(image_id).unwrap())
+                .is_some()
+        );
         paste_engine.undo().unwrap();
-        assert!(paste_engine.document.asset(AssetId(parse_id(asset_id).unwrap().0)).is_none());
-        assert!(paste_engine.document.node(parse_id(image_id).unwrap()).is_none());
+        assert!(
+            paste_engine
+                .document
+                .asset(AssetId(parse_id(asset_id).unwrap().0))
+                .is_none()
+        );
+        assert!(
+            paste_engine
+                .document
+                .node(parse_id(image_id).unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -6006,7 +7260,9 @@ mod tests {
             .submit_batch(
                 NodeId(101),
                 0,
-                vec![BatchCommand::Create { node: frame.clone() }],
+                vec![BatchCommand::Create {
+                    node: frame.clone(),
+                }],
             )
             .unwrap();
         let mut image_filled = frame.clone();
@@ -6015,7 +7271,9 @@ mod tests {
             .submit_batch(
                 NodeId(102),
                 1,
-                vec![BatchCommand::Update { node: image_filled.clone() }],
+                vec![BatchCommand::Update {
+                    node: image_filled.clone(),
+                }],
             )
             .unwrap();
         let mut circular = image_filled;
@@ -6024,7 +7282,9 @@ mod tests {
             .submit_batch(
                 NodeId(103),
                 2,
-                vec![BatchCommand::Update { node: circular.clone() }],
+                vec![BatchCommand::Update {
+                    node: circular.clone(),
+                }],
             )
             .unwrap();
         let mut outside = circular;
@@ -6036,7 +7296,11 @@ mod tests {
             4
         );
         assert_eq!(
-            engine.document.node(parse_id(frame_id).unwrap()).unwrap().stroke_align,
+            engine
+                .document
+                .node(parse_id(frame_id).unwrap())
+                .unwrap()
+                .stroke_align,
             StrokeAlign::Outside
         );
     }
@@ -6070,8 +7334,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: "inside".into(),
+            stroke_weights: Vec::new(),
+            stroke_align: "inside".into(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -6200,8 +7464,8 @@ mod tests {
             stroke_join: Default::default(),
             stroke_miter_limit: 10.0,
             stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: "inside".into(),
+            stroke_weights: Vec::new(),
+            stroke_align: "inside".into(),
             arc_data: None,
             parametric_shape: None,
             vector_path: None,
@@ -6259,7 +7523,7 @@ mod tests {
         assert_eq!(engine.redo().unwrap(), 4);
 
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":20"));
+        assert!(snapshot.contains("\"schemaVersion\":21"));
         assert!(snapshot.contains("\"textProperties\":{\"runs\":[{\"start\":0,\"end\":5"));
         assert!(snapshot.contains("\"color\":{\"space\":\"srgb\""));
         assert!(snapshot.contains("\"stroke\":\"#00000000\""));
@@ -6303,19 +7567,51 @@ mod tests {
                 { "id": "00000000-0000-0000-0000-000000000003", "x": 50.0, "y": 100.0, "pointType": "corner" }
             ] }]
         }).to_string();
-        let flattened: serde_json::Value = serde_json::from_str(&vector_path_geometry_json(&path, 0.25).unwrap()).unwrap();
+        let flattened: serde_json::Value =
+            serde_json::from_str(&vector_path_geometry_json(&path, 0.25).unwrap()).unwrap();
         assert!(flattened["subpaths"][0]["points"].as_array().unwrap().len() > 3);
         assert!(vector_path_contains_json(&path, 50.0, 70.0, 0.25).unwrap());
-        let mesh: serde_json::Value = serde_json::from_str(&vector_path_stroke_mesh_json(&path, 0.25, 4.0, "round", "round", 4.0).unwrap()).unwrap();
+        let mesh: serde_json::Value = serde_json::from_str(
+            &vector_path_stroke_mesh_json(&path, 0.25, 4.0, "round", "round", 4.0).unwrap(),
+        )
+        .unwrap();
         assert!(mesh["triangles"].as_array().unwrap().len() >= 6);
-        assert!(vector_path_stroke_contains_json(&path, 50.0, 101.0, 0.25, 4.0, "round", "round", 4.0).unwrap());
-        let outline: serde_json::Value = serde_json::from_str(&vector_path_outline_json(&path, 0.25, 4.0, "round", "round", 4.0).unwrap()).unwrap();
+        assert!(
+            vector_path_stroke_contains_json(&path, 50.0, 101.0, 0.25, 4.0, "round", "round", 4.0)
+                .unwrap()
+        );
+        let outline: serde_json::Value = serde_json::from_str(
+            &vector_path_outline_json(&path, 0.25, 4.0, "round", "round", 4.0).unwrap(),
+        )
+        .unwrap();
         assert_eq!(outline["fillRule"], "nonZero");
-        assert!(outline["subpaths"].as_array().unwrap().iter().all(|subpath| subpath["closed"] == true));
-        assert!(outline["subpaths"].as_array().unwrap().iter().any(|subpath| subpath["points"].as_array().unwrap().len() >= 3));
-        let dashed: serde_json::Value = serde_json::from_str(&vector_path_dashed_outline_json(&path, 0.25, 4.0, "[12,6]", "round", "round", 4.0).unwrap()).unwrap();
+        assert!(
+            outline["subpaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|subpath| subpath["closed"] == true)
+        );
+        assert!(
+            outline["subpaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|subpath| subpath["points"].as_array().unwrap().len() >= 3)
+        );
+        let dashed: serde_json::Value = serde_json::from_str(
+            &vector_path_dashed_outline_json(&path, 0.25, 4.0, "[12,6]", "round", "round", 4.0)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(dashed["subpaths"].as_array().unwrap().len() > 2);
-        assert!(dashed["subpaths"].as_array().unwrap().iter().all(|subpath| subpath["closed"] == true));
+        assert!(
+            dashed["subpaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|subpath| subpath["closed"] == true)
+        );
     }
 
     #[test]
@@ -6328,11 +7624,17 @@ mod tests {
             ] }]
         }).to_string();
 
-        let hit: serde_json::Value = serde_json::from_str(&vector_path_nearest_segment_json(&path, 5.0, 7.5, 0.01, 1.0).unwrap()).unwrap();
+        let hit: serde_json::Value = serde_json::from_str(
+            &vector_path_nearest_segment_json(&path, 5.0, 7.5, 0.01, 1.0).unwrap(),
+        )
+        .unwrap();
         assert_eq!(hit["subpathIndex"], 0);
         assert_eq!(hit["afterPointIndex"], 0);
         assert!((hit["t"].as_f64().unwrap() - 0.5).abs() < 0.01);
-        assert_eq!(vector_path_nearest_segment_json(&path, 5.0, 30.0, 0.01, 1.0).unwrap(), "null");
+        assert_eq!(
+            vector_path_nearest_segment_json(&path, 5.0, 30.0, 0.01, 1.0).unwrap(),
+            "null"
+        );
     }
 
     #[test]
@@ -6351,9 +7653,9 @@ mod tests {
                 { "id": "00000000-0000-0000-0000-000000000204", "x": 5.0, "y": 10.0, "pointType": "corner" }
             ] }] }
         ]).to_string();
-        let result: serde_json::Value = serde_json::from_str(
-            &boolean_vector_paths_json("subtract", &operands, 0.25).unwrap(),
-        ).unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(&boolean_vector_paths_json("subtract", &operands, 0.25).unwrap())
+                .unwrap();
         assert_eq!(result["fillRule"], "nonZero");
         assert_eq!(result["bounds"]["min"], serde_json::json!([0.0, 0.0]));
         assert_eq!(result["bounds"]["max"], serde_json::json!([5.0, 10.0]));
@@ -6369,9 +7671,27 @@ mod tests {
             subpaths: vec![VectorSubpath {
                 closed: true,
                 points: vec![
-                    VectorPoint { id: PointId(1), position: Point { x: 0.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(2), position: Point { x: 20.0, y: 0.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
-                    VectorPoint { id: PointId(3), position: Point { x: 10.0, y: 20.0 }, handle_in: None, handle_out: None, point_type: VectorPointType::Corner },
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 20.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(3),
+                        position: Point { x: 10.0, y: 20.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
                 ],
             }],
         });
@@ -6390,7 +7710,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            engine.document.node(id).unwrap().vector_path.as_ref().unwrap().subpaths[0].points[1].position,
+            engine
+                .document
+                .node(id)
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points[1]
+                .position,
             Point { x: 25.0, y: 5.0 },
         );
         engine
@@ -6404,7 +7733,17 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert!(!engine.document.node(id).unwrap().vector_path.as_ref().unwrap().subpaths[0].closed);
+        assert!(
+            !engine
+                .document
+                .node(id)
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .closed
+        );
         let split: BatchCommand = serde_json::from_value(serde_json::json!({
             "type": "splitVectorSegment",
             "id": format_uuid(id),
@@ -6414,8 +7753,22 @@ mod tests {
             "pointId": format_uuid(NodeId(4)),
         }))
         .unwrap();
-        engine.submit_batch(NodeId(10), engine.document.revision, vec![split]).unwrap();
-        assert_eq!(engine.document.node(id).unwrap().vector_path.as_ref().unwrap().subpaths[0].points.len(), 4);
+        engine
+            .submit_batch(NodeId(10), engine.document.revision, vec![split])
+            .unwrap();
+        assert_eq!(
+            engine
+                .document
+                .node(id)
+                .unwrap()
+                .vector_path
+                .as_ref()
+                .unwrap()
+                .subpaths[0]
+                .points
+                .len(),
+            4
+        );
     }
 
     #[test]
@@ -6434,15 +7787,57 @@ mod tests {
             { "type": "reparent", "parentIds": [{ "id": id, "parentId": null, "positionId": "00000000000000000000000000000001:00000000000000000000000000000002" }] }
         ])).unwrap();
 
-        assert!(matches!(commands[0], BatchCommand::MoveVectorPoint { ref point_id, .. } if point_id == "00000000-0000-4000-8000-000000000002"));
-        assert!(matches!(commands[1], BatchCommand::SetVectorSubpathClosed { subpath_index: 3, .. }));
-        assert!(matches!(commands[2], BatchCommand::InsertVectorPoint { subpath_index: 4, after_point_id: Some(_), .. }));
-        assert!(matches!(commands[3], BatchCommand::SplitVectorSegment { subpath_index: 5, .. }));
-        assert!(matches!(commands[4], BatchCommand::ConnectVectorEndpoints { first_subpath_index: 6, second_subpath_index: 7, .. }));
-        assert!(matches!(commands[5], BatchCommand::DeleteVectorPoint { .. }));
-        assert!(matches!(commands[6], BatchCommand::SetVectorPointHandles { handle_in: Some(_), handle_out: Some(_), .. }));
-        assert!(matches!(commands[7], BatchCommand::Reposition { ref position_ids } if position_ids.len() == 1));
-        assert!(matches!(commands[8], BatchCommand::Reparent { ref parent_ids } if parent_ids.len() == 1));
+        assert!(
+            matches!(commands[0], BatchCommand::MoveVectorPoint { ref point_id, .. } if point_id == "00000000-0000-4000-8000-000000000002")
+        );
+        assert!(matches!(
+            commands[1],
+            BatchCommand::SetVectorSubpathClosed {
+                subpath_index: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            commands[2],
+            BatchCommand::InsertVectorPoint {
+                subpath_index: 4,
+                after_point_id: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            commands[3],
+            BatchCommand::SplitVectorSegment {
+                subpath_index: 5,
+                ..
+            }
+        ));
+        assert!(matches!(
+            commands[4],
+            BatchCommand::ConnectVectorEndpoints {
+                first_subpath_index: 6,
+                second_subpath_index: 7,
+                ..
+            }
+        ));
+        assert!(matches!(
+            commands[5],
+            BatchCommand::DeleteVectorPoint { .. }
+        ));
+        assert!(matches!(
+            commands[6],
+            BatchCommand::SetVectorPointHandles {
+                handle_in: Some(_),
+                handle_out: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            matches!(commands[7], BatchCommand::Reposition { ref position_ids } if position_ids.len() == 1)
+        );
+        assert!(
+            matches!(commands[8], BatchCommand::Reparent { ref parent_ids } if parent_ids.len() == 1)
+        );
     }
 
     #[test]
@@ -6575,7 +7970,7 @@ mod tests {
             .set_document_color_profile("00000000-0000-4000-8000-000000000099", 0, "display-p3")
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":20"));
+        assert!(snapshot.contains("\"schemaVersion\":21"));
         assert!(snapshot.contains("\"colorProfile\":\"display-p3\""));
 
         let mut restored = DocumentEngine::new();
@@ -6650,42 +8045,42 @@ mod tests {
                         stroke_color: None,
                         stroke_gradient: Some(gradient.clone()),
                         stroke_width: 3.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: "inside".into(),
-            arc_data: None,
-            parametric_shape: None,
-            vector_path: None,
-            boolean_operation: None,
-            relative_transform: None,
-            position_id: None,
+                        stroke_cap_start: Default::default(),
+                        stroke_cap_end: Default::default(),
+                        stroke_join: Default::default(),
+                        stroke_miter_limit: 10.0,
+                        stroke_dash_pattern: Vec::new(),
+                        stroke_weights: Vec::new(),
+                        stroke_align: "inside".into(),
+                        arc_data: None,
+                        parametric_shape: None,
+                        vector_path: None,
+                        boolean_operation: None,
+                        relative_transform: None,
+                        position_id: None,
                         page_id: None,
-                       opacity: 1.0,
-                       blend_mode: "normal".into(),
-                       drop_shadow: None,
-            effect_stack: Vec::new(),
-                       corner_radius: 8.0,
+                        opacity: 1.0,
+                        blend_mode: "normal".into(),
+                        drop_shadow: None,
+                        effect_stack: Vec::new(),
+                        corner_radius: 8.0,
                         corner_radii: Vec::new(),
                         corner_smoothing: 0.0,
-            constraints: None,
-            auto_layout: None,
+                        constraints: None,
+                        auto_layout: None,
                         text: String::new(),
                         visible: true,
                         locked: false,
-            contents_hidden: false,
-            clips_content: Some(false),
-            is_mask: false,
-            extensions: Default::default(),
+                        contents_hidden: false,
+                        clips_content: Some(false),
+                        is_mask: false,
+                        extensions: Default::default(),
                     },
                 }],
             )
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":20"));
+        assert!(snapshot.contains("\"schemaVersion\":21"));
         assert!(snapshot.contains("\"fillGradient\""));
         assert!(snapshot.contains("\"strokeGradient\""));
         assert!(snapshot.contains("\"strokeWidth\":3.0"));
@@ -6786,7 +8181,7 @@ mod tests {
             Some(parse_page_id(design_page).unwrap())
         );
         let round_trip = restored.snapshot_json();
-        assert!(round_trip.contains("\"schemaVersion\":20"));
+        assert!(round_trip.contains("\"schemaVersion\":21"));
         assert!(round_trip.contains("\"pageId\":\"00000000-0000-4000-8000-000000000002\""));
 
         let mut v9 = current;
@@ -6810,12 +8205,45 @@ mod tests {
             ("00000000-0000-4000-8000-000000000201", mask_id, "Mask"),
             ("00000000-0000-4000-8000-000000000202", target_id, "Target"),
         ] {
-            engine.create_node(transaction_id, engine.document.revision, node_id, "rectangle", name, 0.0, 0.0, 100.0, 80.0, 0.0, "#ffffff", "#00000000", 0.0, 1.0, 0.0, true, false, "").unwrap();
+            engine
+                .create_node(
+                    transaction_id,
+                    engine.document.revision,
+                    node_id,
+                    "rectangle",
+                    name,
+                    0.0,
+                    0.0,
+                    100.0,
+                    80.0,
+                    0.0,
+                    "#ffffff",
+                    "#00000000",
+                    0.0,
+                    1.0,
+                    0.0,
+                    true,
+                    false,
+                    "",
+                )
+                .unwrap();
         }
-        engine.submit_batch(NodeId(0x203), 2, vec![BatchCommand::SetMask { id: mask_id.into(), enabled: true }]).unwrap();
+        engine
+            .submit_batch(
+                NodeId(0x203),
+                2,
+                vec![BatchCommand::SetMask {
+                    id: mask_id.into(),
+                    enabled: true,
+                }],
+            )
+            .unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
         assert_eq!(snapshot["nodes"][0]["isMask"], true);
-        assert_eq!(snapshot["nodes"][0]["extensions"]["makefigma.mask.alpha.v1"], serde_json::json!([1]));
+        assert_eq!(
+            snapshot["nodes"][0]["extensions"]["makefigma.mask.alpha.v1"],
+            serde_json::json!([1])
+        );
         engine.undo().unwrap();
         let undone: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
         assert_eq!(undone["nodes"][0]["isMask"], false);
@@ -6862,6 +8290,79 @@ mod tests {
     }
 
     #[test]
+    fn imported_page_keeps_its_explicit_canonical_position() {
+        let mut engine = DocumentEngine::new();
+        let position = "40000000000000000000000000000000:00000000000000000000000000000000";
+        engine
+            .create_page_at_position(
+                "00000000-0000-4000-8000-0000000000aa",
+                0,
+                "00000000-0000-4000-8000-0000000000bb",
+                "Imported first page",
+                position,
+            )
+            .unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        let imported = snapshot["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|page| page["name"] == "Imported first page")
+            .unwrap();
+        assert_eq!(imported["positionId"], position);
+    }
+
+    #[test]
+    fn page_and_nodes_share_one_atomic_import_batch() {
+        let mut engine = DocumentEngine::new();
+        let page_id = "00000000-0000-4000-8000-0000000007a1";
+        let page_position = "40000000000000000000000000000000:00000000000000000000000000000000";
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-0000000007a2",
+            "pageId": page_id,
+            "positionId": "80000000000000000000000000000000:00000000000000000000000000000000",
+            "name": "Imported layer", "kind": "rectangle",
+            "x": 10.0, "y": 20.0, "width": 40.0, "height": 30.0,
+            "fill": "#ffffff", "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false, "contentsHidden": false
+        }))
+        .unwrap();
+        engine
+            .submit_batch(
+                NodeId(0x7a0),
+                0,
+                vec![
+                    BatchCommand::CreatePage {
+                        page: ProjectionPage {
+                            id: page_id.into(),
+                            name: "Imported page".into(),
+                            position_id: page_position.into(),
+                        },
+                    },
+                    BatchCommand::Create { node },
+                ],
+            )
+            .unwrap();
+        assert_eq!(engine.document.revision, 1);
+        assert_eq!(engine.document.pages().count(), 2);
+        assert_eq!(
+            engine
+                .document
+                .page(PageId(parse_id(page_id).unwrap().0))
+                .unwrap()
+                .position
+                .key,
+            0x40000000000000000000000000000000_u128
+        );
+        assert!(
+            engine
+                .document
+                .node(parse_id("00000000-0000-4000-8000-0000000007a2").unwrap())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn one_thousand_property_updates_commit_as_one_batch() {
         let mut engine = DocumentEngine::new();
         let mut updates = Vec::with_capacity(1_000);
@@ -6885,32 +8386,32 @@ mod tests {
                     fills: Vec::new(),
                     strokes: Vec::new(),
                     stroke_width: 0.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: Default::default(),
-            arc_data: None,
-            parametric_shape: None,
-            vector_path: None,
-            boolean_operation: None,
-            relative_transform: None,
-           opacity: 1.0,
-           blend_mode: BlendMode::Normal,
-           drop_shadow: None,
-            effect_stack: Vec::new(),
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                    stroke_weights: Vec::new(),
+                    stroke_align: Default::default(),
+                    arc_data: None,
+                    parametric_shape: None,
+                    vector_path: None,
+                    boolean_operation: None,
+                    relative_transform: None,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    drop_shadow: None,
+                    effect_stack: Vec::new(),
                     corner_radius: 12.0,
                     corner_radii: Vec::new(),
                     corner_smoothing: 0.0,
-            constraints: None,
+                    constraints: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
-            contents_hidden: false,
-            clips_content: false,
-            extensions: Default::default(),
+                    contents_hidden: false,
+                    clips_content: false,
+                    extensions: Default::default(),
                 })
                 .unwrap();
             updates.push(BatchCommand::Update {
@@ -6935,36 +8436,36 @@ mod tests {
                     stroke_color: None,
                     stroke_gradient: None,
                     stroke_width: 0.0,
-            stroke_cap_start: Default::default(),
-            stroke_cap_end: Default::default(),
-            stroke_join: Default::default(),
-            stroke_miter_limit: 10.0,
-            stroke_dash_pattern: Vec::new(),
-           stroke_weights: Vec::new(),
-           stroke_align: "inside".into(),
-            arc_data: None,
-            parametric_shape: None,
-            vector_path: None,
-            boolean_operation: None,
-            relative_transform: None,
-            position_id: None,
+                    stroke_cap_start: Default::default(),
+                    stroke_cap_end: Default::default(),
+                    stroke_join: Default::default(),
+                    stroke_miter_limit: 10.0,
+                    stroke_dash_pattern: Vec::new(),
+                    stroke_weights: Vec::new(),
+                    stroke_align: "inside".into(),
+                    arc_data: None,
+                    parametric_shape: None,
+                    vector_path: None,
+                    boolean_operation: None,
+                    relative_transform: None,
+                    position_id: None,
                     page_id: None,
-                   opacity: 1.0,
-                   blend_mode: "normal".into(),
-                   drop_shadow: None,
-            effect_stack: Vec::new(),
-                   corner_radius: 12.0,
+                    opacity: 1.0,
+                    blend_mode: "normal".into(),
+                    drop_shadow: None,
+                    effect_stack: Vec::new(),
+                    corner_radius: 12.0,
                     corner_radii: Vec::new(),
                     corner_smoothing: 0.0,
-            constraints: None,
-            auto_layout: None,
+                    constraints: None,
+                    auto_layout: None,
                     text: String::new(),
                     visible: true,
                     locked: false,
-            contents_hidden: false,
-            clips_content: Some(false),
-            is_mask: false,
-            extensions: Default::default(),
+                    contents_hidden: false,
+                    clips_content: Some(false),
+                    is_mask: false,
+                    extensions: Default::default(),
                 },
             });
         }

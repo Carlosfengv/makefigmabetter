@@ -713,7 +713,8 @@ impl AssetService {
                 "INSERT OR IGNORE INTO document_assets (document_id, asset_id) VALUES (?1, ?2)",
                 params![target_document_id.as_slice(), asset_id.as_slice()],
             )
-            .map_err(|_| AssetServiceError::Storage)? > 0;
+            .map_err(|_| AssetServiceError::Storage)?
+            > 0;
         if inserted {
             transaction
                 .execute(
@@ -728,7 +729,9 @@ impl AssetService {
                 )
                 .map_err(|_| AssetServiceError::Storage)?;
         }
-        transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| AssetServiceError::Storage)?;
         Ok(inserted)
     }
 
@@ -741,7 +744,10 @@ impl AssetService {
         document_id: Id,
         asset_id: Id,
     ) -> Result<bool, AssetServiceError> {
-        let mut connection = self.connection.lock().map_err(|_| AssetServiceError::Storage)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AssetServiceError::Storage)?;
         if !can_write_document(&connection, principal, document_id)? {
             return Err(AssetServiceError::PermissionDenied);
         }
@@ -753,7 +759,8 @@ impl AssetService {
                 "DELETE FROM clipboard_document_assets WHERE document_id = ?1 AND asset_id = ?2",
                 params![document_id.as_slice(), asset_id.as_slice()],
             )
-            .map_err(|_| AssetServiceError::Storage)? > 0;
+            .map_err(|_| AssetServiceError::Storage)?
+            > 0;
         if removed {
             transaction
                 .execute(
@@ -768,7 +775,9 @@ impl AssetService {
                 )
                 .map_err(|_| AssetServiceError::Storage)?;
         }
-        transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| AssetServiceError::Storage)?;
         Ok(removed)
     }
 
@@ -781,7 +790,10 @@ impl AssetService {
         document_id: Id,
         asset_id: Id,
     ) -> Result<(), AssetServiceError> {
-        let connection = self.connection.lock().map_err(|_| AssetServiceError::Storage)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AssetServiceError::Storage)?;
         if !can_write_document(&connection, principal, document_id)? {
             return Err(AssetServiceError::PermissionDenied);
         }
@@ -1132,7 +1144,9 @@ impl AssetService {
                         params![tenant_id.as_slice(), content_hash.as_slice()],
                     )
                     .map_err(|_| AssetServiceError::Storage)?;
-                transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+                transaction
+                    .commit()
+                    .map_err(|_| AssetServiceError::Storage)?;
                 continue;
             }
             self.object_store.delete(AssetObjectKey {
@@ -1145,7 +1159,9 @@ impl AssetService {
                     params![tenant_id.as_slice(), content_hash.as_slice()],
                 )
                 .map_err(|_| AssetServiceError::Storage)?;
-            transaction.commit().map_err(|_| AssetServiceError::Storage)?;
+            transaction
+                .commit()
+                .map_err(|_| AssetServiceError::Storage)?;
             deleted += 1;
         }
         Ok(deleted)
@@ -1633,14 +1649,19 @@ mod tests {
             .attach_asset_to_document(principal(7), source, asset.asset_id)
             .unwrap();
 
-        assert!(service
-            .attach_asset_from_document(principal(7), source, target, asset.asset_id)
-            .unwrap());
+        assert!(
+            service
+                .attach_asset_from_document(principal(7), source, target, asset.asset_id)
+                .unwrap()
+        );
         let grant = service
             .issue_download_grant(principal(7), target, asset.asset_id, 100, 30)
             .unwrap();
         assert_eq!(
-            service.download_with_grant(principal(7), &grant, 101).unwrap().1,
+            service
+                .download_with_grant(principal(7), &grant, 101)
+                .unwrap()
+                .1,
             bytes,
         );
 
@@ -1652,30 +1673,40 @@ mod tests {
             service.attach_asset_from_document(principal(8), source, target, asset.asset_id),
             Err(AssetServiceError::PermissionDenied)
         );
-        assert!(service
-            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
-            .unwrap());
-        assert!(!service
-            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
-            .unwrap());
+        assert!(
+            service
+                .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+                .unwrap()
+        );
+        assert!(
+            !service
+                .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+                .unwrap()
+        );
         assert_eq!(
             service.issue_download_grant(principal(7), target, asset.asset_id, 102, 30),
             Err(AssetServiceError::PermissionDenied)
         );
-        assert!(service
-            .attach_asset_from_document(principal(7), source, target, asset.asset_id)
-            .unwrap());
+        assert!(
+            service
+                .attach_asset_from_document(principal(7), source, target, asset.asset_id)
+                .unwrap()
+        );
         // Finalizing a successful Core transaction keeps the attachment but
         // consumes its rollback marker.
         service
             .finalize_clipboard_asset_attachment(principal(7), target, asset.asset_id)
             .unwrap();
-        assert!(!service
-            .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
-            .unwrap());
-        assert!(service
-            .issue_download_grant(principal(7), target, asset.asset_id, 103, 30)
-            .is_ok());
+        assert!(
+            !service
+                .detach_clipboard_asset_from_document(principal(7), target, asset.asset_id)
+                .unwrap()
+        );
+        assert!(
+            service
+                .issue_download_grant(principal(7), target, asset.asset_id, 103, 30)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1721,7 +1752,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             rejection_outcomes,
-            vec!["permission_denied", "content_hash_mismatch", "mime_mismatch"]
+            vec![
+                "permission_denied",
+                "content_hash_mismatch",
+                "mime_mismatch"
+            ]
         );
     }
 
@@ -1906,11 +1941,9 @@ mod tests {
     #[test]
     fn queued_orphan_cleanup_never_deletes_a_reuploaded_content_hash() {
         let store = Arc::new(InMemoryObjectStore(Mutex::new(HashMap::new())));
-        let service = AssetService::from_connection(
-            Connection::open_in_memory().unwrap(),
-            store.clone(),
-        )
-        .unwrap();
+        let service =
+            AssetService::from_connection(Connection::open_in_memory().unwrap(), store.clone())
+                .unwrap();
         let bytes = png();
         let hash: ContentHash = Sha256::digest(&bytes).into();
 

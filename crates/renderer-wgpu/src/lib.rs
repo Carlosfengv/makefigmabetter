@@ -152,8 +152,15 @@ pub fn build_gpu_instance_batch(
         {
             continue;
         }
-        let closed_shape = matches!(primitive.kind, SceneNodeKind::Frame | SceneNodeKind::Rectangle | SceneNodeKind::Ellipse);
-        let outset = if closed_shape { primitive.shape_stroke_outset.max(0.0) } else { 0.0 };
+        let closed_shape = matches!(
+            primitive.kind,
+            SceneNodeKind::Frame | SceneNodeKind::Rectangle | SceneNodeKind::Ellipse
+        );
+        let outset = if closed_shape {
+            primitive.shape_stroke_outset.max(0.0)
+        } else {
+            0.0
+        };
         let bounds = if outset > 0.0 {
             Rect {
                 x: primitive.bounds.x - outset,
@@ -173,8 +180,8 @@ pub fn build_gpu_instance_batch(
             } else {
                 outset
             })
-            .max(0.0)
-            .min(limiting_dimension / 2.0);
+        .max(0.0)
+        .min(limiting_dimension / 2.0);
         let inside_stroke_width = if primitive.stroke_rgba[3] > 0.0 {
             primitive
                 .stroke_width
@@ -362,9 +369,7 @@ pub fn compile_render_graph(scene: &Scene, dirty: DirtySet, viewport: Rect) -> R
                 | SceneNodeKind::Section
                 | SceneNodeKind::Rectangle
                 | SceneNodeKind::Ellipse
-                | SceneNodeKind::Line => {
-                    RenderPass::MainScene
-                }
+                | SceneNodeKind::Line => RenderPass::MainScene,
                 SceneNodeKind::Group => RenderPass::Overlay,
             },
         })
@@ -2535,7 +2540,12 @@ mod tests {
         let batch = build_gpu_instance_batch([GpuPrimitive {
             node_id: 7,
             kind: SceneNodeKind::Ellipse,
-            bounds: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
+            bounds: Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
             rotation_degrees: 0.0,
             corner_radius: 0.0,
             stroke_width: 8.0,
@@ -2553,7 +2563,12 @@ mod tests {
         let batch = build_gpu_instance_batch([GpuPrimitive {
             node_id: 8,
             kind: SceneNodeKind::Rectangle,
-            bounds: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
+            bounds: Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
             rotation_degrees: 0.0,
             corner_radius: 12.0,
             stroke_width: 8.0,

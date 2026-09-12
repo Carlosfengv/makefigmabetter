@@ -313,6 +313,7 @@ name = "editor-core"
 version = "0.1.0"
 dependencies = [
  "clipper2-rust",
+ "serde_json",
  "sha2",
  "unicode-segmentation",
 ]

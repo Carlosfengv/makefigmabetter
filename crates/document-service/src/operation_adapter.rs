@@ -2,9 +2,12 @@
 //! This is the only service-side location allowed to know both protocol and core.
 
 use editor_core::{
-    ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, Node, NodeId, NodeKind, ParametricShape, PointId, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    Page, PageId, ParagraphStyle, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
-    TextStyleRun,
+    ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
+    BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
+    FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, Node, NodeId,
+    NodeKind, Page, PageId, ParagraphStyle, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun, VectorPath,
+    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
     geometry::Point,
 };
@@ -72,23 +75,45 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             appearance: Appearance {
                 fill: paint_from_proto(value.fill.ok_or(ServiceError::InvalidEnvelope)?)?,
                 stroke: paint_from_proto(value.stroke.ok_or(ServiceError::InvalidEnvelope)?)?,
-                fills: value.fills.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
-                strokes: value.strokes.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
+                fills: value
+                    .fills
+                    .into_iter()
+                    .map(paint_from_proto)
+                    .collect::<Result<Vec<_>, _>>()?,
+                strokes: value
+                    .strokes
+                    .into_iter()
+                    .map(paint_from_proto)
+                    .collect::<Result<Vec<_>, _>>()?,
                 stroke_width: value.stroke_width,
                 stroke_cap_start: stroke_cap_from_proto(value.stroke_cap_start)?,
                 stroke_cap_end: stroke_cap_from_proto(value.stroke_cap_end)?,
                 stroke_join: stroke_join_from_proto(value.stroke_join)?,
-                stroke_miter_limit: if value.stroke_miter_limit == 0.0 { 10.0 } else { value.stroke_miter_limit },
+                stroke_miter_limit: if value.stroke_miter_limit == 0.0 {
+                    10.0
+                } else {
+                    value.stroke_miter_limit
+                },
                 stroke_dash_pattern: value.stroke_dash_pattern,
                 stroke_weights: value.stroke_weights,
                 stroke_align: stroke_align_from_proto(value.stroke_align)?,
                 arc_data: value.arc_data.map(arc_from_proto).transpose()?,
-                parametric_shape: parametric_shape_from_proto(value.polygon_parameters, value.star_parameters)?,
-                relative_transform: value.relative_transform.map(transform_from_proto).transpose()?,
+                parametric_shape: parametric_shape_from_proto(
+                    value.polygon_parameters,
+                    value.star_parameters,
+                )?,
+                relative_transform: value
+                    .relative_transform
+                    .map(transform_from_proto)
+                    .transpose()?,
                 opacity: value.opacity,
                 blend_mode: blend_mode_from_proto(value.blend_mode)?,
                 drop_shadow: value.drop_shadow.map(drop_shadow_from_proto).transpose()?,
-                effect_stack: value.effect_stack.into_iter().map(effect_from_proto).collect::<Result<Vec<_>, _>>()?,
+                effect_stack: value
+                    .effect_stack
+                    .into_iter()
+                    .map(effect_from_proto)
+                    .collect::<Result<Vec<_>, _>>()?,
                 corner_radius: value.corner_radius,
                 corner_radii: value.corner_radii,
                 corner_smoothing: value.corner_smoothing,
@@ -148,21 +173,31 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             };
             let handle_in = match (point.handle_in_x, point.handle_in_y) {
                 (None, None) => None,
-                (Some(x), Some(y)) => Some(Point::new(x, y).map_err(|_| ServiceError::InvalidEnvelope)?),
+                (Some(x), Some(y)) => {
+                    Some(Point::new(x, y).map_err(|_| ServiceError::InvalidEnvelope)?)
+                }
                 _ => return Err(ServiceError::InvalidEnvelope),
             };
             let handle_out = match (point.handle_out_x, point.handle_out_y) {
                 (None, None) => None,
-                (Some(x), Some(y)) => Some(Point::new(x, y).map_err(|_| ServiceError::InvalidEnvelope)?),
+                (Some(x), Some(y)) => {
+                    Some(Point::new(x, y).map_err(|_| ServiceError::InvalidEnvelope)?)
+                }
                 _ => return Err(ServiceError::InvalidEnvelope),
             };
             Ok(Command::InsertVectorPoint {
                 id: node_id(&value.node_id)?,
                 subpath_index: value.subpath_index,
-                after_point_id: value.after_point_id.as_deref().map(id).transpose()?.map(PointId),
+                after_point_id: value
+                    .after_point_id
+                    .as_deref()
+                    .map(id)
+                    .transpose()?
+                    .map(PointId),
                 point: VectorPoint {
                     id: PointId(id(&point.point_id)?),
-                    position: Point::new(point.x, point.y).map_err(|_| ServiceError::InvalidEnvelope)?,
+                    position: Point::new(point.x, point.y)
+                        .map_err(|_| ServiceError::InvalidEnvelope)?,
                     handle_in,
                     handle_out,
                     point_type,
@@ -204,6 +239,10 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
         Kind::SetMask(value) => Ok(Command::SetMask {
             id: node_id(&value.node_id)?,
             enabled: value.enabled,
+        }),
+        Kind::SetNodeExtensions(value) => Ok(Command::SetNodeExtensions {
+            id: node_id(&value.node_id)?,
+            extensions: value.extensions.into_iter().collect(),
         }),
         Kind::SetAutoLayout(value) => Ok(Command::SetAutoLayout {
             id: node_id(&value.node_id)?,
@@ -262,7 +301,10 @@ fn node_from_proto(node: v1::SceneNode) -> Result<(PageId, Node, Option<AssetId>
 fn restored_node_from_proto(
     node: v1::SceneNode,
 ) -> Result<(PageId, Node, Option<AssetId>, Option<TextProperties>), ServiceError> {
-    let text_properties = node.text_properties.map(text_properties_from_proto).transpose()?;
+    let text_properties = node
+        .text_properties
+        .map(text_properties_from_proto)
+        .transpose()?;
     let page_id = PageId(id(&node.page_id)?);
     let kind = match v1::NodeKind::try_from(node.kind).map_err(|_| ServiceError::InvalidEnvelope)? {
         v1::NodeKind::Frame => NodeKind::Frame,
@@ -278,9 +320,39 @@ fn restored_node_from_proto(
         v1::NodeKind::Vector => NodeKind::Vector,
         v1::NodeKind::BooleanOperation => NodeKind::BooleanOperation,
         v1::NodeKind::Slice => NodeKind::Slice,
+        v1::NodeKind::CodeBlock => NodeKind::CodeBlock,
+        v1::NodeKind::Component => NodeKind::Component,
+        v1::NodeKind::Instance => NodeKind::Instance,
+        v1::NodeKind::Slot => NodeKind::Slot,
+        v1::NodeKind::ComponentSet => NodeKind::ComponentSet,
+        v1::NodeKind::Connector => NodeKind::Connector,
+        v1::NodeKind::Embed => NodeKind::Embed,
+        v1::NodeKind::Highlight => NodeKind::Highlight,
+        v1::NodeKind::InteractiveSlideElement => NodeKind::InteractiveSlideElement,
+        v1::NodeKind::LinkUnfurl => NodeKind::LinkUnfurl,
+        v1::NodeKind::Media => NodeKind::Media,
+        v1::NodeKind::ShapeWithText => NodeKind::ShapeWithText,
+        v1::NodeKind::SlideGrid => NodeKind::SlideGrid,
+        v1::NodeKind::Slide => NodeKind::Slide,
+        v1::NodeKind::SlideRow => NodeKind::SlideRow,
+        v1::NodeKind::Stamp => NodeKind::Stamp,
+        v1::NodeKind::Sticky => NodeKind::Sticky,
+        v1::NodeKind::Table => NodeKind::Table,
+        v1::NodeKind::TableCell => NodeKind::TableCell,
+        v1::NodeKind::TextPath => NodeKind::TextPath,
+        v1::NodeKind::TransformGroup => NodeKind::TransformGroup,
+        v1::NodeKind::WashiTape => NodeKind::WashiTape,
+        v1::NodeKind::Widget => NodeKind::Widget,
         v1::NodeKind::Unspecified => return Err(ServiceError::InvalidEnvelope),
     };
-    let clips_content = node.clips_content.unwrap_or(kind == NodeKind::Frame);
+    let clips_content = node.clips_content.unwrap_or(matches!(
+        kind,
+        NodeKind::Frame
+            | NodeKind::Component
+            | NodeKind::Instance
+            | NodeKind::Slot
+            | NodeKind::ComponentSet
+    ));
     let parent_id = node.parent_id.as_deref().map(node_id).transpose()?;
     Ok((
         page_id,
@@ -297,25 +369,50 @@ fn restored_node_from_proto(
             rotation: node.rotation,
             fill: paint_from_proto(node.fill.ok_or(ServiceError::InvalidEnvelope)?)?,
             stroke: paint_from_proto(node.stroke.ok_or(ServiceError::InvalidEnvelope)?)?,
-            fills: node.fills.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
-            strokes: node.strokes.into_iter().map(paint_from_proto).collect::<Result<Vec<_>, _>>()?,
+            fills: node
+                .fills
+                .into_iter()
+                .map(paint_from_proto)
+                .collect::<Result<Vec<_>, _>>()?,
+            strokes: node
+                .strokes
+                .into_iter()
+                .map(paint_from_proto)
+                .collect::<Result<Vec<_>, _>>()?,
             stroke_width: node.stroke_width,
             stroke_cap_start: stroke_cap_from_proto(node.stroke_cap_start)?,
             stroke_cap_end: stroke_cap_from_proto(node.stroke_cap_end)?,
             stroke_join: stroke_join_from_proto(node.stroke_join)?,
-            stroke_miter_limit: if node.stroke_miter_limit == 0.0 { 10.0 } else { node.stroke_miter_limit },
+            stroke_miter_limit: if node.stroke_miter_limit == 0.0 {
+                10.0
+            } else {
+                node.stroke_miter_limit
+            },
             stroke_dash_pattern: node.stroke_dash_pattern,
             stroke_weights: node.stroke_weights,
             stroke_align: stroke_align_from_proto(node.stroke_align)?,
             arc_data: node.arc_data.map(arc_from_proto).transpose()?,
-            parametric_shape: parametric_shape_from_proto(node.polygon_parameters, node.star_parameters)?,
+            parametric_shape: parametric_shape_from_proto(
+                node.polygon_parameters,
+                node.star_parameters,
+            )?,
             vector_path: node.vector_path.map(vector_path_from_proto).transpose()?,
-            boolean_operation: node.boolean_operation.map(boolean_operation_from_proto).transpose()?,
-            relative_transform: node.relative_transform.map(transform_from_proto).transpose()?,
+            boolean_operation: node
+                .boolean_operation
+                .map(boolean_operation_from_proto)
+                .transpose()?,
+            relative_transform: node
+                .relative_transform
+                .map(transform_from_proto)
+                .transpose()?,
             opacity: node.opacity,
             blend_mode: blend_mode_from_proto(node.blend_mode)?,
             drop_shadow: node.drop_shadow.map(drop_shadow_from_proto).transpose()?,
-            effect_stack: node.effect_stack.into_iter().map(effect_from_proto).collect::<Result<Vec<_>, _>>()?,
+            effect_stack: node
+                .effect_stack
+                .into_iter()
+                .map(effect_from_proto)
+                .collect::<Result<Vec<_>, _>>()?,
             corner_radius: node.corner_radius,
             corner_radii: node.corner_radii,
             corner_smoothing: node.corner_smoothing,
@@ -333,32 +430,38 @@ fn restored_node_from_proto(
 }
 
 fn stroke_cap_from_proto(value: i32) -> Result<StrokeCap, ServiceError> {
-    Ok(match v1::StrokeCap::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
-        v1::StrokeCap::Unspecified | v1::StrokeCap::None => StrokeCap::None,
-        v1::StrokeCap::Round => StrokeCap::Round,
-        v1::StrokeCap::Square => StrokeCap::Square,
-        v1::StrokeCap::ArrowLines => StrokeCap::ArrowLines,
-        v1::StrokeCap::ArrowEquilateral => StrokeCap::ArrowEquilateral,
-        v1::StrokeCap::DiamondFilled => StrokeCap::DiamondFilled,
-        v1::StrokeCap::TriangleFilled => StrokeCap::TriangleFilled,
-        v1::StrokeCap::CircleFilled => StrokeCap::CircleFilled,
-    })
+    Ok(
+        match v1::StrokeCap::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::StrokeCap::Unspecified | v1::StrokeCap::None => StrokeCap::None,
+            v1::StrokeCap::Round => StrokeCap::Round,
+            v1::StrokeCap::Square => StrokeCap::Square,
+            v1::StrokeCap::ArrowLines => StrokeCap::ArrowLines,
+            v1::StrokeCap::ArrowEquilateral => StrokeCap::ArrowEquilateral,
+            v1::StrokeCap::DiamondFilled => StrokeCap::DiamondFilled,
+            v1::StrokeCap::TriangleFilled => StrokeCap::TriangleFilled,
+            v1::StrokeCap::CircleFilled => StrokeCap::CircleFilled,
+        },
+    )
 }
 
 fn stroke_join_from_proto(value: i32) -> Result<StrokeJoin, ServiceError> {
-    Ok(match v1::StrokeJoin::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
-        v1::StrokeJoin::Unspecified | v1::StrokeJoin::Miter => StrokeJoin::Miter,
-        v1::StrokeJoin::Bevel => StrokeJoin::Bevel,
-        v1::StrokeJoin::Round => StrokeJoin::Round,
-    })
+    Ok(
+        match v1::StrokeJoin::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::StrokeJoin::Unspecified | v1::StrokeJoin::Miter => StrokeJoin::Miter,
+            v1::StrokeJoin::Bevel => StrokeJoin::Bevel,
+            v1::StrokeJoin::Round => StrokeJoin::Round,
+        },
+    )
 }
 
 fn stroke_align_from_proto(value: i32) -> Result<StrokeAlign, ServiceError> {
-    Ok(match v1::StrokeAlign::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
-        v1::StrokeAlign::Unspecified | v1::StrokeAlign::Inside => StrokeAlign::Inside,
-        v1::StrokeAlign::Center => StrokeAlign::Center,
-        v1::StrokeAlign::Outside => StrokeAlign::Outside,
-    })
+    Ok(
+        match v1::StrokeAlign::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::StrokeAlign::Unspecified | v1::StrokeAlign::Inside => StrokeAlign::Inside,
+            v1::StrokeAlign::Center => StrokeAlign::Center,
+            v1::StrokeAlign::Outside => StrokeAlign::Outside,
+        },
+    )
 }
 
 fn blend_mode_from_proto(value: i32) -> Result<BlendMode, ServiceError> {
@@ -373,7 +476,9 @@ fn blend_mode_from_proto(value: i32) -> Result<BlendMode, ServiceError> {
 }
 
 fn constraints_from_proto(value: v1::Constraints) -> Result<Constraints, ServiceError> {
-    let convert = |axis| match v1::ConstraintType::try_from(axis).map_err(|_| ServiceError::InvalidEnvelope)? {
+    let convert = |axis| match v1::ConstraintType::try_from(axis)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
         v1::ConstraintType::Min => Ok(ConstraintType::Min),
         v1::ConstraintType::Center => Ok(ConstraintType::Center),
         v1::ConstraintType::Max => Ok(ConstraintType::Max),
@@ -381,18 +486,20 @@ fn constraints_from_proto(value: v1::Constraints) -> Result<Constraints, Service
         v1::ConstraintType::Scale => Ok(ConstraintType::Scale),
         v1::ConstraintType::Unspecified => Err(ServiceError::InvalidEnvelope),
     };
-    Ok(Constraints { horizontal: convert(value.horizontal)?, vertical: convert(value.vertical)? })
+    Ok(Constraints {
+        horizontal: convert(value.horizontal)?,
+        vertical: convert(value.vertical)?,
+    })
 }
 
 fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceError> {
-    let mode = match v1::LayoutMode::try_from(value.mode)
-        .map_err(|_| ServiceError::InvalidEnvelope)?
-    {
-        v1::LayoutMode::None => LayoutMode::None,
-        v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
-        v1::LayoutMode::Vertical => LayoutMode::Vertical,
-        v1::LayoutMode::Unspecified => return Err(ServiceError::InvalidEnvelope),
-    };
+    let mode =
+        match v1::LayoutMode::try_from(value.mode).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::LayoutMode::None => LayoutMode::None,
+            v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
+            v1::LayoutMode::Vertical => LayoutMode::Vertical,
+            v1::LayoutMode::Unspecified => return Err(ServiceError::InvalidEnvelope),
+        };
     let alignment = |value| match v1::LayoutAlignment::try_from(value)
         .map_err(|_| ServiceError::InvalidEnvelope)?
     {
@@ -400,6 +507,7 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         v1::LayoutAlignment::Center => Ok(LayoutAlignment::Center),
         v1::LayoutAlignment::End => Ok(LayoutAlignment::End),
         v1::LayoutAlignment::SpaceBetween => Ok(LayoutAlignment::SpaceBetween),
+        v1::LayoutAlignment::Baseline => Ok(LayoutAlignment::Baseline),
         v1::LayoutAlignment::Unspecified => Err(ServiceError::InvalidEnvelope),
     };
     let sizing = |value| match v1::LayoutSizing::try_from(value)
@@ -410,10 +518,34 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         v1::LayoutSizing::Fill => Ok(LayoutSizing::Fill),
         v1::LayoutSizing::Unspecified => Err(ServiceError::InvalidEnvelope),
     };
-    Ok(AutoLayout {
+    let align_self = value.align_self.map(|value| alignment(value)).transpose()?;
+    if matches!(
+        align_self,
+        Some(LayoutAlignment::SpaceBetween | LayoutAlignment::Baseline)
+    ) {
+        return Err(ServiceError::InvalidEnvelope);
+    }
+    let track_alignment = match value
+        .wrap_track_alignment
+        .map(v1::WrapTrackAlignment::try_from)
+        .transpose()
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        None | Some(v1::WrapTrackAlignment::Auto) => WrapTrackAlignment::Auto,
+        Some(v1::WrapTrackAlignment::SpaceBetween) => WrapTrackAlignment::SpaceBetween,
+        Some(v1::WrapTrackAlignment::Unspecified) => return Err(ServiceError::InvalidEnvelope),
+    };
+    let layout = AutoLayout {
         mode,
-        padding: [value.padding_top, value.padding_right, value.padding_bottom, value.padding_left],
+        padding: [
+            value.padding_top,
+            value.padding_right,
+            value.padding_bottom,
+            value.padding_left,
+        ],
         item_spacing: value.item_spacing,
+        track_spacing: value.track_spacing,
+        track_alignment,
         wrap: value.wrap,
         primary_alignment: alignment(value.primary_alignment)?,
         counter_alignment: alignment(value.counter_alignment)?,
@@ -424,33 +556,98 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         min_height: value.min_height,
         max_height: value.max_height,
         absolute: value.absolute,
-    })
+        align_self,
+    };
+    if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
+        || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
+        || (layout.counter_alignment == LayoutAlignment::Baseline
+            && layout.mode != LayoutMode::Horizontal)
+        || (!layout.wrap && layout.track_alignment != WrapTrackAlignment::Auto)
+    {
+        return Err(ServiceError::InvalidEnvelope);
+    }
+    Ok(layout)
 }
 
-fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> { Ok(ArcData { starting_angle: arc.starting_angle, ending_angle: arc.ending_angle, inner_radius: arc.inner_radius }) }
+fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> {
+    Ok(ArcData {
+        starting_angle: arc.starting_angle,
+        ending_angle: arc.ending_angle,
+        inner_radius: arc.inner_radius,
+    })
+}
 fn parametric_shape_from_proto(
     polygon: Option<v1::PolygonParameters>,
     star: Option<v1::StarParameters>,
 ) -> Result<Option<ParametricShape>, ServiceError> {
     match (polygon, star) {
         (Some(_), Some(_)) => Err(ServiceError::InvalidEnvelope),
-        (Some(parameters), None) => Ok(Some(ParametricShape::Polygon { point_count: parameters.point_count })),
-        (None, Some(parameters)) => Ok(Some(ParametricShape::Star { point_count: parameters.point_count, inner_ratio: parameters.inner_ratio })),
+        (Some(parameters), None) => Ok(Some(ParametricShape::Polygon {
+            point_count: parameters.point_count,
+        })),
+        (None, Some(parameters)) => Ok(Some(ParametricShape::Star {
+            point_count: parameters.point_count,
+            inner_ratio: parameters.inner_ratio,
+        })),
         (None, None) => Ok(None),
     }
 }
 fn vector_path_from_proto(path: v1::VectorPath) -> Result<VectorPath, ServiceError> {
-    let fill_rule = match v1::FillRule::try_from(path.fill_rule).map_err(|_| ServiceError::InvalidEnvelope)? { v1::FillRule::NonZero => FillRule::NonZero, v1::FillRule::EvenOdd => FillRule::EvenOdd, v1::FillRule::Unspecified => return Err(ServiceError::InvalidEnvelope) };
-    let subpaths = path.subpaths.into_iter().map(|subpath| Ok(VectorSubpath {
-        closed: subpath.closed,
-        points: subpath.points.into_iter().map(|point| {
-            let point_type = match v1::VectorPointType::try_from(point.point_type).map_err(|_| ServiceError::InvalidEnvelope)? { v1::VectorPointType::Corner => VectorPointType::Corner, v1::VectorPointType::Mirrored => VectorPointType::Mirrored, v1::VectorPointType::Asymmetric => VectorPointType::Asymmetric, v1::VectorPointType::Unspecified => return Err(ServiceError::InvalidEnvelope) };
-            let handle_in = match (point.handle_in_x, point.handle_in_y) { (None, None) => None, (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }), _ => return Err(ServiceError::InvalidEnvelope) };
-            let handle_out = match (point.handle_out_x, point.handle_out_y) { (None, None) => None, (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }), _ => return Err(ServiceError::InvalidEnvelope) };
-            Ok(VectorPoint { id: PointId(id(&point.point_id)?), position: editor_core::geometry::Point { x: point.x, y: point.y }, handle_in, handle_out, point_type })
-        }).collect::<Result<Vec<_>, ServiceError>>()?,
-    })).collect::<Result<Vec<_>, ServiceError>>()?;
-    Ok(VectorPath { fill_rule, subpaths })
+    let fill_rule =
+        match v1::FillRule::try_from(path.fill_rule).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::FillRule::NonZero => FillRule::NonZero,
+            v1::FillRule::EvenOdd => FillRule::EvenOdd,
+            v1::FillRule::Unspecified => return Err(ServiceError::InvalidEnvelope),
+        };
+    let subpaths = path
+        .subpaths
+        .into_iter()
+        .map(|subpath| {
+            Ok(VectorSubpath {
+                closed: subpath.closed,
+                points: subpath
+                    .points
+                    .into_iter()
+                    .map(|point| {
+                        let point_type = match v1::VectorPointType::try_from(point.point_type)
+                            .map_err(|_| ServiceError::InvalidEnvelope)?
+                        {
+                            v1::VectorPointType::Corner => VectorPointType::Corner,
+                            v1::VectorPointType::Mirrored => VectorPointType::Mirrored,
+                            v1::VectorPointType::Asymmetric => VectorPointType::Asymmetric,
+                            v1::VectorPointType::Unspecified => {
+                                return Err(ServiceError::InvalidEnvelope);
+                            }
+                        };
+                        let handle_in = match (point.handle_in_x, point.handle_in_y) {
+                            (None, None) => None,
+                            (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }),
+                            _ => return Err(ServiceError::InvalidEnvelope),
+                        };
+                        let handle_out = match (point.handle_out_x, point.handle_out_y) {
+                            (None, None) => None,
+                            (Some(x), Some(y)) => Some(editor_core::geometry::Point { x, y }),
+                            _ => return Err(ServiceError::InvalidEnvelope),
+                        };
+                        Ok(VectorPoint {
+                            id: PointId(id(&point.point_id)?),
+                            position: editor_core::geometry::Point {
+                                x: point.x,
+                                y: point.y,
+                            },
+                            handle_in,
+                            handle_out,
+                            point_type,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ServiceError>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ServiceError>>()?;
+    Ok(VectorPath {
+        fill_rule,
+        subpaths,
+    })
 }
 fn boolean_operation_from_proto(operation: i32) -> Result<BooleanOperation, ServiceError> {
     match v1::BooleanOperation::try_from(operation).map_err(|_| ServiceError::InvalidEnvelope)? {
@@ -461,7 +658,18 @@ fn boolean_operation_from_proto(operation: i32) -> Result<BooleanOperation, Serv
         v1::BooleanOperation::Unspecified => Err(ServiceError::InvalidEnvelope),
     }
 }
-fn transform_from_proto(transform: v1::Transform) -> Result<editor_core::geometry::AffineTransform, ServiceError> { Ok(editor_core::geometry::AffineTransform { a: transform.a, b: transform.b, c: transform.c, d: transform.d, e: transform.e, f: transform.f }) }
+fn transform_from_proto(
+    transform: v1::Transform,
+) -> Result<editor_core::geometry::AffineTransform, ServiceError> {
+    Ok(editor_core::geometry::AffineTransform {
+        a: transform.a,
+        b: transform.b,
+        c: transform.c,
+        d: transform.d,
+        e: transform.e,
+        f: transform.f,
+    })
+}
 
 fn font_from_proto(font: v1::FontReference) -> Result<FontReference, ServiceError> {
     let mut variation_axes = std::collections::BTreeMap::new();
@@ -582,10 +790,25 @@ fn drop_shadow_from_proto(shadow: v1::DropShadow) -> Result<DropShadow, ServiceE
 
 fn effect_from_proto(effect: v1::Effect) -> Result<Effect, ServiceError> {
     match effect.kind.ok_or(ServiceError::InvalidEnvelope)? {
-        v1::effect::Kind::DropShadow(shadow) => Ok(Effect::DropShadow(drop_shadow_from_proto(shadow)?)),
-        v1::effect::Kind::LayerBlur(blur) => Ok(Effect::LayerBlur(LayerBlur { radius: blur.radius, visible: blur.visible })),
-        v1::effect::Kind::InnerShadow(shadow) => Ok(Effect::InnerShadow(InnerShadow { offset_x: shadow.offset_x, offset_y: shadow.offset_y, blur_radius: shadow.blur_radius, spread: shadow.spread, color: color_from_proto(shadow.color.ok_or(ServiceError::InvalidEnvelope)?)?, visible: shadow.visible })),
-        v1::effect::Kind::BackgroundBlur(blur) => Ok(Effect::BackgroundBlur(BackgroundBlur { radius: blur.radius, visible: blur.visible })),
+        v1::effect::Kind::DropShadow(shadow) => {
+            Ok(Effect::DropShadow(drop_shadow_from_proto(shadow)?))
+        }
+        v1::effect::Kind::LayerBlur(blur) => Ok(Effect::LayerBlur(LayerBlur {
+            radius: blur.radius,
+            visible: blur.visible,
+        })),
+        v1::effect::Kind::InnerShadow(shadow) => Ok(Effect::InnerShadow(InnerShadow {
+            offset_x: shadow.offset_x,
+            offset_y: shadow.offset_y,
+            blur_radius: shadow.blur_radius,
+            spread: shadow.spread,
+            color: color_from_proto(shadow.color.ok_or(ServiceError::InvalidEnvelope)?)?,
+            visible: shadow.visible,
+        })),
+        v1::effect::Kind::BackgroundBlur(blur) => Ok(Effect::BackgroundBlur(BackgroundBlur {
+            radius: blur.radius,
+            visible: blur.visible,
+        })),
     }
 }
 
@@ -636,7 +859,9 @@ fn id(value: &[u8]) -> Result<u128, ServiceError> {
 
 #[cfg(test)]
 mod tests {
-    use editor_core::{Command, DEFAULT_PAGE_ID, Document, Origin, PointId, Transaction, TransactionId, geometry::Point};
+    use editor_core::{
+        Command, Document, Origin, PointId, Transaction, TransactionId, geometry::Point,
+    };
     use makefigma_protocol::v1;
     use prost::Message;
 
@@ -658,12 +883,41 @@ mod tests {
         }
     }
 
+    fn auto_layout(
+        mode: v1::LayoutMode,
+        primary_alignment: v1::LayoutAlignment,
+        counter_alignment: v1::LayoutAlignment,
+        align_self: Option<v1::LayoutAlignment>,
+    ) -> v1::AutoLayout {
+        v1::AutoLayout {
+            mode: mode as i32,
+            padding_top: 0.0,
+            padding_right: 0.0,
+            padding_bottom: 0.0,
+            padding_left: 0.0,
+            item_spacing: 0.0,
+            wrap: false,
+            primary_alignment: primary_alignment as i32,
+            counter_alignment: counter_alignment as i32,
+            primary_sizing: v1::LayoutSizing::Fixed as i32,
+            counter_sizing: v1::LayoutSizing::Fixed as i32,
+            min_width: None,
+            max_width: None,
+            min_height: None,
+            max_height: None,
+            absolute: false,
+            align_self: align_self.map(|value| value as i32),
+            track_spacing: None,
+            wrap_track_alignment: None,
+        }
+    }
+
     #[test]
-    fn generated_batch_maps_to_the_same_core_reducer_boundary() {
+    fn generated_import_page_nodes_then_mask_batch_maps_to_the_same_core_reducer_boundary() {
         let node = v1::SceneNode {
             node_id: 7_u128.to_be_bytes().to_vec(),
             parent_id: None,
-            page_id: 1_u128.to_be_bytes().to_vec(),
+            page_id: 2_u128.to_be_bytes().to_vec(),
             position_id: Some(v1::PositionId {
                 key: 7_u128.to_be_bytes().to_vec(),
                 actor_id: 0_u128.to_be_bytes().to_vec(),
@@ -692,7 +946,7 @@ mod tests {
             corner_radius: 0.0,
             corner_radii: vec![],
             corner_smoothing: 0.0,
-                    constraints: None,
+            constraints: None,
             text: String::new(),
             visible: true,
             locked: false,
@@ -710,13 +964,94 @@ mod tests {
             relative_transform: None,
             extensions: Default::default(),
             auto_layout: None,
+            reactions: Vec::new(),
+            prototype_metadata: None,
         };
         let payload = v1::ResolvedOperationBatch {
-            operations: vec![v1::ResolvedOperation {
-                kind: Some(v1::resolved_operation::Kind::CreateNode(v1::CreateNode {
-                    node: Some(node),
-                })),
-            }],
+            operations: vec![
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::CreatePage(v1::CreatePage {
+                        page: Some(v1::PageRef {
+                            page_id: 2_u128.to_be_bytes().to_vec(),
+                            name: "Imported page".into(),
+                            position_id: Some(v1::PositionId {
+                                key: 2_u128.to_be_bytes().to_vec(),
+                                actor_id: 0_u128.to_be_bytes().to_vec(),
+                            }),
+                        }),
+                    })),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::CreateNode(v1::CreateNode {
+                        node: Some(node),
+                    })),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::CreateNode(v1::CreateNode {
+                        node: Some(v1::SceneNode {
+                            node_id: 8_u128.to_be_bytes().to_vec(),
+                            parent_id: None,
+                            page_id: 2_u128.to_be_bytes().to_vec(),
+                            position_id: Some(v1::PositionId {
+                                key: 8_u128.to_be_bytes().to_vec(),
+                                actor_id: 0_u128.to_be_bytes().to_vec(),
+                            }),
+                            name: "Masked target".into(),
+                            kind: v1::NodeKind::Rectangle as i32,
+                            asset_id: None,
+                            x: 24.0,
+                            y: 0.0,
+                            width: 100.0,
+                            height: 80.0,
+                            rotation: 0.0,
+                            fill: Some(paint()),
+                            stroke: Some(paint()),
+                            fills: Vec::new(),
+                            strokes: Vec::new(),
+                            stroke_width: 0.0,
+                            opacity: 1.0,
+                            blend_mode: v1::BlendMode::Normal as i32,
+                            drop_shadow: None,
+                            effect_stack: Vec::new(),
+                            polygon_parameters: None,
+                            star_parameters: None,
+                            vector_path: None,
+                            boolean_operation: None,
+                            corner_radius: 0.0,
+                            corner_radii: vec![],
+                            corner_smoothing: 0.0,
+                            constraints: None,
+                            text: String::new(),
+                            visible: true,
+                            locked: false,
+                            contents_hidden: false,
+                            clips_content: Some(false),
+                            text_properties: None,
+                            stroke_cap_start: v1::StrokeCap::None as i32,
+                            stroke_cap_end: v1::StrokeCap::None as i32,
+                            stroke_join: v1::StrokeJoin::Miter as i32,
+                            stroke_miter_limit: 10.0,
+                            stroke_dash_pattern: vec![],
+                            stroke_weights: vec![],
+                            stroke_align: v1::StrokeAlign::Inside as i32,
+                            arc_data: None,
+                            relative_transform: None,
+                            extensions: Default::default(),
+                            auto_layout: None,
+                            reactions: Vec::new(),
+                            prototype_metadata: None,
+                        }),
+                    })),
+                },
+                // CreateNode intentionally does not own the Phase 2 mask bit;
+                // its dedicated operation must survive the same remote batch.
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetMask(v1::SetMask {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        enabled: true,
+                    })),
+                },
+            ],
         }
         .encode_to_vec();
         let commands = commands_from_payload(&payload).unwrap();
@@ -733,8 +1068,70 @@ mod tests {
             .unwrap();
         assert_eq!(
             document.page_for_node(editor_core::NodeId(7)),
-            Some(DEFAULT_PAGE_ID)
+            Some(editor_core::PageId(2))
         );
+        assert_eq!(
+            document
+                .node(editor_core::NodeId(7))
+                .unwrap()
+                .extensions
+                .get("makefigma.mask.alpha.v1"),
+            Some(&vec![1]),
+        );
+    }
+
+    #[test]
+    fn baseline_auto_layout_operation_is_durable_only_on_a_horizontal_counter_axis() {
+        let operation = |layout| {
+            v1::ResolvedOperationBatch {
+                operations: vec![v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetAutoLayout(
+                        v1::AutoLayoutUpdate {
+                            node_id: 7_u128.to_be_bytes().to_vec(),
+                            auto_layout: Some(layout),
+                        },
+                    )),
+                }],
+            }
+            .encode_to_vec()
+        };
+
+        let valid = operation(auto_layout(
+            v1::LayoutMode::Horizontal,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Baseline,
+            None,
+        ));
+        assert!(matches!(
+            commands_from_payload(&valid).unwrap().as_slice(),
+            [Command::SetAutoLayout { id: editor_core::NodeId(7), layout }]
+                if layout.mode == editor_core::LayoutMode::Horizontal
+                    && layout.counter_alignment == editor_core::LayoutAlignment::Baseline
+        ));
+
+        let vertical = operation(auto_layout(
+            v1::LayoutMode::Vertical,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Baseline,
+            None,
+        ));
+        assert!(commands_from_payload(&vertical).is_err());
+
+        let child_override = operation(auto_layout(
+            v1::LayoutMode::None,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Start,
+            Some(v1::LayoutAlignment::Baseline),
+        ));
+        assert!(commands_from_payload(&child_override).is_err());
+
+        let counter_space_between = operation(auto_layout(
+            v1::LayoutMode::Horizontal,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::SpaceBetween,
+            None,
+        ));
+        assert!(commands_from_payload(&counter_space_between).is_err());
     }
 
     #[test]
@@ -778,25 +1175,57 @@ mod tests {
     fn vector_path_operation_maps_to_the_atomic_core_command() {
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
-                kind: Some(v1::resolved_operation::Kind::SetVectorPath(v1::SetVectorPath {
-                    node_id: 7_u128.to_be_bytes().to_vec(),
-                    vector_path: Some(v1::VectorPath {
-                        fill_rule: v1::FillRule::EvenOdd as i32,
-                        subpaths: vec![v1::VectorSubpath {
-                            closed: true,
-                            points: vec![
-                                v1::VectorPoint { point_id: 1_u128.to_be_bytes().to_vec(), x: 0.0, y: 0.0, handle_in_x: None, handle_in_y: None, handle_out_x: None, handle_out_y: None, point_type: v1::VectorPointType::Corner as i32 },
-                                v1::VectorPoint { point_id: 2_u128.to_be_bytes().to_vec(), x: 100.0, y: 0.0, handle_in_x: None, handle_in_y: None, handle_out_x: None, handle_out_y: None, point_type: v1::VectorPointType::Corner as i32 },
-                                v1::VectorPoint { point_id: 3_u128.to_be_bytes().to_vec(), x: 50.0, y: 100.0, handle_in_x: None, handle_in_y: None, handle_out_x: None, handle_out_y: None, point_type: v1::VectorPointType::Mirrored as i32 },
-                            ],
-                        }],
-                    }),
-                })),
+                kind: Some(v1::resolved_operation::Kind::SetVectorPath(
+                    v1::SetVectorPath {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        vector_path: Some(v1::VectorPath {
+                            fill_rule: v1::FillRule::EvenOdd as i32,
+                            subpaths: vec![v1::VectorSubpath {
+                                closed: true,
+                                points: vec![
+                                    v1::VectorPoint {
+                                        point_id: 1_u128.to_be_bytes().to_vec(),
+                                        x: 0.0,
+                                        y: 0.0,
+                                        handle_in_x: None,
+                                        handle_in_y: None,
+                                        handle_out_x: None,
+                                        handle_out_y: None,
+                                        point_type: v1::VectorPointType::Corner as i32,
+                                    },
+                                    v1::VectorPoint {
+                                        point_id: 2_u128.to_be_bytes().to_vec(),
+                                        x: 100.0,
+                                        y: 0.0,
+                                        handle_in_x: None,
+                                        handle_in_y: None,
+                                        handle_out_x: None,
+                                        handle_out_y: None,
+                                        point_type: v1::VectorPointType::Corner as i32,
+                                    },
+                                    v1::VectorPoint {
+                                        point_id: 3_u128.to_be_bytes().to_vec(),
+                                        x: 50.0,
+                                        y: 100.0,
+                                        handle_in_x: None,
+                                        handle_in_y: None,
+                                        handle_out_x: None,
+                                        handle_out_y: None,
+                                        point_type: v1::VectorPointType::Mirrored as i32,
+                                    },
+                                ],
+                            }],
+                        }),
+                    },
+                )),
             }],
-        }.encode_to_vec();
+        }
+        .encode_to_vec();
 
         let commands = commands_from_payload(&payload).unwrap();
-        assert!(matches!(commands.as_slice(), [Command::SetVectorPath { id: editor_core::NodeId(7), path }] if path.fill_rule == editor_core::FillRule::EvenOdd && path.subpaths[0].points[2].point_type == editor_core::VectorPointType::Mirrored));
+        assert!(
+            matches!(commands.as_slice(), [Command::SetVectorPath { id: editor_core::NodeId(7), path }] if path.fill_rule == editor_core::FillRule::EvenOdd && path.subpaths[0].points[2].point_type == editor_core::VectorPointType::Mirrored)
+        );
     }
 
     #[test]
@@ -885,34 +1314,53 @@ mod tests {
     fn split_vector_segment_operation_maps_to_core_command() {
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
-                kind: Some(v1::resolved_operation::Kind::SplitVectorSegment(v1::SplitVectorSegment {
-                    node_id: 7_u128.to_be_bytes().to_vec(), subpath_index: 1,
-                    after_point_id: 4_u128.to_be_bytes().to_vec(), t: 0.25,
-                    point_id: 5_u128.to_be_bytes().to_vec(),
-                })),
+                kind: Some(v1::resolved_operation::Kind::SplitVectorSegment(
+                    v1::SplitVectorSegment {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        subpath_index: 1,
+                        after_point_id: 4_u128.to_be_bytes().to_vec(),
+                        t: 0.25,
+                        point_id: 5_u128.to_be_bytes().to_vec(),
+                    },
+                )),
             }],
-        }.encode_to_vec();
+        }
+        .encode_to_vec();
 
-        assert!(matches!(commands_from_payload(&payload).unwrap().as_slice(), [
+        assert!(
+            matches!(commands_from_payload(&payload).unwrap().as_slice(), [
             Command::SplitVectorSegment { id: editor_core::NodeId(7), subpath_index: 1, after_point_id: PointId(4), t, point_id: PointId(5) },
-        ] if *t == 0.25));
+        ] if *t == 0.25)
+        );
     }
 
     #[test]
     fn connect_vector_endpoints_operation_maps_to_core_command() {
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
-                kind: Some(v1::resolved_operation::Kind::ConnectVectorEndpoints(v1::ConnectVectorEndpoints {
-                    node_id: 7_u128.to_be_bytes().to_vec(), first_subpath_index: 1,
-                    first_point_id: 4_u128.to_be_bytes().to_vec(), second_subpath_index: 2,
-                    second_point_id: 5_u128.to_be_bytes().to_vec(),
-                })),
+                kind: Some(v1::resolved_operation::Kind::ConnectVectorEndpoints(
+                    v1::ConnectVectorEndpoints {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        first_subpath_index: 1,
+                        first_point_id: 4_u128.to_be_bytes().to_vec(),
+                        second_subpath_index: 2,
+                        second_point_id: 5_u128.to_be_bytes().to_vec(),
+                    },
+                )),
             }],
-        }.encode_to_vec();
+        }
+        .encode_to_vec();
 
-        assert!(matches!(commands_from_payload(&payload).unwrap().as_slice(), [
-            Command::ConnectVectorEndpoints { id: editor_core::NodeId(7), first_subpath_index: 1, first_point_id: PointId(4), second_subpath_index: 2, second_point_id: PointId(5) },
-        ]));
+        assert!(matches!(
+            commands_from_payload(&payload).unwrap().as_slice(),
+            [Command::ConnectVectorEndpoints {
+                id: editor_core::NodeId(7),
+                first_subpath_index: 1,
+                first_point_id: PointId(4),
+                second_subpath_index: 2,
+                second_point_id: PointId(5)
+            },]
+        ));
     }
 
     #[test]
@@ -920,13 +1368,19 @@ mod tests {
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
                 kind: Some(v1::resolved_operation::Kind::SetMask(v1::SetMask {
-                    node_id: 7_u128.to_be_bytes().to_vec(), enabled: true,
+                    node_id: 7_u128.to_be_bytes().to_vec(),
+                    enabled: true,
                 })),
             }],
-        }.encode_to_vec();
+        }
+        .encode_to_vec();
 
-        assert!(matches!(commands_from_payload(&payload).unwrap().as_slice(), [
-            Command::SetMask { id: editor_core::NodeId(7), enabled: true },
-        ]));
+        assert!(matches!(
+            commands_from_payload(&payload).unwrap().as_slice(),
+            [Command::SetMask {
+                id: editor_core::NodeId(7),
+                enabled: true
+            },]
+        ));
     }
 }

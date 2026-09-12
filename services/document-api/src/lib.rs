@@ -176,26 +176,42 @@ async fn clone_document(
     Path((document_id, target_document_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let (principal, source_id, target_id) = match (dev_principal(&headers), parse_id(&document_id), parse_id(&target_document_id)) {
-        (Ok(principal), Ok(source_id), Ok(target_id)) if source_id != target_id => (principal, source_id, target_id),
+    let (principal, source_id, target_id) = match (
+        dev_principal(&headers),
+        parse_id(&document_id),
+        parse_id(&target_document_id),
+    ) {
+        (Ok(principal), Ok(source_id), Ok(target_id)) if source_id != target_id => {
+            (principal, source_id, target_id)
+        }
         _ => return protocol_error(ServiceError::InvalidEnvelope),
     };
     let source = match state.service.load_document(source_id) {
         Ok(source) => source,
         Err(error) => return protocol_error(error),
     };
-    if !state.service.can_read_document(principal, source_id).unwrap_or(false) {
+    if !state
+        .service
+        .can_read_document(principal, source_id)
+        .unwrap_or(false)
+    {
         return protocol_error(ServiceError::PermissionDenied);
     }
     let snapshot = match makefigma_document_codec::clone_wire_snapshot(&source.snapshot, target_id)
-        .and_then(|snapshot| makefigma_document_codec::document_from_wire_snapshot(&snapshot)) {
-        Ok(document) => match initial_document_state(&document, principal.tenant_id, ENGINE_SEMANTICS_VERSION) {
-            Ok(state) => state,
-            Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
-        },
+        .and_then(|snapshot| makefigma_document_codec::document_from_wire_snapshot(&snapshot))
+    {
+        Ok(document) => {
+            match initial_document_state(&document, principal.tenant_id, ENGINE_SEMANTICS_VERSION) {
+                Ok(state) => state,
+                Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
+            }
+        }
         Err(_) => return protocol_error(ServiceError::InvalidEnvelope),
     };
-    match state.service.clone_document(principal, source_id, source.document_hash, snapshot) {
+    match state
+        .service
+        .clone_document(principal, source_id, source.document_hash, snapshot)
+    {
         Ok(()) => plain_response(StatusCode::CREATED, Vec::new(), PROTOBUF_CONTENT_TYPE),
         Err(error) => protocol_error(error),
     }
@@ -710,31 +726,54 @@ mod tests {
         let source = headers(Request::post(format!("/v1/documents/{}", id_hex(1))))
             .body(Body::empty())
             .unwrap();
-        assert_eq!(app.clone().oneshot(source).await.unwrap().status(), StatusCode::CREATED);
+        assert_eq!(
+            app.clone().oneshot(source).await.unwrap().status(),
+            StatusCode::CREATED
+        );
         let copy = headers(Request::post(format!(
-            "/v1/documents/{}/copies/{}", id_hex(1), id_hex(4)
+            "/v1/documents/{}/copies/{}",
+            id_hex(1),
+            id_hex(4)
         )))
         .body(Body::empty())
         .unwrap();
-        assert_eq!(app.clone().oneshot(copy).await.unwrap().status(), StatusCode::CREATED);
-        let snapshot = headers(Request::get(format!("/v1/documents/{}/snapshot", id_hex(4))))
-            .body(Body::empty())
-            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(copy).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let snapshot = headers(Request::get(format!(
+            "/v1/documents/{}/snapshot",
+            id_hex(4)
+        )))
+        .body(Body::empty())
+        .unwrap();
         let response = app.clone().oneshot(snapshot).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let copy = makefigma_document_codec::document_from_wire_snapshot(
-            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(copy.id().0.to_be_bytes(), id(4));
         assert_eq!(copy.revision, 0);
         let delete = headers(Request::delete(format!("/v1/documents/{}", id_hex(4))))
             .body(Body::empty())
             .unwrap();
-        assert_eq!(app.clone().oneshot(delete).await.unwrap().status(), StatusCode::NO_CONTENT);
-        let missing = headers(Request::get(format!("/v1/documents/{}/snapshot", id_hex(4))))
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.oneshot(missing).await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            app.clone().oneshot(delete).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let missing = headers(Request::get(format!(
+            "/v1/documents/{}/snapshot",
+            id_hex(4)
+        )))
+        .body(Body::empty())
+        .unwrap();
+        assert_eq!(
+            app.oneshot(missing).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
