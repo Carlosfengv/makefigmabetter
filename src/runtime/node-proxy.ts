@@ -229,6 +229,18 @@ function runtimeOpenTypeFeaturesForRange(
   return { ...first };
 }
 
+function runtimeTextStyleIdForRange(
+  text: string,
+  properties: DocumentTextProperties | undefined,
+  start: number,
+  end: number,
+): string | typeof RUNTIME_MIXED {
+  const values = runtimeTextStylesForRange(text, properties, start, end)
+    .map((style) => style.textStyleId ?? "");
+  if (!values.length) return properties?.baseStyle?.textStyleId ?? "";
+  return values.some((value) => value !== values[0]) ? RUNTIME_MIXED : values[0]!;
+}
+
 function canonicalHyperlink(value: RuntimeHyperlinkTarget | null): DocumentTextProperties["runs"][number]["hyperlink"] {
   if (value === null) return undefined;
   if (!value || typeof value !== "object" || (value.type !== "URL" && value.type !== "NODE") || typeof value.value !== "string") {
@@ -479,6 +491,10 @@ export class RuntimeTextSublayerProxy {
 
   get openTypeFeatures(): Readonly<Record<string, boolean>> | typeof RUNTIME_MIXED {
     return this.getRangeOpenTypeFeatures(0, this.characters.length);
+  }
+
+  get textStyleId(): string | typeof RUNTIME_MIXED {
+    return this.getRangeTextStyleId(0, this.characters.length);
   }
 
   get textCase(): RuntimeTextCase | typeof RUNTIME_MIXED {
@@ -834,6 +850,13 @@ export class RuntimeTextSublayerProxy {
     const text = typeof node.characters === "string" ? node.characters : "";
     this.assertTextRange(start, end);
     return runtimeOpenTypeFeaturesForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end);
+  }
+
+  getRangeTextStyleId(start: number, end: number): string | typeof RUNTIME_MIXED {
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    this.assertTextRange(start, end);
+    return runtimeTextStyleIdForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end);
   }
 
   setRangeFontSize(start: number, end: number, value: number): void {
@@ -1581,6 +1604,11 @@ export class RuntimeNodeProxy {
     return this.getRangeOpenTypeFeatures(0, this.characters.length);
   }
 
+  get textStyleId(): string | typeof RUNTIME_MIXED {
+    this.assertText();
+    return this.getRangeTextStyleId(0, this.characters.length);
+  }
+
   get letterSpacing(): RuntimeLetterSpacing | typeof RUNTIME_MIXED {
     this.assertText();
     return this.getRangeLetterSpacing(0, this.characters.length);
@@ -1779,6 +1807,17 @@ export class RuntimeNodeProxy {
     this.assertText();
     runtimeTextRange(this.characters, start, end);
     return runtimeOpenTypeFeaturesForRange(
+      this.characters,
+      this.read().textProperties as DocumentTextProperties | undefined,
+      start,
+      end,
+    );
+  }
+
+  getRangeTextStyleId(start: number, end: number): string | typeof RUNTIME_MIXED {
+    this.assertText();
+    runtimeTextRange(this.characters, start, end);
+    return runtimeTextStyleIdForRange(
       this.characters,
       this.read().textProperties as DocumentTextProperties | undefined,
       start,

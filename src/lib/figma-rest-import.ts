@@ -1409,7 +1409,7 @@ function constraintState(value: unknown, sourceId: string, issues: FigmaImportIs
   return undefined;
 }
 
-type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim" | "openTypeFeatures">;
+type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim" | "openTypeFeatures" | "textStyleId">;
 
 function textProperties(node: JsonRecord, text: string, sourceId: string, issues: FigmaImportIssue[]) {
   const extensions: Record<string, number[]> = {};
@@ -1421,6 +1421,12 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
     issues.push({ sourceId, capability: "text-style", outcome: "preserved-extension", reason: "Figma Text style has invalid metrics and was not coerced into a Canonical run." });
     return { extensions };
   }
+  const textStyleId = importedNodeTextStyleId(node.styles);
+  if (textStyleId === false) {
+    extensions["figma.rest.text-style-link.v1"] = jsonBytes(node.styles);
+    issues.push({ sourceId, capability: "text-style-link", outcome: "preserved-extension", reason: "An invalid Figma TextStyle link was preserved without creating an ambiguous Canonical identity." });
+  }
+  const linkedBase = textStyleId ? { ...base, textStyleId } : base;
   const fontMetadata = [style, ...Object.values(record(node.styleOverrideTable) ?? {})].filter((candidate) => typeof record(candidate)?.fontFamily === "string");
   if (fontMetadata.length) {
     extensions["figma.rest.text-font.v1"] = jsonBytes(fontMetadata);
@@ -1428,11 +1434,11 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
   }
   const overrides = array(node.characterStyleOverrides);
   let styles: ImportedTextStyle[];
-  if (!overrides?.length) styles = Array.from({ length: text.length }, () => base);
+  if (!overrides?.length) styles = Array.from({ length: text.length }, () => linkedBase);
   else if (!isAscii(text) || overrides.length > text.length || overrides.some((entry) => !Number.isInteger(entry) || (entry as number) < 0)) {
     extensions["figma.rest.text-overrides.v1"] = jsonBytes({ styleOverrideTable: node.styleOverrideTable, characterStyleOverrides: node.characterStyleOverrides });
     issues.push({ sourceId, capability: "text-style-overrides", outcome: "preserved-extension", reason: "Only ASCII REST override indices are converted; Unicode override indexing remains opaque rather than risking invalid UTF-8 ranges." });
-    styles = Array.from({ length: text.length }, () => base);
+    styles = Array.from({ length: text.length }, () => linkedBase);
   } else {
     const table = record(node.styleOverrideTable) ?? {};
     let invalidOverridePreserved = false;
@@ -1442,16 +1448,16 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
       if (override !== 0 && !overrideStyle) {
         extensions["figma.rest.text-overrides.v1"] = jsonBytes({ styleOverrideTable: node.styleOverrideTable, characterStyleOverrides: node.characterStyleOverrides });
         issues.push({ sourceId, capability: "text-style-overrides", outcome: "preserved-extension", reason: `Figma style override ${override} is missing from styleOverrideTable.` });
-        return base;
+        return linkedBase;
       }
-      if (!overrideStyle) return base;
-      const imported = importedTextStyle(overrideStyle, base);
+      if (!overrideStyle) return linkedBase;
+      const imported = importedTextStyle(overrideStyle, linkedBase);
       if (!imported && !invalidOverridePreserved) {
         invalidOverridePreserved = true;
         extensions["figma.rest.text-overrides.v1"] = jsonBytes({ styleOverrideTable: node.styleOverrideTable, characterStyleOverrides: node.characterStyleOverrides });
         issues.push({ sourceId, capability: "text-style-overrides", outcome: "preserved-extension", reason: `Figma style override ${override} contains an unsupported text style value.` });
       }
-      return imported ?? base;
+      return imported ?? linkedBase;
     });
   }
   const runs = textRuns(text, styles);
@@ -1489,7 +1495,7 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
     extensions,
     properties: {
       runs,
-      ...(text.length === 0 ? { baseStyle: base } : {}),
+      ...(text.length === 0 ? { baseStyle: linkedBase } : {}),
       paragraph: {
         alignment: textAlignment(string(style.textAlignHorizontal)),
         ...lineHeight,
@@ -1510,6 +1516,18 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
         : {}),
     } satisfies DocumentTextProperties,
   };
+}
+
+function importedNodeTextStyleId(value: unknown): string | undefined | false {
+  if (value === undefined || value === null) return undefined;
+  const styles = record(value);
+  if (!styles) return false;
+  const lower = styles.text;
+  const upper = styles.TEXT;
+  if (lower !== undefined && upper !== undefined && lower !== upper) return false;
+  const id = lower ?? upper;
+  if (id === undefined || id === null) return undefined;
+  return typeof id === "string" && id.length > 0 && encoder.encode(id).byteLength <= 2_048 && !id.includes("\0") ? id : false;
 }
 
 function importedTextIndentation(
@@ -1707,8 +1725,9 @@ function importedTextStyle(value: JsonRecord, fallback?: ImportedTextStyle): Imp
         ? undefined
         : null;
   const openTypeFeatures = importedOpenTypeFeatures(value.openTypeFlags, fallback?.openTypeFeatures);
+  const textStyleId = fallback?.textStyleId;
   if (fontSize === undefined || fontSize <= 0 || fontWeight === undefined || fontWeight <= 0 || !Number.isInteger(fontWeight) || textCase === null || hyperlink === false || textDecoration === false || textDecorationStyle === false || textDecorationOffset === false || textDecorationThickness === false || textDecorationColor === false || textDecorationSkipInk === null || leadingTrim === null || openTypeFeatures === false) return undefined;
-  return { fontSize, fontWeight, italic: typeof value.italic === "boolean" ? value.italic : fallback?.italic ?? false, letterSpacing, ...(textCase ? { textCase } : {}), ...(hyperlink ? { hyperlink } : {}), ...(textDecoration ? { textDecoration } : {}), ...(textDecoration && textDecorationStyle ? { textDecorationStyle } : {}), ...(textDecoration && textDecorationOffset ? { textDecorationOffset } : {}), ...(textDecoration && textDecorationThickness ? { textDecorationThickness } : {}), ...(textDecoration === "underline" && textDecorationColor ? { textDecorationColor } : {}), ...(textDecoration === "underline" && textDecorationSkipInk === true ? { textDecorationSkipInk: true } : {}), ...(leadingTrim ? { leadingTrim } : {}), ...(openTypeFeatures && Object.keys(openTypeFeatures).length ? { openTypeFeatures } : {}) };
+  return { fontSize, fontWeight, italic: typeof value.italic === "boolean" ? value.italic : fallback?.italic ?? false, letterSpacing, ...(textCase ? { textCase } : {}), ...(hyperlink ? { hyperlink } : {}), ...(textDecoration ? { textDecoration } : {}), ...(textDecoration && textDecorationStyle ? { textDecorationStyle } : {}), ...(textDecoration && textDecorationOffset ? { textDecorationOffset } : {}), ...(textDecoration && textDecorationThickness ? { textDecorationThickness } : {}), ...(textDecoration === "underline" && textDecorationColor ? { textDecorationColor } : {}), ...(textDecoration === "underline" && textDecorationSkipInk === true ? { textDecorationSkipInk: true } : {}), ...(leadingTrim ? { leadingTrim } : {}), ...(openTypeFeatures && Object.keys(openTypeFeatures).length ? { openTypeFeatures } : {}), ...(textStyleId ? { textStyleId } : {}) };
 }
 
 function importedOpenTypeFeatures(value: unknown, fallback?: ImportedTextStyle["openTypeFeatures"]): ImportedTextStyle["openTypeFeatures"] | false {
@@ -1839,7 +1858,7 @@ function textRuns(text: string, styles: ImportedTextStyle[]): DocumentTextProper
   return runs;
 }
 
-function sameTextStyle(left: ImportedTextStyle, right: ImportedTextStyle) { return left.fontSize === right.fontSize && left.fontWeight === right.fontWeight && left.italic === right.italic && left.letterSpacing === right.letterSpacing && left.textCase === right.textCase && JSON.stringify(left.hyperlink) === JSON.stringify(right.hyperlink) && left.textDecoration === right.textDecoration && left.textDecorationStyle === right.textDecorationStyle && JSON.stringify(left.textDecorationOffset) === JSON.stringify(right.textDecorationOffset) && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness) && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor) && left.textDecorationSkipInk === right.textDecorationSkipInk && left.leadingTrim === right.leadingTrim && JSON.stringify(left.openTypeFeatures) === JSON.stringify(right.openTypeFeatures); }
+function sameTextStyle(left: ImportedTextStyle, right: ImportedTextStyle) { return left.fontSize === right.fontSize && left.fontWeight === right.fontWeight && left.italic === right.italic && left.letterSpacing === right.letterSpacing && left.textCase === right.textCase && JSON.stringify(left.hyperlink) === JSON.stringify(right.hyperlink) && left.textDecoration === right.textDecoration && left.textDecorationStyle === right.textDecorationStyle && JSON.stringify(left.textDecorationOffset) === JSON.stringify(right.textDecorationOffset) && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness) && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor) && left.textDecorationSkipInk === right.textDecorationSkipInk && left.leadingTrim === right.leadingTrim && JSON.stringify(left.openTypeFeatures) === JSON.stringify(right.openTypeFeatures) && left.textStyleId === right.textStyleId; }
 function textAlignment(value: string | undefined): DocumentTextProperties["paragraph"]["alignment"] { return value === "CENTER" ? "center" : value === "RIGHT" ? "right" : value === "JUSTIFIED" ? "justify" : "left"; }
 function textAutoSize(value: string | undefined): DocumentTextProperties["autoSize"] { return value === "HEIGHT" ? "height" : value === "WIDTH_AND_HEIGHT" ? "widthAndHeight" : "fixed"; }
 function positive(value: unknown) { const number = finite(value); return number !== undefined && number > 0 ? number : undefined; }

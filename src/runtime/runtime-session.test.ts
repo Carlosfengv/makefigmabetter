@@ -907,8 +907,8 @@ describe("M1 RuntimeSession", () => {
   it("projects styled text segments from character and paragraph runs for Text and ShapeWithText", async () => {
     const textProperties = {
       runs: [
-        { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, openTypeFeatures: { LIGA: true } },
-        { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, openTypeFeatures: { LIGA: false } },
+        { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, openTypeFeatures: { LIGA: true }, textStyleId: "S:body" },
+        { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, openTypeFeatures: { LIGA: false }, textStyleId: "S:caption" },
       ],
       paragraph: { alignment: "left" as const, paragraphSpacing: 3, textWrapStyle: "balance" as const, listType: "ordered" as const },
       paragraphStyleRuns: [{ start: 6, paragraphSpacing: 9, textWrapStyle: "auto" as const, listType: "none" as const }],
@@ -941,9 +941,13 @@ describe("M1 RuntimeSession", () => {
     expect(text.getRangeFontWeight(4, 6)).toBe(700);
     expect(text.openTypeFeatures).toBe(RUNTIME_MIXED);
     expect(text.getRangeOpenTypeFeatures(1, 3)).toEqual({ LIGA: true });
+    expect(text.textStyleId).toBe(RUNTIME_MIXED);
+    expect(text.getRangeTextStyleId(0, 4)).toBe("S:body");
     expect(shape.text.getRangeFontWeight(0, 4)).toBe(400);
     expect(shape.text.openTypeFeatures).toBe(RUNTIME_MIXED);
     expect(shape.text.getRangeOpenTypeFeatures(4, 6)).toEqual({ LIGA: false });
+    expect(shape.text.textStyleId).toBe(RUNTIME_MIXED);
+    expect(shape.text.getRangeTextStyleId(4, 6)).toBe("S:caption");
 
     text.setRangeFontSize(4, 6, 24);
     text.setRangeParagraphSpacing(4, 6, 7);
@@ -1728,7 +1732,7 @@ describe("M1 RuntimeSession", () => {
             runs: [],
             paragraph: { alignment: "center", paragraphSpacing: 0 },
             autoSize: "fixed",
-            baseStyle: { fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0 },
+            baseStyle: { fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, textStyleId: "S:empty" },
           },
         },
         {
@@ -1759,12 +1763,15 @@ describe("M1 RuntimeSession", () => {
     expect(text.hasMissingFont).toBe(false);
     expect(missing.hasMissingFont).toBe(true);
     expect(shape.text.fontName).toEqual({ family: "Inter", style: "Regular" });
+    expect(shape.text.textStyleId).toBe("S:empty");
+    expect(shape.text.getRangeTextStyleId(0, 0)).toBe("S:empty");
 
     text.setRangeFontName(0, 1, secondName);
     shape.text.fontName = firstName;
     missing.fontName = secondName;
     expect(text.getRangeFontName(0, 1)).toEqual(secondName);
     expect(shape.text.fontName).toEqual(firstName);
+    expect(shape.text.textStyleId).toBe("S:empty");
     expect((session.projectionStore.getNode("shape-font-name")?.textProperties as { baseStyle?: { font?: unknown } }).baseStyle?.font).toEqual({ assetId: firstAsset.assetId, faceIndex: 0 });
     expect(missing.hasMissingFont).toBe(false);
     expect(missing.getRangeFontName(0, 1)).toEqual(secondName);

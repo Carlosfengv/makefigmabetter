@@ -20,6 +20,7 @@ export type FigmaPluginTransform = [[number, number, number], [number, number, n
 export type FigmaPluginArcData = Readonly<{ startingAngle: number; endingAngle: number; innerRadius: number }>;
 export type FigmaPluginTextSublayerProjection = Readonly<{
   characters: string;
+  textStyleId: string;
   fontSize: number;
   fontWeight: number;
   letterSpacing: Readonly<{ value: number; unit: "PIXELS" }>;
@@ -437,6 +438,7 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     projection.shapeType = node.shapeWithTextType;
     projection.textSublayer = {
       characters: node.text ?? "",
+      textStyleId: primary?.textStyleId ?? "",
       fontSize: primary?.fontSize ?? 14,
       fontWeight: primary?.fontWeight ?? 400,
       letterSpacing: { value: primary?.letterSpacing ?? 0, unit: "PIXELS" },

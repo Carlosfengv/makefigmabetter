@@ -840,7 +840,20 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=57).contains(&snapshot.schema_version)
+    if !(1..=58).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 58
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_style_id.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_style_id.is_some())
+                })
+            }))
         || (snapshot.schema_version < 57
             && snapshot.nodes.iter().any(|node| {
                 node.text_properties.as_ref().is_some_and(|properties| {
@@ -1513,6 +1526,8 @@ struct ProjectionTextStyleRun {
     leading_trim: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     open_type_features: std::collections::BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_style_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1555,6 +1570,8 @@ struct ProjectionTextStyle {
     leading_trim: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     open_type_features: std::collections::BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_style_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1959,6 +1976,21 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_style_id.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_style_id.is_some())
+                })
+        }) {
+            58
+        } else if self.document.nodes().any(|node| {
             self.document
                 .text_properties_for_node(node.id)
                 .is_some_and(|properties| {
@@ -5524,6 +5556,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .iter()
                     .map(|feature| (feature.tag.clone(), feature.enabled))
                     .collect(),
+                text_style_id: run.text_style_id.clone(),
             })
             .collect(),
         paragraph: ProjectionParagraphStyle {
@@ -5642,6 +5675,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .iter()
                     .map(|feature| (feature.tag.clone(), feature.enabled))
                     .collect(),
+                text_style_id: style.text_style_id.clone(),
             }),
     }
 }
@@ -5739,6 +5773,7 @@ fn text_properties_from_projection(
                                     enabled: *enabled,
                                 })
                                 .collect(),
+                            text_style_id: run.text_style_id.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, JsValue>>()?,
@@ -5905,6 +5940,7 @@ fn text_properties_from_projection(
                                     enabled: *enabled,
                                 })
                                 .collect(),
+                            text_style_id: style.text_style_id.clone(),
                         })
                     })
                     .transpose()?,
@@ -9678,7 +9714,7 @@ mod tests {
     fn text_batch_round_trips_canonically_and_v2_snapshots_remain_readable() {
         let mut engine = DocumentEngine::new();
         let id = parse_id("00000000-0000-4000-8000-000000000001").unwrap();
-        let text = |value: &str| ProjectionNode {
+        let text = |value: &str, text_style_id: Option<&str>| ProjectionNode {
             id: "00000000-0000-4000-8000-000000000001".into(),
             parent_id: None,
             name: "Heading".into(),
@@ -9710,6 +9746,7 @@ mod tests {
                     text_decoration_skip_ink: None,
                     leading_trim: None,
                     open_type_features: Default::default(),
+                    text_style_id: text_style_id.map(str::to_owned),
                 }],
                 paragraph: ProjectionParagraphStyle {
                     alignment: "center".into(),
@@ -9782,7 +9819,7 @@ mod tests {
                 NodeId(16),
                 0,
                 vec![BatchCommand::Create {
-                    node: text("Before"),
+                    node: text("Before", None),
                 }],
             )
             .unwrap();
@@ -9791,7 +9828,7 @@ mod tests {
                 NodeId(17),
                 1,
                 vec![BatchCommand::Update {
-                    node: text("After"),
+                    node: text("After", None),
                     ignore_constraints: false,
                     plain_text_only: false,
                     rename_text_path: false,
@@ -9861,6 +9898,28 @@ mod tests {
         let mut legacy = DocumentEngine::new();
         legacy.load_snapshot_json(&v2.to_string()).unwrap();
         assert_eq!(legacy.document.node(id).unwrap().text, "");
+
+        engine
+            .submit_batch(
+                NodeId(18),
+                engine.document.revision,
+                vec![BatchCommand::Update {
+                    node: text("After", Some("S:heading")),
+                    ignore_constraints: false,
+                    plain_text_only: false,
+                    rename_text_path: false,
+                }],
+            )
+            .unwrap();
+        let linked_snapshot = engine.snapshot_json();
+        assert!(linked_snapshot.contains("\"schemaVersion\":58"));
+        assert!(linked_snapshot.contains("\"textStyleId\":\"S:heading\""));
+        let mut mislabeled_link: CoreSnapshot = serde_json::from_str(&linked_snapshot).unwrap();
+        mislabeled_link.schema_version = 57;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled_link),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
     }
 
     #[test]

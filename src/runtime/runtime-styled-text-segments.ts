@@ -180,7 +180,7 @@ function segmentFieldValue(
     case "fills": return style.fillStack !== undefined
       ? runtimePaintsFromDocumentStack(style.fillStack)
       : style.color ? runtimeFillsFromDocumentTextColor(style.color) : structuredClone(fallbackFills);
-    case "textStyleId":
+    case "textStyleId": return style.textStyleId ?? "";
     case "fillStyleId": return "";
     case "listOptions": return { type: listType === "ordered" ? "ORDERED" : listType === "unordered" ? "UNORDERED" : "NONE" };
     case "listSpacing": return paragraphRun?.listSpacing ?? properties.paragraph.listSpacing ?? 0;

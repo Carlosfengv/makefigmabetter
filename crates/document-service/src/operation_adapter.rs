@@ -364,6 +364,13 @@ pub fn commands_from_payload_with_semantics(
             minimum: makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION,
         });
     }
+    if engine_semantics_version < makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_style_link)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
     if engine_semantics_version
         < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && batch
@@ -817,6 +824,19 @@ fn operation_has_open_type_features(operation: &v1::ResolvedOperation) -> bool {
                 .base_style
                 .as_ref()
                 .is_some_and(|style| !style.open_type_features.is_empty())
+    })
+}
+
+fn operation_has_text_style_link(operation: &v1::ResolvedOperation) -> bool {
+    operation_text_properties(operation).is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_style_id.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_style_id.is_some())
     })
 }
 
@@ -2017,6 +2037,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .transpose()?
                         .flatten(),
                     open_type_features: open_type_features_from_proto(run.open_type_features),
+                    text_style_id: run.text_style_id,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2134,6 +2155,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .transpose()?
                         .flatten(),
                     open_type_features: open_type_features_from_proto(style.open_type_features),
+                    text_style_id: style.text_style_id,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -3647,6 +3669,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -3735,6 +3758,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
                 ..Default::default()
             }),
@@ -3787,6 +3811,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -4093,6 +4118,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4159,6 +4185,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4233,6 +4260,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4310,6 +4338,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4387,6 +4416,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4461,6 +4491,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: Some(v1::TextDecorationColor {
                     color: Some(color()),
                     visible: true,
@@ -4539,6 +4570,7 @@ mod tests {
                 text_decoration_skip_ink: Some(true),
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4590,6 +4622,7 @@ mod tests {
                 font_weight: 400,
                 leading_trim: Some(v1::LeadingTrim::CapHeight as i32),
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4661,6 +4694,44 @@ mod tests {
         );
         assert!(
             matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(), [Command::SetTextProperties { properties, .. }] if properties.runs[0].open_type_features == [editor_core::OpenTypeFeature { tag: "LIGA".into(), enabled: false }])
+        );
+    }
+
+    #[test]
+    fn text_style_link_operations_require_semantics_forty_three() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font_size: 16.0,
+                font_weight: 400,
+                text_style_id: Some("S:heading".into()),
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 15_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(), [Command::SetTextProperties { properties, .. }] if properties.runs[0].text_style_id.as_deref() == Some("S:heading"))
         );
     }
 

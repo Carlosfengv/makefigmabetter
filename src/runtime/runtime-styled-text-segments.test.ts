@@ -14,8 +14,8 @@ const fallbackFills = [{
 
 const properties: DocumentTextProperties = {
   runs: [
-    { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline" },
-    { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, textCase: "upper" },
+    { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textStyleId: "S:body" },
+    { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, textCase: "upper", textStyleId: "S:caption" },
   ],
   paragraph: {
     alignment: "left",
@@ -96,7 +96,7 @@ describe("runtimeStyledTextSegments", () => {
     ]);
   });
 
-  it("returns deterministic empty style and binding fields", () => {
+  it("returns linked text style identities and deterministic empty unsupported fields", () => {
     expect(runtimeStyledTextSegments(
       "A😀\nBC",
       properties,
@@ -104,10 +104,19 @@ describe("runtimeStyledTextSegments", () => {
       fallbackFills,
       defaults,
     )).toEqual([{
-      characters: "A😀\nBC",
+      characters: "A😀\n",
       start: 0,
+      end: 4,
+      textStyleId: "S:body",
+      fillStyleId: "",
+      openTypeFeatures: {},
+      boundVariables: undefined,
+      textStyleOverrides: [],
+    }, {
+      characters: "BC",
+      start: 4,
       end: 6,
-      textStyleId: "",
+      textStyleId: "S:caption",
       fillStyleId: "",
       openTypeFeatures: {},
       boundVariables: undefined,

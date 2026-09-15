@@ -420,6 +420,7 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       textDecorationSkipInk: run.textDecorationSkipInk === true ? true : undefined,
       leadingTrim: run.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
       openTypeFeatures: openTypeFeaturesProto(run.openTypeFeatures),
+      textStyleId: run.textStyleId,
     })),
     paragraph: {
       alignment: value.paragraph.alignment === "left" ? TextAlignment.TEXT_ALIGNMENT_LEFT : value.paragraph.alignment === "center" ? TextAlignment.TEXT_ALIGNMENT_CENTER : value.paragraph.alignment === "right" ? TextAlignment.TEXT_ALIGNMENT_RIGHT : TextAlignment.TEXT_ALIGNMENT_JUSTIFY,
@@ -478,6 +479,7 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       textDecorationSkipInk: value.baseStyle.textDecorationSkipInk === true ? true : undefined,
       leadingTrim: value.baseStyle.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
       openTypeFeatures: openTypeFeaturesProto(value.baseStyle.openTypeFeatures),
+      textStyleId: value.baseStyle.textStyleId,
     } : undefined,
     paragraphStyleRuns: (value.paragraphStyleRuns ?? []).map((run) => ({
       start: run.start,

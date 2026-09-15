@@ -272,6 +272,8 @@ export interface DocumentTextStyle {
   leadingTrim?: "capHeight";
   /** Explicit four-character OpenType feature overrides, keyed by uppercase tag. */
   openTypeFeatures?: Readonly<Record<string, boolean>>;
+  /** Linked Figma TextStyle identity; omission means unlinked. */
+  textStyleId?: string;
 }
 
 export interface DocumentTextProperties {

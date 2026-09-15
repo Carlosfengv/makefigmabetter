@@ -565,6 +565,9 @@ message TextStyleRun {
   // Sorted explicit overrides only. Tags use the Figma/API uppercase form;
   // enabled=false is meaningful because many OpenType features default on.
   repeated OpenTypeFeatureSetting open_type_features = 19;
+  // Figma TextStyle link identity. Presence requires engine semantics 43.
+  // The referenced style resource may be resolved by a later capability.
+  optional string text_style_id = 20;
 }
 
 message OpenTypeFeatureSetting {

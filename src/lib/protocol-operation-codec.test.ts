@@ -375,6 +375,35 @@ describe("protocol operation codec", () => {
     });
   });
 
+  it("serializes TextStyle link identities on character runs and empty-text base styles", () => {
+    const linked = {
+      ...createNode("text", 10, 20),
+      id,
+      text: "AB",
+      textProperties: {
+        runs: [{ start: 0, end: 2, fontSize: 18, fontWeight: 600, italic: false, letterSpacing: 0, textStyleId: "S:heading" }],
+        paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const linkedBatch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: linked }])!.batch));
+    expect(linkedBatch.operations[1]?.setTextProperties?.properties?.runs[0]?.textStyleId).toBe("S:heading");
+
+    const empty = {
+      ...createNode("text", 10, 20),
+      id,
+      text: "",
+      textProperties: {
+        runs: [],
+        baseStyle: { fontSize: 18, fontWeight: 600, italic: false, letterSpacing: 0, textStyleId: "S:body" },
+        paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const emptyBatch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: empty }])!.batch));
+    expect(emptyBatch.operations[1]?.setTextProperties?.properties?.baseStyle?.textStyleId).toBe("S:body");
+  });
+
   it("serializes beta TransformGroup with repeat metadata", () => {
     const node = { ...createNode("transformGroup", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", transformModifiers: [{ type: "REPEAT" as const, count: 2, unitType: "PIXELS" as const, offset: 10, repeatType: "LINEAR" as const, axis: "VERTICAL" as const }] };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));

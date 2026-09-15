@@ -990,7 +990,7 @@ describe("Figma REST import planning", () => {
     const plan = planFigmaRestImport({
       version: "text-decoration",
       document: { children: [{ id: "0:1", type: "CANVAS", children: [{
-        id: "1:1", type: "TEXT", characters: "ABCD", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 90, height: 30 },
+        id: "1:1", type: "TEXT", characters: "ABCD", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 90, height: 30 }, styles: { text: "S:heading" },
         style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "UNDERLINE", textDecorationStyle: "WAVY", textDecorationOffset: { value: 2, unit: "PIXELS" }, textDecorationThickness: { value: 2.5, unit: "PIXELS" }, textDecorationColor: { value: { type: "SOLID", color: { r: 1, g: .25, b: .5 }, visible: true, opacity: .75, blendMode: "MULTIPLY" } }, textDecorationSkipInk: true, leadingTrim: "CAP_HEIGHT", openTypeFlags: { liga: 1, kern: 0 } },
         characterStyleOverrides: [0, 1, 2, 3],
         styleOverrideTable: {
@@ -1034,6 +1034,9 @@ describe("Figma REST import planning", () => {
     expect(plan.nodes[0]?.textProperties?.runs.map((run) => run.openTypeFeatures)).toEqual([
       { KERN: false, LIGA: true }, { LIGA: false }, { KERN: false, LIGA: true }, { KERN: false, LIGA: true },
     ]);
+    expect(plan.nodes[0]?.textProperties?.runs.map((run) => run.textStyleId)).toEqual([
+      "S:heading", "S:heading", "S:heading", "S:heading",
+    ]);
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("BLINK");
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("ZIGZAG");
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("EM");
@@ -1045,18 +1048,41 @@ describe("Figma REST import planning", () => {
     const plan = planFigmaRestImport({
       version: "empty-text-style",
       document: { children: [{ id: "0:1", type: "CANVAS", children: [{
-        id: "1:1", type: "TEXT", characters: "", relativeTransform: [[1, 0, 4], [0, 1, 8]], absoluteBoundingBox: { x: 4, y: 8, width: 200, height: 40 },
+        id: "1:1", type: "TEXT", characters: "", relativeTransform: [[1, 0, 4], [0, 1, 8]], absoluteBoundingBox: { x: 4, y: 8, width: 200, height: 40 }, styles: { TEXT: "S:body" },
         style: { fontFamily: "Inter", fontSize: 18, fontWeight: 650, italic: true, letterSpacing: .5, textAlignHorizontal: "RIGHT", lineHeightPx: 26, paragraphSpacing: 3 },
       }] }] },
     }, ids());
 
     expect(plan.nodes[0]?.textProperties).toEqual({
       runs: [],
-      baseStyle: { fontSize: 18, fontWeight: 650, italic: true, letterSpacing: .5 },
+      baseStyle: { fontSize: 18, fontWeight: 650, italic: true, letterSpacing: .5, textStyleId: "S:body" },
       paragraph: { alignment: "right", lineHeight: 26, paragraphSpacing: 3 },
       autoSize: "fixed",
     });
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-font.v1"])).toContain("Inter");
+  });
+
+  it("preserves malformed or conflicting REST TextStyle links without inventing an identity", () => {
+    const imported = (id: string, styles: unknown) => planFigmaRestImport({
+      version: `text-style-link-${id}`,
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: `1:${id}`, type: "TEXT", characters: "A", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 20, height: 20 }, styles,
+        style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+      }] }] },
+    }, ids());
+
+    for (const plan of [
+      imported("1", { text: "" }),
+      imported("2", { text: "S:body", TEXT: "S:heading" }),
+      imported("3", { text: `S:${"x".repeat(2_048)}` }),
+      imported("4", { text: "bad\0id" }),
+    ]) {
+      expect(plan.nodes[0]?.textProperties?.runs[0]?.textStyleId).toBeUndefined();
+      expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-style-link.v1"])).toBeTruthy();
+      expect(plan.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ capability: "text-style-link", outcome: "preserved-extension" }),
+      ]));
+    }
   });
 
   it("preserves invalid REST text truncation metadata instead of weakening it", () => {

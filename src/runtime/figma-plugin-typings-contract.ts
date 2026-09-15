@@ -53,6 +53,8 @@ export function assertFigmaPluginTypingsContract(
   void text.getRangeFontWeight(0, 1);
   void text.openTypeFeatures;
   void text.getRangeOpenTypeFeatures(0, 1);
+  void text.textStyleId;
+  void text.getRangeTextStyleId(0, 1);
   void text.fontName;
   void text.getRangeFontName(0, 1);
   void text.getRangeAllFontNames(0, 1);

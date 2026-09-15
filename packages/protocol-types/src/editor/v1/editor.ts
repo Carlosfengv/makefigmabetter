@@ -782,6 +782,11 @@ export interface TextStyleRun {
    * enabled=false is meaningful because many OpenType features default on.
    */
   openTypeFeatures: OpenTypeFeatureSetting[];
+  /**
+   * Figma TextStyle link identity. Presence requires engine semantics 43.
+   * The referenced style resource may be resolved by a later capability.
+   */
+  textStyleId?: string | undefined;
 }
 
 export interface OpenTypeFeatureSetting {
@@ -4635,6 +4640,7 @@ function createBaseTextStyleRun(): TextStyleRun {
     textDecorationSkipInk: undefined,
     leadingTrim: undefined,
     openTypeFeatures: [],
+    textStyleId: undefined,
   };
 }
 
@@ -4696,6 +4702,9 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     for (const v of message.openTypeFeatures) {
       OpenTypeFeatureSetting.encode(v!, writer.uint32(154).fork()).join();
+    }
+    if (message.textStyleId !== undefined) {
+      writer.uint32(162).string(message.textStyleId);
     }
     return writer;
   },
@@ -4859,6 +4868,14 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.openTypeFeatures.push(OpenTypeFeatureSetting.decode(reader, reader.uint32()));
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.textStyleId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4905,6 +4922,7 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     message.textDecorationSkipInk = object.textDecorationSkipInk ?? undefined;
     message.leadingTrim = object.leadingTrim ?? undefined;
     message.openTypeFeatures = object.openTypeFeatures?.map((e) => OpenTypeFeatureSetting.fromPartial(e)) || [];
+    message.textStyleId = object.textStyleId ?? undefined;
     return message;
   },
 };

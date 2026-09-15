@@ -129,7 +129,7 @@ describe("Figma Plugin API node projection", () => {
       shapeWithTextType: "DIAMOND" as const,
       text: "Decision",
       textProperties: {
-        runs: [{ start: 0, end: 8, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 1.5, textCase: "smallCapsForced" as const, hyperlink: { type: "URL" as const, value: "https://example.com/decision" }, textDecoration: "underline" as const, textDecorationStyle: "wavy" as const, textDecorationOffset: { value: -15, unit: "percent" as const }, textDecorationThickness: { value: 12.5, unit: "percent" as const }, textDecorationColor: { color: { space: "srgb" as const, components: [1, .25, .5] as [number, number, number], alpha: 1 }, visible: true, opacity: .75, blendMode: "multiply" as const }, textDecorationSkipInk: true, leadingTrim: "capHeight" as const }],
+        runs: [{ start: 0, end: 8, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 1.5, textCase: "smallCapsForced" as const, hyperlink: { type: "URL" as const, value: "https://example.com/decision" }, textDecoration: "underline" as const, textDecorationStyle: "wavy" as const, textDecorationOffset: { value: -15, unit: "percent" as const }, textDecorationThickness: { value: 12.5, unit: "percent" as const }, textDecorationColor: { color: { space: "srgb" as const, components: [1, .25, .5] as [number, number, number], alpha: 1 }, visible: true, opacity: .75, blendMode: "multiply" as const }, textDecorationSkipInk: true, leadingTrim: "capHeight" as const, textStyleId: "S:decision" }],
         paragraph: { alignment: "center" as const, lineHeight: 24, paragraphSpacing: 4, paragraphIndent: 12, textWrapStyle: "balance" as const, listType: "unordered" as const, listSpacing: 8, hangingList: true, hangingPunctuation: true },
         autoSize: "fixed" as const,
       },
@@ -139,6 +139,7 @@ describe("Figma Plugin API node projection", () => {
       shapeType: "DIAMOND",
       textSublayer: {
         characters: "Decision",
+        textStyleId: "S:decision",
         fontSize: 18,
         fontWeight: 650,
         letterSpacing: { value: 1.5, unit: "PIXELS" },

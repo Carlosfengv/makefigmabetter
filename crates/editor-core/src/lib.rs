@@ -37,6 +37,7 @@ pub const MAX_TEXT_FALLBACK_FONTS: usize = 32;
 pub const MAX_TEXT_HYPERLINK_BYTES: usize = 2_048;
 pub const MAX_FONT_VARIATION_AXES: usize = 16;
 pub const MAX_OPEN_TYPE_FEATURES: usize = 128;
+pub const MAX_STYLE_ID_BYTES: usize = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u128);
@@ -762,6 +763,9 @@ pub struct TextStyleRun {
     /// Sorted, unique explicit OpenType feature overrides. An empty list keeps
     /// the font's defaults and preserves all legacy hashes.
     pub open_type_features: Vec<OpenTypeFeature>,
+    /// Stable Figma TextStyle link identity. This does not imply that the
+    /// referenced style resource is locally editable or resolvable.
+    pub text_style_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6303,6 +6307,9 @@ impl Document {
                 .open_type_features
                 .windows(2)
                 .all(|pair| pair[0].tag < pair[1].tag)
+            && style.text_style_id.as_ref().is_none_or(|id| {
+                !id.is_empty() && id.len() <= MAX_STYLE_ID_BYTES && !id.contains('\0')
+            })
             && style.hyperlink.as_ref().is_none_or(|hyperlink| {
                 !hyperlink.value.is_empty()
                     && hyperlink.value.len() <= MAX_TEXT_HYPERLINK_BYTES
@@ -7127,6 +7134,7 @@ impl TextProperties {
                                 std::mem::size_of::<OpenTypeFeature>() + feature.tag.len()
                             })
                             .sum::<usize>()
+                        + run.text_style_id.as_ref().map_or(0, String::len)
                 })
                 .sum::<usize>()
             + self.paragraph_style_runs.len() * std::mem::size_of::<ParagraphStyleRun>()
@@ -7156,6 +7164,7 @@ impl TextProperties {
                                 std::mem::size_of::<OpenTypeFeature>() + feature.tag.len()
                             })
                             .sum::<usize>()
+                        + style.text_style_id.as_ref().map_or(0, String::len)
                 })
                 .unwrap_or(0)
             + self
@@ -8055,6 +8064,27 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
             hash_len(hasher, 0);
         }
     }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_style_id.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_style_id.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-style-link-v1");
+        for run in &properties.runs {
+            hash_optional_text(hasher, run.text_style_id.as_deref());
+        }
+        hash_optional_text(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_style_id.as_deref()),
+        );
+    }
     if properties.runs.iter().any(|run| run.text_case.is_some())
         || properties
             .base_style
@@ -8234,6 +8264,16 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
                 .and_then(|style| style.leading_trim)
                 == Some(LeadingTrim::CapHeight),
         )]);
+    }
+}
+
+fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_text(hasher, value);
+        }
+        None => hasher.update([0]),
     }
 }
 
@@ -11451,6 +11491,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11547,6 +11588,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11644,6 +11686,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11732,6 +11775,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -16742,6 +16786,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -16841,6 +16886,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: pixels,
@@ -16934,6 +16980,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -17927,6 +17974,7 @@ mod tests {
             text_decoration_skip_ink: None,
             leading_trim: None,
             open_type_features: Vec::new(),
+            text_style_id: None,
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -18030,6 +18078,7 @@ mod tests {
                     text_decoration_skip_ink: None,
                     leading_trim: None,
                     open_type_features: Vec::new(),
+                    text_style_id: None,
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -18051,6 +18100,7 @@ mod tests {
                     text_decoration_skip_ink: None,
                     leading_trim: None,
                     open_type_features: Vec::new(),
+                    text_style_id: None,
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -18072,6 +18122,7 @@ mod tests {
                     text_decoration_skip_ink: None,
                     leading_trim: None,
                     open_type_features: Vec::new(),
+                    text_style_id: None,
                     text_decoration_color: None,
                 },
             ],
@@ -18199,6 +18250,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18275,6 +18327,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18357,6 +18410,7 @@ mod tests {
                     enabled: true,
                 },
             ],
+            text_style_id: None,
         };
         let properties = TextProperties {
             runs: vec![style],
@@ -18420,6 +18474,50 @@ mod tests {
             );
             assert_eq!(document.canonical_hash_hex(), feature_hash);
         }
+
+        let mut linked = properties.clone();
+        linked.runs[0].open_type_features.clear();
+        linked.runs[0].text_style_id = Some("S:heading".into());
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(190),
+                        properties: linked.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let linked_hash = document.canonical_hash_hex();
+        assert_ne!(linked_hash, feature_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), feature_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), linked_hash);
+        for id in [
+            String::new(),
+            "x".repeat(MAX_STYLE_ID_BYTES + 1),
+            "bad\0id".into(),
+        ] {
+            let mut invalid = linked.clone();
+            invalid.runs[0].text_style_id = Some(id);
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(190),
+                            properties: invalid
+                        }]
+                    ),
+                    Origin::LocalUser
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+            assert_eq!(document.canonical_hash_hex(), linked_hash);
+        }
     }
 
     #[test]
@@ -18458,6 +18556,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18560,6 +18659,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18922,6 +19022,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -20920,6 +21021,7 @@ mod tests {
                                     text_decoration_skip_ink: None,
                                     leading_trim: None,
                                     open_type_features: Vec::new(),
+                                    text_style_id: None,
                                     text_decoration_color: None,
                                 }],
                                 ..TextProperties::default()

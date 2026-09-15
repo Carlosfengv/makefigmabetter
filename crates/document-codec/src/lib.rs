@@ -65,8 +65,9 @@ pub const PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 39;
 pub const FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 40;
 pub const FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION: u32 = 41;
 pub const OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION: u32 = 42;
+pub const TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 43;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -461,6 +462,15 @@ pub fn snapshot_from_document(
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
+    if engine_semantics_version < TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_style_link)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     let mut pages = document.pages().cloned().collect::<Vec<_>>();
     pages.sort_by_key(|page| (page.position, page.id));
     let page_chunks = pages
@@ -850,6 +860,13 @@ pub fn document_from_snapshot_with_engine_semantics(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_open_type_features)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_style_link)
             {
                 return Err(SnapshotError::Invalid);
             }
@@ -1928,6 +1945,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 text_decoration_skip_ink: run.text_decoration_skip_ink,
                 leading_trim: run.leading_trim.map(leading_trim_to_proto),
                 open_type_features: open_type_features_to_proto(&run.open_type_features),
+                text_style_id: run.text_style_id.clone(),
                 text_decoration_color: run
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -1997,6 +2015,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 text_decoration_skip_ink: style.text_decoration_skip_ink,
                 leading_trim: style.leading_trim.map(leading_trim_to_proto),
                 open_type_features: open_type_features_to_proto(&style.open_type_features),
+                text_style_id: style.text_style_id.clone(),
                 text_decoration_color: style
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2086,6 +2105,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .transpose()?
                         .flatten(),
                     open_type_features: open_type_features_from_proto(run.open_type_features)?,
+                    text_style_id: run.text_style_id,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2206,6 +2226,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .transpose()?
                         .flatten(),
                     open_type_features: open_type_features_from_proto(style.open_type_features)?,
+                    text_style_id: style.text_style_id,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2397,6 +2418,17 @@ fn text_properties_has_open_type_features(properties: &TextProperties) -> bool {
             .base_style
             .as_ref()
             .is_some_and(|style| !style.open_type_features.is_empty())
+}
+
+fn text_properties_has_text_style_link(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_style_id.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_style_id.is_some())
 }
 
 fn open_type_features_to_proto(features: &[OpenTypeFeature]) -> Vec<v1::OpenTypeFeatureSetting> {
@@ -3297,6 +3329,7 @@ mod tests {
                         text_decoration_skip_ink: None,
                         leading_trim: None,
                         open_type_features: Vec::new(),
+                        text_style_id: None,
                         text_decoration_color: None,
                     }],
                     paragraph: ParagraphStyle {
@@ -4340,6 +4373,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4420,6 +4454,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4489,6 +4524,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }),
             ..TextProperties::default()
@@ -4556,6 +4592,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4647,6 +4684,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4714,6 +4752,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4792,6 +4831,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4923,6 +4963,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4988,6 +5029,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5053,6 +5095,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5121,6 +5164,7 @@ mod tests {
             text_decoration_skip_ink: None,
             leading_trim: None,
             open_type_features: Vec::new(),
+            text_style_id: None,
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5191,6 +5235,7 @@ mod tests {
             text_decoration_skip_ink: None,
             leading_trim: None,
             open_type_features: Vec::new(),
+            text_style_id: None,
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5265,6 +5310,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
                 text_decoration_color: Some(TextDecorationColor {
                     color: Color {
                         space: ColorSpace::Srgb,
@@ -5344,6 +5390,7 @@ mod tests {
                 text_decoration_skip_ink: Some(true),
                 leading_trim: None,
                 open_type_features: Vec::new(),
+                text_style_id: None,
             }],
             ..TextProperties::default()
         };
@@ -5413,6 +5460,7 @@ mod tests {
                 text_decoration_skip_ink: None,
                 leading_trim: Some(LeadingTrim::CapHeight),
                 open_type_features: Vec::new(),
+                text_style_id: None,
             }],
             ..TextProperties::default()
         };
@@ -5485,6 +5533,7 @@ mod tests {
                     enabled: true,
                 },
             ],
+            text_style_id: None,
         };
         let properties = TextProperties {
             runs: vec![style],
@@ -5519,6 +5568,52 @@ mod tests {
                 170_u128.to_be_bytes(),
                 hash,
                 OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut linked_document = Document::with_id(DocumentId(171));
+        let mut linked_text = node(171, NodeKind::Text, None);
+        linked_text.text = "office".into();
+        linked_document
+            .seed_node_on_page(DEFAULT_PAGE_ID, linked_text)
+            .unwrap();
+        let mut linked_properties = properties;
+        linked_properties.runs[0].open_type_features.clear();
+        linked_properties.runs[0].text_style_id = Some("S:heading".into());
+        linked_document
+            .seed_text_properties(NodeId(171), linked_properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &linked_document,
+                TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let linked_hash = linked_document.canonical_hash();
+        let linked_snapshot =
+            snapshot_from_document(&linked_document, TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let linked_restored = document_from_snapshot_with_engine_semantics(
+            &linked_snapshot,
+            171_u128.to_be_bytes(),
+            linked_hash,
+            TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            linked_restored.text_properties_for_node(NodeId(171)),
+            Some(&linked_properties)
+        );
+        let mut mislabeled_link = v1::DocumentSnapshot::decode(linked_snapshot.as_slice()).unwrap();
+        mislabeled_link.engine_semantics_version = TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled_link.encode_to_vec(),
+                171_u128.to_be_bytes(),
+                linked_hash,
+                TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
             ),
             Err(SnapshotError::Invalid)
         );
