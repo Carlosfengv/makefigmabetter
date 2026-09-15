@@ -269,9 +269,11 @@ export class RuntimeSession implements RuntimeContainerHost {
       const faceIndices = asset.fontFaces?.length
         ? asset.fontFaces.map((face) => face.faceIndex)
         : [0];
-      return faceIndices.map((faceIndex) => {
+      return faceIndices.flatMap((faceIndex) => {
         const reference = { assetId: asset.assetId, faceIndex };
-        return { fontName: runtimeFontNameForReference(reference, [asset]), ...reference };
+        const face = asset.fontFaces?.find((candidate) => candidate.faceIndex === faceIndex);
+        return [runtimeFontNameForReference(reference, [asset]), ...(face?.aliases ?? [])]
+          .map((fontName) => ({ fontName, ...reference }));
       });
     });
   }

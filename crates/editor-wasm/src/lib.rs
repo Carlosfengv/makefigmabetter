@@ -840,7 +840,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=55).contains(&snapshot.schema_version)
+    if !(1..=56).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 56
+            && snapshot.resource_index.as_ref().is_some_and(|assets| {
+                assets
+                    .iter()
+                    .any(|asset| asset.font_faces.iter().any(|face| !face.aliases.is_empty()))
+            }))
         || (snapshot.schema_version < 55
             && snapshot
                 .resource_index
@@ -1169,6 +1175,15 @@ struct ProjectionAsset {
 #[serde(rename_all = "camelCase")]
 struct ProjectionFontFace {
     face_index: u32,
+    family: String,
+    style: String,
+    #[serde(default)]
+    aliases: Vec<ProjectionFontNameAlias>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionFontNameAlias {
     family: String,
     style: String,
 }
@@ -1927,6 +1942,12 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self
+            .document
+            .assets()
+            .any(|asset| asset.font_faces.iter().any(|face| !face.aliases.is_empty()))
+        {
+            56
+        } else if self
             .document
             .assets()
             .any(|asset| !asset.font_faces.is_empty())
@@ -5138,6 +5159,14 @@ fn projection_asset(asset: &AssetReference) -> ProjectionAsset {
                 face_index: face.face_index,
                 family: face.family.clone(),
                 style: face.style.clone(),
+                aliases: face
+                    .aliases
+                    .iter()
+                    .map(|alias| ProjectionFontNameAlias {
+                        family: alias.family.clone(),
+                        style: alias.style.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -5174,6 +5203,14 @@ fn asset_from_projection(asset: ProjectionAsset) -> Result<AssetReference, JsVal
                 face_index: face.face_index,
                 family: face.family,
                 style: face.style,
+                aliases: face
+                    .aliases
+                    .into_iter()
+                    .map(|alias| editor_core::FontNameAlias {
+                        family: alias.family,
+                        style: alias.style,
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -11509,6 +11546,38 @@ mod tests {
 
         let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
         mislabeled["schemaVersion"] = serde_json::json!(54);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v56_round_trips_localized_font_aliases_and_v55_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        engine
+            .register_asset(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-0000-0000-000000000056",
+                &"56".repeat(32),
+                "font/ttf",
+                512,
+                0,
+                0,
+                r#"[{"faceIndex":0,"family":"Acme Sans","style":"Regular","aliases":[{"family":"思源黑体","style":"常规"}]}]"#,
+            )
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":56"));
+        assert!(snapshot.contains("\"family\":\"思源黑体\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(55);
         let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),

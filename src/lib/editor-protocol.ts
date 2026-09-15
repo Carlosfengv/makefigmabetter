@@ -452,6 +452,13 @@ export interface DocumentFontFaceMetadata {
   faceIndex: number;
   family: string;
   style: string;
+  /** Sorted, unique localized identities for the same admitted face. */
+  aliases?: readonly DocumentFontNameAlias[];
+}
+
+export interface DocumentFontNameAlias {
+  family: string;
+  style: string;
 }
 
 /** Durable, byte-free metadata for an admitted Asset Service object. */

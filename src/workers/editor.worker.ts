@@ -140,7 +140,7 @@ import { connectorPathForNode, traceConnectorPath } from "@/lib/connector-path";
 import { DEFAULT_PAGE_ID, migrateLegacyFigmaBootstrapPage } from "@/lib/document-bootstrap";
 
 declare const self: DedicatedWorkerGlobalScope;
-const ENGINE_SEMANTICS_VERSION = 29;
+let engineSemanticsVersion: number | undefined;
 
 type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
@@ -1157,7 +1157,7 @@ async function buildPendingRemoteOperation(transactionId: string, baseRevision: 
     sessionId: remoteSessionId,
     clientSequence,
     baseRevision: BigInt(baseRevision),
-    engineSemanticsVersion: ENGINE_SEMANTICS_VERSION,
+    engineSemanticsVersion: currentEngineSemanticsVersion(),
   }, payload);
   return {
     format: "pending-operation-v1",
@@ -1173,6 +1173,15 @@ async function buildPendingRemoteOperation(transactionId: string, baseRevision: 
     ...(replay ? { replay } : {}),
   };
 }
+
+function currentEngineSemanticsVersion(): number {
+  const version = engineSemanticsVersion;
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
+    throw new Error("WASM engine semantics unavailable");
+  }
+  return version;
+}
+
 function queueRemotePayload(transactionId: string, baseRevision: number, payload: Uint8Array, localDocumentHash: string, replay?: PendingOperationReplay) {
   remoteOperationQueue = remoteOperationQueue
     .catch(() => undefined)
@@ -2687,7 +2696,11 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     const wasm = await loadWasmRuntime();
     const runtime = await wasm.default();
     wasmMemory = runtime.memory;
-    if (wasm.engine_semantics_version() !== ENGINE_SEMANTICS_VERSION) throw new Error("Unsupported WASM engine semantics");
+    const loadedEngineSemanticsVersion = wasm.engine_semantics_version();
+    if (!Number.isSafeInteger(loadedEngineSemanticsVersion) || loadedEngineSemanticsVersion < 1) {
+      throw new Error("Unsupported WASM engine semantics");
+    }
+    engineSemanticsVersion = loadedEngineSemanticsVersion;
     const engine = new wasm.DocumentEngine();
     if (localSnapshot) {
       engine.load_snapshot_json(localSnapshot.coreSnapshot);

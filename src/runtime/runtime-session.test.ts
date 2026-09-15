@@ -2252,7 +2252,7 @@ describe("M1 RuntimeSession", () => {
     const projection: RuntimeProjection = {
       revision: 0,
       nodes: [
-        { id: "document", type: "DOCUMENT", name: "Document", assets: [{ assetId: "font-1", contentHash: "f".repeat(64), mediaType: "font/ttf", byteLength: 10, fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular" }, { faceIndex: 1, family: "Acme Sans", style: "Bold" }] }] },
+        { id: "document", type: "DOCUMENT", name: "Document", assets: [{ assetId: "font-1", contentHash: "f".repeat(64), mediaType: "font/ttf", byteLength: 10, fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular", aliases: [{ family: "思源黑体", style: "常规" }] }, { faceIndex: 1, family: "Acme Sans", style: "Bold" }] }] },
         { id: "page-1", type: "PAGE", parentId: "document", name: "Page 1" },
         { id: "page-2", type: "PAGE", parentId: "document", name: "Page 2" },
         { id: "one", type: "RECTANGLE", parentId: "page-1", pageId: "page-1", name: "One" },
@@ -2262,6 +2262,7 @@ describe("M1 RuntimeSession", () => {
     const session = new RuntimeSession({ sessionId: "paged", projection, currentPageId: "page-1", documentAccess: "dynamic-page", transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
     await expect(session.listAvailableFontsAsync()).resolves.toEqual([
       { fontName: { family: "Acme Sans", style: "Regular" }, assetId: "font-1", faceIndex: 0 },
+      { fontName: { family: "思源黑体", style: "常规" }, assetId: "font-1", faceIndex: 0 },
       { fontName: { family: "Acme Sans", style: "Bold" }, assetId: "font-1", faceIndex: 1 },
     ]);
     expect(session.hasFontReference({ assetId: "font-1", faceIndex: 1 })).toBe(true);

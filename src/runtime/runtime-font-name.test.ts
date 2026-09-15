@@ -18,7 +18,12 @@ const namedAsset = {
   ...asset,
   assetId: "00000000-0000-4000-8000-000000000043",
   fontFaces: [
-    { faceIndex: 0, family: "Acme Sans", style: "Regular" },
+    {
+      faceIndex: 0,
+      family: "Acme Sans",
+      style: "Regular",
+      aliases: [{ family: "思源黑体", style: "常规" }],
+    },
     { faceIndex: 1, family: "Acme Sans", style: "Bold" },
   ],
 };
@@ -48,11 +53,15 @@ describe("Runtime FontName mapping", () => {
       .toEqual({ family: "Acme Sans", style: "Bold" });
     expect(runtimeFontReferenceForName({ family: "Acme Sans", style: "Bold" }, [namedAsset]))
       .toEqual({ assetId: namedAsset.assetId, faceIndex: 1 });
+    expect(runtimeFontReferenceForName({ family: "思源黑体", style: "常规" }, [namedAsset]))
+      .toEqual({ assetId: namedAsset.assetId, faceIndex: 0 });
   });
 
   it("rejects ambiguous name-table identities instead of binding the wrong asset", () => {
     const duplicate = { ...namedAsset, assetId: "00000000-0000-4000-8000-000000000044" };
     expect(runtimeFontReferenceForName({ family: "Acme Sans", style: "Regular" }, [namedAsset, duplicate]))
+      .toBeNull();
+    expect(runtimeFontReferenceForName({ family: "思源黑体", style: "常规" }, [namedAsset, duplicate]))
       .toBeNull();
   });
 });

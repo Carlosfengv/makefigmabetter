@@ -26,7 +26,7 @@ export type UploadedAsset = {
   mediaType: string;
   byteLength: number;
   deduplicated: boolean;
-  fontFaces: readonly { faceIndex: number; family: string; style: string }[];
+  fontFaces: readonly { faceIndex: number; family: string; style: string; aliases?: readonly { family: string; style: string }[] }[];
 };
 
 type UploadProgress = { sessionId: string; acceptedByteLength: number };
@@ -170,13 +170,41 @@ function uploadedAsset(value: unknown): UploadedAsset {
   if (!Array.isArray(rawFaces) || rawFaces.length > 16) throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
   const fontFaces = rawFaces.map((value, index) => {
     if (!value || typeof value !== "object") throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
-    const face = value as { faceIndex?: unknown; family?: unknown; style?: unknown };
+    const face = value as { faceIndex?: unknown; family?: unknown; style?: unknown; aliases?: unknown };
     if (face.faceIndex !== index || !validFontNamePart(face.family) || !validFontNamePart(face.style)) {
       throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
     }
-    return { faceIndex: index, family: face.family, style: face.style };
+    const rawAliases = face.aliases ?? [];
+    if (!Array.isArray(rawAliases) || rawAliases.length > 64) throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+    const aliases = rawAliases.map((value) => {
+      if (!value || typeof value !== "object") throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+      const alias = value as { family?: unknown; style?: unknown };
+      if (!validFontNamePart(alias.family) || !validFontNamePart(alias.style)) {
+        throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+      }
+      return { family: alias.family, style: alias.style };
+    });
+    if (aliases.some((alias) => alias.family === face.family && alias.style === face.style)
+      || aliases.some((alias, aliasIndex) => aliasIndex > 0 && compareFontNames(aliases[aliasIndex - 1]!, alias) >= 0)) {
+      throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+    }
+    return { faceIndex: index, family: face.family, style: face.style, aliases };
   });
   return { ...(candidate as UploadedAsset), fontFaces };
+}
+
+function compareFontNames(left: { family: string; style: string }, right: { family: string; style: string }): number {
+  const family = compareUtf8(left.family, right.family);
+  return family || compareUtf8(left.style, right.style);
+}
+
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  for (let index = 0; index < Math.min(leftBytes.length, rightBytes.length); index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! - rightBytes[index]!;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 function validFontNamePart(value: unknown): value is string {

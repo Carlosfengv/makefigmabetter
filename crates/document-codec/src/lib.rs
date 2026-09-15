@@ -6,9 +6,9 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
-    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
     ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
     TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
@@ -63,8 +63,9 @@ pub const PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION: u32 = 37;
 pub const TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION: u32 = 38;
 pub const PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 39;
 pub const FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 40;
+pub const FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION: u32 = 41;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -99,6 +100,13 @@ pub fn snapshot_from_document(
 ) -> Result<Vec<u8>, SnapshotError> {
     if engine_semantics_version < FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && document.assets().any(|asset| !asset.font_faces.is_empty())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION
+        && document
+            .assets()
+            .any(|asset| asset.font_faces.iter().any(|face| !face.aliases.is_empty()))
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
@@ -531,6 +539,11 @@ pub fn document_from_snapshot_with_engine_semantics(
     for asset in snapshot.resource_index {
         if declared_engine_semantics_version < FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
             && !asset.font_faces.is_empty()
+        {
+            return Err(SnapshotError::Invalid);
+        }
+        if declared_engine_semantics_version < FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION
+            && asset.font_faces.iter().any(|face| !face.aliases.is_empty())
         {
             return Err(SnapshotError::Invalid);
         }
@@ -1024,6 +1037,14 @@ fn asset_to_proto(asset: &AssetReference) -> v1::ResourceIndexEntry {
                 face_index: face.face_index,
                 family: face.family.clone(),
                 style: face.style.clone(),
+                aliases: face
+                    .aliases
+                    .iter()
+                    .map(|alias| v1::FontNameAlias {
+                        family: alias.family.clone(),
+                        style: alias.style.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -1049,6 +1070,14 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Sna
                 face_index: face.face_index,
                 family: face.family,
                 style: face.style,
+                aliases: face
+                    .aliases
+                    .into_iter()
+                    .map(|alias| FontNameAlias {
+                        family: alias.family,
+                        style: alias.style,
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -5984,7 +6013,7 @@ mod tests {
     }
 
     #[test]
-    fn font_face_metadata_round_trips_and_requires_semantics_forty() {
+    fn localized_font_aliases_round_trip_and_require_semantics_forty_one() {
         let mut document = Document::with_id(DocumentId(74));
         let asset = AssetReference {
             asset_id: AssetId(74),
@@ -5996,33 +6025,37 @@ mod tests {
                 face_index: 0,
                 family: "Acme Sans".into(),
                 style: "Regular".into(),
+                aliases: vec![editor_core::FontNameAlias {
+                    family: "思源黑体".into(),
+                    style: "常规".into(),
+                }],
             }],
         };
         document.seed_asset(asset.clone()).unwrap();
         assert_eq!(
-            snapshot_from_document(&document, FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION - 1),
+            snapshot_from_document(&document, FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION - 1),
             Err(SnapshotError::UnsupportedEngineSemantics)
         );
         let hash = document.canonical_hash();
         let snapshot =
-            snapshot_from_document(&document, FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION).unwrap();
+            snapshot_from_document(&document, FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION).unwrap();
         let restored = document_from_snapshot_with_engine_semantics(
             &snapshot,
             74_u128.to_be_bytes(),
             hash,
-            FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+            FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
         )
         .unwrap();
         assert_eq!(restored.asset(AssetId(74)), Some(&asset));
 
         let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
-        mislabeled.engine_semantics_version = FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION - 1;
+        mislabeled.engine_semantics_version = FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION - 1;
         assert_eq!(
             document_from_snapshot_with_engine_semantics(
                 &mislabeled.encode_to_vec(),
                 74_u128.to_be_bytes(),
                 hash,
-                FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+                FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

@@ -1040,10 +1040,20 @@ describe("protocol operation codec", () => {
       contentHash: "ef".repeat(32),
       mediaType: "font/ttf",
       byteLength: 512,
-      fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular" }],
+      fontFaces: [{
+        faceIndex: 0,
+        family: "Acme Sans",
+        style: "Regular",
+        aliases: [{ family: "思源黑体", style: "常规" }],
+      }],
     }));
     expect(batch.operations[0].registerResource?.resource?.fontFaces).toEqual([
-      { faceIndex: 0, family: "Acme Sans", style: "Regular" },
+      {
+        faceIndex: 0,
+        family: "Acme Sans",
+        style: "Regular",
+        aliases: [{ family: "思源黑体", style: "常规" }],
+      },
     ]);
   });
 

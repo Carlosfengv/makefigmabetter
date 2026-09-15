@@ -453,6 +453,16 @@ export interface FontFaceMetadata {
   faceIndex: number;
   family: string;
   style: string;
+  /**
+   * Bounded localized family/style identities from the same immutable face.
+   * The preferred identity above remains the stable default projection.
+   */
+  aliases: FontNameAlias[];
+}
+
+export interface FontNameAlias {
+  family: string;
+  style: string;
 }
 
 export interface DocumentSnapshot {
@@ -2014,7 +2024,7 @@ export const ResourceIndexEntry: MessageFns<ResourceIndexEntry> = {
 };
 
 function createBaseFontFaceMetadata(): FontFaceMetadata {
-  return { faceIndex: 0, family: "", style: "" };
+  return { faceIndex: 0, family: "", style: "", aliases: [] };
 }
 
 export const FontFaceMetadata: MessageFns<FontFaceMetadata> = {
@@ -2027,6 +2037,9 @@ export const FontFaceMetadata: MessageFns<FontFaceMetadata> = {
     }
     if (message.style !== "") {
       writer.uint32(26).string(message.style);
+    }
+    for (const v of message.aliases) {
+      FontNameAlias.encode(v!, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -2062,6 +2075,14 @@ export const FontFaceMetadata: MessageFns<FontFaceMetadata> = {
           message.style = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.aliases.push(FontNameAlias.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2077,6 +2098,65 @@ export const FontFaceMetadata: MessageFns<FontFaceMetadata> = {
   fromPartial<I extends Exact<DeepPartial<FontFaceMetadata>, I>>(object: I): FontFaceMetadata {
     const message = createBaseFontFaceMetadata();
     message.faceIndex = object.faceIndex ?? 0;
+    message.family = object.family ?? "";
+    message.style = object.style ?? "";
+    message.aliases = object.aliases?.map((e) => FontNameAlias.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseFontNameAlias(): FontNameAlias {
+  return { family: "", style: "" };
+}
+
+export const FontNameAlias: MessageFns<FontNameAlias> = {
+  encode(message: FontNameAlias, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.family !== "") {
+      writer.uint32(10).string(message.family);
+    }
+    if (message.style !== "") {
+      writer.uint32(18).string(message.style);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FontNameAlias {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFontNameAlias();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.family = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.style = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<FontNameAlias>, I>>(base?: I): FontNameAlias {
+    return FontNameAlias.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<FontNameAlias>, I>>(object: I): FontNameAlias {
+    const message = createBaseFontNameAlias();
     message.family = object.family ?? "";
     message.style = object.style ?? "";
     return message;

@@ -4,13 +4,14 @@
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
-    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
-    Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId,
-    PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
-    TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
-    TextDecorationThickness, TextListType, TextProperties, TextStyleRun, TextTruncation,
-    TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
+    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
+    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
+    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -361,6 +362,14 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_font_name_aliases)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
         });
     }
     let mut commands = Vec::with_capacity(batch.operations.len());
@@ -2444,6 +2453,14 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Ser
                 face_index: face.face_index,
                 family: face.family,
                 style: face.style,
+                aliases: face
+                    .aliases
+                    .into_iter()
+                    .map(|alias| FontNameAlias {
+                        family: alias.family,
+                        style: alias.style,
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -2454,6 +2471,16 @@ fn operation_has_font_face_metadata(operation: &v1::ResolvedOperation) -> bool {
         operation.kind.as_ref(),
         Some(v1::resolved_operation::Kind::RegisterResource(value))
             if value.resource.as_ref().is_some_and(|resource| !resource.font_faces.is_empty())
+    )
+}
+
+fn operation_has_font_name_aliases(operation: &v1::ResolvedOperation) -> bool {
+    matches!(
+        operation.kind.as_ref(),
+        Some(v1::resolved_operation::Kind::RegisterResource(value))
+            if value.resource.as_ref().is_some_and(|resource| {
+                resource.font_faces.iter().any(|face| !face.aliases.is_empty())
+            })
     )
 }
 
@@ -3195,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn font_face_metadata_requires_semantics_v40_and_reaches_core() {
+    fn localized_font_aliases_require_semantics_v41_and_reach_core() {
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
                 kind: Some(v1::resolved_operation::Kind::RegisterResource(
@@ -3211,6 +3238,10 @@ mod tests {
                                 face_index: 0,
                                 family: "Acme Sans".into(),
                                 style: "Regular".into(),
+                                aliases: vec![v1::FontNameAlias {
+                                    family: "思源黑体".into(),
+                                    style: "常规".into(),
+                                }],
                             }],
                         }),
                     },
@@ -3229,13 +3260,23 @@ mod tests {
         );
         let commands = commands_from_payload_with_semantics(
             &payload,
-            makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+            makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
         )
         .unwrap();
         let Command::RegisterAsset { asset } = &commands[0] else {
             panic!("expected font resource registration");
         };
         assert_eq!(asset.font_faces[0].family, "Acme Sans");
+        assert_eq!(asset.font_faces[0].aliases[0].family, "思源黑体");
+        assert_eq!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
+            })
+        );
     }
 
     #[test]

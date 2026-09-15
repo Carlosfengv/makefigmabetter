@@ -593,10 +593,19 @@ pub struct Page {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontNameAlias {
+    pub family: String,
+    pub style: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFaceMetadata {
     pub face_index: u32,
     pub family: String,
     pub style: String,
+    /// Sorted, unique localized identities for the same immutable face. The
+    /// preferred family/style above is excluded to avoid duplicate state.
+    pub aliases: Vec<FontNameAlias>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1997,6 +2006,14 @@ impl Document {
                     hasher.update(face.face_index.to_be_bytes());
                     hash_text(&mut hasher, &face.family);
                     hash_text(&mut hasher, &face.style);
+                    if !face.aliases.is_empty() {
+                        hasher.update(b"makefigma/editor-core/font-name-aliases-v1");
+                        hash_len(&mut hasher, face.aliases.len());
+                        for alias in &face.aliases {
+                            hash_text(&mut hasher, &alias.family);
+                            hash_text(&mut hasher, &alias.style);
+                        }
+                    }
                 }
             }
         }
@@ -2154,6 +2171,17 @@ impl Document {
                 face.face_index as usize == index
                     && valid_font_metadata_name(&face.family)
                     && valid_font_metadata_name(&face.style)
+                    && face.aliases.len() <= 64
+                    && face.aliases.iter().all(|alias| {
+                        valid_font_metadata_name(&alias.family)
+                            && valid_font_metadata_name(&alias.style)
+                            && (alias.family.as_str(), alias.style.as_str())
+                                != (face.family.as_str(), face.style.as_str())
+                    })
+                    && face.aliases.windows(2).all(|pair| {
+                        (pair[0].family.as_str(), pair[0].style.as_str())
+                            < (pair[1].family.as_str(), pair[1].style.as_str())
+                    })
             });
         if asset.media_type.trim().is_empty()
             || asset.byte_length == 0
@@ -6981,6 +7009,15 @@ impl Command {
                             std::mem::size_of::<FontFaceMetadata>()
                                 + face.family.len()
                                 + face.style.len()
+                                + face
+                                    .aliases
+                                    .iter()
+                                    .map(|alias| {
+                                        std::mem::size_of::<FontNameAlias>()
+                                            + alias.family.len()
+                                            + alias.style.len()
+                                    })
+                                    .sum::<usize>()
                         })
                         .sum::<usize>()
             }
@@ -7214,6 +7251,15 @@ impl AppliedChange {
                             std::mem::size_of::<FontFaceMetadata>()
                                 + face.family.len()
                                 + face.style.len()
+                                + face
+                                    .aliases
+                                    .iter()
+                                    .map(|alias| {
+                                        std::mem::size_of::<FontNameAlias>()
+                                            + alias.family.len()
+                                            + alias.style.len()
+                                    })
+                                    .sum::<usize>()
                         })
                         .sum::<usize>()
             }
@@ -8804,6 +8850,14 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                     hasher.update(face.face_index.to_be_bytes());
                     hash_text(hasher, &face.family);
                     hash_text(hasher, &face.style);
+                    if !face.aliases.is_empty() {
+                        hasher.update(b"makefigma/editor-core/font-name-aliases-v1");
+                        hash_len(hasher, face.aliases.len());
+                        for alias in &face.aliases {
+                            hash_text(hasher, &alias.family);
+                            hash_text(hasher, &alias.style);
+                        }
+                    }
                 }
             }
         }
@@ -12353,18 +12407,97 @@ mod tests {
                 face_index: 0,
                 family: "Acme Sans".into(),
                 style: "Regular".into(),
+                aliases: vec![FontNameAlias {
+                    family: "思源黑体".into(),
+                    style: "常规".into(),
+                }],
             }],
         };
         let before_font = document.canonical_hash();
         document.seed_asset(named_font.clone()).unwrap();
         assert_ne!(document.canonical_hash(), before_font);
-        let mut invalid_faces = named_font;
+        let mut invalid_faces = named_font.clone();
         invalid_faces.asset_id = AssetId(10);
         invalid_faces.font_faces[0].face_index = 1;
         assert_eq!(
             document.seed_asset(invalid_faces),
             Err(CommandError::InvalidAsset)
         );
+        let mut unsorted_aliases = named_font;
+        unsorted_aliases.asset_id = AssetId(11);
+        unsorted_aliases.font_faces[0].aliases = vec![
+            FontNameAlias {
+                family: "Zulu".into(),
+                style: "Regular".into(),
+            },
+            FontNameAlias {
+                family: "Alpha".into(),
+                style: "Regular".into(),
+            },
+        ];
+        assert_eq!(
+            document.seed_asset(unsorted_aliases),
+            Err(CommandError::InvalidAsset)
+        );
+    }
+
+    #[test]
+    fn localized_font_aliases_are_canonical_bounded_and_version_visible() {
+        let base = AssetReference {
+            asset_id: AssetId(12),
+            content_hash: [4; 32],
+            media_type: "font/ttf".into(),
+            byte_length: 512,
+            dimensions: None,
+            font_faces: vec![FontFaceMetadata {
+                face_index: 0,
+                family: "Acme Sans".into(),
+                style: "Regular".into(),
+                aliases: Vec::new(),
+            }],
+        };
+        let mut legacy = Document::empty();
+        legacy.seed_asset(base.clone()).unwrap();
+
+        let mut localized_asset = base.clone();
+        localized_asset.font_faces[0].aliases = vec![FontNameAlias {
+            family: "艾克米黑体".into(),
+            style: "常规".into(),
+        }];
+        let mut localized = Document::empty();
+        localized.seed_asset(localized_asset.clone()).unwrap();
+        assert_ne!(legacy.canonical_hash(), localized.canonical_hash());
+
+        for aliases in [
+            vec![FontNameAlias {
+                family: "Acme Sans".into(),
+                style: "Regular".into(),
+            }],
+            vec![
+                FontNameAlias {
+                    family: "Alias".into(),
+                    style: "Regular".into(),
+                },
+                FontNameAlias {
+                    family: "Alias".into(),
+                    style: "Regular".into(),
+                },
+            ],
+            (0..65)
+                .map(|index| FontNameAlias {
+                    family: format!("Alias {index:02}"),
+                    style: "Regular".into(),
+                })
+                .collect(),
+        ] {
+            let mut invalid = localized_asset.clone();
+            invalid.asset_id = AssetId(13);
+            invalid.font_faces[0].aliases = aliases;
+            assert_eq!(
+                Document::empty().seed_asset(invalid),
+                Err(CommandError::InvalidAsset)
+            );
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! admission and authorization transaction boundary is independent of whether
 //! bytes live in SQLite, S3, or another object store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,13 @@ pub struct AssetRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFaceMetadata {
     pub face_index: u32,
+    pub family: String,
+    pub style: String,
+    pub aliases: Vec<FontNameAlias>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FontNameAlias {
     pub family: String,
     pub style: String,
 }
@@ -316,6 +323,13 @@ impl AssetService {
                style TEXT NOT NULL,
                PRIMARY KEY (asset_id, face_index)
              );
+             CREATE TABLE IF NOT EXISTS asset_font_face_aliases (
+               asset_id BLOB NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+               face_index INTEGER NOT NULL,
+               family TEXT NOT NULL,
+               style TEXT NOT NULL,
+               PRIMARY KEY (asset_id, face_index, family, style)
+             );
              CREATE TABLE IF NOT EXISTS document_readers (
                document_id BLOB NOT NULL CHECK(length(document_id) = 16),
                tenant_id BLOB NOT NULL CHECK(length(tenant_id) = 16),
@@ -541,7 +555,10 @@ impl AssetService {
         };
         if let Some(mut asset) = load_asset_by_hash(&transaction, principal.tenant_id, actual_hash)?
         {
-            if asset.font_faces.is_empty() && !font_faces.is_empty() {
+            if !font_faces.is_empty()
+                && (asset.font_faces.is_empty()
+                    || asset.font_faces.iter().all(|face| face.aliases.is_empty()))
+            {
                 store_font_faces(&transaction, asset.asset_id, &font_faces)?;
                 asset.font_faces = font_faces;
             }
@@ -1262,16 +1279,29 @@ fn load_font_faces(
     connection: &Connection,
     asset_id: Id,
 ) -> Result<Vec<FontFaceMetadata>, AssetServiceError> {
-    connection.prepare(
+    let mut faces = connection.prepare(
         "SELECT face_index, family, style FROM asset_font_faces WHERE asset_id = ?1 ORDER BY face_index",
     ).map_err(|_| AssetServiceError::Storage)?
         .query_map(params![asset_id.as_slice()], |row| Ok(FontFaceMetadata {
             face_index: row.get(0)?,
             family: row.get(1)?,
             style: row.get(2)?,
+            aliases: Vec::new(),
         })).map_err(|_| AssetServiceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| AssetServiceError::Storage)
+        .map_err(|_| AssetServiceError::Storage)?;
+    for face in &mut faces {
+        face.aliases = connection.prepare(
+            "SELECT family, style FROM asset_font_face_aliases WHERE asset_id = ?1 AND face_index = ?2 ORDER BY family, style",
+        ).map_err(|_| AssetServiceError::Storage)?
+            .query_map(params![asset_id.as_slice(), face.face_index], |row| Ok(FontNameAlias {
+                family: row.get(0)?,
+                style: row.get(1)?,
+            })).map_err(|_| AssetServiceError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| AssetServiceError::Storage)?;
+    }
+    Ok(faces)
 }
 
 fn store_font_faces(
@@ -1284,6 +1314,12 @@ fn store_font_faces(
             "INSERT OR IGNORE INTO asset_font_faces (asset_id, face_index, family, style) VALUES (?1, ?2, ?3, ?4)",
             params![asset_id.as_slice(), face.face_index, face.family, face.style],
         ).map_err(|_| AssetServiceError::Storage)?;
+        for alias in &face.aliases {
+            connection.execute(
+                "INSERT OR IGNORE INTO asset_font_face_aliases (asset_id, face_index, family, style) VALUES (?1, ?2, ?3, ?4)",
+                params![asset_id.as_slice(), face.face_index, alias.family, alias.style],
+            ).map_err(|_| AssetServiceError::Storage)?;
+        }
     }
     Ok(())
 }
@@ -1561,11 +1597,99 @@ fn extract_font_face_metadata(bytes: &[u8]) -> Option<Vec<FontFaceMetadata>> {
             .unwrap_or_else(|| "Regular".into());
             Some(FontFaceMetadata {
                 face_index: index,
+                aliases: localized_font_aliases(&face, &family, &style),
                 family,
                 style,
             })
         })
         .collect()
+}
+
+type FontNameRecordKey = (u8, u16, u16);
+
+fn localized_font_aliases(
+    face: &ttf_parser::Face<'_>,
+    preferred_family: &str,
+    preferred_style: &str,
+) -> Vec<FontNameAlias> {
+    let families = localized_font_names(
+        face,
+        &[
+            ttf_parser::name_id::TYPOGRAPHIC_FAMILY,
+            ttf_parser::name_id::WWS_FAMILY,
+            ttf_parser::name_id::FAMILY,
+        ],
+    );
+    let styles = localized_font_names(
+        face,
+        &[
+            ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY,
+            ttf_parser::name_id::WWS_SUBFAMILY,
+            ttf_parser::name_id::SUBFAMILY,
+        ],
+    );
+    font_aliases_from_name_maps(&families, &styles, preferred_family, preferred_style)
+}
+
+fn font_aliases_from_name_maps(
+    families: &BTreeMap<FontNameRecordKey, String>,
+    styles: &BTreeMap<FontNameRecordKey, String>,
+    preferred_family: &str,
+    preferred_style: &str,
+) -> Vec<FontNameAlias> {
+    let keys = families
+        .keys()
+        .chain(styles.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    keys.into_iter()
+        .filter_map(|key| {
+            let family = families
+                .get(&key)
+                .map(String::as_str)
+                .unwrap_or(preferred_family);
+            let style = styles
+                .get(&key)
+                .map(String::as_str)
+                .unwrap_or(preferred_style);
+            ((family, style) != (preferred_family, preferred_style)).then(|| FontNameAlias {
+                family: family.to_owned(),
+                style: style.to_owned(),
+            })
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(64)
+        .collect()
+}
+
+fn localized_font_names(
+    face: &ttf_parser::Face<'_>,
+    name_ids: &[u16],
+) -> BTreeMap<FontNameRecordKey, String> {
+    let mut names = BTreeMap::new();
+    for name_id in name_ids {
+        for name in face
+            .names()
+            .into_iter()
+            .filter(|name| name.name_id == *name_id)
+        {
+            let Some(value) = name.to_string().and_then(bounded_font_name) else {
+                continue;
+            };
+            let platform = match name.platform_id {
+                ttf_parser::PlatformId::Unicode => 0,
+                ttf_parser::PlatformId::Windows => 1,
+                ttf_parser::PlatformId::Macintosh => 2,
+                ttf_parser::PlatformId::Iso => 3,
+                ttf_parser::PlatformId::Custom => 4,
+            };
+            names
+                .entry((platform, name.encoding_id, name.language_id))
+                .or_insert(value);
+        }
+    }
+    names
 }
 
 fn preferred_font_name(face: &ttf_parser::Face<'_>, name_ids: &[u16]) -> Option<String> {
@@ -1917,8 +2041,33 @@ mod tests {
                 face_index: 0,
                 family: "Tofu".into(),
                 style: "Regular".into(),
+                aliases: Vec::new(),
             }]
         );
+        {
+            let connection = service.connection.lock().unwrap();
+            store_font_faces(
+                &connection,
+                admitted.asset.asset_id,
+                &[FontFaceMetadata {
+                    face_index: 0,
+                    family: "Tofu".into(),
+                    style: "Regular".into(),
+                    aliases: vec![FontNameAlias {
+                        family: "豆腐".into(),
+                        style: "常规".into(),
+                    }],
+                }],
+            )
+            .unwrap();
+            assert_eq!(
+                load_font_faces(&connection, admitted.asset.asset_id).unwrap()[0].aliases,
+                vec![FontNameAlias {
+                    family: "豆腐".into(),
+                    style: "常规".into()
+                }],
+            );
+        }
         service
             .begin_upload(principal(7), font_request(14, valid))
             .unwrap();
@@ -1927,7 +2076,13 @@ mod tests {
             .unwrap();
         let deduplicated = service.complete_upload(principal(7), id(14)).unwrap();
         assert!(deduplicated.deduplicated);
-        assert_eq!(deduplicated.asset.font_faces, admitted.asset.font_faces);
+        assert_eq!(
+            deduplicated.asset.font_faces[0].aliases,
+            vec![FontNameAlias {
+                family: "豆腐".into(),
+                style: "常规".into()
+            }],
+        );
 
         let truncated = [0, 1, 0, 0];
         service
@@ -1949,6 +2104,32 @@ mod tests {
                 .map(|event| event.outcome)
                 .collect::<Vec<_>>(),
             vec!["font_invalid"]
+        );
+    }
+
+    #[test]
+    fn localized_font_aliases_pair_matching_name_records_and_fallback_per_field() {
+        let families = BTreeMap::from([
+            ((1, 1, 0x0409), "Acme Sans".into()),
+            ((1, 1, 0x0804), "艾克米黑体".into()),
+            ((1, 1, 0x0411), "アクメ角ゴ".into()),
+        ]);
+        let styles = BTreeMap::from([
+            ((1, 1, 0x0409), "Regular".into()),
+            ((1, 1, 0x0804), "常规".into()),
+        ]);
+        assert_eq!(
+            font_aliases_from_name_maps(&families, &styles, "Acme Sans", "Regular"),
+            vec![
+                FontNameAlias {
+                    family: "アクメ角ゴ".into(),
+                    style: "Regular".into()
+                },
+                FontNameAlias {
+                    family: "艾克米黑体".into(),
+                    style: "常规".into()
+                },
+            ],
         );
     }
 

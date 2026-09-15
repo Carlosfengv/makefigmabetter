@@ -42,7 +42,8 @@ export function runtimeFontReferenceForName(
   if (!isRuntimeFontName(fontName)) return null;
   if (sameRuntimeFontName(fontName, DEFAULT_RUNTIME_FONT_NAME)) return undefined;
   const metadataMatches = assets.flatMap((asset) => (asset.fontFaces ?? [])
-    .filter((face) => face.family === fontName.family && face.style === fontName.style)
+    .filter((face) => (face.family === fontName.family && face.style === fontName.style)
+      || (face.aliases ?? []).some((alias) => alias.family === fontName.family && alias.style === fontName.style))
     .map((face) => ({ assetId: asset.assetId, faceIndex: face.faceIndex })));
   if (metadataMatches.length === 1) return metadataMatches[0]!;
   if (metadataMatches.length > 1) return null;

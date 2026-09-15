@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
-    Effect, FillRule, FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
-    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
+    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
+    LineHeightUnit, Node, NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
     TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
@@ -457,6 +457,14 @@ pub fn snapshot_from_document(
     {
         return Err(ServiceError::ReducerRejected);
     }
+    if engine_semantics_version
+        < makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION
+        && document
+            .assets()
+            .any(|asset| asset.font_faces.iter().any(|face| !face.aliases.is_empty()))
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             document.fill_stack_for_node(node.id).is_some()
@@ -895,6 +903,12 @@ pub fn document_from_snapshot(
         {
             return Err(ServiceError::ReducerRejected);
         }
+        if declared_engine_semantics_version
+            < makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION
+            && asset.font_faces.iter().any(|face| !face.aliases.is_empty())
+        {
+            return Err(ServiceError::ReducerRejected);
+        }
         document
             .seed_asset(asset_from_proto(asset)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
@@ -1281,6 +1295,14 @@ fn asset_to_proto(asset: &AssetReference) -> v1::ResourceIndexEntry {
                 face_index: face.face_index,
                 family: face.family.clone(),
                 style: face.style.clone(),
+                aliases: face
+                    .aliases
+                    .iter()
+                    .map(|alias| v1::FontNameAlias {
+                        family: alias.family.clone(),
+                        style: alias.style.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -1308,6 +1330,14 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Ser
                 face_index: face.face_index,
                 family: face.family,
                 style: face.style,
+                aliases: face
+                    .aliases
+                    .into_iter()
+                    .map(|alias| FontNameAlias {
+                        family: alias.family,
+                        style: alias.style,
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -4950,7 +4980,7 @@ mod tests {
     }
 
     #[test]
-    fn service_snapshot_adapter_round_trips_font_face_metadata_at_semantics_forty() {
+    fn service_snapshot_adapter_round_trips_localized_font_aliases_at_semantics_forty_one() {
         let mut document = Document::with_id(DocumentId(75));
         let asset = AssetReference {
             asset_id: AssetId(75),
@@ -4962,10 +4992,14 @@ mod tests {
                 face_index: 0,
                 family: "Acme Sans".into(),
                 style: "Regular".into(),
+                aliases: vec![FontNameAlias {
+                    family: "思源黑体".into(),
+                    style: "常规".into(),
+                }],
             }],
         };
         document.seed_asset(asset.clone()).unwrap();
-        let required = makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION;
+        let required = makefigma_document_codec::FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION;
 
         assert!(snapshot_from_document(&document, required - 1).is_err());
         let snapshot = snapshot_from_document(&document, required).unwrap();

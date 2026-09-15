@@ -54,6 +54,14 @@ message FontFaceMetadata {
   uint32 face_index = 1;
   string family = 2;
   string style = 3;
+  // Bounded localized family/style identities from the same immutable face.
+  // The preferred identity above remains the stable default projection.
+  repeated FontNameAlias aliases = 4;
+}
+
+message FontNameAlias {
+  string family = 1;
+  string style = 2;
 }
 
 message DocumentSnapshot {

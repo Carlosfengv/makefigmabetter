@@ -109,7 +109,12 @@ export function encodeRegisterResourcePayload(resource: ResourceRegistration): U
   return ResolvedOperationBatch.encode({ operations: [{ registerResource: { resource: {
     assetId: idBytes(resource.assetId), contentHash: hashBytes(resource.contentHash), mediaType: resource.mediaType,
     byteLength: resource.byteLength.toString(), pixelWidth: resource.pixelWidth, pixelHeight: resource.pixelHeight,
-    fontFaces: (resource.fontFaces ?? []).map((face) => ({ faceIndex: face.faceIndex, family: face.family, style: face.style })),
+    fontFaces: (resource.fontFaces ?? []).map((face) => ({
+      faceIndex: face.faceIndex,
+      family: face.family,
+      style: face.style,
+      aliases: (face.aliases ?? []).map((alias) => ({ family: alias.family, style: alias.style })),
+    })),
   } } }] }).finish();
 }
 
@@ -124,7 +129,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
     return [{ registerResource: { resource: {
       assetId: idBytes(asset.assetId), contentHash: hashBytes(asset.contentHash), mediaType: asset.mediaType,
       byteLength: asset.byteLength.toString(), pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight,
-      fontFaces: (asset.fontFaces ?? []).map((face) => ({ faceIndex: face.faceIndex, family: face.family, style: face.style })),
+      fontFaces: (asset.fontFaces ?? []).map((face) => ({
+        faceIndex: face.faceIndex,
+        family: face.family,
+        style: face.style,
+        aliases: (face.aliases ?? []).map((alias) => ({ family: alias.family, style: alias.style })),
+      })),
     } } }];
   }
   if (command.type === "create") {

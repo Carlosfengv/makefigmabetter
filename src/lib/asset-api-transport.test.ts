@@ -41,13 +41,39 @@ describe("AssetApiTransport", () => {
     const response = (faceIndex: number) => vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ sessionId, acceptedByteLength: 0 }), { status: 201 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ sessionId, acceptedByteLength: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ assetId: "font", contentHash: "hash", kind: "font", mediaType: "font/ttf", byteLength: 1, deduplicated: false, fontFaces: [{ faceIndex, family: "Acme Sans", style: "Regular" }] }), { status: 200 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ assetId: "font", contentHash: "hash", kind: "font", mediaType: "font/ttf", byteLength: 1, deduplicated: false, fontFaces: [{ faceIndex, family: "Acme Sans", style: "Regular", aliases: [{ family: "思源黑体", style: "常规" }] }] }), { status: 200 }));
     const accepted = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch: response(0) });
     await expect(accepted.upload({ sessionId, kind: "font", mediaType: "font/ttf", bytes: Uint8Array.of(1) }))
-      .resolves.toMatchObject({ fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular" }] });
+      .resolves.toMatchObject({ fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular", aliases: [{ family: "思源黑体", style: "常规" }] }] });
 
     const malformed = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch: response(2) });
     await expect(malformed.upload({ sessionId, kind: "font", mediaType: "font/ttf", bytes: Uint8Array.of(1) }))
+      .rejects.toThrow("ASSET_UPLOAD_RESPONSE_INVALID");
+  });
+
+  it("rejects unsorted or duplicate localized font aliases", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sessionId, acceptedByteLength: 0 }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sessionId, acceptedByteLength: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        assetId: "font",
+        contentHash: "hash",
+        kind: "font",
+        mediaType: "font/ttf",
+        byteLength: 1,
+        deduplicated: false,
+        fontFaces: [{
+          faceIndex: 0,
+          family: "Acme Sans",
+          style: "Regular",
+          aliases: [
+            { family: "Zulu", style: "Regular" },
+            { family: "Alpha", style: "Regular" },
+          ],
+        }],
+      }), { status: 200 }));
+    const transport = new AssetApiTransport({ baseUrl: "http://127.0.0.1:8789", ...principal, fetch });
+    await expect(transport.upload({ sessionId, kind: "font", mediaType: "font/ttf", bytes: Uint8Array.of(1) }))
       .rejects.toThrow("ASSET_UPLOAD_RESPONSE_INVALID");
   });
 

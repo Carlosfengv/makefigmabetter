@@ -135,6 +135,14 @@ struct FontFaceBody {
     face_index: u32,
     family: String,
     style: String,
+    aliases: Vec<FontNameAliasBody>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontNameAliasBody {
+    family: String,
+    style: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +296,14 @@ async fn complete_upload(
                         face_index: face.face_index,
                         family: face.family,
                         style: face.style,
+                        aliases: face
+                            .aliases
+                            .into_iter()
+                            .map(|alias| FontNameAliasBody {
+                                family: alias.family,
+                                style: alias.style,
+                            })
+                            .collect(),
                     })
                     .collect(),
             },
@@ -820,7 +836,7 @@ mod tests {
         let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
         assert_eq!(
             value["fontFaces"],
-            serde_json::json!([{"faceIndex": 0, "family": "Tofu", "style": "Regular"}])
+            serde_json::json!([{"faceIndex": 0, "family": "Tofu", "style": "Regular", "aliases": []}])
         );
     }
 
