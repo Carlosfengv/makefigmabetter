@@ -1040,7 +1040,7 @@ describe("SVG export", () => {
     const assetId = "00000000-0000-4000-8000-000000000034";
     const text = {
       ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-000000000035", pageId, text: "Custom font",
-      textProperties: { runs: [{ start: 0, end: 11, font: { assetId, faceIndex: 0, variationAxes: [{ tag: "wght", value: 650 }, { tag: "wdth", value: 92 }] }, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }], paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+      textProperties: { runs: [{ start: 0, end: 11, font: { assetId, faceIndex: 0, variationAxes: [{ tag: "wght", value: 650 }, { tag: "wdth", value: 92 }] }, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, openTypeFeatures: { KERN: false, LIGA: true } }], paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
     };
     const result = exportPageToSvg([text], { pageId, defaultPageId: pageId, sourceRevision: 42, fontDataUris: new Map([[assetId, "data:font/woff2;base64,AA=="]]) });
 
@@ -1049,6 +1049,7 @@ describe("SVG export", () => {
     expect(result.svg).toContain("@font-face{font-family:'makefigma-font-00000000-0000-4000-8000-000000000034'");
     expect(result.svg).toContain('font-family="makefigma-font-00000000-0000-4000-8000-000000000034,sans-serif"');
     expect(result.svg).toContain('font-variation-settings="&quot;wdth&quot; 92, &quot;wght&quot; 650"');
+    expect(result.svg).toContain('font-feature-settings="\'kern\' 0, \'liga\' 1"');
     expect(result.compatibilityFallbacks).not.toEqual(expect.arrayContaining([expect.objectContaining({ capability: "font-asset" })]));
   });
 

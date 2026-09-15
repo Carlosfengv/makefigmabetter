@@ -270,6 +270,8 @@ export interface DocumentTextStyle {
   /** Omission preserves legacy continuous underlines; true skips descenders. */
   textDecorationSkipInk?: boolean;
   leadingTrim?: "capHeight";
+  /** Explicit four-character OpenType feature overrides, keyed by uppercase tag. */
+  openTypeFeatures?: Readonly<Record<string, boolean>>;
 }
 
 export interface DocumentTextProperties {

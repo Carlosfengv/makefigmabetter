@@ -189,7 +189,7 @@ function segmentFieldValue(
     case "paragraphSpacing": return paragraphRun?.paragraphSpacing ?? properties.paragraph.paragraphSpacing;
     case "textWrapStyle": return wrapStyle(paragraphRun?.textWrapStyle ?? properties.paragraph.textWrapStyle ?? "auto");
     case "hyperlink": return style.hyperlink ? structuredClone(style.hyperlink) : null;
-    case "openTypeFeatures": return {};
+    case "openTypeFeatures": return { ...(style.openTypeFeatures ?? {}) };
     case "boundVariables": return undefined;
     case "textStyleOverrides": return [];
   }

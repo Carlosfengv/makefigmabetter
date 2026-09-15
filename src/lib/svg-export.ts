@@ -1326,6 +1326,7 @@ function svgTextMarkup(
           textDecorationColor: primary?.textDecorationColor,
           textDecorationSkipInk: primary?.textDecorationSkipInk,
           leadingTrim: primary?.leadingTrim,
+          openTypeFeatures: primary?.openTypeFeatures,
         };
         return approximateStyledRange(line.start, end) + approximateStyleMeasure("…", ellipsisStyle);
       },
@@ -1348,6 +1349,7 @@ function svgTextMarkup(
       textDecorationColor: primary?.textDecorationColor,
       textDecorationSkipInk: primary?.textDecorationSkipInk,
       leadingTrim: primary?.leadingTrim,
+      openTypeFeatures: primary?.openTypeFeatures,
     } });
     const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, fontDataUris, fallbackFamilies, !textPaintAttributes)}${svgHyperlinkDataAttributes(span.style)}${textPaintAttributes?.(span.style, layerIndex) ?? ""}>${text(span.text)}</tspan>`).join("");
     // Canvas resolves a paragraph base direction before choosing the visual
@@ -1383,6 +1385,11 @@ function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyM
     : fallbackFamilies.length ? [...fallbackFamilies, "sans-serif"] : undefined;
   const variations = style.font?.variationAxes?.length ? ` font-variation-settings="${attribute(fontVariationCss(style.font.variationAxes))}"` : "";
   const caps = usesSmallCaps(style.textCase) ? ` font-variant-caps="small-caps"` : "";
+  const features = Object.entries(style.openTypeFeatures ?? {})
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([tag, enabled]) => `'${tag.toLowerCase()}' ${enabled ? 1 : 0}`)
+    .join(", ");
+  const featureSettings = features ? ` font-feature-settings="${attribute(features)}"` : "";
   const decoration = style.textDecoration === "underline"
     ? ` text-decoration="underline"`
     : style.textDecoration === "strikethrough"
@@ -1412,7 +1419,7 @@ function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyM
       }))}"`
     : "";
   const leadingTrim = style.leadingTrim === "capHeight" ? ` data-makefigma-leading-trim="CAP_HEIGHT"` : "";
-  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${caps}${decoration}${decorationStyle}${decorationInlineStyle}${decorationThickness}${decorationColor}${leadingTrim}${family ? ` font-family="${family.map(attribute).join(",")}"` : ""}${variations}${color}`;
+  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${caps}${featureSettings}${decoration}${decorationStyle}${decorationInlineStyle}${decorationThickness}${decorationColor}${leadingTrim}${family ? ` font-family="${family.map(attribute).join(",")}"` : ""}${variations}${color}`;
 }
 
 function svgHyperlinkDataAttributes(style: RenderTextStyle) {

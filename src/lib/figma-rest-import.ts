@@ -1409,7 +1409,7 @@ function constraintState(value: unknown, sourceId: string, issues: FigmaImportIs
   return undefined;
 }
 
-type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim">;
+type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim" | "openTypeFeatures">;
 
 function textProperties(node: JsonRecord, text: string, sourceId: string, issues: FigmaImportIssue[]) {
   const extensions: Record<string, number[]> = {};
@@ -1706,8 +1706,21 @@ function importedTextStyle(value: JsonRecord, fallback?: ImportedTextStyle): Imp
       : value.leadingTrim === "NONE" || value.leadingTrim === null
         ? undefined
         : null;
-  if (fontSize === undefined || fontSize <= 0 || fontWeight === undefined || fontWeight <= 0 || !Number.isInteger(fontWeight) || textCase === null || hyperlink === false || textDecoration === false || textDecorationStyle === false || textDecorationOffset === false || textDecorationThickness === false || textDecorationColor === false || textDecorationSkipInk === null || leadingTrim === null) return undefined;
-  return { fontSize, fontWeight, italic: typeof value.italic === "boolean" ? value.italic : fallback?.italic ?? false, letterSpacing, ...(textCase ? { textCase } : {}), ...(hyperlink ? { hyperlink } : {}), ...(textDecoration ? { textDecoration } : {}), ...(textDecoration && textDecorationStyle ? { textDecorationStyle } : {}), ...(textDecoration && textDecorationOffset ? { textDecorationOffset } : {}), ...(textDecoration && textDecorationThickness ? { textDecorationThickness } : {}), ...(textDecoration === "underline" && textDecorationColor ? { textDecorationColor } : {}), ...(textDecoration === "underline" && textDecorationSkipInk === true ? { textDecorationSkipInk: true } : {}), ...(leadingTrim ? { leadingTrim } : {}) };
+  const openTypeFeatures = importedOpenTypeFeatures(value.openTypeFlags, fallback?.openTypeFeatures);
+  if (fontSize === undefined || fontSize <= 0 || fontWeight === undefined || fontWeight <= 0 || !Number.isInteger(fontWeight) || textCase === null || hyperlink === false || textDecoration === false || textDecorationStyle === false || textDecorationOffset === false || textDecorationThickness === false || textDecorationColor === false || textDecorationSkipInk === null || leadingTrim === null || openTypeFeatures === false) return undefined;
+  return { fontSize, fontWeight, italic: typeof value.italic === "boolean" ? value.italic : fallback?.italic ?? false, letterSpacing, ...(textCase ? { textCase } : {}), ...(hyperlink ? { hyperlink } : {}), ...(textDecoration ? { textDecoration } : {}), ...(textDecoration && textDecorationStyle ? { textDecorationStyle } : {}), ...(textDecoration && textDecorationOffset ? { textDecorationOffset } : {}), ...(textDecoration && textDecorationThickness ? { textDecorationThickness } : {}), ...(textDecoration === "underline" && textDecorationColor ? { textDecorationColor } : {}), ...(textDecoration === "underline" && textDecorationSkipInk === true ? { textDecorationSkipInk: true } : {}), ...(leadingTrim ? { leadingTrim } : {}), ...(openTypeFeatures && Object.keys(openTypeFeatures).length ? { openTypeFeatures } : {}) };
+}
+
+function importedOpenTypeFeatures(value: unknown, fallback?: ImportedTextStyle["openTypeFeatures"]): ImportedTextStyle["openTypeFeatures"] | false {
+  if (value === undefined) return fallback;
+  if (value === null) return undefined;
+  const flags = record(value);
+  if (!flags || Object.keys(flags).length > 128) return false;
+  const entries = Object.entries(flags).map(([rawTag, rawEnabled]) => [rawTag.toUpperCase(), rawEnabled] as const);
+  if (entries.some(([tag, enabled]) => !/^[A-Z0-9]{4}$/.test(tag) || (enabled !== 0 && enabled !== 1))) return false;
+  entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  if (entries.some(([tag], index) => index > 0 && entries[index - 1]![0] === tag)) return false;
+  return Object.fromEntries(entries.map(([tag, enabled]) => [tag, enabled === 1]));
 }
 
 function importedTextDecorationColor(
@@ -1826,7 +1839,7 @@ function textRuns(text: string, styles: ImportedTextStyle[]): DocumentTextProper
   return runs;
 }
 
-function sameTextStyle(left: ImportedTextStyle, right: ImportedTextStyle) { return left.fontSize === right.fontSize && left.fontWeight === right.fontWeight && left.italic === right.italic && left.letterSpacing === right.letterSpacing && left.textCase === right.textCase && JSON.stringify(left.hyperlink) === JSON.stringify(right.hyperlink) && left.textDecoration === right.textDecoration && left.textDecorationStyle === right.textDecorationStyle && JSON.stringify(left.textDecorationOffset) === JSON.stringify(right.textDecorationOffset) && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness) && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor) && left.textDecorationSkipInk === right.textDecorationSkipInk && left.leadingTrim === right.leadingTrim; }
+function sameTextStyle(left: ImportedTextStyle, right: ImportedTextStyle) { return left.fontSize === right.fontSize && left.fontWeight === right.fontWeight && left.italic === right.italic && left.letterSpacing === right.letterSpacing && left.textCase === right.textCase && JSON.stringify(left.hyperlink) === JSON.stringify(right.hyperlink) && left.textDecoration === right.textDecoration && left.textDecorationStyle === right.textDecorationStyle && JSON.stringify(left.textDecorationOffset) === JSON.stringify(right.textDecorationOffset) && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness) && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor) && left.textDecorationSkipInk === right.textDecorationSkipInk && left.leadingTrim === right.leadingTrim && JSON.stringify(left.openTypeFeatures) === JSON.stringify(right.openTypeFeatures); }
 function textAlignment(value: string | undefined): DocumentTextProperties["paragraph"]["alignment"] { return value === "CENTER" ? "center" : value === "RIGHT" ? "right" : value === "JUSTIFIED" ? "justify" : "left"; }
 function textAutoSize(value: string | undefined): DocumentTextProperties["autoSize"] { return value === "HEIGHT" ? "height" : value === "WIDTH_AND_HEIGHT" ? "widthAndHeight" : "fixed"; }
 function positive(value: unknown) { const number = finite(value); return number !== undefined && number > 0 ? number : undefined; }

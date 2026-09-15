@@ -8,7 +8,7 @@ use editor_core::{
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
     FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
-    LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
     OperationEnvelope, OperationId, Origin, Page, PageId, ParagraphListType, ParagraphStyle,
     ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
     TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
@@ -840,7 +840,20 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=56).contains(&snapshot.schema_version)
+    if !(1..=57).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 57
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| !run.open_type_features.is_empty())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| !style.open_type_features.is_empty())
+                })
+            }))
         || (snapshot.schema_version < 56
             && snapshot.resource_index.as_ref().is_some_and(|assets| {
                 assets
@@ -1498,6 +1511,8 @@ struct ProjectionTextStyleRun {
     text_decoration_skip_ink: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     leading_trim: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    open_type_features: std::collections::BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1538,6 +1553,8 @@ struct ProjectionTextStyle {
     text_decoration_skip_ink: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     leading_trim: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    open_type_features: std::collections::BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1941,7 +1958,22 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self
+        let schema_version = if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| !run.open_type_features.is_empty())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| !style.open_type_features.is_empty())
+                })
+        }) {
+            57
+        } else if self
             .document
             .assets()
             .any(|asset| asset.font_faces.iter().any(|face| !face.aliases.is_empty()))
@@ -4452,10 +4484,15 @@ pub fn layout_shaped_text_runs_json(
         .iter()
         .map(|run| parse_font_variation_inputs(&run.variation_axes))
         .collect::<Result<Vec<_>, _>>()?;
+    let features = inputs
+        .iter()
+        .map(|run| parse_open_type_feature_inputs(&run.open_type_features))
+        .collect::<Result<Vec<_>, _>>()?;
     let runs = inputs
         .iter()
         .zip(&variations)
-        .map(|(run, variations)| {
+        .zip(&features)
+        .map(|((run, variations), features)| {
             let font_end = run
                 .font_offset
                 .checked_add(run.font_length)
@@ -4468,6 +4505,7 @@ pub fn layout_shaped_text_runs_json(
                 font_bytes,
                 face_index: run.face_index,
                 variations,
+                features,
                 start: run.start,
                 end: run.end,
                 font_size: run.font_size,
@@ -4532,6 +4570,8 @@ struct TextShapingRunInput {
     face_index: u32,
     #[serde(default)]
     variation_axes: Vec<FontVariationInput>,
+    #[serde(default)]
+    open_type_features: Vec<OpenTypeFeatureInput>,
     font_size: f32,
     #[serde(default = "default_font_weight")]
     font_weight: u16,
@@ -4539,6 +4579,39 @@ struct TextShapingRunInput {
     italic: bool,
     #[serde(default)]
     letter_spacing: f32,
+}
+
+#[derive(Deserialize)]
+struct OpenTypeFeatureInput {
+    tag: String,
+    enabled: bool,
+}
+
+fn parse_open_type_feature_inputs(
+    inputs: &[OpenTypeFeatureInput],
+) -> Result<Vec<makefigma_graphics_core::OpenTypeFeature>, JsValue> {
+    if inputs.len() > 128 {
+        return Err(JsValue::from_str("INVALID_TEXT_STYLE_FEATURES"));
+    }
+    let mut previous: Option<&str> = None;
+    let mut output = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let bytes = input.tag.as_bytes();
+        if bytes.len() != 4
+            || bytes
+                .iter()
+                .any(|byte| !byte.is_ascii_uppercase() && !byte.is_ascii_digit())
+            || previous.is_some_and(|tag| tag >= input.tag.as_str())
+        {
+            return Err(JsValue::from_str("INVALID_TEXT_STYLE_FEATURES"));
+        }
+        output.push(makefigma_graphics_core::OpenTypeFeature {
+            tag: [bytes[0], bytes[1], bytes[2], bytes[3]],
+            enabled: input.enabled,
+        });
+        previous = Some(&input.tag);
+    }
+    Ok(output)
 }
 
 fn default_font_weight() -> u16 {
@@ -5446,6 +5519,11 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                 leading_trim: run.leading_trim.map(|value| match value {
                     LeadingTrim::CapHeight => "capHeight".to_owned(),
                 }),
+                open_type_features: run
+                    .open_type_features
+                    .iter()
+                    .map(|feature| (feature.tag.clone(), feature.enabled))
+                    .collect(),
             })
             .collect(),
         paragraph: ProjectionParagraphStyle {
@@ -5559,6 +5637,11 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                 leading_trim: style.leading_trim.map(|value| match value {
                     LeadingTrim::CapHeight => "capHeight".to_owned(),
                 }),
+                open_type_features: style
+                    .open_type_features
+                    .iter()
+                    .map(|feature| (feature.tag.clone(), feature.enabled))
+                    .collect(),
             }),
     }
 }
@@ -5648,6 +5731,14 @@ fn text_properties_from_projection(
                                 Some("capHeight") => Some(LeadingTrim::CapHeight),
                                 _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
                             },
+                            open_type_features: run
+                                .open_type_features
+                                .iter()
+                                .map(|(tag, enabled)| OpenTypeFeature {
+                                    tag: tag.clone(),
+                                    enabled: *enabled,
+                                })
+                                .collect(),
                         })
                     })
                     .collect::<Result<Vec<_>, JsValue>>()?,
@@ -5806,6 +5897,14 @@ fn text_properties_from_projection(
                                 Some("capHeight") => Some(LeadingTrim::CapHeight),
                                 _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
                             },
+                            open_type_features: style
+                                .open_type_features
+                                .iter()
+                                .map(|(tag, enabled)| OpenTypeFeature {
+                                    tag: tag.clone(),
+                                    enabled: *enabled,
+                                })
+                                .collect(),
                         })
                     })
                     .transpose()?,
@@ -9610,6 +9709,7 @@ mod tests {
                     text_decoration_color: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Default::default(),
                 }],
                 paragraph: ProjectionParagraphStyle {
                     alignment: "center".into(),

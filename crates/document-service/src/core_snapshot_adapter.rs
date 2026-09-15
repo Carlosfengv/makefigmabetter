@@ -7,12 +7,12 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
     Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
     HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
-    LineHeightUnit, Node, NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
-    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint,
+    VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -291,6 +291,14 @@ impl CanonicalReducer for CoreOperationReducer {
         {
             return Err(ServiceError::EngineSemanticsUnsupported {
                 minimum: makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_open_type_features)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION,
             });
         }
         validate_delete_subtree_completeness(&document, &commands)?;
@@ -730,6 +738,16 @@ pub fn snapshot_from_document(
     {
         return Err(ServiceError::ReducerRejected);
     }
+    if engine_semantics_version
+        < makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_open_type_features)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version < makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             node.blend_mode.requires_advanced_blend_semantics()
@@ -1133,6 +1151,14 @@ pub fn document_from_snapshot(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_leading_trim)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_open_type_features)
             {
                 return Err(ServiceError::ReducerRejected);
             }
@@ -2175,6 +2201,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                     .map(text_decoration_thickness_to_proto),
                 text_decoration_skip_ink: run.text_decoration_skip_ink,
                 leading_trim: run.leading_trim.map(leading_trim_to_proto),
+                open_type_features: open_type_features_to_proto(&run.open_type_features),
                 text_decoration_color: run
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2243,6 +2270,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                     .map(text_decoration_thickness_to_proto),
                 text_decoration_skip_ink: style.text_decoration_skip_ink,
                 leading_trim: style.leading_trim.map(leading_trim_to_proto),
+                open_type_features: open_type_features_to_proto(&style.open_type_features),
                 text_decoration_color: style
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2332,6 +2360,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(run.open_type_features),
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2448,6 +2477,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(style.open_type_features),
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2629,6 +2659,39 @@ fn text_properties_has_leading_trim(properties: &TextProperties) -> bool {
             .base_style
             .as_ref()
             .is_some_and(|style| style.leading_trim.is_some())
+}
+
+fn text_properties_has_open_type_features(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| !run.open_type_features.is_empty())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| !style.open_type_features.is_empty())
+}
+
+fn open_type_features_to_proto(features: &[OpenTypeFeature]) -> Vec<v1::OpenTypeFeatureSetting> {
+    features
+        .iter()
+        .map(|feature| v1::OpenTypeFeatureSetting {
+            tag: feature.tag.clone(),
+            enabled: feature.enabled,
+        })
+        .collect()
+}
+
+fn open_type_features_from_proto(
+    features: Vec<v1::OpenTypeFeatureSetting>,
+) -> Vec<OpenTypeFeature> {
+    features
+        .into_iter()
+        .map(|feature| OpenTypeFeature {
+            tag: feature.tag,
+            enabled: feature.enabled,
+        })
+        .collect()
 }
 
 fn leading_trim_to_proto(value: LeadingTrim) -> i32 {
@@ -3018,6 +3081,11 @@ fn command_has_text_decoration_skip_ink(command: &Command) -> bool {
 fn command_has_leading_trim(command: &Command) -> bool {
     matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_leading_trim(properties))
         || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_leading_trim(properties))
+}
+
+fn command_has_open_type_features(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_open_type_features(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_open_type_features(properties))
 }
 
 fn page_to_proto(page: &Page) -> v1::PageRef {
@@ -3534,6 +3602,7 @@ mod tests {
                     text_decoration_thickness: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Vec::new(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -3555,6 +3624,7 @@ mod tests {
                     text_decoration_thickness: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Vec::new(),
                     text_decoration_color: None,
                 },
             ],
@@ -4838,6 +4908,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4893,6 +4964,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }),
             ..TextProperties::default()
@@ -4949,6 +5021,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5085,6 +5158,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5111,6 +5185,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5137,6 +5212,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5163,6 +5239,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5189,6 +5266,7 @@ mod tests {
                         text_decoration_thickness: Some(TextDecorationThickness::Pixels(2.0)),
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5215,6 +5293,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: Some(TextDecorationColor {
                             color: Color {
                                 space: ColorSpace::Srgb,
@@ -5250,6 +5329,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: Some(true),
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5276,6 +5356,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: Some(LeadingTrim::CapHeight),
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()

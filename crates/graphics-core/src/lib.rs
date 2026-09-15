@@ -133,6 +133,7 @@ pub struct TextShapingRun<'a> {
     pub font_bytes: &'a [u8],
     pub face_index: u32,
     pub variations: &'a [FontVariation],
+    pub features: &'a [OpenTypeFeature],
     pub start: u32,
     pub end: u32,
     pub font_size: f32,
@@ -142,6 +143,12 @@ pub struct TextShapingRun<'a> {
     /// Figma PIXELS tracking. It is converted into the first run's font-unit
     /// coordinate system before line fitting and caret placement.
     pub letter_spacing: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenTypeFeature {
+    pub tag: [u8; 4],
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -422,7 +429,7 @@ pub fn shape_text_with_variations(
     direction: TextDirection,
 ) -> Result<ShapedText, TextShapingError> {
     let face = rustybuzz_face(font_bytes, face_index, variations)?;
-    Ok(shape_text_with_face(&face, text, direction))
+    Ok(shape_text_with_face(&face, &[], text, direction))
 }
 
 /// Resolves a single source range into UAX #9 display-order runs. It is public
@@ -955,6 +962,7 @@ pub fn layout_shaped_text_with_variations(
 
 struct PreparedTextShapingRun<'a> {
     face: rustybuzz::Face<'a>,
+    features: Vec<rustybuzz::Feature>,
     start: usize,
     end: usize,
     index: u32,
@@ -1006,6 +1014,32 @@ pub fn layout_shaped_text_runs(
             return Err(TextShapingError::InvalidStyleRun);
         }
         let face = rustybuzz_face(run.font_bytes, run.face_index, run.variations)?;
+        if run.features.len() > 128
+            || run
+                .features
+                .windows(2)
+                .any(|pair| pair[0].tag >= pair[1].tag)
+            || run.features.iter().any(|feature| {
+                feature
+                    .tag
+                    .iter()
+                    .any(|byte| !byte.is_ascii_uppercase() && !byte.is_ascii_digit())
+            })
+        {
+            return Err(TextShapingError::InvalidStyleRun);
+        }
+        let features = run
+            .features
+            .iter()
+            .map(|feature| {
+                let tag = feature.tag.map(|byte| byte.to_ascii_lowercase());
+                rustybuzz::Feature::new(
+                    rustybuzz::ttf_parser::Tag::from_bytes(&tag),
+                    u32::from(feature.enabled),
+                    ..,
+                )
+            })
+            .collect();
         let units = face.units_per_em() as f64;
         let reference_units = *primary_units.get_or_insert(face.units_per_em());
         let scale = run.font_size as f64 * reference_units as f64 / (units * primary_size as f64);
@@ -1022,6 +1056,7 @@ pub fn layout_shaped_text_runs(
         }
         prepared.push(PreparedTextShapingRun {
             face,
+            features,
             start,
             end,
             index: index as u32,
@@ -1121,6 +1156,7 @@ fn apply_ttf_variations(
 
 fn shape_text_with_face(
     face: &rustybuzz::Face<'_>,
+    features: &[rustybuzz::Feature],
     text: &str,
     direction: TextDirection,
 ) -> ShapedText {
@@ -1130,7 +1166,7 @@ fn shape_text_with_face(
         TextDirection::LeftToRight => rustybuzz::Direction::LeftToRight,
         TextDirection::RightToLeft => rustybuzz::Direction::RightToLeft,
     });
-    let glyph_buffer = rustybuzz::shape(&face, &[], buffer);
+    let glyph_buffer = rustybuzz::shape(&face, features, buffer);
     let glyphs = glyph_buffer
         .glyph_infos()
         .iter()
@@ -1505,7 +1541,8 @@ fn shape_styled_visual_line(
             let relative_start = piece_start - absolute_start;
             let relative_end = piece_end - absolute_start;
             let piece_text = &text[relative_start..relative_end];
-            let mut shaped = shape_text_with_face(&run.face, piece_text, visual_run.direction);
+            let mut shaped =
+                shape_text_with_face(&run.face, &run.features, piece_text, visual_run.direction);
             let raw_carets = positioned_run_carets(
                 &run.face,
                 piece_text,
@@ -1663,7 +1700,7 @@ fn shape_visual_line(
     let direction = paragraph_direction(text);
     let visual_runs = bidi_visual_runs(text);
     if visual_runs.is_empty() {
-        let shaped = shape_text_with_face(face, text, direction);
+        let shaped = shape_text_with_face(face, &[], text, direction);
         let visual_carets = positioned_run_carets(face, text, direction, &shaped.glyphs, 0);
         return (shaped, visual_runs, visual_carets);
     }
@@ -1673,7 +1710,7 @@ fn shape_visual_line(
     for run in &visual_runs {
         let start = run.start as usize;
         let end = run.end as usize;
-        let mut shaped = shape_text_with_face(face, &text[start..end], run.direction);
+        let mut shaped = shape_text_with_face(face, &[], &text[start..end], run.direction);
         visual_carets.extend(
             positioned_run_carets(
                 face,
@@ -4994,6 +5031,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: boundary,
                 font_size: 16.0,
@@ -5004,6 +5042,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: boundary,
                 end: text.len() as u32,
                 font_size: 32.0,
@@ -5066,6 +5105,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: word.len() as u32,
                 font_size: 16.0,
@@ -5081,6 +5121,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: word.len() as u32,
                 font_size: 16.0,
@@ -5139,6 +5180,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: source.len() as u32,
                 font_size: 16.0,
@@ -5155,6 +5197,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: source.len() as u32,
                 font_size: 16.0,
@@ -5173,6 +5216,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: word.len() as u32,
                 font_size: 16.0,
@@ -5190,6 +5234,7 @@ mod tests {
                     font_bytes: font,
                     face_index: 0,
                     variations: &[],
+                    features: &[],
                     start: 0,
                     end: word.len() as u32,
                     font_size: 16.0,
@@ -5212,6 +5257,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: 1,
                 font_size: 16.0,
@@ -5222,6 +5268,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 1,
                 end: 5,
                 font_size: 24.0,
@@ -5232,6 +5279,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 5,
                 end: 6,
                 font_size: 16.0,
@@ -5271,6 +5319,7 @@ mod tests {
             font_bytes: font_test_data::NOTOSERIFHEBREW_AUTOHINT_METRICS,
             face_index: 0,
             variations: &[],
+            features: &[],
             start: 0,
             end: text.len() as u32,
             font_size: 48.0,
@@ -5316,6 +5365,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 0,
                 end: 1,
                 font_size: 16.0,
@@ -5326,6 +5376,7 @@ mod tests {
                 font_bytes: font,
                 face_index: 0,
                 variations: &[],
+                features: &[],
                 start: 5,
                 end: 6,
                 font_size: 16.0,
@@ -5337,6 +5388,7 @@ mod tests {
             font_bytes: font,
             face_index: 0,
             variations: &[],
+            features: &[],
             start: 0,
             end: 2,
             font_size: 16.0,
@@ -5375,6 +5427,42 @@ mod tests {
                 .carets
                 .iter()
                 .all(|caret| (caret.byte_offset as usize) <= text.len())
+        );
+    }
+
+    #[test]
+    fn open_type_feature_overrides_change_rustybuzz_shaping() {
+        let font = font_test_data::NOTOSERIF_AUTOHINT_SHAPING;
+        let text = "office";
+        let enabled = [super::OpenTypeFeature {
+            tag: *b"LIGA",
+            enabled: true,
+        }];
+        let disabled = [super::OpenTypeFeature {
+            tag: *b"LIGA",
+            enabled: false,
+        }];
+        let shape = |features: &[super::OpenTypeFeature]| {
+            layout_shaped_text_runs(
+                &[TextShapingRun {
+                    font_bytes: font,
+                    face_index: 0,
+                    variations: &[],
+                    features,
+                    start: 0,
+                    end: text.len() as u32,
+                    font_size: 16.0,
+                    synthetic_style: super::SyntheticFontStyle::default(),
+                    letter_spacing: 0.0,
+                }],
+                text,
+                1_000.0,
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            shape(&enabled).lines[0].glyphs.len(),
+            shape(&disabled).lines[0].glyphs.len()
         );
     }
 

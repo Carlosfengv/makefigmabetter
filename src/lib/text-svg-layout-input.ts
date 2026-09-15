@@ -34,6 +34,7 @@ export type TextFrozenLayoutRun = Readonly<{
   fontWeight: number;
   italic: boolean;
   letterSpacing: number;
+  openTypeFeatures: Readonly<Record<string, boolean>>;
 }>;
 
 export type TextFrozenLayoutPlan = Readonly<{
@@ -134,6 +135,7 @@ export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | u
           fontWeight: run.fontWeight,
           italic: run.italic,
           letterSpacing: run.letterSpacing,
+          openTypeFeatures: run.openTypeFeatures ?? {},
         };
   });
   if (shapingRuns.some((run) => !run)) return undefined;
@@ -206,6 +208,11 @@ export function textLayoutInputFromPlan(
       fontWeight: run.fontWeight,
       italic: run.italic,
       letterSpacing: run.letterSpacing,
+      ...(Object.keys(run.openTypeFeatures).length ? {
+        openTypeFeatures: Object.entries(run.openTypeFeatures)
+          .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+          .map(([tag, enabled]) => ({ tag, enabled })),
+      } : {}),
     };
   }));
   return {

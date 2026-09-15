@@ -419,6 +419,7 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       textDecorationColor: textDecorationColorProto(run.textDecorationColor),
       textDecorationSkipInk: run.textDecorationSkipInk === true ? true : undefined,
       leadingTrim: run.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
+      openTypeFeatures: openTypeFeaturesProto(run.openTypeFeatures),
     })),
     paragraph: {
       alignment: value.paragraph.alignment === "left" ? TextAlignment.TEXT_ALIGNMENT_LEFT : value.paragraph.alignment === "center" ? TextAlignment.TEXT_ALIGNMENT_CENTER : value.paragraph.alignment === "right" ? TextAlignment.TEXT_ALIGNMENT_RIGHT : TextAlignment.TEXT_ALIGNMENT_JUSTIFY,
@@ -476,6 +477,7 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       textDecorationColor: textDecorationColorProto(value.baseStyle.textDecorationColor),
       textDecorationSkipInk: value.baseStyle.textDecorationSkipInk === true ? true : undefined,
       leadingTrim: value.baseStyle.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
+      openTypeFeatures: openTypeFeaturesProto(value.baseStyle.openTypeFeatures),
     } : undefined,
     paragraphStyleRuns: (value.paragraphStyleRuns ?? []).map((run) => ({
       start: run.start,
@@ -505,6 +507,12 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
             : undefined,
     })),
   };
+}
+
+function openTypeFeaturesProto(features: Readonly<Record<string, boolean>> | undefined) {
+  return Object.entries(features ?? {})
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([tag, enabled]) => ({ tag, enabled }));
 }
 
 function hyperlinkProto(value: NonNullable<DocumentTextProperties["runs"][number]["hyperlink"]>) {

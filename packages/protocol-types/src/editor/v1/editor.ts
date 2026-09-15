@@ -774,7 +774,19 @@ export interface TextStyleRun {
    * Omission is Figma NONE. CAP_HEIGHT requires engine semantics 28 and
    * removes the outer leading above the first line and below the last line.
    */
-  leadingTrim?: LeadingTrim | undefined;
+  leadingTrim?:
+    | LeadingTrim
+    | undefined;
+  /**
+   * Sorted explicit overrides only. Tags use the Figma/API uppercase form;
+   * enabled=false is meaningful because many OpenType features default on.
+   */
+  openTypeFeatures: OpenTypeFeatureSetting[];
+}
+
+export interface OpenTypeFeatureSetting {
+  tag: string;
+  enabled: boolean;
 }
 
 export interface TextDecorationOffset {
@@ -4622,6 +4634,7 @@ function createBaseTextStyleRun(): TextStyleRun {
     textDecorationColor: undefined,
     textDecorationSkipInk: undefined,
     leadingTrim: undefined,
+    openTypeFeatures: [],
   };
 }
 
@@ -4680,6 +4693,9 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     if (message.leadingTrim !== undefined) {
       writer.uint32(144).int32(message.leadingTrim);
+    }
+    for (const v of message.openTypeFeatures) {
+      OpenTypeFeatureSetting.encode(v!, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -4835,6 +4851,14 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.leadingTrim = reader.int32() as any;
           continue;
         }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.openTypeFeatures.push(OpenTypeFeatureSetting.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4880,6 +4904,65 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
       : undefined;
     message.textDecorationSkipInk = object.textDecorationSkipInk ?? undefined;
     message.leadingTrim = object.leadingTrim ?? undefined;
+    message.openTypeFeatures = object.openTypeFeatures?.map((e) => OpenTypeFeatureSetting.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseOpenTypeFeatureSetting(): OpenTypeFeatureSetting {
+  return { tag: "", enabled: false };
+}
+
+export const OpenTypeFeatureSetting: MessageFns<OpenTypeFeatureSetting> = {
+  encode(message: OpenTypeFeatureSetting, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.tag !== "") {
+      writer.uint32(10).string(message.tag);
+    }
+    if (message.enabled !== false) {
+      writer.uint32(16).bool(message.enabled);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OpenTypeFeatureSetting {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOpenTypeFeatureSetting();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.tag = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.enabled = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<OpenTypeFeatureSetting>, I>>(base?: I): OpenTypeFeatureSetting {
+    return OpenTypeFeatureSetting.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OpenTypeFeatureSetting>, I>>(object: I): OpenTypeFeatureSetting {
+    const message = createBaseOpenTypeFeatureSetting();
+    message.tag = object.tag ?? "";
+    message.enabled = object.enabled ?? false;
     return message;
   },
 };

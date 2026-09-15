@@ -562,6 +562,14 @@ message TextStyleRun {
   // Omission is Figma NONE. CAP_HEIGHT requires engine semantics 28 and
   // removes the outer leading above the first line and below the last line.
   optional LeadingTrim leading_trim = 18;
+  // Sorted explicit overrides only. Tags use the Figma/API uppercase form;
+  // enabled=false is meaningful because many OpenType features default on.
+  repeated OpenTypeFeatureSetting open_type_features = 19;
+}
+
+message OpenTypeFeatureSetting {
+  string tag = 1;
+  bool enabled = 2;
 }
 
 enum LeadingTrim {

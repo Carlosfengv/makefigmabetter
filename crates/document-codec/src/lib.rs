@@ -8,9 +8,9 @@ use editor_core::{
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
     FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
     InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
     TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment, can_parent_contain_child,
@@ -64,8 +64,9 @@ pub const TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION: u32 = 38;
 pub const PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 39;
 pub const FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 40;
 pub const FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION: u32 = 41;
+pub const OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION: u32 = 42;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -447,6 +448,15 @@ pub fn snapshot_from_document(
             document
                 .text_properties_for_node(node.id)
                 .is_some_and(text_properties_has_leading_trim)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_open_type_features)
         })
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
@@ -833,6 +843,13 @@ pub fn document_from_snapshot_with_engine_semantics(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_leading_trim)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_open_type_features)
             {
                 return Err(SnapshotError::Invalid);
             }
@@ -1910,6 +1927,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                     .map(text_decoration_thickness_to_proto),
                 text_decoration_skip_ink: run.text_decoration_skip_ink,
                 leading_trim: run.leading_trim.map(leading_trim_to_proto),
+                open_type_features: open_type_features_to_proto(&run.open_type_features),
                 text_decoration_color: run
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -1978,6 +1996,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                     .map(text_decoration_thickness_to_proto),
                 text_decoration_skip_ink: style.text_decoration_skip_ink,
                 leading_trim: style.leading_trim.map(leading_trim_to_proto),
+                open_type_features: open_type_features_to_proto(&style.open_type_features),
                 text_decoration_color: style
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2066,6 +2085,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(run.open_type_features)?,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2185,6 +2205,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(style.open_type_features)?,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2365,6 +2386,39 @@ fn text_properties_has_leading_trim(properties: &TextProperties) -> bool {
             .base_style
             .as_ref()
             .is_some_and(|style| style.leading_trim.is_some())
+}
+
+fn text_properties_has_open_type_features(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| !run.open_type_features.is_empty())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| !style.open_type_features.is_empty())
+}
+
+fn open_type_features_to_proto(features: &[OpenTypeFeature]) -> Vec<v1::OpenTypeFeatureSetting> {
+    features
+        .iter()
+        .map(|feature| v1::OpenTypeFeatureSetting {
+            tag: feature.tag.clone(),
+            enabled: feature.enabled,
+        })
+        .collect()
+}
+
+fn open_type_features_from_proto(
+    features: Vec<v1::OpenTypeFeatureSetting>,
+) -> Result<Vec<OpenTypeFeature>, SnapshotError> {
+    Ok(features
+        .into_iter()
+        .map(|feature| OpenTypeFeature {
+            tag: feature.tag,
+            enabled: feature.enabled,
+        })
+        .collect())
 }
 
 fn leading_trim_to_proto(value: LeadingTrim) -> i32 {
@@ -3242,6 +3296,7 @@ mod tests {
                         text_decoration_thickness: None,
                         text_decoration_skip_ink: None,
                         leading_trim: None,
+                        open_type_features: Vec::new(),
                         text_decoration_color: None,
                     }],
                     paragraph: ParagraphStyle {
@@ -4284,6 +4339,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4363,6 +4419,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4431,6 +4488,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }),
             ..TextProperties::default()
@@ -4497,6 +4555,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4587,6 +4646,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4653,6 +4713,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4730,6 +4791,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4860,6 +4922,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4924,6 +4987,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -4988,6 +5052,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5055,6 +5120,7 @@ mod tests {
             text_decoration_thickness: None,
             text_decoration_skip_ink: None,
             leading_trim: None,
+            open_type_features: Vec::new(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5124,6 +5190,7 @@ mod tests {
             text_decoration_thickness: Some(TextDecorationThickness::Percent(12.5)),
             text_decoration_skip_ink: None,
             leading_trim: None,
+            open_type_features: Vec::new(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5197,6 +5264,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: Some(TextDecorationColor {
                     color: Color {
                         space: ColorSpace::Srgb,
@@ -5275,6 +5343,7 @@ mod tests {
                 text_decoration_color: None,
                 text_decoration_skip_ink: Some(true),
                 leading_trim: None,
+                open_type_features: Vec::new(),
             }],
             ..TextProperties::default()
         };
@@ -5343,6 +5412,7 @@ mod tests {
                 text_decoration_color: None,
                 text_decoration_skip_ink: None,
                 leading_trim: Some(LeadingTrim::CapHeight),
+                open_type_features: Vec::new(),
             }],
             ..TextProperties::default()
         };
@@ -5375,6 +5445,80 @@ mod tests {
                 69_u128.to_be_bytes(),
                 hash,
                 LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn open_type_features_round_trip_and_require_semantics_forty_two() {
+        let mut document = Document::with_id(DocumentId(170));
+        let mut text = node(170, NodeKind::Text, None);
+        text.text = "office".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let style = TextStyleRun {
+            start: 0,
+            end: 6,
+            font: None,
+            font_size: 16.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: None,
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: None,
+            text_decoration_color: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            open_type_features: vec![
+                OpenTypeFeature {
+                    tag: "KERN".into(),
+                    enabled: false,
+                },
+                OpenTypeFeature {
+                    tag: "LIGA".into(),
+                    enabled: true,
+                },
+            ],
+        };
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(170), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            170_u128.to_be_bytes(),
+            hash,
+            OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(170)),
+            Some(&properties)
+        );
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                170_u128.to_be_bytes(),
+                hash,
+                OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
             ),
             Err(SnapshotError::Invalid)
         );

@@ -907,8 +907,8 @@ describe("M1 RuntimeSession", () => {
   it("projects styled text segments from character and paragraph runs for Text and ShapeWithText", async () => {
     const textProperties = {
       runs: [
-        { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 },
-        { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1 },
+        { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, openTypeFeatures: { LIGA: true } },
+        { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, openTypeFeatures: { LIGA: false } },
       ],
       paragraph: { alignment: "left" as const, paragraphSpacing: 3, textWrapStyle: "balance" as const, listType: "ordered" as const },
       paragraphStyleRuns: [{ start: 6, paragraphSpacing: 9, textWrapStyle: "auto" as const, listType: "none" as const }],
@@ -939,11 +939,11 @@ describe("M1 RuntimeSession", () => {
     expect(text.fontWeight).toBe(RUNTIME_MIXED);
     expect(text.getRangeFontSize(0, 1)).toBe(12);
     expect(text.getRangeFontWeight(4, 6)).toBe(700);
-    expect(text.openTypeFeatures).toEqual({});
-    expect(text.getRangeOpenTypeFeatures(1, 3)).toEqual({});
+    expect(text.openTypeFeatures).toBe(RUNTIME_MIXED);
+    expect(text.getRangeOpenTypeFeatures(1, 3)).toEqual({ LIGA: true });
     expect(shape.text.getRangeFontWeight(0, 4)).toBe(400);
-    expect(shape.text.openTypeFeatures).toEqual({});
-    expect(shape.text.getRangeOpenTypeFeatures(4, 6)).toEqual({});
+    expect(shape.text.openTypeFeatures).toBe(RUNTIME_MIXED);
+    expect(shape.text.getRangeOpenTypeFeatures(4, 6)).toEqual({ LIGA: false });
 
     text.setRangeFontSize(4, 6, 24);
     text.setRangeParagraphSpacing(4, 6, 7);

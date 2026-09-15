@@ -215,6 +215,20 @@ function runtimeHyperlinkForRange(
   return first ? structuredClone(first) : null;
 }
 
+function runtimeOpenTypeFeaturesForRange(
+  text: string,
+  properties: DocumentTextProperties | undefined,
+  start: number,
+  end: number,
+): Readonly<Record<string, boolean>> | typeof RUNTIME_MIXED {
+  const values = runtimeTextStylesForRange(text, properties, start, end)
+    .map((style) => style.openTypeFeatures ?? {});
+  if (!values.length) return { ...(properties?.baseStyle?.openTypeFeatures ?? {}) };
+  const first = values[0]!;
+  if (values.some((value) => JSON.stringify(value) !== JSON.stringify(first))) return RUNTIME_MIXED;
+  return { ...first };
+}
+
 function canonicalHyperlink(value: RuntimeHyperlinkTarget | null): DocumentTextProperties["runs"][number]["hyperlink"] {
   if (value === null) return undefined;
   if (!value || typeof value !== "object" || (value.type !== "URL" && value.type !== "NODE") || typeof value.value !== "string") {
@@ -816,8 +830,10 @@ export class RuntimeTextSublayerProxy {
   }
 
   getRangeOpenTypeFeatures(start: number, end: number): Readonly<Record<string, boolean>> | typeof RUNTIME_MIXED {
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
     this.assertTextRange(start, end);
-    return {};
+    return runtimeOpenTypeFeaturesForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end);
   }
 
   setRangeFontSize(start: number, end: number, value: number): void {
@@ -1762,7 +1778,12 @@ export class RuntimeNodeProxy {
   getRangeOpenTypeFeatures(start: number, end: number): Readonly<Record<string, boolean>> | typeof RUNTIME_MIXED {
     this.assertText();
     runtimeTextRange(this.characters, start, end);
-    return {};
+    return runtimeOpenTypeFeaturesForRange(
+      this.characters,
+      this.read().textProperties as DocumentTextProperties | undefined,
+      start,
+      end,
+    );
   }
 
   getRangeLetterSpacing(start: number, end: number): RuntimeLetterSpacing | typeof RUNTIME_MIXED {

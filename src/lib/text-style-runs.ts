@@ -18,6 +18,7 @@ export type RenderTextStyle = {
   textDecorationColor?: DocumentTextProperties["runs"][number]["textDecorationColor"];
   textDecorationSkipInk?: DocumentTextProperties["runs"][number]["textDecorationSkipInk"];
   leadingTrim?: DocumentTextProperties["runs"][number]["leadingTrim"];
+  openTypeFeatures?: DocumentTextProperties["runs"][number]["openTypeFeatures"];
 };
 
 export type StyledTextSpan = { text: string; start: number; end: number; style: RenderTextStyle };
@@ -72,6 +73,7 @@ export function styledTextSpans(text: string, start: number, end: number, proper
         textDecorationColor: run.textDecorationColor,
         textDecorationSkipInk: run.textDecorationSkipInk,
         leadingTrim: run.leadingTrim,
+        openTypeFeatures: run.openTypeFeatures,
       } : defaultStyle,
     };
   }).filter((span) => span.text.length > 0);

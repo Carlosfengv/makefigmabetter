@@ -6,9 +6,9 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
     FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
     LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
     TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
@@ -351,6 +351,17 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_open_type_features)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version
@@ -794,6 +805,47 @@ fn operation_has_leading_trim(operation: &v1::ResolvedOperation) -> bool {
                 .as_ref()
                 .is_some_and(|style| style.leading_trim.is_some())
     })
+}
+
+fn operation_has_open_type_features(operation: &v1::ResolvedOperation) -> bool {
+    operation_text_properties(operation).is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| !run.open_type_features.is_empty())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| !style.open_type_features.is_empty())
+    })
+}
+
+fn operation_text_properties(operation: &v1::ResolvedOperation) -> Option<&v1::TextProperties> {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    }
+}
+
+fn open_type_features_from_proto(
+    features: Vec<v1::OpenTypeFeatureSetting>,
+) -> Vec<OpenTypeFeature> {
+    features
+        .into_iter()
+        .map(|feature| OpenTypeFeature {
+            tag: feature.tag,
+            enabled: feature.enabled,
+        })
+        .collect()
 }
 
 fn operation_has_line_height_unit(operation: &v1::ResolvedOperation) -> bool {
@@ -1964,6 +2016,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(run.open_type_features),
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2080,6 +2133,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                         .map(leading_trim_from_proto)
                         .transpose()?
                         .flatten(),
+                    open_type_features: open_type_features_from_proto(style.open_type_features),
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -3592,6 +3646,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -3679,6 +3734,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
                 ..Default::default()
             }),
@@ -3730,6 +3786,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -4035,6 +4092,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4100,6 +4158,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4173,6 +4232,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4249,6 +4309,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4325,6 +4386,7 @@ mod tests {
                 }),
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4398,6 +4460,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: Some(v1::TextDecorationColor {
                     color: Some(color()),
                     visible: true,
@@ -4475,6 +4538,7 @@ mod tests {
                 text_decoration: Some(v1::TextDecoration::Underline as i32),
                 text_decoration_skip_ink: Some(true),
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4525,6 +4589,7 @@ mod tests {
                 font_size: 16.0,
                 font_weight: 400,
                 leading_trim: Some(v1::LeadingTrim::CapHeight as i32),
+                open_type_features: Vec::new(),
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4556,6 +4621,47 @@ mod tests {
             [Command::SetTextProperties { properties, .. }]
                 if properties.runs[0].leading_trim == Some(LeadingTrim::CapHeight)
         ));
+    }
+
+    #[test]
+    fn open_type_feature_operations_require_semantics_forty_two() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font_size: 16.0,
+                font_weight: 400,
+                open_type_features: vec![v1::OpenTypeFeatureSetting {
+                    tag: "LIGA".into(),
+                    enabled: false,
+                }],
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 14_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(), [Command::SetTextProperties { properties, .. }] if properties.runs[0].open_type_features == [editor_core::OpenTypeFeature { tag: "LIGA".into(), enabled: false }])
+        );
     }
 
     #[test]

@@ -6649,6 +6649,13 @@ function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: Ren
   // unvaried spans so a preceding Style Run cannot leak its axes into the next.
   const variationTarget = ctx as unknown as { fontVariationSettings?: string };
   if ("fontVariationSettings" in variationTarget) variationTarget.fontVariationSettings = fontVariationCss(style.font?.variationAxes);
+  const featureTarget = ctx as unknown as { fontFeatureSettings?: string };
+  if ("fontFeatureSettings" in featureTarget) {
+    featureTarget.fontFeatureSettings = Object.entries(style.openTypeFeatures ?? {})
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([tag, enabled]) => `'${tag.toLowerCase()}' ${enabled ? 1 : 0}`)
+      .join(", ");
+  }
 }
 
 /** Measures the exact presentation spans while retaining Canonical source

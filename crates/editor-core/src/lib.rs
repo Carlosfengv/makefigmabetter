@@ -36,6 +36,7 @@ pub const MAX_TEXT_STYLE_RUNS: usize = 4_096;
 pub const MAX_TEXT_FALLBACK_FONTS: usize = 32;
 pub const MAX_TEXT_HYPERLINK_BYTES: usize = 2_048;
 pub const MAX_FONT_VARIATION_AXES: usize = 16;
+pub const MAX_OPEN_TYPE_FEATURES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u128);
@@ -707,6 +708,15 @@ pub struct HyperlinkTarget {
     pub value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTypeFeature {
+    /// Four uppercase ASCII bytes matching Figma's public feature keys.
+    pub tag: String,
+    /// Explicit override. `false` is retained because several features are on
+    /// by default in OpenType shaping engines.
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyleRun {
     /// UTF-8 byte offsets. Boundaries must coincide with Unicode scalar value
@@ -749,6 +759,9 @@ pub struct TextStyleRun {
     /// Omission is Figma NONE and preserves legacy line boxes and hashes.
     /// CAP_HEIGHT removes only the outer leading of the text block.
     pub leading_trim: Option<LeadingTrim>,
+    /// Sorted, unique explicit OpenType feature overrides. An empty list keeps
+    /// the font's defaults and preserves all legacy hashes.
+    pub open_type_features: Vec<OpenTypeFeature>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6278,6 +6291,18 @@ impl Document {
                     && !matches!(decoration.blend_mode, BlendMode::PassThrough)
             })
             && style.text_decoration_skip_ink != Some(false)
+            && style.open_type_features.len() <= MAX_OPEN_TYPE_FEATURES
+            && style.open_type_features.iter().all(|feature| {
+                feature.tag.len() == 4
+                    && feature
+                        .tag
+                        .bytes()
+                        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            })
+            && style
+                .open_type_features
+                .windows(2)
+                .all(|pair| pair[0].tag < pair[1].tag)
             && style.hyperlink.as_ref().is_none_or(|hyperlink| {
                 !hyperlink.value.is_empty()
                     && hyperlink.value.len() <= MAX_TEXT_HYPERLINK_BYTES
@@ -7095,6 +7120,13 @@ impl TextProperties {
                             .map(PaintStack::estimated_bytes)
                             .unwrap_or(0)
                         + run.hyperlink.as_ref().map_or(0, |value| value.value.len())
+                        + run
+                            .open_type_features
+                            .iter()
+                            .map(|feature| {
+                                std::mem::size_of::<OpenTypeFeature>() + feature.tag.len()
+                            })
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
             + self.paragraph_style_runs.len() * std::mem::size_of::<ParagraphStyleRun>()
@@ -7117,6 +7149,13 @@ impl TextProperties {
                             .hyperlink
                             .as_ref()
                             .map_or(0, |value| value.value.len())
+                        + style
+                            .open_type_features
+                            .iter()
+                            .map(|feature| {
+                                std::mem::size_of::<OpenTypeFeature>() + feature.tag.len()
+                            })
+                            .sum::<usize>()
                 })
                 .unwrap_or(0)
             + self
@@ -7997,6 +8036,25 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
         hasher.update(b"makefigma/editor-core/text-base-style-v1");
         hash_text_style_payload(hasher, style);
     }
+    if properties
+        .runs
+        .iter()
+        .any(|run| !run.open_type_features.is_empty())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| !style.open_type_features.is_empty())
+    {
+        hasher.update(b"makefigma/editor-core/open-type-features-v1");
+        for run in &properties.runs {
+            hash_open_type_features(hasher, &run.open_type_features);
+        }
+        if let Some(style) = &properties.base_style {
+            hash_open_type_features(hasher, &style.open_type_features);
+        } else {
+            hash_len(hasher, 0);
+        }
+    }
     if properties.runs.iter().any(|run| run.text_case.is_some())
         || properties
             .base_style
@@ -8190,6 +8248,14 @@ fn hash_optional_text_decoration_offset(hasher: &mut Sha256, value: Option<TextD
             hasher.update([2]);
             hash_number(hasher, value);
         }
+    }
+}
+
+fn hash_open_type_features(hasher: &mut Sha256, features: &[OpenTypeFeature]) {
+    hash_len(hasher, features.len());
+    for feature in features {
+        hash_text(hasher, &feature.tag);
+        hasher.update([u8::from(feature.enabled)]);
     }
 }
 
@@ -11384,6 +11450,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11479,6 +11546,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11575,6 +11643,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -11662,6 +11731,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -16671,6 +16741,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -16769,6 +16840,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: pixels,
@@ -16861,6 +16933,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -17853,6 +17926,7 @@ mod tests {
             text_decoration_thickness: None,
             text_decoration_skip_ink: None,
             leading_trim: None,
+            open_type_features: Vec::new(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -17955,6 +18029,7 @@ mod tests {
                     text_decoration_thickness: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Vec::new(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -17975,6 +18050,7 @@ mod tests {
                     text_decoration_thickness: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Vec::new(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -17995,6 +18071,7 @@ mod tests {
                     text_decoration_thickness: None,
                     text_decoration_skip_ink: None,
                     leading_trim: None,
+                    open_type_features: Vec::new(),
                     text_decoration_color: None,
                 },
             ],
@@ -18121,6 +18198,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18196,6 +18274,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18237,6 +18316,113 @@ mod tests {
     }
 
     #[test]
+    fn open_type_features_are_bounded_sorted_hashed_and_undoable() {
+        let mut text = node(190);
+        text.kind = NodeKind::Text;
+        text.text = "office".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let style = TextStyleRun {
+            start: 0,
+            end: 6,
+            font: None,
+            font_size: 16.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: None,
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: None,
+            text_decoration_color: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            open_type_features: vec![
+                OpenTypeFeature {
+                    tag: "KERN".into(),
+                    enabled: false,
+                },
+                OpenTypeFeature {
+                    tag: "LIGA".into(),
+                    enabled: true,
+                },
+            ],
+        };
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(190),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let feature_hash = document.canonical_hash_hex();
+        assert_ne!(feature_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), feature_hash);
+
+        for features in [
+            vec![OpenTypeFeature {
+                tag: "liga".into(),
+                enabled: true,
+            }],
+            vec![
+                OpenTypeFeature {
+                    tag: "LIGA".into(),
+                    enabled: true,
+                },
+                OpenTypeFeature {
+                    tag: "KERN".into(),
+                    enabled: false,
+                },
+            ],
+            (0..129)
+                .map(|index| OpenTypeFeature {
+                    tag: format!("A{index:03}"),
+                    enabled: true,
+                })
+                .collect(),
+        ] {
+            let mut invalid = properties.clone();
+            invalid.runs[0].open_type_features = features;
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(190),
+                            properties: invalid
+                        }]
+                    ),
+                    Origin::LocalUser
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+            assert_eq!(document.canonical_hash_hex(), feature_hash);
+        }
+    }
+
+    #[test]
     fn text_hyperlink_is_canonical_hashed_undoable_and_validated_atomically() {
         let mut text = node(92);
         text.kind = NodeKind::Text;
@@ -18271,6 +18457,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18372,6 +18559,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -18733,6 +18921,7 @@ mod tests {
                 text_decoration_thickness: None,
                 text_decoration_skip_ink: None,
                 leading_trim: None,
+                open_type_features: Vec::new(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -20730,6 +20919,7 @@ mod tests {
                                     text_decoration_thickness: None,
                                     text_decoration_skip_ink: None,
                                     leading_trim: None,
+                                    open_type_features: Vec::new(),
                                     text_decoration_color: None,
                                 }],
                                 ..TextProperties::default()

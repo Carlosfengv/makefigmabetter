@@ -991,15 +991,16 @@ describe("Figma REST import planning", () => {
       version: "text-decoration",
       document: { children: [{ id: "0:1", type: "CANVAS", children: [{
         id: "1:1", type: "TEXT", characters: "ABCD", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 90, height: 30 },
-        style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "UNDERLINE", textDecorationStyle: "WAVY", textDecorationOffset: { value: 2, unit: "PIXELS" }, textDecorationThickness: { value: 2.5, unit: "PIXELS" }, textDecorationColor: { value: { type: "SOLID", color: { r: 1, g: .25, b: .5 }, visible: true, opacity: .75, blendMode: "MULTIPLY" } }, textDecorationSkipInk: true, leadingTrim: "CAP_HEIGHT" },
+        style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "UNDERLINE", textDecorationStyle: "WAVY", textDecorationOffset: { value: 2, unit: "PIXELS" }, textDecorationThickness: { value: 2.5, unit: "PIXELS" }, textDecorationColor: { value: { type: "SOLID", color: { r: 1, g: .25, b: .5 }, visible: true, opacity: .75, blendMode: "MULTIPLY" } }, textDecorationSkipInk: true, leadingTrim: "CAP_HEIGHT", openTypeFlags: { liga: 1, kern: 0 } },
         characterStyleOverrides: [0, 1, 2, 3],
         styleOverrideTable: {
-          1: { textDecoration: "STRIKETHROUGH", textDecorationStyle: "DOTTED", textDecorationOffset: { value: -20, unit: "PERCENT" }, textDecorationThickness: { value: 15, unit: "PERCENT" }, leadingTrim: "NONE" },
+          1: { textDecoration: "STRIKETHROUGH", textDecorationStyle: "DOTTED", textDecorationOffset: { value: -20, unit: "PERCENT" }, textDecorationThickness: { value: 15, unit: "PERCENT" }, leadingTrim: "NONE", openTypeFlags: { liga: 0 } },
           2: {
             textDecoration: "BLINK", textDecorationStyle: "ZIGZAG",
             textDecorationOffset: { value: 1, unit: "EM" }, textDecorationThickness: { value: 1, unit: "EM" },
             textDecorationColor: { value: { type: "SOLID", color: { r: 2, g: 0, b: 0 }, boundVariables: { color: "VariableID:1" } } },
             leadingTrim: "AUTO",
+            openTypeFlags: { liga: 2 },
           },
           3: { textDecoration: "NONE" },
         },
@@ -1030,10 +1031,14 @@ describe("Figma REST import planning", () => {
     expect(plan.nodes[0]?.textProperties?.runs.map((run) => run.leadingTrim)).toEqual([
       "capHeight", undefined, "capHeight", "capHeight",
     ]);
+    expect(plan.nodes[0]?.textProperties?.runs.map((run) => run.openTypeFeatures)).toEqual([
+      { KERN: false, LIGA: true }, { LIGA: false }, { KERN: false, LIGA: true }, { KERN: false, LIGA: true },
+    ]);
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("BLINK");
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("ZIGZAG");
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("EM");
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain("AUTO");
+    expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain('"liga":2');
   });
 
   it("preserves an empty Figma Text node style as its Canonical insertion style", () => {
