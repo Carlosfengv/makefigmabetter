@@ -6,11 +6,19 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing,
-    Node, NodeId, NodeKind, Page, PageId, ParagraphStyle, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun,
-    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
+    FillRule, FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
+    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
+    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
+    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment, can_parent_contain_child,
+    color::{
+        Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
+        ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
+        PaintLayerKind, PaintStack,
+    },
 };
 use makefigma_protocol::v1;
 use prost::Message;
@@ -18,12 +26,55 @@ use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const PAINT_STACK_ENGINE_SEMANTICS_VERSION: u32 = 4;
+pub const NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION: u32 = 5;
+pub const ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION: u32 = 6;
+pub const IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION: u32 = 7;
+pub const PASS_THROUGH_ENGINE_SEMANTICS_VERSION: u32 = 8;
+pub const LINEAR_BLEND_ENGINE_SEMANTICS_VERSION: u32 = 9;
+pub const NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION: u32 = 10;
+pub const IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION: u32 = 11;
+pub const TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION: u32 = 12;
+pub const SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION: u32 = 13;
+pub const TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION: u32 = 14;
+pub const TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 15;
+pub const TEXT_CASE_ENGINE_SEMANTICS_VERSION: u32 = 16;
+pub const TEXT_PATH_ENGINE_SEMANTICS_VERSION: u32 = 17;
+pub const LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION: u32 = 18;
+pub const PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION: u32 = 19;
+pub const TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 20;
+pub const TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION: u32 = 21;
+pub const TEXT_DECORATION_ENGINE_SEMANTICS_VERSION: u32 = 22;
+pub const TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 23;
+pub const TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION: u32 = 24;
+pub const TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION: u32 = 25;
+pub const TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION: u32 = 26;
+pub const TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION: u32 = 27;
+pub const LEADING_TRIM_ENGINE_SEMANTICS_VERSION: u32 = 28;
+pub const TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION: u32 = 29;
+pub const TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 30;
+pub const PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION: u32 = 31;
+pub const TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION: u32 = 32;
+pub const PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION: u32 = 33;
+pub const PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 34;
+pub const PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 35;
+pub const PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION: u32 = 36;
+pub const PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION: u32 = 37;
+pub const TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION: u32 = 38;
+pub const PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION: u32 = 39;
+pub const FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 40;
+pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotError {
     Invalid,
+    /// The snapshot declares canonical behavior newer than this reader can
+    /// preserve. Reject it before decoding nodes so an older client cannot
+    /// silently rewrite a newer Paint or layout contract.
+    UnsupportedEngineSemantics,
     /// The snapshot carries a NodeKind minted by a newer engine version. The
     /// document is not corrupt; the current client is simply too old to open it
     /// without silently rewriting the unknown node. Kept distinct from `Invalid`
@@ -38,12 +89,360 @@ struct DecodedNode {
     asset_id: Option<AssetId>,
     text_properties: Option<TextProperties>,
     auto_layout: AutoLayout,
+    fill_stack: Option<PaintStack>,
+    stroke_stack: Option<PaintStack>,
 }
 
 pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
+        && document.assets().any(|asset| !asset.font_faces.is_empty())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document.fill_stack_for_node(node.id).is_some()
+                || document.stroke_stack_for_node(node.id).is_some()
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_non_linear_gradient)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.blend_mode.requires_advanced_blend_semantics()
+                || [
+                    document.fill_stack_for_node(node.id),
+                    document.stroke_stack_for_node(node.id),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|stack| &stack.layers)
+                .any(|layer| layer.blend_mode.requires_advanced_blend_semantics())
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_rotated_image)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| node.blend_mode.requires_pass_through_semantics())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.blend_mode.requires_linear_blend_semantics()
+                || [
+                    document.fill_stack_for_node(node.id),
+                    document.stroke_stack_for_node(node.id),
+                ]
+                .into_iter()
+                .flatten()
+                .any(paint_stack_has_linear_blend)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.extensions
+                .get(NORMAL_BLEND_ISOLATION_EXTENSION)
+                .is_some_and(|value| value.as_slice() == [1])
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_image_filters)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_truncation)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.kind == NodeKind::ShapeWithText
+                && document.text_properties_for_node(node.id).is_some()
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_fill_stack)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_base_style)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_CASE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_case)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_PATH_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.kind == NodeKind::TextPath && document.text_properties_for_node(node.id).is_some()
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_line_height_unit)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_indent)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_wrap_style)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_list_type)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_list_spacing)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_style_runs)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hanging_list)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_list_options)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_list_spacing)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_spacing)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_indent_run)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_line_height)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hanging_punctuation)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_text_wrap_style)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hyperlink)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_style)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_offset)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_thickness)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_color)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_skip_ink)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_leading_trim)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     let mut pages = document.pages().cloned().collect::<Vec<_>>();
     pages.sort_by_key(|page| (page.position, page.id));
     let page_chunks = pages
@@ -65,6 +464,8 @@ pub fn snapshot_from_document(
                             document.asset_for_node(node.id),
                             document.text_properties_for_node(node.id),
                             document.auto_layout_for_node(node.id),
+                            document.fill_stack_for_node(node.id),
+                            document.stroke_stack_for_node(node.id),
                         )
                         .encode_to_vec(),
                     })
@@ -101,15 +502,38 @@ pub fn document_from_snapshot(
     expected_document_id: Id,
     expected_hash: Hash,
 ) -> Result<Document, SnapshotError> {
+    document_from_snapshot_with_engine_semantics(
+        bytes,
+        expected_document_id,
+        expected_hash,
+        CURRENT_ENGINE_SEMANTICS_VERSION,
+    )
+}
+
+pub fn document_from_snapshot_with_engine_semantics(
+    bytes: &[u8],
+    expected_document_id: Id,
+    expected_hash: Hash,
+    supported_engine_semantics_version: u32,
+) -> Result<Document, SnapshotError> {
     let snapshot = v1::DocumentSnapshot::decode(bytes).map_err(|_| SnapshotError::Invalid)?;
     if snapshot.format_version != SNAPSHOT_FORMAT_VERSION
         || snapshot.document_id.as_slice() != expected_document_id.as_slice()
     {
         return Err(SnapshotError::Invalid);
     }
+    if snapshot.engine_semantics_version > supported_engine_semantics_version {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    let declared_engine_semantics_version = snapshot.engine_semantics_version;
     let mut document = Document::with_id(DocumentId(id(&snapshot.document_id)?));
     document.seed_color_profile(profile_from_proto(snapshot.document_color_profile)?);
     for asset in snapshot.resource_index {
+        if declared_engine_semantics_version < FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
+            && !asset.font_faces.is_empty()
+        {
+            return Err(SnapshotError::Invalid);
+        }
         document
             .seed_asset(asset_from_proto(asset)?)
             .map_err(|_| SnapshotError::Invalid)?;
@@ -140,8 +564,265 @@ pub fn document_from_snapshot(
         for reference in chunk.nodes {
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| SnapshotError::Invalid)?;
-            let (page_id, node, asset_id, text_properties, auto_layout) =
+            let (page_id, node, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
                 node_from_proto(node_proto)?;
+            if declared_engine_semantics_version < PAINT_STACK_ENGINE_SEMANTICS_VERSION
+                && (fill_stack.is_some() || stroke_stack.is_some())
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_non_linear_gradient)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+                && (node.blend_mode.requires_advanced_blend_semantics()
+                    || [fill_stack.as_ref(), stroke_stack.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|stack| &stack.layers)
+                        .any(|layer| layer.blend_mode.requires_advanced_blend_semantics()))
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_rotated_image)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+                && node.blend_mode.requires_pass_through_semantics()
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+                && (node.blend_mode.requires_linear_blend_semantics()
+                    || [fill_stack.as_ref(), stroke_stack.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(paint_stack_has_linear_blend))
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+                && node
+                    .extensions
+                    .get(NORMAL_BLEND_ISOLATION_EXTENSION)
+                    .is_some_and(|value| value.as_slice() == [1])
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_image_filters)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_truncation)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION
+                && node.kind == NodeKind::ShapeWithText
+                && text_properties.is_some()
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_fill_stack)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_base_style)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_CASE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_case)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_PATH_ENGINE_SEMANTICS_VERSION
+                && node.kind == NodeKind::TextPath
+                && text_properties.is_some()
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_line_height_unit)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_indent)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_wrap_style)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_list_type)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_list_spacing)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_style_runs)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hanging_list)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_list_options)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_list_spacing)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_spacing)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_indent_run)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_line_height)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hanging_punctuation)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version
+                < PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_text_wrap_style)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hyperlink)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_style)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_offset)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version
+                < TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_thickness)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_color)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_skip_ink)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version < LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_leading_trim)
+            {
+                return Err(SnapshotError::Invalid);
+            }
             if page_id != chunk_page_id
                 || page_id.0 != id(&reference.page_id)?
                 || node.id.0 != id(&reference.node_id)?
@@ -164,6 +845,8 @@ pub fn document_from_snapshot(
                         asset_id,
                         text_properties,
                         auto_layout,
+                        fill_stack,
+                        stroke_stack,
                     },
                 )
                 .is_some()
@@ -191,12 +874,22 @@ pub fn document_from_snapshot(
         document
             .seed_auto_layout(decoded.node.id, decoded.auto_layout.clone())
             .map_err(|_| SnapshotError::Invalid)?;
+        document
+            .seed_paint_stacks(
+                decoded.node.id,
+                decoded.fill_stack.clone(),
+                decoded.stroke_stack.clone(),
+            )
+            .map_err(|_| SnapshotError::Invalid)?;
     }
     for retired_id in snapshot.retired_node_ids {
         document
             .seed_retired_id(NodeId(id(&retired_id)?))
             .map_err(|_| SnapshotError::Invalid)?;
     }
+    document
+        .validate_seeded_structure()
+        .map_err(|_| SnapshotError::Invalid)?;
     document.revision = snapshot.revision;
     if page_hashes
         .into_iter()
@@ -234,10 +927,7 @@ fn nodes_in_hydration_order(
         if let Some(parent_id) = node.parent_id {
             let parent = decoded.get(&parent_id).ok_or(SnapshotError::Invalid)?;
             if parent.page_id != decoded_node.page_id
-                || !matches!(
-                    parent.node.kind,
-                    NodeKind::Frame | NodeKind::Group | NodeKind::Section
-                )
+                || !can_parent_contain_child(&parent.node.kind, &node.kind)
             {
                 return Err(SnapshotError::Invalid);
             }
@@ -327,6 +1017,15 @@ fn asset_to_proto(asset: &AssetReference) -> v1::ResourceIndexEntry {
         byte_length: Some(asset.byte_length),
         pixel_width: asset.dimensions.map(|[width, _]| width),
         pixel_height: asset.dimensions.map(|[_, height]| height),
+        font_faces: asset
+            .font_faces
+            .iter()
+            .map(|face| v1::FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family.clone(),
+                style: face.style.clone(),
+            })
+            .collect(),
     }
 }
 fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, SnapshotError> {
@@ -343,6 +1042,15 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Sna
             (Some(width), Some(height)) => Some([width, height]),
             _ => return Err(SnapshotError::Invalid),
         },
+        font_faces: asset
+            .font_faces
+            .into_iter()
+            .map(|face| FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family,
+                style: face.style,
+            })
+            .collect(),
     })
 }
 fn node_to_proto(
@@ -351,6 +1059,8 @@ fn node_to_proto(
     asset_id: Option<AssetId>,
     text_properties: Option<&TextProperties>,
     auto_layout: AutoLayout,
+    fill_stack: Option<&PaintStack>,
+    stroke_stack: Option<&PaintStack>,
 ) -> v1::SceneNode {
     v1::SceneNode {
         node_id: id_to_bytes(node.id.0),
@@ -457,6 +1167,8 @@ fn node_to_proto(
         auto_layout: Some(auto_layout_to_proto(&auto_layout)),
         reactions: Vec::new(),
         prototype_metadata: None,
+        fill_stack: fill_stack.map(paint_stack_to_proto),
+        stroke_stack: stroke_stack.map(paint_stack_to_proto),
     }
 }
 fn node_from_proto(
@@ -468,6 +1180,8 @@ fn node_from_proto(
         Option<AssetId>,
         Option<TextProperties>,
         AutoLayout,
+        Option<PaintStack>,
+        Option<PaintStack>,
     ),
     SnapshotError,
 > {
@@ -524,6 +1238,8 @@ fn node_from_proto(
             | NodeKind::Slot
             | NodeKind::ComponentSet
     ));
+    let fill_stack = node.fill_stack.map(paint_stack_from_proto).transpose()?;
+    let stroke_stack = node.stroke_stack.map(paint_stack_from_proto).transpose()?;
     Ok((
         page_id,
         Node {
@@ -602,6 +1318,8 @@ fn node_from_proto(
             .map(auto_layout_from_proto)
             .transpose()?
             .unwrap_or_default(),
+        fill_stack,
+        stroke_stack,
     ))
 }
 
@@ -903,6 +1621,19 @@ fn blend_mode_to_proto(mode: BlendMode) -> v1::BlendMode {
         BlendMode::Overlay => v1::BlendMode::Overlay,
         BlendMode::Darken => v1::BlendMode::Darken,
         BlendMode::Lighten => v1::BlendMode::Lighten,
+        BlendMode::ColorDodge => v1::BlendMode::ColorDodge,
+        BlendMode::ColorBurn => v1::BlendMode::ColorBurn,
+        BlendMode::HardLight => v1::BlendMode::HardLight,
+        BlendMode::SoftLight => v1::BlendMode::SoftLight,
+        BlendMode::Difference => v1::BlendMode::Difference,
+        BlendMode::Exclusion => v1::BlendMode::Exclusion,
+        BlendMode::Hue => v1::BlendMode::Hue,
+        BlendMode::Saturation => v1::BlendMode::Saturation,
+        BlendMode::Color => v1::BlendMode::Color,
+        BlendMode::Luminosity => v1::BlendMode::Luminosity,
+        BlendMode::PassThrough => v1::BlendMode::PassThrough,
+        BlendMode::LinearBurn => v1::BlendMode::LinearBurn,
+        BlendMode::LinearDodge => v1::BlendMode::LinearDodge,
     }
 }
 
@@ -914,6 +1645,19 @@ fn blend_mode_from_proto(value: i32) -> Result<BlendMode, SnapshotError> {
         Ok(v1::BlendMode::Overlay) => Ok(BlendMode::Overlay),
         Ok(v1::BlendMode::Darken) => Ok(BlendMode::Darken),
         Ok(v1::BlendMode::Lighten) => Ok(BlendMode::Lighten),
+        Ok(v1::BlendMode::ColorDodge) => Ok(BlendMode::ColorDodge),
+        Ok(v1::BlendMode::ColorBurn) => Ok(BlendMode::ColorBurn),
+        Ok(v1::BlendMode::HardLight) => Ok(BlendMode::HardLight),
+        Ok(v1::BlendMode::SoftLight) => Ok(BlendMode::SoftLight),
+        Ok(v1::BlendMode::Difference) => Ok(BlendMode::Difference),
+        Ok(v1::BlendMode::Exclusion) => Ok(BlendMode::Exclusion),
+        Ok(v1::BlendMode::Hue) => Ok(BlendMode::Hue),
+        Ok(v1::BlendMode::Saturation) => Ok(BlendMode::Saturation),
+        Ok(v1::BlendMode::Color) => Ok(BlendMode::Color),
+        Ok(v1::BlendMode::Luminosity) => Ok(BlendMode::Luminosity),
+        Ok(v1::BlendMode::PassThrough) => Ok(BlendMode::PassThrough),
+        Ok(v1::BlendMode::LinearBurn) => Ok(BlendMode::LinearBurn),
+        Ok(v1::BlendMode::LinearDodge) => Ok(BlendMode::LinearDodge),
         Err(_) => Err(SnapshotError::Invalid),
     }
 }
@@ -1122,6 +1866,24 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 italic: run.italic,
                 letter_spacing: run.letter_spacing,
                 color: run.color.map(color_to_proto),
+                fill_stack: run.fill_stack.as_ref().map(paint_stack_to_proto),
+                text_case: run.text_case.map(text_case_to_proto),
+                hyperlink: run.hyperlink.as_ref().map(hyperlink_to_proto),
+                text_decoration: run.text_decoration.map(text_decoration_to_proto),
+                text_decoration_style: run
+                    .text_decoration_style
+                    .map(text_decoration_style_to_proto),
+                text_decoration_offset: run
+                    .text_decoration_offset
+                    .map(text_decoration_offset_to_proto),
+                text_decoration_thickness: run
+                    .text_decoration_thickness
+                    .map(text_decoration_thickness_to_proto),
+                text_decoration_skip_ink: run.text_decoration_skip_ink,
+                leading_trim: run.leading_trim.map(leading_trim_to_proto),
+                text_decoration_color: run
+                    .text_decoration_color
+                    .map(text_decoration_color_to_proto),
             })
             .collect(),
         paragraph: Some(v1::ParagraphStyle {
@@ -1133,6 +1895,19 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
             } as i32,
             line_height: properties.paragraph.line_height,
             paragraph_spacing: properties.paragraph.paragraph_spacing,
+            line_height_unit: properties
+                .paragraph
+                .line_height_unit
+                .map(line_height_unit_to_proto),
+            paragraph_indent: properties.paragraph.paragraph_indent,
+            text_wrap_style: properties
+                .paragraph
+                .text_wrap_style
+                .map(text_wrap_style_to_proto),
+            list_type: properties.paragraph.list_type.map(text_list_type_to_proto),
+            list_spacing: properties.paragraph.list_spacing,
+            hanging_list: properties.paragraph.hanging_list.then_some(true),
+            hanging_punctuation: properties.paragraph.hanging_punctuation.then_some(true),
         }),
         auto_size: match properties.auto_size {
             TextAutoSize::Fixed => v1::TextAutoSize::Fixed,
@@ -1143,6 +1918,55 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
             .fallback_fonts
             .iter()
             .map(font_to_proto)
+            .collect(),
+        text_truncation: (properties.text_truncation == TextTruncation::Ending)
+            .then_some(v1::TextTruncation::Ending as i32),
+        max_lines: properties.max_lines,
+        base_style: properties
+            .base_style
+            .as_ref()
+            .map(|style| v1::TextStyleRun {
+                start: 0,
+                end: 0,
+                font: style.font.as_ref().map(font_to_proto),
+                font_size: style.font_size,
+                font_weight: u32::from(style.font_weight),
+                italic: style.italic,
+                letter_spacing: style.letter_spacing,
+                color: style.color.map(color_to_proto),
+                fill_stack: style.fill_stack.as_ref().map(paint_stack_to_proto),
+                text_case: style.text_case.map(text_case_to_proto),
+                hyperlink: style.hyperlink.as_ref().map(hyperlink_to_proto),
+                text_decoration: style.text_decoration.map(text_decoration_to_proto),
+                text_decoration_style: style
+                    .text_decoration_style
+                    .map(text_decoration_style_to_proto),
+                text_decoration_offset: style
+                    .text_decoration_offset
+                    .map(text_decoration_offset_to_proto),
+                text_decoration_thickness: style
+                    .text_decoration_thickness
+                    .map(text_decoration_thickness_to_proto),
+                text_decoration_skip_ink: style.text_decoration_skip_ink,
+                leading_trim: style.leading_trim.map(leading_trim_to_proto),
+                text_decoration_color: style
+                    .text_decoration_color
+                    .map(text_decoration_color_to_proto),
+            }),
+        paragraph_style_runs: properties
+            .paragraph_style_runs
+            .iter()
+            .map(|run| v1::ParagraphStyleRun {
+                start: run.start,
+                indentation: run.indentation,
+                list_type: run.list_type.map(paragraph_list_type_to_proto),
+                list_spacing: run.list_spacing,
+                paragraph_spacing: run.paragraph_spacing,
+                paragraph_indent: run.paragraph_indent,
+                line_height: run.line_height,
+                line_height_unit: run.line_height_unit.map(line_height_unit_to_proto),
+                text_wrap_style: run.text_wrap_style.map(text_wrap_style_to_proto),
+            })
             .collect(),
     }
 }
@@ -1180,21 +2004,600 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     italic: run.italic,
                     letter_spacing: run.letter_spacing,
                     color: run.color.map(color_from_proto).transpose()?,
+                    fill_stack: run.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: run
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: run.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: run
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: run
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: run
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: run
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: run.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: run
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: run
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
                 })
             })
             .collect::<Result<_, SnapshotError>>()?,
         paragraph: ParagraphStyle {
             alignment,
             line_height: paragraph.line_height,
+            line_height_unit: paragraph
+                .line_height_unit
+                .map(line_height_unit_from_proto)
+                .transpose()?
+                .flatten(),
             paragraph_spacing: paragraph.paragraph_spacing,
+            paragraph_indent: paragraph.paragraph_indent,
+            text_wrap_style: paragraph
+                .text_wrap_style
+                .map(text_wrap_style_from_proto)
+                .transpose()?
+                .flatten(),
+            list_type: paragraph
+                .list_type
+                .map(text_list_type_from_proto)
+                .transpose()?
+                .flatten(),
+            // Explicit zero is Figma's default and is not a semantics-30
+            // capability. Keep malformed negative/non-finite values present so
+            // Core validation rejects them instead of silently repairing data.
+            list_spacing: paragraph.list_spacing.filter(|value| *value != 0.0),
+            hanging_list: paragraph.hanging_list.unwrap_or(false),
+            hanging_punctuation: paragraph.hanging_punctuation.unwrap_or(false),
         },
+        paragraph_style_runs: value
+            .paragraph_style_runs
+            .into_iter()
+            .map(|run| {
+                Ok(ParagraphStyleRun {
+                    start: run.start,
+                    indentation: run.indentation,
+                    list_type: run
+                        .list_type
+                        .map(paragraph_list_type_from_proto)
+                        .transpose()?,
+                    list_spacing: run.list_spacing,
+                    paragraph_spacing: run.paragraph_spacing,
+                    paragraph_indent: run.paragraph_indent,
+                    line_height: run.line_height,
+                    line_height_unit: run
+                        .line_height_unit
+                        .map(line_height_unit_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_wrap_style: run
+                        .text_wrap_style
+                        .map(paragraph_text_wrap_style_from_proto)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<_, SnapshotError>>()?,
         auto_size,
+        text_truncation: match value.text_truncation {
+            None => TextTruncation::Disabled,
+            Some(raw) => {
+                match v1::TextTruncation::try_from(raw).map_err(|_| SnapshotError::Invalid)? {
+                    v1::TextTruncation::Disabled => TextTruncation::Disabled,
+                    v1::TextTruncation::Ending => TextTruncation::Ending,
+                    v1::TextTruncation::Unspecified => return Err(SnapshotError::Invalid),
+                }
+            }
+        },
+        max_lines: value.max_lines,
+        base_style: value
+            .base_style
+            .map(|style| {
+                Ok(TextStyleRun {
+                    start: style.start,
+                    end: style.end,
+                    font: style.font.map(font_from_proto).transpose()?,
+                    font_size: style.font_size,
+                    font_weight: u16::try_from(style.font_weight)
+                        .map_err(|_| SnapshotError::Invalid)?,
+                    italic: style.italic,
+                    letter_spacing: style.letter_spacing,
+                    color: style.color.map(color_from_proto).transpose()?,
+                    fill_stack: style.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: style
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: style.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: style
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: style
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: style
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: style
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: style.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: style
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: style
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
+                })
+            })
+            .transpose()?,
         fallback_fonts: value
             .fallback_fonts
             .into_iter()
             .map(font_from_proto)
             .collect::<Result<_, SnapshotError>>()?,
     })
+}
+
+fn text_properties_has_truncation(properties: &TextProperties) -> bool {
+    properties.text_truncation == TextTruncation::Ending || properties.max_lines.is_some()
+}
+fn text_properties_has_text_case(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.text_case.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_case.is_some())
+}
+
+fn text_properties_has_line_height_unit(properties: &TextProperties) -> bool {
+    properties.paragraph.line_height_unit.is_some()
+}
+
+fn text_properties_has_paragraph_indent(properties: &TextProperties) -> bool {
+    properties.paragraph.paragraph_indent.is_some()
+}
+
+fn text_properties_has_text_wrap_style(properties: &TextProperties) -> bool {
+    properties.paragraph.text_wrap_style.is_some()
+}
+
+fn text_properties_has_list_type(properties: &TextProperties) -> bool {
+    properties.paragraph.list_type.is_some()
+}
+
+fn text_properties_has_list_spacing(properties: &TextProperties) -> bool {
+    properties.paragraph.list_spacing.is_some()
+}
+
+fn text_properties_has_paragraph_style_runs(properties: &TextProperties) -> bool {
+    !properties.paragraph_style_runs.is_empty()
+}
+
+fn text_properties_has_paragraph_list_options(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_type.is_some())
+}
+
+fn text_properties_has_paragraph_list_spacing(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_spacing.is_some())
+}
+
+fn text_properties_has_paragraph_spacing(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_spacing.is_some())
+}
+
+fn text_properties_has_paragraph_indent_run(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_indent.is_some())
+}
+
+fn text_properties_has_paragraph_line_height(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+}
+
+fn text_properties_has_paragraph_text_wrap_style(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.text_wrap_style.is_some())
+}
+
+fn text_properties_has_hanging_list(properties: &TextProperties) -> bool {
+    properties.paragraph.hanging_list
+}
+
+fn text_properties_has_hanging_punctuation(properties: &TextProperties) -> bool {
+    properties.paragraph.hanging_punctuation
+}
+
+fn text_properties_has_hyperlink(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.hyperlink.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.hyperlink.is_some())
+}
+
+fn text_properties_has_text_decoration(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration.is_some())
+}
+
+fn text_properties_has_text_decoration_style(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_style.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_style.is_some())
+}
+
+fn text_properties_has_text_decoration_offset(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_offset.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_offset.is_some())
+}
+
+fn text_properties_has_text_decoration_thickness(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_thickness.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_thickness.is_some())
+}
+
+fn text_properties_has_text_decoration_color(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_color.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_color.is_some())
+}
+
+fn text_properties_has_text_decoration_skip_ink(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_skip_ink == Some(true))
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_skip_ink == Some(true))
+}
+
+fn text_properties_has_leading_trim(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.leading_trim.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.leading_trim.is_some())
+}
+
+fn leading_trim_to_proto(value: LeadingTrim) -> i32 {
+    match value {
+        LeadingTrim::CapHeight => v1::LeadingTrim::CapHeight as i32,
+    }
+}
+
+fn leading_trim_from_proto(value: i32) -> Result<Option<LeadingTrim>, SnapshotError> {
+    match v1::LeadingTrim::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::LeadingTrim::CapHeight => Ok(Some(LeadingTrim::CapHeight)),
+        v1::LeadingTrim::None | v1::LeadingTrim::Unspecified => Ok(None),
+    }
+}
+
+fn text_decoration_offset_to_proto(value: TextDecorationOffset) -> v1::TextDecorationOffset {
+    let (value, unit) = match value {
+        TextDecorationOffset::Pixels(value) => (value, v1::TextDecorationOffsetUnit::Pixels),
+        TextDecorationOffset::Percent(value) => (value, v1::TextDecorationOffsetUnit::Percent),
+    };
+    v1::TextDecorationOffset {
+        value,
+        unit: unit as i32,
+    }
+}
+
+fn text_decoration_offset_from_proto(
+    value: v1::TextDecorationOffset,
+) -> Result<Option<TextDecorationOffset>, SnapshotError> {
+    match v1::TextDecorationOffsetUnit::try_from(value.unit).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextDecorationOffsetUnit::Pixels => Ok(Some(TextDecorationOffset::Pixels(value.value))),
+        v1::TextDecorationOffsetUnit::Percent => {
+            Ok(Some(TextDecorationOffset::Percent(value.value)))
+        }
+        v1::TextDecorationOffsetUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationOffsetUnit::Auto | v1::TextDecorationOffsetUnit::Unspecified => {
+            Err(SnapshotError::Invalid)
+        }
+    }
+}
+
+fn text_decoration_thickness_to_proto(
+    value: TextDecorationThickness,
+) -> v1::TextDecorationThickness {
+    let (value, unit) = match value {
+        TextDecorationThickness::Pixels(value) => (value, v1::TextDecorationThicknessUnit::Pixels),
+        TextDecorationThickness::Percent(value) => {
+            (value, v1::TextDecorationThicknessUnit::Percent)
+        }
+    };
+    v1::TextDecorationThickness {
+        value,
+        unit: unit as i32,
+    }
+}
+
+fn text_decoration_thickness_from_proto(
+    value: v1::TextDecorationThickness,
+) -> Result<Option<TextDecorationThickness>, SnapshotError> {
+    match v1::TextDecorationThicknessUnit::try_from(value.unit)
+        .map_err(|_| SnapshotError::Invalid)?
+    {
+        v1::TextDecorationThicknessUnit::Pixels => {
+            Ok(Some(TextDecorationThickness::Pixels(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Percent => {
+            Ok(Some(TextDecorationThickness::Percent(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationThicknessUnit::Auto | v1::TextDecorationThicknessUnit::Unspecified => {
+            Err(SnapshotError::Invalid)
+        }
+    }
+}
+
+fn text_decoration_color_to_proto(value: TextDecorationColor) -> v1::TextDecorationColor {
+    v1::TextDecorationColor {
+        color: Some(color_to_proto(value.color)),
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode: blend_mode_to_proto(value.blend_mode) as i32,
+    }
+}
+
+fn text_decoration_color_from_proto(
+    value: v1::TextDecorationColor,
+) -> Result<TextDecorationColor, SnapshotError> {
+    let blend_mode = blend_mode_from_proto(value.blend_mode)?;
+    if matches!(blend_mode, BlendMode::PassThrough) {
+        return Err(SnapshotError::Invalid);
+    }
+    Ok(TextDecorationColor {
+        color: color_from_proto(value.color.ok_or(SnapshotError::Invalid)?)?,
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode,
+    })
+}
+
+fn text_decoration_style_to_proto(value: TextDecorationStyle) -> i32 {
+    (match value {
+        TextDecorationStyle::Wavy => v1::TextDecorationStyle::Wavy,
+        TextDecorationStyle::Dotted => v1::TextDecorationStyle::Dotted,
+    }) as i32
+}
+
+fn text_decoration_style_from_proto(
+    value: i32,
+) -> Result<Option<TextDecorationStyle>, SnapshotError> {
+    match v1::TextDecorationStyle::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextDecorationStyle::Wavy => Ok(Some(TextDecorationStyle::Wavy)),
+        v1::TextDecorationStyle::Dotted => Ok(Some(TextDecorationStyle::Dotted)),
+        v1::TextDecorationStyle::Unspecified | v1::TextDecorationStyle::Solid => Ok(None),
+    }
+}
+
+fn text_decoration_to_proto(value: TextDecoration) -> i32 {
+    (match value {
+        TextDecoration::Underline => v1::TextDecoration::Underline,
+        TextDecoration::Strikethrough => v1::TextDecoration::Strikethrough,
+    }) as i32
+}
+
+fn text_decoration_from_proto(value: i32) -> Result<Option<TextDecoration>, SnapshotError> {
+    Ok(Some(
+        match v1::TextDecoration::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+            v1::TextDecoration::Underline => TextDecoration::Underline,
+            v1::TextDecoration::Strikethrough => TextDecoration::Strikethrough,
+            v1::TextDecoration::Unspecified => return Ok(None),
+        },
+    ))
+}
+
+fn hyperlink_to_proto(value: &HyperlinkTarget) -> v1::HyperlinkTarget {
+    v1::HyperlinkTarget {
+        r#type: match value.kind {
+            HyperlinkType::Url => v1::HyperlinkType::Url,
+            HyperlinkType::Node => v1::HyperlinkType::Node,
+        } as i32,
+        value: value.value.clone(),
+    }
+}
+
+fn hyperlink_from_proto(value: v1::HyperlinkTarget) -> Result<HyperlinkTarget, SnapshotError> {
+    let kind =
+        match v1::HyperlinkType::try_from(value.r#type).map_err(|_| SnapshotError::Invalid)? {
+            v1::HyperlinkType::Url => HyperlinkType::Url,
+            v1::HyperlinkType::Node => HyperlinkType::Node,
+            v1::HyperlinkType::Unspecified => return Err(SnapshotError::Invalid),
+        };
+    Ok(HyperlinkTarget {
+        kind,
+        value: value.value,
+    })
+}
+
+fn text_wrap_style_to_proto(value: TextWrapStyle) -> i32 {
+    (match value {
+        TextWrapStyle::Auto => v1::TextWrapStyle::Auto,
+        TextWrapStyle::Balance => v1::TextWrapStyle::Balance,
+        TextWrapStyle::Pretty => v1::TextWrapStyle::Pretty,
+    }) as i32
+}
+
+fn paragraph_text_wrap_style_from_proto(value: i32) -> Result<TextWrapStyle, SnapshotError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextWrapStyle::Auto => Ok(TextWrapStyle::Auto),
+        v1::TextWrapStyle::Balance => Ok(TextWrapStyle::Balance),
+        v1::TextWrapStyle::Pretty => Ok(TextWrapStyle::Pretty),
+        v1::TextWrapStyle::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+
+fn text_wrap_style_from_proto(value: i32) -> Result<Option<TextWrapStyle>, SnapshotError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextWrapStyle::Auto => Ok(None),
+        v1::TextWrapStyle::Balance => Ok(Some(TextWrapStyle::Balance)),
+        v1::TextWrapStyle::Pretty => Ok(Some(TextWrapStyle::Pretty)),
+        v1::TextWrapStyle::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+
+fn text_list_type_to_proto(value: TextListType) -> i32 {
+    (match value {
+        TextListType::Ordered => v1::TextListType::Ordered,
+        TextListType::Unordered => v1::TextListType::Unordered,
+    }) as i32
+}
+
+fn text_list_type_from_proto(value: i32) -> Result<Option<TextListType>, SnapshotError> {
+    match v1::TextListType::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextListType::None => Ok(None),
+        v1::TextListType::Ordered => Ok(Some(TextListType::Ordered)),
+        v1::TextListType::Unordered => Ok(Some(TextListType::Unordered)),
+        v1::TextListType::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+
+fn paragraph_list_type_to_proto(value: ParagraphListType) -> i32 {
+    (match value {
+        ParagraphListType::None => v1::TextListType::None,
+        ParagraphListType::Ordered => v1::TextListType::Ordered,
+        ParagraphListType::Unordered => v1::TextListType::Unordered,
+    }) as i32
+}
+
+fn paragraph_list_type_from_proto(value: i32) -> Result<ParagraphListType, SnapshotError> {
+    match v1::TextListType::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextListType::None => Ok(ParagraphListType::None),
+        v1::TextListType::Ordered => Ok(ParagraphListType::Ordered),
+        v1::TextListType::Unordered => Ok(ParagraphListType::Unordered),
+        v1::TextListType::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+
+fn line_height_unit_to_proto(value: LineHeightUnit) -> i32 {
+    (match value {
+        LineHeightUnit::Percent => v1::LineHeightUnit::Percent,
+        LineHeightUnit::Auto => v1::LineHeightUnit::Auto,
+    }) as i32
+}
+
+fn line_height_unit_from_proto(value: i32) -> Result<Option<LineHeightUnit>, SnapshotError> {
+    match v1::LineHeightUnit::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::LineHeightUnit::Pixels => Ok(None),
+        v1::LineHeightUnit::Percent => Ok(Some(LineHeightUnit::Percent)),
+        v1::LineHeightUnit::Auto => Ok(Some(LineHeightUnit::Auto)),
+        v1::LineHeightUnit::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+
+fn text_case_to_proto(value: TextCase) -> i32 {
+    (match value {
+        TextCase::Original => v1::TextCase::Original,
+        TextCase::Upper => v1::TextCase::Upper,
+        TextCase::Lower => v1::TextCase::Lower,
+        TextCase::Title => v1::TextCase::Title,
+        TextCase::SmallCaps => v1::TextCase::SmallCaps,
+        TextCase::SmallCapsForced => v1::TextCase::SmallCapsForced,
+    }) as i32
+}
+
+fn text_case_from_proto(value: i32) -> Result<Option<TextCase>, SnapshotError> {
+    match v1::TextCase::try_from(value).map_err(|_| SnapshotError::Invalid)? {
+        v1::TextCase::Original => Ok(None),
+        v1::TextCase::Upper => Ok(Some(TextCase::Upper)),
+        v1::TextCase::Lower => Ok(Some(TextCase::Lower)),
+        v1::TextCase::Title => Ok(Some(TextCase::Title)),
+        v1::TextCase::SmallCaps => Ok(Some(TextCase::SmallCaps)),
+        v1::TextCase::SmallCapsForced => Ok(Some(TextCase::SmallCapsForced)),
+        v1::TextCase::Unspecified => Err(SnapshotError::Invalid),
+    }
+}
+fn text_properties_has_fill_stack(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.fill_stack.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.fill_stack.is_some())
+}
+fn text_properties_has_base_style(properties: &TextProperties) -> bool {
+    properties.base_style.is_some()
 }
 fn page_to_proto(page: &Page) -> v1::PageRef {
     v1::PageRef {
@@ -1263,6 +2666,194 @@ fn paint_from_proto(paint: v1::Paint) -> Result<Paint, SnapshotError> {
         )
         .map(Paint::LinearGradient)
         .map_err(|_| SnapshotError::Invalid),
+    }
+}
+
+fn paint_stack_to_proto(stack: &PaintStack) -> v1::PaintStack {
+    v1::PaintStack {
+        layers: stack.layers.iter().map(paint_layer_to_proto).collect(),
+    }
+}
+
+fn paint_stack_has_non_linear_gradient(stack: &PaintStack) -> bool {
+    stack
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.paint, PaintLayerKind::Gradient(_)))
+}
+
+fn paint_stack_has_rotated_image(stack: &PaintStack) -> bool {
+    stack.layers.iter().any(
+        |layer| matches!(&layer.paint, PaintLayerKind::Image(image) if image.rotation_degrees != 0),
+    )
+}
+
+fn paint_stack_has_image_filters(stack: &PaintStack) -> bool {
+    stack.layers.iter().any(
+        |layer| matches!(&layer.paint, PaintLayerKind::Image(image) if image.filters.is_some()),
+    )
+}
+
+fn paint_stack_has_linear_blend(stack: &PaintStack) -> bool {
+    stack
+        .layers
+        .iter()
+        .any(|layer| layer.blend_mode.requires_linear_blend_semantics())
+}
+
+fn gradient_paint_to_proto(gradient: &GradientPaint) -> v1::GradientPaint {
+    v1::GradientPaint {
+        kind: match gradient.kind {
+            GradientPaintKind::Radial => v1::GradientPaintKind::Radial,
+            GradientPaintKind::Angular => v1::GradientPaintKind::Angular,
+            GradientPaintKind::Diamond => v1::GradientPaintKind::Diamond,
+        } as i32,
+        transform: Some(transform_to_proto(gradient.transform)),
+        stops: gradient
+            .stops
+            .iter()
+            .map(|stop| v1::GradientStop {
+                position: stop.position,
+                color: Some(color_to_proto(stop.color)),
+            })
+            .collect(),
+    }
+}
+
+fn gradient_paint_from_proto(gradient: v1::GradientPaint) -> Result<GradientPaint, SnapshotError> {
+    let kind =
+        match v1::GradientPaintKind::try_from(gradient.kind).map_err(|_| SnapshotError::Invalid)? {
+            v1::GradientPaintKind::Radial => GradientPaintKind::Radial,
+            v1::GradientPaintKind::Angular => GradientPaintKind::Angular,
+            v1::GradientPaintKind::Diamond => GradientPaintKind::Diamond,
+            v1::GradientPaintKind::Unspecified => return Err(SnapshotError::Invalid),
+        };
+    GradientPaint::new(
+        kind,
+        transform_from_proto(gradient.transform.ok_or(SnapshotError::Invalid)?)?,
+        gradient
+            .stops
+            .into_iter()
+            .map(|stop| {
+                Ok(GradientStop {
+                    position: stop.position,
+                    color: color_from_proto(stop.color.ok_or(SnapshotError::Invalid)?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SnapshotError>>()?,
+    )
+    .map_err(|_| SnapshotError::Invalid)
+}
+
+fn paint_layer_to_proto(layer: &PaintLayer) -> v1::PaintLayer {
+    use v1::paint_layer::Kind;
+    let kind = match &layer.paint {
+        PaintLayerKind::Solid(color) => Kind::Solid(color_to_proto(*color)),
+        PaintLayerKind::LinearGradient(gradient) => Kind::LinearGradient(
+            match paint_to_proto(&Paint::LinearGradient(gradient.clone())).kind {
+                Some(v1::paint::Kind::LinearGradient(gradient)) => gradient,
+                _ => unreachable!("linear gradient conversion is stable"),
+            },
+        ),
+        PaintLayerKind::Image(image) => Kind::Image(v1::ImagePaint {
+            asset_id: id_to_bytes(image.asset_id.0),
+            scale_mode: match image.scale_mode {
+                ImageScaleMode::Fill => v1::ImageScaleMode::Fill,
+                ImageScaleMode::Fit => v1::ImageScaleMode::Fit,
+                ImageScaleMode::Crop => v1::ImageScaleMode::Crop,
+                ImageScaleMode::Tile => v1::ImageScaleMode::Tile,
+            } as i32,
+            transform: Some(transform_to_proto(image.transform)),
+            rotation_degrees: i32::from(image.rotation_degrees),
+            filters: image.filters.map(image_filters_to_proto),
+        }),
+        PaintLayerKind::Gradient(gradient) => Kind::Gradient(gradient_paint_to_proto(gradient)),
+    };
+    v1::PaintLayer {
+        kind: Some(kind),
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blend_mode: blend_mode_to_proto(layer.blend_mode) as i32,
+    }
+}
+
+fn paint_stack_from_proto(stack: v1::PaintStack) -> Result<PaintStack, SnapshotError> {
+    let stack = PaintStack {
+        layers: stack
+            .layers
+            .into_iter()
+            .map(paint_layer_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    stack
+        .is_valid()
+        .then_some(stack)
+        .ok_or(SnapshotError::Invalid)
+}
+
+fn paint_layer_from_proto(layer: v1::PaintLayer) -> Result<PaintLayer, SnapshotError> {
+    use v1::paint_layer::Kind;
+    let paint = match layer.kind.ok_or(SnapshotError::Invalid)? {
+        Kind::Solid(color) => PaintLayerKind::Solid(color_from_proto(color)?),
+        Kind::LinearGradient(gradient) => PaintLayerKind::LinearGradient(
+            match paint_from_proto(v1::Paint {
+                kind: Some(v1::paint::Kind::LinearGradient(gradient)),
+            })? {
+                Paint::LinearGradient(gradient) => gradient,
+                Paint::Solid(_) => unreachable!("linear gradient tag is stable"),
+            },
+        ),
+        Kind::Image(image) => PaintLayerKind::Image(ImagePaint {
+            asset_id: AssetId(id(&image.asset_id)?),
+            scale_mode: match v1::ImageScaleMode::try_from(image.scale_mode)
+                .map_err(|_| SnapshotError::Invalid)?
+            {
+                v1::ImageScaleMode::Fill => ImageScaleMode::Fill,
+                v1::ImageScaleMode::Fit => ImageScaleMode::Fit,
+                v1::ImageScaleMode::Crop => ImageScaleMode::Crop,
+                v1::ImageScaleMode::Tile => ImageScaleMode::Tile,
+                v1::ImageScaleMode::Unspecified => return Err(SnapshotError::Invalid),
+            },
+            transform: transform_from_proto(image.transform.ok_or(SnapshotError::Invalid)?)?,
+            rotation_degrees: i16::try_from(image.rotation_degrees)
+                .map_err(|_| SnapshotError::Invalid)?,
+            filters: image.filters.map(image_filters_from_proto),
+        }),
+        Kind::Gradient(gradient) => PaintLayerKind::Gradient(gradient_paint_from_proto(gradient)?),
+    };
+    let layer = PaintLayer {
+        paint,
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blend_mode: blend_mode_from_proto(layer.blend_mode)?,
+    };
+    layer
+        .is_valid()
+        .then_some(layer)
+        .ok_or(SnapshotError::Invalid)
+}
+
+fn image_filters_to_proto(filters: ImageFilters) -> v1::ImageFilters {
+    v1::ImageFilters {
+        exposure: filters.exposure,
+        contrast: filters.contrast,
+        saturation: filters.saturation,
+        temperature: filters.temperature,
+        tint: filters.tint,
+        highlights: filters.highlights,
+        shadows: filters.shadows,
+    }
+}
+
+fn image_filters_from_proto(filters: v1::ImageFilters) -> ImageFilters {
+    ImageFilters {
+        exposure: filters.exposure,
+        contrast: filters.contrast,
+        saturation: filters.saturation,
+        temperature: filters.temperature,
+        tint: filters.tint,
+        highlights: filters.highlights,
+        shadows: filters.shadows,
     }
 }
 fn color_to_proto(color: Color) -> v1::Color {
@@ -1444,6 +3035,7 @@ mod tests {
                 media_type: "image/png".into(),
                 byte_length: 16,
                 dimensions: Some([2, 2]),
+                font_faces: Vec::new(),
             })
             .unwrap();
         document
@@ -1611,14 +3203,36 @@ mod tests {
                         italic: false,
                         letter_spacing: 0.0,
                         color: None,
+                        fill_stack: None,
+
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: None,
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
                     }],
                     paragraph: ParagraphStyle {
                         alignment: TextAlign::Left,
                         line_height: Some(20.0),
+                        line_height_unit: None,
                         paragraph_spacing: 0.0,
+                        paragraph_indent: None,
+                        text_wrap_style: None,
+                        list_type: None,
+                        list_spacing: None,
+                        hanging_list: false,
+                        hanging_punctuation: false,
                     },
+                    paragraph_style_runs: Vec::new(),
                     auto_size: TextAutoSize::Height,
                     fallback_fonts: vec![],
+                    text_truncation: TextTruncation::Disabled,
+                    max_lines: None,
+                    base_style: None,
                 },
             )
             .unwrap();
@@ -1688,6 +3302,18 @@ mod tests {
         document
             .seed_node_on_page(DEFAULT_PAGE_ID, boolean)
             .unwrap();
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                node(8, NodeKind::Rectangle, Some(NodeId(7))),
+            )
+            .unwrap();
+        document
+            .seed_node_on_page(
+                DEFAULT_PAGE_ID,
+                node(9, NodeKind::Rectangle, Some(NodeId(7))),
+            )
+            .unwrap();
 
         let restored =
             document_from_wire_snapshot(&snapshot_from_document(&document, 1).unwrap()).unwrap();
@@ -1696,6 +3322,20 @@ mod tests {
                 .node(NodeId(7))
                 .and_then(|node| node.boolean_operation),
             Some(BooleanOperation::Exclude),
+        );
+    }
+
+    #[test]
+    fn wire_snapshot_rejects_an_incomplete_structural_container() {
+        let mut document = Document::with_id(DocumentId(43));
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(7, NodeKind::Group, None))
+            .unwrap();
+        let snapshot = snapshot_from_document(&document, 1).unwrap();
+
+        assert_eq!(
+            document_from_wire_snapshot(&snapshot),
+            Err(SnapshotError::Invalid)
         );
     }
 
@@ -1985,6 +3625,2405 @@ mod tests {
         zero.page_chunks[0].nodes[0].canonical_node = zero_node.encode_to_vec();
         assert_eq!(
             document_from_wire_snapshot(&zero.encode_to_vec()),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn newer_engine_semantics_is_rejected_before_node_decode() {
+        let document = Document::with_id(DocumentId(41));
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION + 1).unwrap();
+
+        assert_eq!(
+            document_from_snapshot(&snapshot, 41_u128.to_be_bytes(), hash),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        assert!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                41_u128.to_be_bytes(),
+                hash,
+                CURRENT_ENGINE_SEMANTICS_VERSION + 1,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn versioned_paint_stack_round_trips_presence_and_requires_semantics_four() {
+        let mut document = Document::with_id(DocumentId(44));
+        let asset = AssetReference {
+            asset_id: AssetId(440),
+            content_hash: [44; 32],
+            media_type: "image/png".into(),
+            byte_length: 16,
+            dimensions: Some([2, 2]),
+            font_faces: Vec::new(),
+        };
+        document.seed_asset(asset.clone()).unwrap();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(44, NodeKind::Rectangle, None))
+            .unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(44),
+                Some(PaintStack::default()),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Image(ImagePaint {
+                            asset_id: asset.asset_id,
+                            scale_mode: ImageScaleMode::Tile,
+                            transform: editor_core::geometry::AffineTransform::IDENTITY,
+                            rotation_degrees: 0,
+                            filters: None,
+                        }),
+                        visible: false,
+                        opacity: 0.25,
+                        blend_mode: BlendMode::Screen,
+                    }],
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PAINT_STACK_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                44_u128.to_be_bytes(),
+                hash,
+                PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            44_u128.to_be_bytes(),
+            hash,
+            PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.fill_stack_for_node(NodeId(44)),
+            Some(&PaintStack::default())
+        );
+        assert_eq!(
+            restored
+                .stroke_stack_for_node(NodeId(44))
+                .unwrap()
+                .layers
+                .len(),
+            1
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                44_u128.to_be_bytes(),
+                hash,
+                PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn non_linear_gradient_round_trips_and_requires_semantics_five() {
+        let mut document = Document::with_id(DocumentId(45));
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(45, NodeKind::Rectangle, None))
+            .unwrap();
+        let gradient = GradientPaint::new(
+            GradientPaintKind::Diamond,
+            AffineTransform {
+                a: 0.8,
+                b: -0.2,
+                c: 0.15,
+                d: 1.1,
+                e: 0.1,
+                f: 0.05,
+            },
+            vec![
+                GradientStop {
+                    position: 0.0,
+                    color: Color::from_srgb_u8([255, 0, 0], 255),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: Color::from_srgb_u8([0, 0, 255], 128),
+                },
+            ],
+        )
+        .unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(45),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Gradient(gradient.clone()),
+                        visible: true,
+                        opacity: 0.75,
+                        blend_mode: BlendMode::Overlay,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION - 1,),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            45_u128.to_be_bytes(),
+            hash,
+            NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.fill_stack_for_node(NodeId(45)).unwrap().layers[0].paint,
+            PaintLayerKind::Gradient(gradient)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn advanced_blend_modes_round_trip_and_require_semantics_six() {
+        let mut document = Document::with_id(DocumentId(46));
+        let mut blended = node(46, NodeKind::Rectangle, None);
+        blended.blend_mode = BlendMode::Hue;
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, blended)
+            .unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(46),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Solid(Color::from_srgb_u8([20, 80, 160], 255)),
+                        visible: true,
+                        opacity: 0.8,
+                        blend_mode: BlendMode::ColorBurn,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                46_u128.to_be_bytes(),
+                hash,
+                ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            46_u128.to_be_bytes(),
+            hash,
+            ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.node(NodeId(46)).unwrap().blend_mode,
+            BlendMode::Hue
+        );
+        assert_eq!(
+            restored.fill_stack_for_node(NodeId(46)).unwrap().layers[0].blend_mode,
+            BlendMode::ColorBurn
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn image_rotation_round_trips_and_requires_semantics_seven() {
+        let asset = AssetReference {
+            asset_id: AssetId(470),
+            content_hash: [47; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([8, 4]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::with_id(DocumentId(47));
+        document.seed_asset(asset.clone()).unwrap();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(47, NodeKind::Rectangle, None))
+            .unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(47),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Image(ImagePaint {
+                            asset_id: asset.asset_id,
+                            scale_mode: ImageScaleMode::Fill,
+                            transform: AffineTransform::IDENTITY,
+                            rotation_degrees: 90,
+                            filters: None,
+                        }),
+                        visible: true,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                47_u128.to_be_bytes(),
+                hash,
+                IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            47_u128.to_be_bytes(),
+            hash,
+            IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert!(matches!(
+            &restored.fill_stack_for_node(NodeId(47)).unwrap().layers[0].paint,
+            PaintLayerKind::Image(ImagePaint {
+                rotation_degrees: 90,
+                ..
+            })
+        ));
+        assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn pass_through_round_trips_and_requires_semantics_eight() {
+        let mut document = Document::with_id(DocumentId(48));
+        let mut frame = node(48, NodeKind::Frame, None);
+        frame.blend_mode = BlendMode::PassThrough;
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, PASS_THROUGH_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PASS_THROUGH_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                48_u128.to_be_bytes(),
+                hash,
+                PASS_THROUGH_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            48_u128.to_be_bytes(),
+            hash,
+            PASS_THROUGH_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.node(NodeId(48)).unwrap().blend_mode,
+            BlendMode::PassThrough
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn linear_blends_round_trip_and_require_semantics_nine() {
+        let mut document = Document::with_id(DocumentId(49));
+        let mut burn = node(49, NodeKind::Rectangle, None);
+        burn.blend_mode = BlendMode::LinearBurn;
+        let mut dodge = node(50, NodeKind::Rectangle, None);
+        dodge.blend_mode = BlendMode::LinearDodge;
+        document.seed_node_on_page(DEFAULT_PAGE_ID, burn).unwrap();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, dodge).unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(49),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Solid(Color::from_srgb_u8([200, 40, 90], 255)),
+                        visible: true,
+                        opacity: 0.75,
+                        blend_mode: BlendMode::LinearDodge,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, LINEAR_BLEND_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, LINEAR_BLEND_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                49_u128.to_be_bytes(),
+                hash,
+                LINEAR_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            49_u128.to_be_bytes(),
+            hash,
+            LINEAR_BLEND_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.node(NodeId(49)).unwrap().blend_mode,
+            BlendMode::LinearBurn
+        );
+        assert_eq!(
+            restored.node(NodeId(50)).unwrap().blend_mode,
+            BlendMode::LinearDodge
+        );
+        assert_eq!(
+            restored.fill_stack_for_node(NodeId(49)).unwrap().layers[0].blend_mode,
+            BlendMode::LinearDodge
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn isolated_normal_round_trips_and_requires_semantics_ten() {
+        let mut document = Document::with_id(DocumentId(51));
+        let mut group = node(51, NodeKind::Frame, None);
+        group
+            .extensions
+            .insert(NORMAL_BLEND_ISOLATION_EXTENSION.into(), vec![1]);
+        document.seed_node_on_page(DEFAULT_PAGE_ID, group).unwrap();
+
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                51_u128.to_be_bytes(),
+                hash,
+                NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            51_u128.to_be_bytes(),
+            hash,
+            NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .node(NodeId(51))
+                .unwrap()
+                .extensions
+                .get(NORMAL_BLEND_ISOLATION_EXTENSION),
+            Some(&vec![1])
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                51_u128.to_be_bytes(),
+                hash,
+                NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn image_filters_round_trip_and_require_semantics_eleven() {
+        let asset = AssetReference {
+            asset_id: AssetId(520),
+            content_hash: [52; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([8, 4]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::with_id(DocumentId(52));
+        document.seed_asset(asset.clone()).unwrap();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node(52, NodeKind::Rectangle, None))
+            .unwrap();
+        document
+            .seed_paint_stacks(
+                NodeId(52),
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Image(ImagePaint {
+                            asset_id: asset.asset_id,
+                            scale_mode: ImageScaleMode::Fill,
+                            transform: AffineTransform::IDENTITY,
+                            rotation_degrees: 0,
+                            filters: Some(ImageFilters {
+                                exposure: Some(0.25),
+                                shadows: Some(-0.5),
+                                ..ImageFilters::default()
+                            }),
+                        }),
+                        visible: true,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                52_u128.to_be_bytes(),
+                hash,
+                IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            52_u128.to_be_bytes(),
+            hash,
+            IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert!(matches!(
+            restored.fill_stack_for_node(NodeId(52)).unwrap().layers[0].paint,
+            PaintLayerKind::Image(ImagePaint {
+                filters: Some(ImageFilters { exposure: Some(value), shadows: Some(shadows), .. }),
+                ..
+            }) if (value - 0.25).abs() < f32::EPSILON && (shadows + 0.5).abs() < f32::EPSILON
+        ));
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                52_u128.to_be_bytes(),
+                hash,
+                IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_truncation_round_trips_and_requires_semantics_twelve() {
+        let mut document = Document::with_id(DocumentId(53));
+        let mut text = node(53, NodeKind::Text, None);
+        text.text = "one two three".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            text_truncation: TextTruncation::Ending,
+            max_lines: Some(2),
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(53), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION).unwrap();
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &snapshot,
+                53_u128.to_be_bytes(),
+                hash,
+                TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            53_u128.to_be_bytes(),
+            hash,
+            TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(53)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                53_u128.to_be_bytes(),
+                hash,
+                TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn shape_with_text_sublayer_styles_require_semantics_thirteen() {
+        let mut document = Document::with_id(DocumentId(54));
+        let mut shape = node(54, NodeKind::ShapeWithText, None);
+        shape.text = "Approve".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, shape).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 7,
+                font: None,
+                font_size: 18.0,
+                font_weight: 650,
+                italic: false,
+                letter_spacing: 1.5,
+                color: None,
+                fill_stack: None,
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Center,
+                line_height: Some(24.0),
+                line_height_unit: None,
+                paragraph_spacing: 4.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(54), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            54_u128.to_be_bytes(),
+            hash,
+            SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(54)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                54_u128.to_be_bytes(),
+                hash,
+                SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_run_paint_stack_round_trips_and_requires_semantics_fourteen() {
+        let mut document = Document::with_id(DocumentId(55));
+        let mut text = node(55, NodeKind::Text, None);
+        text.text = "AB".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 2,
+                font: None,
+                font_size: 16.0,
+                font_weight: 500,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: Some(PaintStack::default()),
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(55), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1,),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            55_u128.to_be_bytes(),
+            hash,
+            TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(55)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                55_u128.to_be_bytes(),
+                hash,
+                TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn empty_text_base_style_round_trips_and_requires_semantics_fifteen() {
+        let mut document = Document::with_id(DocumentId(56));
+        let mut shape = node(56, NodeKind::ShapeWithText, None);
+        shape.text.clear();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, shape).unwrap();
+        let properties = TextProperties {
+            base_style: Some(TextStyleRun {
+                start: 0,
+                end: 0,
+                font: None,
+                font_size: 22.0,
+                font_weight: 600,
+                italic: true,
+                letter_spacing: 1.25,
+                color: None,
+                fill_stack: Some(PaintStack::default()),
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }),
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(56), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            56_u128.to_be_bytes(),
+            hash,
+            TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(56)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                56_u128.to_be_bytes(),
+                hash,
+                TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_case_round_trips_and_requires_semantics_sixteen() {
+        let mut document = Document::with_id(DocumentId(57));
+        let mut text = node(57, NodeKind::Text, None);
+        text.text = "Case".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: Some(TextCase::SmallCapsForced),
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(57), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_CASE_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_CASE_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            57_u128.to_be_bytes(),
+            hash,
+            TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(57)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_CASE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                57_u128.to_be_bytes(),
+                hash,
+                TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_path_text_properties_round_trip_and_require_semantics_seventeen() {
+        let mut document = Document::with_id(DocumentId(58));
+        let mut text_path = node(58, NodeKind::TextPath, None);
+        text_path.text = "Curve".into();
+        text_path.vector_path = Some(VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                points: vec![
+                    VectorPoint {
+                        id: PointId(1),
+                        position: editor_core::geometry::Point { x: 0.0, y: 40.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: editor_core::geometry::Point { x: 100.0, y: 40.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                ],
+            }],
+        });
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, text_path)
+            .unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 18.0,
+                font_weight: 600,
+                italic: false,
+                letter_spacing: 1.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(58), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_PATH_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_PATH_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            58_u128.to_be_bytes(),
+            hash,
+            TEXT_PATH_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(58)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), hash);
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_PATH_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                58_u128.to_be_bytes(),
+                hash,
+                TEXT_PATH_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn relative_line_height_round_trips_and_requires_semantics_eighteen() {
+        let mut document = Document::with_id(DocumentId(59));
+        let mut text = node(59, NodeKind::Text, None);
+        text.text = "Scale".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 20.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Left,
+                line_height: Some(150.0),
+                line_height_unit: Some(LineHeightUnit::Percent),
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(59), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            59_u128.to_be_bytes(),
+            hash,
+            LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(59)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                59_u128.to_be_bytes(),
+                hash,
+                LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_indent_round_trips_and_requires_semantics_nineteen() {
+        let mut document = Document::with_id(DocumentId(60));
+        let mut text = node(60, NodeKind::Text, None);
+        text.text = "Inset".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 20.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: ParagraphStyle {
+                paragraph_indent: Some(16.0),
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(60), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            60_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(60)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                60_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_wrap_style_round_trips_and_requires_semantics_twenty() {
+        let mut document = Document::with_id(DocumentId(61));
+        let mut text = node(61, NodeKind::Text, None);
+        text.text = "aa bb cc dd".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                text_wrap_style: Some(TextWrapStyle::Balance),
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(61), properties.clone())
+            .unwrap();
+
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            61_u128.to_be_bytes(),
+            hash,
+            TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(61)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                61_u128.to_be_bytes(),
+                hash,
+                TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_hyperlink_round_trips_and_requires_semantics_twenty_one() {
+        let mut document = Document::with_id(DocumentId(62));
+        let mut text = node(62, NodeKind::Text, None);
+        text.text = "Link".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: Some(HyperlinkTarget {
+                    kind: HyperlinkType::Url,
+                    value: "https://example.com".into(),
+                }),
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(62), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            62_u128.to_be_bytes(),
+            hash,
+            TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(62)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                62_u128.to_be_bytes(),
+                hash,
+                TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_round_trips_and_requires_semantics_twenty_two() {
+        let mut document = Document::with_id(DocumentId(63));
+        let mut text = node(63, NodeKind::Text, None);
+        text.text = "Line".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(63), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_DECORATION_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_DECORATION_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            63_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(63)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_DECORATION_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                63_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_style_round_trips_and_requires_semantics_twenty_three() {
+        let mut document = Document::with_id(DocumentId(64));
+        let mut text = node(64, NodeKind::Text, None);
+        text.text = "Wave".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: Some(TextDecorationStyle::Wavy),
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(64), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            64_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(64)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                64_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_offset_round_trips_and_requires_semantics_twenty_four() {
+        let mut document = Document::with_id(DocumentId(65));
+        let mut text = node(65, NodeKind::Text, None);
+        text.text = "Offset".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let style = TextStyleRun {
+            start: 0,
+            end: 6,
+            font: None,
+            font_size: 16.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: Some(TextDecoration::Underline),
+            text_decoration_style: None,
+            text_decoration_offset: Some(TextDecorationOffset::Percent(-25.0)),
+            text_decoration_thickness: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            text_decoration_color: None,
+        };
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(65), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            65_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(65)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                65_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_thickness_round_trips_and_requires_semantics_twenty_five() {
+        let mut document = Document::with_id(DocumentId(66));
+        let mut text = node(66, NodeKind::Text, None);
+        text.text = "Thick".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let style = TextStyleRun {
+            start: 0,
+            end: 5,
+            font: None,
+            font_size: 16.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: Some(TextDecoration::Underline),
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: Some(TextDecorationThickness::Percent(12.5)),
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            text_decoration_color: None,
+        };
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(66), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot = snapshot_from_document(
+            &document,
+            TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            66_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(66)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version =
+            TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                66_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_color_round_trips_and_requires_semantics_twenty_six() {
+        let mut document = Document::with_id(DocumentId(67));
+        let mut text = node(67, NodeKind::Text, None);
+        text.text = "Color".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: Some(TextDecorationColor {
+                    color: Color {
+                        space: ColorSpace::Srgb,
+                        components: [1.0, 0.25, 0.5],
+                        alpha: 1.0,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Multiply,
+                }),
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(67), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            67_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(67)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                67_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_skip_ink_round_trips_and_requires_semantics_twenty_seven() {
+        let mut document = Document::with_id(DocumentId(68));
+        let mut text = node(68, NodeKind::Text, None);
+        text.text = "glyph".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 5,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: Some(true),
+                leading_trim: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(68), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            68_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(68)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                68_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn leading_trim_round_trips_and_requires_semantics_twenty_eight() {
+        let mut document = Document::with_id(DocumentId(69));
+        let mut text = node(69, NodeKind::Text, None);
+        text.text = "Cap".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 3,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: None,
+                leading_trim: Some(LeadingTrim::CapHeight),
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(69), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, LEADING_TRIM_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, LEADING_TRIM_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            69_u128.to_be_bytes(),
+            hash,
+            LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(69)),
+            Some(&properties)
+        );
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = LEADING_TRIM_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                69_u128.to_be_bytes(),
+                hash,
+                LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_list_type_round_trips_and_requires_semantics_twenty_nine() {
+        let mut document = Document::with_id(DocumentId(70));
+        let mut text = node(70, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(70), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            70_u128.to_be_bytes(),
+            hash,
+            TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(70)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                70_u128.to_be_bytes(),
+                hash,
+                TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_list_spacing_round_trips_and_requires_semantics_thirty() {
+        let mut document = Document::with_id(DocumentId(71));
+        let mut text = node(71, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                list_spacing: Some(8.0),
+                hanging_list: false,
+                hanging_punctuation: false,
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(71), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            71_u128.to_be_bytes(),
+            hash,
+            TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(71)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                71_u128.to_be_bytes(),
+                hash,
+                TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_style_runs_round_trip_and_require_semantics_thirty_one() {
+        let mut document = Document::with_id(DocumentId(72));
+        let mut text = node(72, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 4,
+                indentation: Some(2),
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(72), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            72_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(72)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                72_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_list_options_round_trip_and_require_semantics_thirty_three() {
+        let mut document = Document::with_id(DocumentId(74));
+        let mut text = node(74, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: Some(ParagraphListType::None),
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(74), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            74_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(74)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                74_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_list_spacing_round_trips_and_requires_semantics_thirty_four() {
+        let mut document = Document::with_id(DocumentId(75));
+        let mut text = node(75, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                list_spacing: Some(8.0),
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: Some(0.0),
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(75), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            75_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(75)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                75_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_spacing_round_trips_and_requires_semantics_thirty_five() {
+        let mut document = Document::with_id(DocumentId(76));
+        let mut text = node(76, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                paragraph_spacing: 8.0,
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: Some(0.0),
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(76), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            76_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(76)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                76_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_indent_run_round_trips_and_requires_semantics_thirty_six() {
+        let mut document = Document::with_id(DocumentId(77));
+        let mut text = node(77, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                paragraph_indent: Some(8.0),
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: Some(0.0),
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(77), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            77_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(77)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                77_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_line_height_round_trips_and_requires_semantics_thirty_seven() {
+        let mut document = Document::with_id(DocumentId(78));
+        let mut text = node(78, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: Some(150.0),
+                line_height_unit: Some(LineHeightUnit::Percent),
+                text_wrap_style: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(78), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            78_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(78)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                78_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_hanging_punctuation_round_trips_and_requires_semantics_thirty_eight() {
+        let mut document = Document::with_id(DocumentId(79));
+        let mut text = node(79, NodeKind::Text, None);
+        text.text = "“Text.”".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                hanging_punctuation: true,
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(79), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            79_u128.to_be_bytes(),
+            hash,
+            TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(79)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                79_u128.to_be_bytes(),
+                hash,
+                TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paragraph_text_wrap_style_round_trips_and_requires_semantics_thirty_nine() {
+        let mut document = Document::with_id(DocumentId(80));
+        let mut text = node(80, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                text_wrap_style: Some(TextWrapStyle::Balance),
+                ..TextProperties::default().paragraph
+            },
+            paragraph_style_runs: vec![ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: Some(TextWrapStyle::Auto),
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(80), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot = snapshot_from_document(
+            &document,
+            PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            80_u128.to_be_bytes(),
+            hash,
+            PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(80)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version =
+            PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                80_u128.to_be_bytes(),
+                hash,
+                PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_hanging_list_round_trips_and_requires_semantics_thirty_two() {
+        let mut document = Document::with_id(DocumentId(73));
+        let mut text = node(73, NodeKind::Text, None);
+        text.text = "One\nTwo".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            paragraph: ParagraphStyle {
+                list_type: Some(TextListType::Ordered),
+                hanging_list: true,
+                hanging_punctuation: false,
+                ..TextProperties::default().paragraph
+            },
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(73), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            73_u128.to_be_bytes(),
+            hash,
+            TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(73)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                73_u128.to_be_bytes(),
+                hash,
+                TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn font_face_metadata_round_trips_and_requires_semantics_forty() {
+        let mut document = Document::with_id(DocumentId(74));
+        let asset = AssetReference {
+            asset_id: AssetId(74),
+            content_hash: [7; 32],
+            media_type: "font/ttf".into(),
+            byte_length: 512,
+            dimensions: None,
+            font_faces: vec![editor_core::FontFaceMetadata {
+                face_index: 0,
+                family: "Acme Sans".into(),
+                style: "Regular".into(),
+            }],
+        };
+        document.seed_asset(asset.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            74_u128.to_be_bytes(),
+            hash,
+            FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.asset(AssetId(74)), Some(&asset));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                74_u128.to_be_bytes(),
+                hash,
+                FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+            ),
             Err(SnapshotError::Invalid)
         );
     }

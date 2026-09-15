@@ -1,6 +1,9 @@
 //! Explicit document color values. Components are always stored non-premultiplied;
 //! premultiplication happens only at the renderer upload boundary.
 
+use crate::geometry::AffineTransform;
+use crate::{AssetId, BlendMode};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorSpace {
     Srgb,
@@ -30,6 +33,96 @@ pub const MAX_GRADIENT_STOPS: usize = 16;
 pub enum Paint {
     Solid(Color),
     LinearGradient(LinearGradient),
+}
+
+/// Presence-bearing paint storage used by the versioned Paint Stack wire
+/// contract. An empty `layers` vector is a deliberate "no paint" value; the
+/// absence of a `PaintStack` record is what selects the legacy Paint fields.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PaintStack {
+    pub layers: Vec<PaintLayer>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintLayer {
+    pub paint: PaintLayerKind,
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaintLayerKind {
+    Solid(Color),
+    LinearGradient(LinearGradient),
+    Image(ImagePaint),
+    Gradient(GradientPaint),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientPaintKind {
+    Radial,
+    Angular,
+    Diamond,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientPaint {
+    pub kind: GradientPaintKind,
+    /// Figma-compatible node-local normalized coordinates to gradient-space.
+    pub transform: AffineTransform,
+    pub stops: Vec<GradientStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageScaleMode {
+    Fill,
+    Fit,
+    Crop,
+    Tile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImagePaint {
+    pub asset_id: AssetId,
+    pub scale_mode: ImageScaleMode,
+    /// Node-local 2x3 transform. Keeping this value in the document avoids
+    /// reducing Crop and Tile paints to a renderer-specific rectangle.
+    pub transform: AffineTransform,
+    /// Figma's independent image rotation, canonicalized to quarter turns.
+    /// Crop already carries orientation in its transform and must remain zero.
+    pub rotation_degrees: i16,
+    /// Presence-bearing Figma image adjustments. Individual omitted fields use
+    /// Figma's zero default while retaining their wire/API presence semantics.
+    pub filters: Option<ImageFilters>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ImageFilters {
+    pub exposure: Option<f32>,
+    pub contrast: Option<f32>,
+    pub saturation: Option<f32>,
+    pub temperature: Option<f32>,
+    pub tint: Option<f32>,
+    pub highlights: Option<f32>,
+    pub shadows: Option<f32>,
+}
+
+impl ImageFilters {
+    pub fn is_valid(self) -> bool {
+        [
+            self.exposure,
+            self.contrast,
+            self.saturation,
+            self.temperature,
+            self.tint,
+            self.highlights,
+            self.shadows,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +326,66 @@ impl Paint {
     }
 }
 
+impl PaintStack {
+    pub const MAX_LAYERS: usize = 16;
+
+    pub fn is_valid(&self) -> bool {
+        self.layers.len() <= Self::MAX_LAYERS && self.layers.iter().all(PaintLayer::is_valid)
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .layers
+                .iter()
+                .map(PaintLayer::estimated_bytes)
+                .sum::<usize>()
+    }
+}
+
+impl PaintLayer {
+    pub fn is_valid(&self) -> bool {
+        self.opacity.is_finite()
+            && (0.0..=1.0).contains(&self.opacity)
+            && !matches!(self.blend_mode, BlendMode::PassThrough)
+            && match &self.paint {
+                PaintLayerKind::Solid(color) => color.is_valid(),
+                PaintLayerKind::LinearGradient(gradient) => gradient.is_valid(),
+                PaintLayerKind::Gradient(gradient) => gradient.is_valid(),
+                PaintLayerKind::Image(image) => {
+                    let transform = image.transform;
+                    [
+                        transform.a,
+                        transform.b,
+                        transform.c,
+                        transform.d,
+                        transform.e,
+                        transform.f,
+                    ]
+                    .into_iter()
+                    .all(f64::is_finite)
+                        && transform.inverse().is_ok()
+                        && matches!(image.rotation_degrees, 0 | 90 | 180 | 270)
+                        && (image.scale_mode != ImageScaleMode::Crop || image.rotation_degrees == 0)
+                        && image.filters.is_none_or(ImageFilters::is_valid)
+                }
+            }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match &self.paint {
+                PaintLayerKind::Solid(_) | PaintLayerKind::Image(_) => 0,
+                PaintLayerKind::LinearGradient(gradient) => {
+                    gradient.stops.len() * std::mem::size_of::<GradientStop>()
+                }
+                PaintLayerKind::Gradient(gradient) => {
+                    gradient.stops.len() * std::mem::size_of::<GradientStop>()
+                }
+            }
+    }
+}
+
 impl LinearGradient {
     pub fn new(
         start: [f32; 2],
@@ -253,6 +406,50 @@ impl LinearGradient {
             .chain(self.end.iter())
             .all(|value| value.is_finite())
             && self.start != self.end
+            && (2..=MAX_GRADIENT_STOPS).contains(&self.stops.len())
+            && self.stops.iter().all(|stop| {
+                stop.position.is_finite()
+                    && (0.0..=1.0).contains(&stop.position)
+                    && stop.color.is_valid()
+            })
+            && self
+                .stops
+                .windows(2)
+                .all(|pair| pair[0].position <= pair[1].position)
+    }
+}
+
+impl GradientPaint {
+    pub fn new(
+        kind: GradientPaintKind,
+        transform: AffineTransform,
+        stops: Vec<GradientStop>,
+    ) -> Result<Self, ColorError> {
+        let gradient = Self {
+            kind,
+            transform,
+            stops,
+        };
+        if gradient.is_valid() {
+            Ok(gradient)
+        } else {
+            Err(ColorError::InvalidGradient)
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let transform = self.transform;
+        [
+            transform.a,
+            transform.b,
+            transform.c,
+            transform.d,
+            transform.e,
+            transform.f,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            && transform.inverse().is_ok()
             && (2..=MAX_GRADIENT_STOPS).contains(&self.stops.len())
             && self.stops.iter().all(|stop| {
                 stop.position.is_finite()
@@ -321,6 +518,7 @@ fn quantize(value: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::AffineTransform;
 
     #[test]
     fn keeps_srgb_bytes_and_alpha_non_premultiplied_in_document_storage() {
@@ -332,6 +530,52 @@ mod tests {
         assert_eq!(gpu_rgba[2], 0.0);
         assert!((gpu_rgba[3] - color.alpha).abs() < 0.000_001);
         assert_eq!(color.components, [1.0, 128.0 / 255.0, 0.0]);
+    }
+
+    #[test]
+    fn image_rotation_accepts_quarter_turns_and_rejects_crop_rotation() {
+        let layer = |scale_mode, rotation_degrees| PaintLayer {
+            paint: PaintLayerKind::Image(ImagePaint {
+                asset_id: AssetId(1),
+                scale_mode,
+                transform: AffineTransform::IDENTITY,
+                rotation_degrees,
+                filters: None,
+            }),
+            visible: true,
+            opacity: 1.0,
+            blend_mode: crate::BlendMode::Normal,
+        };
+        assert!(layer(ImageScaleMode::Fit, 90).is_valid());
+        assert!(layer(ImageScaleMode::Tile, 270).is_valid());
+        assert!(!layer(ImageScaleMode::Fill, 45).is_valid());
+        assert!(!layer(ImageScaleMode::Crop, 90).is_valid());
+        let mut invalid_paint_blend = layer(ImageScaleMode::Fill, 0);
+        invalid_paint_blend.blend_mode = crate::BlendMode::PassThrough;
+        assert!(!invalid_paint_blend.is_valid());
+        invalid_paint_blend.blend_mode = crate::BlendMode::LinearBurn;
+        assert!(invalid_paint_blend.is_valid());
+        invalid_paint_blend.blend_mode = crate::BlendMode::LinearDodge;
+        assert!(invalid_paint_blend.is_valid());
+
+        let mut filtered = layer(ImageScaleMode::Fill, 0);
+        let PaintLayerKind::Image(image) = &mut filtered.paint else {
+            unreachable!()
+        };
+        image.filters = Some(ImageFilters {
+            exposure: Some(1.0),
+            shadows: Some(-1.0),
+            ..ImageFilters::default()
+        });
+        assert!(filtered.is_valid());
+        let PaintLayerKind::Image(image) = &mut filtered.paint else {
+            unreachable!()
+        };
+        image.filters = Some(ImageFilters {
+            tint: Some(1.01),
+            ..ImageFilters::default()
+        });
+        assert!(!filtered.is_valid());
     }
 
     #[test]
@@ -357,6 +601,52 @@ mod tests {
             .unwrap()
             .to_srgb_u8();
         assert_eq!(midpoint, [188, 188, 188, 255]);
+    }
+
+    #[test]
+    fn non_linear_gradients_require_an_invertible_transform_and_ordered_stops() {
+        let stops = vec![
+            GradientStop {
+                position: 0.0,
+                color: Color::from_srgb_u8([255, 0, 0], 255),
+            },
+            GradientStop {
+                position: 1.0,
+                color: Color::from_srgb_u8([0, 0, 255], 255),
+            },
+        ];
+        for kind in [
+            GradientPaintKind::Radial,
+            GradientPaintKind::Angular,
+            GradientPaintKind::Diamond,
+        ] {
+            assert!(GradientPaint::new(kind, AffineTransform::IDENTITY, stops.clone()).is_ok());
+        }
+        assert_eq!(
+            GradientPaint::new(
+                GradientPaintKind::Radial,
+                AffineTransform {
+                    a: 1.0,
+                    b: 0.0,
+                    c: 2.0,
+                    d: 0.0,
+                    e: 0.0,
+                    f: 0.0
+                },
+                stops.clone(),
+            ),
+            Err(ColorError::InvalidGradient)
+        );
+        let mut reversed = stops;
+        reversed.reverse();
+        assert_eq!(
+            GradientPaint::new(
+                GradientPaintKind::Diamond,
+                AffineTransform::IDENTITY,
+                reversed
+            ),
+            Err(ColorError::InvalidGradient)
+        );
     }
 
     #[test]

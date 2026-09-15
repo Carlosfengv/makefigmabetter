@@ -4,11 +4,18 @@
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, Node, NodeId,
-    NodeKind, Page, PageId, ParagraphStyle, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun, VectorPath,
-    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
+    FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId,
+    PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
+    TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
+    TextDecorationThickness, TextListType, TextProperties, TextStyleRun, TextTruncation,
+    TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    color::{
+        Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
+        ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
+        PaintLayerKind, PaintStack,
+    },
     geometry::Point,
 };
 use makefigma_protocol::v1;
@@ -17,16 +24,1178 @@ use prost::Message;
 use crate::ServiceError;
 
 pub fn commands_from_payload(payload: &[u8]) -> Result<Vec<Command>, ServiceError> {
+    commands_from_payload_with_semantics(payload, u32::MAX)
+}
+
+pub fn commands_from_payload_with_semantics(
+    payload: &[u8],
+    engine_semantics_version: u32,
+) -> Result<Vec<Command>, ServiceError> {
     let batch =
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
     }
-    batch
-        .operations
+    if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_paint_stack)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_non_linear_gradient)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_advanced_blend)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_rotated_image)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_pass_through)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_linear_blend)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_normal_blend_isolation)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_image_filters)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_truncation)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_run_paint_stack)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_base_style)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_case)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::ConvertToTextPath(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_line_height_unit)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_paragraph_indent)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_wrap_style)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_list_type)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_list_spacing)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_style_runs)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_hanging_list)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_list_options)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_list_spacing)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_paragraph_spacing)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_indent_run)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_line_height)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_hanging_punctuation)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_paragraph_text_wrap_style)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_hyperlink)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_text_decoration)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_style)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_offset)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_thickness)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_color)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_skip_ink)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version < makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_leading_trim)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_font_face_metadata)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    let mut commands = Vec::with_capacity(batch.operations.len());
+    for operation in batch.operations {
+        let paint_stacks = paint_stack_command(&operation)?;
+        commands.push(command_from_proto(operation)?);
+        if let Some(command) = paint_stacks {
+            commands.push(command);
+        }
+    }
+    Ok(commands)
+}
+
+fn operation_has_paint_stack(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .is_some_and(|node| node.fill_stack.is_some() || node.stroke_stack.is_some()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .is_some_and(|node| node.fill_stack.is_some() || node.stroke_stack.is_some()),
+        Some(Kind::SetAppearance(value)) => {
+            value.fill_stack.is_some() || value.stroke_stack.is_some()
+        }
+        _ => false,
+    }
+}
+
+fn operation_has_non_linear_gradient(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let stacks = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::SetAppearance(value)) => Some([&value.fill_stack, &value.stroke_stack]),
+        _ => None,
+    };
+    stacks
         .into_iter()
-        .map(command_from_proto)
-        .collect()
+        .flatten()
+        .filter_map(Option::as_ref)
+        .any(|stack| {
+            stack
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.kind, Some(v1::paint_layer::Kind::Gradient(_))))
+        })
+}
+
+fn operation_has_advanced_blend(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let (node_blend, stacks) = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value.node.as_ref().map_or((None, None), |node| {
+            (
+                Some(node.blend_mode),
+                Some([&node.fill_stack, &node.stroke_stack]),
+            )
+        }),
+        Some(Kind::RestoreNode(value)) => value.node.as_ref().map_or((None, None), |node| {
+            (
+                Some(node.blend_mode),
+                Some([&node.fill_stack, &node.stroke_stack]),
+            )
+        }),
+        Some(Kind::SetAppearance(value)) => (
+            Some(value.blend_mode),
+            Some([&value.fill_stack, &value.stroke_stack]),
+        ),
+        _ => (None, None),
+    };
+    node_blend.is_some_and(proto_blend_requires_advanced)
+        || stacks
+            .into_iter()
+            .flatten()
+            .filter_map(Option::as_ref)
+            .flat_map(|stack| &stack.layers)
+            .any(|layer| proto_blend_requires_advanced(layer.blend_mode))
+}
+
+fn proto_blend_requires_advanced(value: i32) -> bool {
+    matches!(
+        v1::BlendMode::try_from(value),
+        Ok(v1::BlendMode::ColorDodge
+            | v1::BlendMode::ColorBurn
+            | v1::BlendMode::HardLight
+            | v1::BlendMode::SoftLight
+            | v1::BlendMode::Difference
+            | v1::BlendMode::Exclusion
+            | v1::BlendMode::Hue
+            | v1::BlendMode::Saturation
+            | v1::BlendMode::Color
+            | v1::BlendMode::Luminosity)
+    )
+}
+
+fn operation_has_rotated_image(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let stacks = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::SetAppearance(value)) => Some([&value.fill_stack, &value.stroke_stack]),
+        _ => None,
+    };
+    stacks
+        .into_iter()
+        .flatten()
+        .filter_map(Option::as_ref)
+        .flat_map(|stack| &stack.layers)
+        .any(|layer| {
+            matches!(&layer.kind, Some(v1::paint_layer::Kind::Image(image)) if image.rotation_degrees != 0)
+        })
+}
+
+fn operation_has_image_filters(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let stacks = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .map(|node| [&node.fill_stack, &node.stroke_stack]),
+        Some(Kind::SetAppearance(value)) => Some([&value.fill_stack, &value.stroke_stack]),
+        _ => None,
+    };
+    stacks
+        .into_iter()
+        .flatten()
+        .filter_map(Option::as_ref)
+        .flat_map(|stack| &stack.layers)
+        .any(|layer| {
+            matches!(&layer.kind, Some(v1::paint_layer::Kind::Image(image)) if image.filters.is_some())
+        })
+}
+
+fn operation_has_text_truncation(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|value| value.text_truncation.is_some() || value.max_lines.is_some())
+}
+
+fn operation_has_text_run_paint_stack(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|value| {
+        value.runs.iter().any(|run| run.fill_stack.is_some())
+            || value
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.fill_stack.is_some())
+    })
+}
+
+fn operation_has_text_base_style(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|value| value.base_style.is_some())
+}
+
+fn operation_has_text_case(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref() {
+        Some(Kind::SetTextProperties(value)) => {
+            value.properties.as_ref().is_some_and(|properties| {
+                properties.runs.iter().any(|run| run.text_case.is_some())
+                    || properties
+                        .base_style
+                        .as_ref()
+                        .is_some_and(|style| style.text_case.is_some())
+            })
+        }
+        _ => false,
+    }
+}
+
+fn operation_has_hyperlink(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties.runs.iter().any(|run| run.hyperlink.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.hyperlink.is_some())
+    })
+}
+
+fn operation_has_text_decoration(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration.is_some())
+    })
+}
+
+fn operation_has_text_decoration_style(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration_style.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration_style.is_some())
+    })
+}
+
+fn operation_has_text_decoration_offset(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration_offset.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration_offset.is_some())
+    })
+}
+
+fn operation_has_text_decoration_thickness(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration_thickness.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration_thickness.is_some())
+    })
+}
+
+fn operation_has_text_decoration_color(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration_color.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration_color.is_some())
+    })
+}
+
+fn operation_has_text_decoration_skip_ink(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| run.text_decoration_skip_ink == Some(true))
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.text_decoration_skip_ink == Some(true))
+    })
+}
+
+fn operation_has_leading_trim(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties.runs.iter().any(|run| run.leading_trim.is_some())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| style.leading_trim.is_some())
+    })
+}
+
+fn operation_has_line_height_unit(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.line_height_unit.is_some())
+    })
+}
+
+fn operation_has_paragraph_indent(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.paragraph_indent.is_some())
+    })
+}
+
+fn operation_has_text_wrap_style(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.text_wrap_style.is_some())
+    })
+}
+
+fn operation_has_list_type(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.list_type.is_some())
+    })
+}
+
+fn operation_has_list_spacing(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.list_spacing.is_some_and(|value| value != 0.0))
+    })
+}
+
+fn operation_has_paragraph_style_runs(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| !properties.paragraph_style_runs.is_empty())
+}
+
+fn operation_has_paragraph_list_options(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.list_type.is_some())
+    })
+}
+
+fn operation_has_paragraph_list_spacing(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.list_spacing.is_some())
+    })
+}
+
+fn operation_has_paragraph_spacing(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.paragraph_spacing.is_some())
+    })
+}
+
+fn operation_has_paragraph_indent_run(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.paragraph_indent.is_some())
+    })
+}
+
+fn operation_has_paragraph_line_height(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+    })
+}
+
+fn operation_has_paragraph_text_wrap_style(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph_style_runs
+            .iter()
+            .any(|run| run.text_wrap_style.is_some())
+    })
+}
+
+fn operation_has_hanging_list(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.hanging_list == Some(true))
+    })
+}
+
+fn operation_has_hanging_punctuation(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties
+            .paragraph
+            .as_ref()
+            .is_some_and(|paragraph| paragraph.hanging_punctuation == Some(true))
+    })
+}
+
+fn operation_has_pass_through(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let value = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(operation)) => operation.node.as_ref().map(|node| node.blend_mode),
+        Some(Kind::RestoreNode(operation)) => operation.node.as_ref().map(|node| node.blend_mode),
+        Some(Kind::SetAppearance(operation)) => Some(operation.blend_mode),
+        _ => None,
+    };
+    value.is_some_and(|value| {
+        matches!(
+            v1::BlendMode::try_from(value),
+            Ok(v1::BlendMode::PassThrough)
+        )
+    })
+}
+
+fn operation_has_linear_blend(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let (value, stacks) = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(operation)) => operation.node.as_ref().map_or((None, None), |node| {
+            (
+                Some(node.blend_mode),
+                Some([&node.fill_stack, &node.stroke_stack]),
+            )
+        }),
+        Some(Kind::RestoreNode(operation)) => {
+            operation.node.as_ref().map_or((None, None), |node| {
+                (
+                    Some(node.blend_mode),
+                    Some([&node.fill_stack, &node.stroke_stack]),
+                )
+            })
+        }
+        Some(Kind::SetAppearance(operation)) => (
+            Some(operation.blend_mode),
+            Some([&operation.fill_stack, &operation.stroke_stack]),
+        ),
+        _ => (None, None),
+    };
+    value.is_some_and(|value| {
+        matches!(
+            v1::BlendMode::try_from(value),
+            Ok(v1::BlendMode::LinearBurn | v1::BlendMode::LinearDodge)
+        )
+    }) || stacks
+        .into_iter()
+        .flatten()
+        .filter_map(Option::as_ref)
+        .flat_map(|stack| &stack.layers)
+        .any(|layer| {
+            matches!(
+                v1::BlendMode::try_from(layer.blend_mode),
+                Ok(v1::BlendMode::LinearBurn | v1::BlendMode::LinearDodge)
+            )
+        })
+}
+
+fn operation_has_normal_blend_isolation(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let extensions = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value.node.as_ref().map(|node| &node.extensions),
+        Some(Kind::RestoreNode(value)) => value.node.as_ref().map(|node| &node.extensions),
+        Some(Kind::SetNodeExtensions(value)) => Some(&value.extensions),
+        _ => None,
+    };
+    extensions.is_some_and(|extensions| {
+        extensions
+            .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION)
+            .is_some_and(|value| value.as_slice() == [1])
+    })
+}
+
+fn paint_stack_command(operation: &v1::ResolvedOperation) -> Result<Option<Command>, ServiceError> {
+    use v1::resolved_operation::Kind;
+    let (node_id, fill_stack, stroke_stack) = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => {
+            let node = value.node.as_ref().ok_or(ServiceError::InvalidEnvelope)?;
+            (
+                node_id(&node.node_id)?,
+                node.fill_stack.clone(),
+                node.stroke_stack.clone(),
+            )
+        }
+        Some(Kind::RestoreNode(value)) => {
+            let node = value.node.as_ref().ok_or(ServiceError::InvalidEnvelope)?;
+            (
+                node_id(&node.node_id)?,
+                node.fill_stack.clone(),
+                node.stroke_stack.clone(),
+            )
+        }
+        Some(Kind::SetAppearance(value)) => (
+            node_id(&value.node_id)?,
+            value.fill_stack.clone(),
+            value.stroke_stack.clone(),
+        ),
+        _ => return Ok(None),
+    };
+    if fill_stack.is_none() && stroke_stack.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Command::SetPaintStacks {
+        id: node_id,
+        fill_stack: fill_stack.map(paint_stack_from_proto).transpose()?,
+        stroke_stack: stroke_stack.map(paint_stack_from_proto).transpose()?,
+    }))
 }
 
 fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, ServiceError> {
@@ -58,14 +1227,28 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
                 text_properties,
             })
         }
-        Kind::UpdateGeometry(value) => Ok(Command::UpdateGeometry {
-            id: node_id(&value.node_id)?,
-            x: value.x,
-            y: value.y,
-            width: value.width,
-            height: value.height,
-            rotation: value.rotation,
-        }),
+        Kind::UpdateGeometry(value) => {
+            let id = node_id(&value.node_id)?;
+            Ok(if value.ignore_constraints {
+                Command::UpdateGeometryWithoutConstraints {
+                    id,
+                    x: value.x,
+                    y: value.y,
+                    width: value.width,
+                    height: value.height,
+                    rotation: value.rotation,
+                }
+            } else {
+                Command::UpdateGeometry {
+                    id,
+                    x: value.x,
+                    y: value.y,
+                    width: value.width,
+                    height: value.height,
+                    rotation: value.rotation,
+                }
+            })
+        }
         Kind::RenameNode(value) => Ok(Command::Rename {
             id: node_id(&value.node_id)?,
             name: value.name,
@@ -148,6 +1331,10 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             position: position_from_proto(value.position_id.ok_or(ServiceError::InvalidEnvelope)?)?,
         }),
         Kind::SetVectorPath(value) => Ok(Command::SetVectorPath {
+            id: node_id(&value.node_id)?,
+            path: vector_path_from_proto(value.vector_path.ok_or(ServiceError::InvalidEnvelope)?)?,
+        }),
+        Kind::ConvertToTextPath(value) => Ok(Command::ConvertToTextPath {
             id: node_id(&value.node_id)?,
             path: vector_path_from_proto(value.vector_path.ok_or(ServiceError::InvalidEnvelope)?)?,
         }),
@@ -472,6 +1659,19 @@ fn blend_mode_from_proto(value: i32) -> Result<BlendMode, ServiceError> {
         v1::BlendMode::Overlay => Ok(BlendMode::Overlay),
         v1::BlendMode::Darken => Ok(BlendMode::Darken),
         v1::BlendMode::Lighten => Ok(BlendMode::Lighten),
+        v1::BlendMode::ColorDodge => Ok(BlendMode::ColorDodge),
+        v1::BlendMode::ColorBurn => Ok(BlendMode::ColorBurn),
+        v1::BlendMode::HardLight => Ok(BlendMode::HardLight),
+        v1::BlendMode::SoftLight => Ok(BlendMode::SoftLight),
+        v1::BlendMode::Difference => Ok(BlendMode::Difference),
+        v1::BlendMode::Exclusion => Ok(BlendMode::Exclusion),
+        v1::BlendMode::Hue => Ok(BlendMode::Hue),
+        v1::BlendMode::Saturation => Ok(BlendMode::Saturation),
+        v1::BlendMode::Color => Ok(BlendMode::Color),
+        v1::BlendMode::Luminosity => Ok(BlendMode::Luminosity),
+        v1::BlendMode::PassThrough => Ok(BlendMode::PassThrough),
+        v1::BlendMode::LinearBurn => Ok(BlendMode::LinearBurn),
+        v1::BlendMode::LinearDodge => Ok(BlendMode::LinearDodge),
     }
 }
 
@@ -722,21 +1922,317 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     italic: run.italic,
                     letter_spacing: run.letter_spacing,
                     color: run.color.map(color_from_proto).transpose()?,
+                    fill_stack: run.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: run
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: run.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: run
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: run
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: run
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: run
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: run.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: run
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: run
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
                 })
             })
             .collect::<Result<_, ServiceError>>()?,
         paragraph: ParagraphStyle {
             alignment,
             line_height: paragraph.line_height,
+            line_height_unit: paragraph
+                .line_height_unit
+                .map(line_height_unit_from_proto)
+                .transpose()?
+                .flatten(),
             paragraph_spacing: paragraph.paragraph_spacing,
+            paragraph_indent: paragraph.paragraph_indent,
+            text_wrap_style: paragraph
+                .text_wrap_style
+                .map(text_wrap_style_from_proto)
+                .transpose()?
+                .flatten(),
+            list_type: paragraph
+                .list_type
+                .map(text_list_type_from_proto)
+                .transpose()?
+                .flatten(),
+            list_spacing: paragraph.list_spacing.filter(|value| *value != 0.0),
+            hanging_list: paragraph.hanging_list.unwrap_or(false),
+            hanging_punctuation: paragraph.hanging_punctuation.unwrap_or(false),
         },
+        paragraph_style_runs: value
+            .paragraph_style_runs
+            .into_iter()
+            .map(|run| {
+                Ok(ParagraphStyleRun {
+                    start: run.start,
+                    indentation: run.indentation,
+                    list_type: run
+                        .list_type
+                        .map(paragraph_list_type_from_proto)
+                        .transpose()?,
+                    list_spacing: run.list_spacing,
+                    paragraph_spacing: run.paragraph_spacing,
+                    paragraph_indent: run.paragraph_indent,
+                    line_height: run.line_height,
+                    line_height_unit: run
+                        .line_height_unit
+                        .map(line_height_unit_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_wrap_style: run
+                        .text_wrap_style
+                        .map(paragraph_text_wrap_style_from_proto)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<_, ServiceError>>()?,
         auto_size,
+        text_truncation: match value.text_truncation {
+            None => TextTruncation::Disabled,
+            Some(raw) => match v1::TextTruncation::try_from(raw)
+                .map_err(|_| ServiceError::InvalidEnvelope)?
+            {
+                v1::TextTruncation::Disabled => TextTruncation::Disabled,
+                v1::TextTruncation::Ending => TextTruncation::Ending,
+                v1::TextTruncation::Unspecified => return Err(ServiceError::InvalidEnvelope),
+            },
+        },
+        max_lines: value.max_lines,
+        base_style: value
+            .base_style
+            .map(|style| {
+                Ok(TextStyleRun {
+                    start: style.start,
+                    end: style.end,
+                    font: style.font.map(font_from_proto).transpose()?,
+                    font_size: style.font_size,
+                    font_weight: u16::try_from(style.font_weight)
+                        .map_err(|_| ServiceError::InvalidEnvelope)?,
+                    italic: style.italic,
+                    letter_spacing: style.letter_spacing,
+                    color: style.color.map(color_from_proto).transpose()?,
+                    fill_stack: style.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: style
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: style.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: style
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: style
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: style
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: style
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: style.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: style
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: style
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
+                })
+            })
+            .transpose()?,
         fallback_fonts: value
             .fallback_fonts
             .into_iter()
             .map(font_from_proto)
             .collect::<Result<_, ServiceError>>()?,
     })
+}
+
+fn text_wrap_style_from_proto(value: i32) -> Result<Option<TextWrapStyle>, ServiceError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextWrapStyle::Auto => Ok(None),
+        v1::TextWrapStyle::Balance => Ok(Some(TextWrapStyle::Balance)),
+        v1::TextWrapStyle::Pretty => Ok(Some(TextWrapStyle::Pretty)),
+        v1::TextWrapStyle::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
+}
+
+fn paragraph_text_wrap_style_from_proto(value: i32) -> Result<TextWrapStyle, ServiceError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextWrapStyle::Auto => Ok(TextWrapStyle::Auto),
+        v1::TextWrapStyle::Balance => Ok(TextWrapStyle::Balance),
+        v1::TextWrapStyle::Pretty => Ok(TextWrapStyle::Pretty),
+        v1::TextWrapStyle::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
+}
+
+fn text_list_type_from_proto(value: i32) -> Result<Option<TextListType>, ServiceError> {
+    match v1::TextListType::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextListType::None => Ok(None),
+        v1::TextListType::Ordered => Ok(Some(TextListType::Ordered)),
+        v1::TextListType::Unordered => Ok(Some(TextListType::Unordered)),
+        v1::TextListType::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
+}
+
+fn paragraph_list_type_from_proto(value: i32) -> Result<ParagraphListType, ServiceError> {
+    match v1::TextListType::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextListType::None => Ok(ParagraphListType::None),
+        v1::TextListType::Ordered => Ok(ParagraphListType::Ordered),
+        v1::TextListType::Unordered => Ok(ParagraphListType::Unordered),
+        v1::TextListType::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
+}
+
+fn hyperlink_from_proto(value: v1::HyperlinkTarget) -> Result<HyperlinkTarget, ServiceError> {
+    let kind = match v1::HyperlinkType::try_from(value.r#type)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        v1::HyperlinkType::Url => HyperlinkType::Url,
+        v1::HyperlinkType::Node => HyperlinkType::Node,
+        v1::HyperlinkType::Unspecified => return Err(ServiceError::InvalidEnvelope),
+    };
+    Ok(HyperlinkTarget {
+        kind,
+        value: value.value,
+    })
+}
+
+fn leading_trim_from_proto(value: i32) -> Result<Option<LeadingTrim>, ServiceError> {
+    match v1::LeadingTrim::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::LeadingTrim::CapHeight => Ok(Some(LeadingTrim::CapHeight)),
+        v1::LeadingTrim::None | v1::LeadingTrim::Unspecified => Ok(None),
+    }
+}
+
+fn text_decoration_from_proto(value: i32) -> Result<Option<TextDecoration>, ServiceError> {
+    Ok(Some(
+        match v1::TextDecoration::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+            v1::TextDecoration::Underline => TextDecoration::Underline,
+            v1::TextDecoration::Strikethrough => TextDecoration::Strikethrough,
+            v1::TextDecoration::Unspecified => return Ok(None),
+        },
+    ))
+}
+
+fn text_decoration_style_from_proto(
+    value: i32,
+) -> Result<Option<TextDecorationStyle>, ServiceError> {
+    match v1::TextDecorationStyle::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextDecorationStyle::Wavy => Ok(Some(TextDecorationStyle::Wavy)),
+        v1::TextDecorationStyle::Dotted => Ok(Some(TextDecorationStyle::Dotted)),
+        v1::TextDecorationStyle::Unspecified | v1::TextDecorationStyle::Solid => Ok(None),
+    }
+}
+
+fn text_decoration_offset_from_proto(
+    value: v1::TextDecorationOffset,
+) -> Result<Option<TextDecorationOffset>, ServiceError> {
+    match v1::TextDecorationOffsetUnit::try_from(value.unit)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        v1::TextDecorationOffsetUnit::Pixels => Ok(Some(TextDecorationOffset::Pixels(value.value))),
+        v1::TextDecorationOffsetUnit::Percent => {
+            Ok(Some(TextDecorationOffset::Percent(value.value)))
+        }
+        v1::TextDecorationOffsetUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationOffsetUnit::Auto | v1::TextDecorationOffsetUnit::Unspecified => {
+            Err(ServiceError::InvalidEnvelope)
+        }
+    }
+}
+
+fn text_decoration_thickness_from_proto(
+    value: v1::TextDecorationThickness,
+) -> Result<Option<TextDecorationThickness>, ServiceError> {
+    match v1::TextDecorationThicknessUnit::try_from(value.unit)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        v1::TextDecorationThicknessUnit::Pixels => {
+            Ok(Some(TextDecorationThickness::Pixels(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Percent => {
+            Ok(Some(TextDecorationThickness::Percent(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationThicknessUnit::Auto | v1::TextDecorationThicknessUnit::Unspecified => {
+            Err(ServiceError::InvalidEnvelope)
+        }
+    }
+}
+
+fn text_decoration_color_from_proto(
+    value: v1::TextDecorationColor,
+) -> Result<TextDecorationColor, ServiceError> {
+    let blend_mode = blend_mode_from_proto(value.blend_mode)?;
+    if matches!(blend_mode, BlendMode::PassThrough) {
+        return Err(ServiceError::InvalidEnvelope);
+    }
+    Ok(TextDecorationColor {
+        color: color_from_proto(value.color.ok_or(ServiceError::InvalidEnvelope)?)?,
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode,
+    })
+}
+
+fn line_height_unit_from_proto(value: i32) -> Result<Option<LineHeightUnit>, ServiceError> {
+    match v1::LineHeightUnit::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::LineHeightUnit::Pixels => Ok(None),
+        v1::LineHeightUnit::Percent => Ok(Some(LineHeightUnit::Percent)),
+        v1::LineHeightUnit::Auto => Ok(Some(LineHeightUnit::Auto)),
+        v1::LineHeightUnit::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
+}
+
+fn text_case_from_proto(value: i32) -> Result<Option<TextCase>, ServiceError> {
+    match v1::TextCase::try_from(value).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::TextCase::Original => Ok(None),
+        v1::TextCase::Upper => Ok(Some(TextCase::Upper)),
+        v1::TextCase::Lower => Ok(Some(TextCase::Lower)),
+        v1::TextCase::Title => Ok(Some(TextCase::Title)),
+        v1::TextCase::SmallCaps => Ok(Some(TextCase::SmallCaps)),
+        v1::TextCase::SmallCapsForced => Ok(Some(TextCase::SmallCapsForced)),
+        v1::TextCase::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
 }
 
 fn paint_from_proto(paint: v1::Paint) -> Result<Paint, ServiceError> {
@@ -762,6 +2258,100 @@ fn paint_from_proto(paint: v1::Paint) -> Result<Paint, ServiceError> {
             .map(Paint::LinearGradient)
             .map_err(|_| ServiceError::InvalidEnvelope)
         }
+    }
+}
+
+fn paint_stack_from_proto(stack: v1::PaintStack) -> Result<PaintStack, ServiceError> {
+    let stack = PaintStack {
+        layers: stack
+            .layers
+            .into_iter()
+            .map(paint_layer_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    stack
+        .is_valid()
+        .then_some(stack)
+        .ok_or(ServiceError::InvalidEnvelope)
+}
+
+fn gradient_paint_from_proto(gradient: v1::GradientPaint) -> Result<GradientPaint, ServiceError> {
+    let kind = match v1::GradientPaintKind::try_from(gradient.kind)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        v1::GradientPaintKind::Radial => GradientPaintKind::Radial,
+        v1::GradientPaintKind::Angular => GradientPaintKind::Angular,
+        v1::GradientPaintKind::Diamond => GradientPaintKind::Diamond,
+        v1::GradientPaintKind::Unspecified => return Err(ServiceError::InvalidEnvelope),
+    };
+    GradientPaint::new(
+        kind,
+        transform_from_proto(gradient.transform.ok_or(ServiceError::InvalidEnvelope)?)?,
+        gradient
+            .stops
+            .into_iter()
+            .map(|stop| {
+                Ok(GradientStop {
+                    position: stop.position,
+                    color: color_from_proto(stop.color.ok_or(ServiceError::InvalidEnvelope)?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ServiceError>>()?,
+    )
+    .map_err(|_| ServiceError::InvalidEnvelope)
+}
+
+fn paint_layer_from_proto(layer: v1::PaintLayer) -> Result<PaintLayer, ServiceError> {
+    use v1::paint_layer::Kind;
+    let paint = match layer.kind.ok_or(ServiceError::InvalidEnvelope)? {
+        Kind::Solid(color) => PaintLayerKind::Solid(color_from_proto(color)?),
+        Kind::LinearGradient(gradient) => PaintLayerKind::LinearGradient(
+            match paint_from_proto(v1::Paint {
+                kind: Some(v1::paint::Kind::LinearGradient(gradient)),
+            })? {
+                Paint::LinearGradient(gradient) => gradient,
+                Paint::Solid(_) => unreachable!("linear gradient tag is stable"),
+            },
+        ),
+        Kind::Image(image) => PaintLayerKind::Image(ImagePaint {
+            asset_id: AssetId(id(&image.asset_id)?),
+            scale_mode: match v1::ImageScaleMode::try_from(image.scale_mode)
+                .map_err(|_| ServiceError::InvalidEnvelope)?
+            {
+                v1::ImageScaleMode::Fill => ImageScaleMode::Fill,
+                v1::ImageScaleMode::Fit => ImageScaleMode::Fit,
+                v1::ImageScaleMode::Crop => ImageScaleMode::Crop,
+                v1::ImageScaleMode::Tile => ImageScaleMode::Tile,
+                v1::ImageScaleMode::Unspecified => return Err(ServiceError::InvalidEnvelope),
+            },
+            transform: transform_from_proto(image.transform.ok_or(ServiceError::InvalidEnvelope)?)?,
+            rotation_degrees: i16::try_from(image.rotation_degrees)
+                .map_err(|_| ServiceError::InvalidEnvelope)?,
+            filters: image.filters.map(image_filters_from_proto),
+        }),
+        Kind::Gradient(gradient) => PaintLayerKind::Gradient(gradient_paint_from_proto(gradient)?),
+    };
+    let layer = PaintLayer {
+        paint,
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blend_mode: blend_mode_from_proto(layer.blend_mode)?,
+    };
+    layer
+        .is_valid()
+        .then_some(layer)
+        .ok_or(ServiceError::InvalidEnvelope)
+}
+
+fn image_filters_from_proto(filters: v1::ImageFilters) -> ImageFilters {
+    ImageFilters {
+        exposure: filters.exposure,
+        contrast: filters.contrast,
+        saturation: filters.saturation,
+        temperature: filters.temperature,
+        tint: filters.tint,
+        highlights: filters.highlights,
+        shadows: filters.shadows,
     }
 }
 
@@ -847,7 +2437,24 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Ser
         media_type: asset.media_type,
         byte_length: asset.byte_length.ok_or(ServiceError::InvalidEnvelope)?,
         dimensions,
+        font_faces: asset
+            .font_faces
+            .into_iter()
+            .map(|face| FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family,
+                style: face.style,
+            })
+            .collect(),
     })
+}
+
+fn operation_has_font_face_metadata(operation: &v1::ResolvedOperation) -> bool {
+    matches!(
+        operation.kind.as_ref(),
+        Some(v1::resolved_operation::Kind::RegisterResource(value))
+            if value.resource.as_ref().is_some_and(|resource| !resource.font_faces.is_empty())
+    )
 }
 
 fn id(value: &[u8]) -> Result<u128, ServiceError> {
@@ -860,12 +2467,16 @@ fn id(value: &[u8]) -> Result<u128, ServiceError> {
 #[cfg(test)]
 mod tests {
     use editor_core::{
-        Command, Document, Origin, PointId, Transaction, TransactionId, geometry::Point,
+        Command, Document, HyperlinkType, LeadingTrim, LineHeightUnit, Origin, ParagraphListType,
+        ParagraphStyleRun, PointId, TextDecoration, TextDecorationColor, TextDecorationOffset,
+        TextDecorationStyle, TextDecorationThickness, TextListType, TextTruncation, TextWrapStyle,
+        Transaction, TransactionId, geometry::Point,
     };
     use makefigma_protocol::v1;
     use prost::Message;
 
-    use super::commands_from_payload;
+    use super::{commands_from_payload, commands_from_payload_with_semantics};
+    use crate::ServiceError;
 
     fn color() -> v1::Color {
         v1::Color {
@@ -881,6 +2492,394 @@ mod tests {
         v1::Paint {
             kind: Some(v1::paint::Kind::Solid(color())),
         }
+    }
+
+    #[test]
+    fn non_linear_gradient_operations_require_semantics_five() {
+        let gradient = v1::GradientPaint {
+            kind: v1::GradientPaintKind::Angular as i32,
+            transform: Some(v1::Transform {
+                a: 1.25,
+                b: 0.1,
+                c: -0.2,
+                d: 1.5,
+                e: -0.1,
+                f: 0.2,
+            }),
+            stops: vec![
+                v1::GradientStop {
+                    position: 0.0,
+                    color: Some(color()),
+                },
+                v1::GradientStop {
+                    position: 1.0,
+                    color: Some(color()),
+                },
+            ],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        fill: Some(paint()),
+                        stroke: Some(paint()),
+                        opacity: 1.0,
+                        visible: true,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        blend_mode: v1::BlendMode::Normal as i32,
+                        fill_stack: Some(v1::PaintStack {
+                            layers: vec![v1::PaintLayer {
+                                visible: true,
+                                opacity: 1.0,
+                                blend_mode: v1::BlendMode::Normal as i32,
+                                kind: Some(v1::paint_layer::Kind::Gradient(gradient)),
+                            }],
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(&payload, makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION - 1),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn advanced_blend_operations_require_semantics_six() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: 8_u128.to_be_bytes().to_vec(),
+                        fill: Some(paint()),
+                        stroke: Some(paint()),
+                        opacity: 1.0,
+                        visible: true,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        blend_mode: v1::BlendMode::Luminosity as i32,
+                        ..Default::default()
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn image_rotation_operations_require_semantics_seven() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: 9_u128.to_be_bytes().to_vec(),
+                        fill: Some(paint()),
+                        stroke: Some(paint()),
+                        opacity: 1.0,
+                        visible: true,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        fill_stack: Some(v1::PaintStack {
+                            layers: vec![v1::PaintLayer {
+                                kind: Some(v1::paint_layer::Kind::Image(v1::ImagePaint {
+                                    asset_id: 90_u128.to_be_bytes().to_vec(),
+                                    scale_mode: v1::ImageScaleMode::Fill as i32,
+                                    transform: Some(v1::Transform {
+                                        a: 1.0,
+                                        b: 0.0,
+                                        c: 0.0,
+                                        d: 1.0,
+                                        e: 0.0,
+                                        f: 0.0,
+                                    }),
+                                    rotation_degrees: 90,
+                                    filters: None,
+                                })),
+                                visible: true,
+                                opacity: 1.0,
+                                blend_mode: v1::BlendMode::Normal as i32,
+                            }],
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+
+        let mut filtered = v1::ResolvedOperationBatch::decode(payload.as_slice()).unwrap();
+        let Some(v1::resolved_operation::Kind::SetAppearance(appearance)) =
+            filtered.operations[0].kind.as_mut()
+        else {
+            unreachable!()
+        };
+        let Some(v1::paint_layer::Kind::Image(image)) =
+            appearance.fill_stack.as_mut().unwrap().layers[0]
+                .kind
+                .as_mut()
+        else {
+            unreachable!()
+        };
+        image.rotation_degrees = 0;
+        image.filters = Some(v1::ImageFilters {
+            exposure: Some(0.25),
+            shadows: Some(-0.5),
+            ..Default::default()
+        });
+        let filtered_payload = filtered.encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &filtered_payload,
+                makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &filtered_payload,
+                makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn pass_through_operations_require_semantics_eight() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: 10_u128.to_be_bytes().to_vec(),
+                        fill: Some(paint()),
+                        stroke: Some(paint()),
+                        opacity: 1.0,
+                        visible: true,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        blend_mode: v1::BlendMode::PassThrough as i32,
+                        ..Default::default()
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn linear_blend_operations_require_semantics_nine() {
+        for blend_mode in [v1::BlendMode::LinearBurn, v1::BlendMode::LinearDodge] {
+            let payload = v1::ResolvedOperationBatch {
+                operations: vec![v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                        v1::AppearanceUpdate {
+                            node_id: 10_u128.to_be_bytes().to_vec(),
+                            fill: Some(paint()),
+                            stroke: Some(paint()),
+                            opacity: 1.0,
+                            visible: true,
+                            stroke_cap_start: v1::StrokeCap::None as i32,
+                            stroke_cap_end: v1::StrokeCap::None as i32,
+                            stroke_join: v1::StrokeJoin::Miter as i32,
+                            stroke_align: v1::StrokeAlign::Inside as i32,
+                            blend_mode: blend_mode as i32,
+                            ..Default::default()
+                        },
+                    )),
+                }],
+            }
+            .encode_to_vec();
+
+            assert!(matches!(
+                commands_from_payload_with_semantics(
+                    &payload,
+                    makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+                ),
+                Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                    if minimum == makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+            ));
+            assert!(
+                commands_from_payload_with_semantics(
+                    &payload,
+                    makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION,
+                )
+                .is_ok()
+            );
+        }
+
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: 10_u128.to_be_bytes().to_vec(),
+                        fill: Some(paint()),
+                        stroke: Some(paint()),
+                        opacity: 1.0,
+                        visible: true,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        blend_mode: v1::BlendMode::Normal as i32,
+                        fill_stack: Some(v1::PaintStack {
+                            layers: vec![v1::PaintLayer {
+                                kind: Some(v1::paint_layer::Kind::Solid(color())),
+                                visible: true,
+                                opacity: 0.75,
+                                blend_mode: v1::BlendMode::LinearDodge as i32,
+                            }],
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn isolated_normal_extension_operations_require_semantics_ten() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetNodeExtensions(
+                    v1::SetNodeExtensions {
+                        node_id: 10_u128.to_be_bytes().to_vec(),
+                        extensions: [(
+                            makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION.to_string(),
+                            vec![1],
+                        )]
+                        .into_iter()
+                        .collect(),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
+
+        let malformed = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetNodeExtensions(
+                    v1::SetNodeExtensions {
+                        node_id: 10_u128.to_be_bytes().to_vec(),
+                        extensions: [(
+                            makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION.to_string(),
+                            vec![2],
+                        )]
+                        .into_iter()
+                        .collect(),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            commands_from_payload_with_semantics(
+                &malformed,
+                makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_ok()
+        );
     }
 
     fn auto_layout(
@@ -966,6 +2965,8 @@ mod tests {
             auto_layout: None,
             reactions: Vec::new(),
             prototype_metadata: None,
+            fill_stack: Some(v1::PaintStack { layers: Vec::new() }),
+            stroke_stack: None,
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![
@@ -1040,6 +3041,8 @@ mod tests {
                             auto_layout: None,
                             reactions: Vec::new(),
                             prototype_metadata: None,
+                            fill_stack: None,
+                            stroke_stack: None,
                         }),
                     })),
                 },
@@ -1054,6 +3057,21 @@ mod tests {
             ],
         }
         .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_ok()
+        );
         let commands = commands_from_payload(&payload).unwrap();
         let mut document = Document::empty();
         document
@@ -1077,6 +3095,10 @@ mod tests {
                 .extensions
                 .get("makefigma.mask.alpha.v1"),
             Some(&vec![1]),
+        );
+        assert_eq!(
+            document.fill_stack_for_node(editor_core::NodeId(7)),
+            Some(&editor_core::color::PaintStack::default())
         );
     }
 
@@ -1147,6 +3169,7 @@ mod tests {
                             byte_length: Some(128),
                             pixel_width: Some(16),
                             pixel_height: Some(8),
+                            font_faces: Vec::new(),
                         }),
                     },
                 )),
@@ -1169,6 +3192,50 @@ mod tests {
             document.asset(editor_core::AssetId(9)).unwrap().dimensions,
             Some([16, 8])
         );
+    }
+
+    #[test]
+    fn font_face_metadata_requires_semantics_v40_and_reaches_core() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::RegisterResource(
+                    v1::RegisterResource {
+                        resource: Some(v1::ResourceIndexEntry {
+                            asset_id: 10_u128.to_be_bytes().to_vec(),
+                            content_hash: vec![5; 32],
+                            media_type: "font/ttf".into(),
+                            byte_length: Some(512),
+                            pixel_width: None,
+                            pixel_height: None,
+                            font_faces: vec![v1::FontFaceMetadata {
+                                face_index: 0,
+                                family: "Acme Sans".into(),
+                                style: "Regular".into(),
+                            }],
+                        }),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert_eq!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+            })
+        );
+        let commands = commands_from_payload_with_semantics(
+            &payload,
+            makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let Command::RegisterAsset { asset } = &commands[0] else {
+            panic!("expected font resource registration");
+        };
+        assert_eq!(asset.font_faces[0].family, "Acme Sans");
     }
 
     #[test]
@@ -1381,6 +3448,1666 @@ mod tests {
                 id: editor_core::NodeId(7),
                 enabled: true
             },]
+        ));
+    }
+
+    #[test]
+    fn geometry_ignore_constraints_maps_to_the_distinct_core_intent() {
+        let operation = |ignore_constraints| v1::ResolvedOperation {
+            kind: Some(v1::resolved_operation::Kind::UpdateGeometry(
+                v1::GeometryUpdate {
+                    node_id: 7_u128.to_be_bytes().to_vec(),
+                    x: 10.0,
+                    y: 20.0,
+                    width: 300.0,
+                    height: 200.0,
+                    rotation: 15.0,
+                    ignore_constraints,
+                },
+            )),
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![operation(false), operation(true)],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload(&payload).unwrap().as_slice(),
+            [
+                Command::UpdateGeometry { id: editor_core::NodeId(7), width, .. },
+                Command::UpdateGeometryWithoutConstraints { id: editor_core::NodeId(7), height, .. },
+            ] if *width == 300.0 && *height == 200.0
+        ));
+    }
+
+    #[test]
+    fn text_truncation_operations_require_semantics_twelve() {
+        let properties = v1::TextProperties {
+            runs: vec![],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                line_height_unit: None,
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: Some(v1::TextTruncation::Ending as i32),
+            max_lines: Some(2),
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.text_truncation == TextTruncation::Ending && properties.max_lines == Some(2)
+        ));
+    }
+
+    #[test]
+    fn text_run_paint_stack_operations_require_semantics_fourteen() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 2,
+                font_size: 16.0,
+                font_weight: 500,
+                fill_stack: Some(v1::PaintStack { layers: vec![] }),
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                line_height_unit: None,
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].fill_stack == Some(editor_core::color::PaintStack::default())
+        ));
+    }
+
+    #[test]
+    fn empty_text_base_style_operations_require_semantics_fifteen() {
+        let properties = v1::TextProperties {
+            runs: vec![],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                line_height_unit: None,
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: Some(v1::TextStyleRun {
+                font_size: 22.0,
+                font_weight: 600,
+                italic: true,
+                letter_spacing: 1.25,
+                fill_stack: Some(v1::PaintStack { layers: vec![] }),
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.base_style.as_ref().is_some_and(|style| style.font_size == 22.0 && style.start == 0 && style.end == 0)
+        ));
+    }
+
+    #[test]
+    fn text_case_operations_require_semantics_sixteen() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 4,
+                font_size: 16.0,
+                font_weight: 400,
+                text_case: Some(v1::TextCase::SmallCapsForced as i32),
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                line_height_unit: None,
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_case == Some(editor_core::TextCase::SmallCapsForced)
+        ));
+    }
+
+    #[test]
+    fn text_path_conversion_requires_semantics_seventeen() {
+        let path = v1::VectorPath {
+            fill_rule: v1::FillRule::NonZero as i32,
+            subpaths: vec![v1::VectorSubpath {
+                closed: false,
+                points: vec![
+                    v1::VectorPoint {
+                        point_id: 1_u128.to_be_bytes().to_vec(),
+                        x: 0.0,
+                        y: 40.0,
+                        handle_in_x: None,
+                        handle_in_y: None,
+                        handle_out_x: None,
+                        handle_out_y: None,
+                        point_type: v1::VectorPointType::Corner as i32,
+                    },
+                    v1::VectorPoint {
+                        point_id: 2_u128.to_be_bytes().to_vec(),
+                        x: 100.0,
+                        y: 40.0,
+                        handle_in_x: None,
+                        handle_in_y: None,
+                        handle_out_x: None,
+                        handle_out_y: None,
+                        point_type: v1::VectorPointType::Corner as i32,
+                    },
+                ],
+            }],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::ConvertToTextPath(
+                    v1::ConvertToTextPath {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        vector_path: Some(path),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::ConvertToTextPath { id: editor_core::NodeId(7), path }]
+                if path.subpaths[0].points.len() == 2 && !path.subpaths[0].closed
+        ));
+    }
+
+    #[test]
+    fn relative_line_height_operations_require_semantics_eighteen() {
+        let properties = v1::TextProperties {
+            runs: vec![],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(150.0),
+                paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+                line_height_unit: Some(v1::LineHeightUnit::Percent as i32),
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.line_height_unit == Some(LineHeightUnit::Percent)
+        ));
+    }
+
+    #[test]
+    fn paragraph_indent_operations_require_semantics_nineteen() {
+        let properties = v1::TextProperties {
+            runs: vec![],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: Some(14.0),
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.paragraph_indent == Some(14.0)
+        ));
+    }
+
+    #[test]
+    fn text_wrap_style_operations_require_semantics_twenty() {
+        let properties = v1::TextProperties {
+            runs: vec![],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: Some(v1::TextWrapStyle::Balance as i32),
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.text_wrap_style == Some(TextWrapStyle::Balance)
+        ));
+    }
+
+    #[test]
+    fn text_hyperlink_operations_require_semantics_twenty_one() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: Some(v1::HyperlinkTarget {
+                    r#type: v1::HyperlinkType::Node as i32,
+                    value: "1:2".into(),
+                }),
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION - 1),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].hyperlink.as_ref().is_some_and(|link| link.kind == HyperlinkType::Node && link.value == "1:2")
+        ));
+    }
+
+    #[test]
+    fn text_decoration_operations_require_semantics_twenty_two() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 8_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration == Some(TextDecoration::Underline)
+        ));
+    }
+
+    #[test]
+    fn text_decoration_style_operations_require_semantics_twenty_three() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_style: Some(v1::TextDecorationStyle::Dotted as i32),
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 9_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration_style == Some(TextDecorationStyle::Dotted)
+        ));
+    }
+
+    #[test]
+    fn text_decoration_offset_operations_require_semantics_twenty_four() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_style: None,
+                text_decoration_offset: Some(v1::TextDecorationOffset {
+                    value: -20.0,
+                    unit: v1::TextDecorationOffsetUnit::Percent as i32,
+                }),
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 10_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration_offset == Some(TextDecorationOffset::Percent(-20.0))
+        ));
+    }
+
+    #[test]
+    fn text_decoration_thickness_operations_require_semantics_twenty_five() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: Some(v1::TextDecorationThickness {
+                    value: 10.0,
+                    unit: v1::TextDecorationThicknessUnit::Percent as i32,
+                }),
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 11_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration_thickness == Some(TextDecorationThickness::Percent(10.0))
+        ));
+    }
+
+    #[test]
+    fn text_decoration_color_operations_require_semantics_twenty_six() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: Some(v1::TextDecorationColor {
+                    color: Some(color()),
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: v1::BlendMode::Multiply as i32,
+                }),
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 0.0,
+                line_height_unit: None,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: None,
+                hanging_punctuation: None,
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            fallback_fonts: vec![],
+            text_truncation: None,
+            max_lines: None,
+            base_style: None,
+            paragraph_style_runs: vec![],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 12_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration_color == Some(TextDecorationColor {
+                    color: editor_core::color::Color {
+                        space: editor_core::color::ColorSpace::Srgb,
+                        components: [0.2, 0.4, 0.6],
+                        alpha: 1.0,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: editor_core::BlendMode::Multiply,
+                })
+        ));
+    }
+
+    #[test]
+    fn text_decoration_skip_ink_operations_require_semantics_twenty_seven() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font_size: 16.0,
+                font_weight: 400,
+                text_decoration: Some(v1::TextDecoration::Underline as i32),
+                text_decoration_skip_ink: Some(true),
+                leading_trim: None,
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 13_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].text_decoration_skip_ink == Some(true)
+        ));
+    }
+
+    #[test]
+    fn leading_trim_operations_require_semantics_twenty_eight() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font_size: 16.0,
+                font_weight: 400,
+                leading_trim: Some(v1::LeadingTrim::CapHeight as i32),
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 14_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(&payload, makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION - 1),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(&payload, makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].leading_trim == Some(LeadingTrim::CapHeight)
+        ));
+    }
+
+    #[test]
+    fn text_list_type_operations_require_semantics_twenty_nine() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 15_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.list_type == Some(TextListType::Ordered)
+        ));
+    }
+
+    #[test]
+    fn text_list_spacing_operations_require_semantics_thirty() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                list_spacing: Some(8.0),
+                hanging_list: None,
+                hanging_punctuation: None,
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 16_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.list_spacing == Some(8.0)
+        ));
+    }
+
+    #[test]
+    fn paragraph_style_run_operations_require_semantics_thirty_one() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 4,
+                indentation: Some(2),
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 17_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun { start: 4, indentation: Some(2), list_type: None, list_spacing: None, paragraph_spacing: None, paragraph_indent: None, line_height: None, line_height_unit: None, text_wrap_style: None }]
+        ));
+    }
+
+    #[test]
+    fn text_hanging_list_operations_require_semantics_thirty_two() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                hanging_list: Some(true),
+                hanging_punctuation: None,
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 18_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.hanging_list
+        ));
+    }
+
+    #[test]
+    fn paragraph_list_option_operations_require_semantics_thirty_three() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: Some(v1::TextListType::None as i32),
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 19_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 4,
+                    indentation: None,
+                    list_type: Some(ParagraphListType::None),
+                    list_spacing: None,
+                    paragraph_spacing: None,
+                    paragraph_indent: None,
+                    line_height: None,
+                    line_height_unit: None,
+                    text_wrap_style: None,
+                }]
+        ));
+    }
+
+    #[test]
+    fn paragraph_list_spacing_operations_require_semantics_thirty_four() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                list_type: Some(v1::TextListType::Ordered as i32),
+                list_spacing: Some(8.0),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: Some(0.0),
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 20_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 0,
+                    indentation: None,
+                    list_type: None,
+                    list_spacing: Some(0.0),
+                    paragraph_spacing: None,
+                    paragraph_indent: None,
+                    line_height: None,
+                    line_height_unit: None,
+                    text_wrap_style: None,
+                }]
+        ));
+    }
+
+    #[test]
+    fn paragraph_spacing_operations_require_semantics_thirty_five() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_spacing: 8.0,
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: Some(0.0),
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 21_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 0,
+                    indentation: None,
+                    list_type: None,
+                    list_spacing: None,
+                    paragraph_spacing: Some(0.0),
+                    paragraph_indent: None,
+                    line_height: None,
+                    line_height_unit: None,
+                    text_wrap_style: None,
+                }]
+        ));
+    }
+
+    #[test]
+    fn paragraph_indent_run_operations_require_semantics_thirty_six() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                paragraph_indent: Some(8.0),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: Some(0.0),
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 22_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 0,
+                    indentation: None,
+                    list_type: None,
+                    list_spacing: None,
+                    paragraph_spacing: None,
+                    paragraph_indent: Some(0.0),
+                    line_height: None,
+                    line_height_unit: None,
+                    text_wrap_style: None,
+                }]
+        ));
+    }
+
+    #[test]
+    fn paragraph_line_height_operations_require_semantics_thirty_seven() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 0,
+                line_height: Some(150.0),
+                line_height_unit: Some(v1::LineHeightUnit::Percent as i32),
+                ..Default::default()
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 23_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 0,
+                    indentation: None,
+                    list_type: None,
+                    list_spacing: None,
+                    paragraph_spacing: None,
+                    paragraph_indent: None,
+                    line_height: Some(150.0),
+                    line_height_unit: Some(LineHeightUnit::Percent),
+                    text_wrap_style: None,
+                }]
+        ));
+    }
+
+    #[test]
+    fn hanging_punctuation_operations_require_semantics_thirty_eight() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                hanging_punctuation: Some(true),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 24_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph.hanging_punctuation
+        ));
+    }
+
+    #[test]
+    fn paragraph_text_wrap_style_operations_require_semantics_thirty_nine() {
+        let properties = v1::TextProperties {
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(20.0),
+                text_wrap_style: Some(v1::TextWrapStyle::Balance as i32),
+                ..Default::default()
+            }),
+            paragraph_style_runs: vec![v1::ParagraphStyleRun {
+                start: 4,
+                text_wrap_style: Some(v1::TextWrapStyle::Auto as i32),
+                ..Default::default()
+            }],
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 25_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.paragraph_style_runs == vec![ParagraphStyleRun {
+                    start: 4,
+                    indentation: None,
+                    list_type: None,
+                    list_spacing: None,
+                    paragraph_spacing: None,
+                    paragraph_indent: None,
+                    line_height: None,
+                    line_height_unit: None,
+                    text_wrap_style: Some(TextWrapStyle::Auto),
+                }]
         ));
     }
 }

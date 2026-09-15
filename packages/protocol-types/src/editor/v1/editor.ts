@@ -104,9 +104,9 @@ export enum StrokeAlign {
 }
 
 /**
- * E1's initial interoperable blend subset. Zero preserves the historical
+ * CSS/Canvas-interoperable Figma blend subset. Zero preserves the historical
  * source-over result for snapshots and operation payloads authored before
- * Blend Mode existed.
+ * Blend Mode existed. New values are append-only.
  */
 export enum BlendMode {
   BLEND_MODE_NORMAL = 0,
@@ -115,6 +115,21 @@ export enum BlendMode {
   BLEND_MODE_OVERLAY = 3,
   BLEND_MODE_DARKEN = 4,
   BLEND_MODE_LIGHTEN = 5,
+  BLEND_MODE_COLOR_DODGE = 6,
+  BLEND_MODE_COLOR_BURN = 7,
+  BLEND_MODE_HARD_LIGHT = 8,
+  BLEND_MODE_SOFT_LIGHT = 9,
+  BLEND_MODE_DIFFERENCE = 10,
+  BLEND_MODE_EXCLUSION = 11,
+  BLEND_MODE_HUE = 12,
+  BLEND_MODE_SATURATION = 13,
+  BLEND_MODE_COLOR = 14,
+  BLEND_MODE_LUMINOSITY = 15,
+  /** BLEND_MODE_PASS_THROUGH - Node-only container mode. PaintLayer validation rejects this value. */
+  BLEND_MODE_PASS_THROUGH = 16,
+  /** BLEND_MODE_LINEAR_BURN - Canvas nodes and Paint Stack layers use explicit bounded pixel compositing. */
+  BLEND_MODE_LINEAR_BURN = 17,
+  BLEND_MODE_LINEAR_DODGE = 18,
   UNRECOGNIZED = -1,
 }
 
@@ -218,6 +233,23 @@ export enum BooleanOperation {
   UNRECOGNIZED = -1,
 }
 
+export enum ImageScaleMode {
+  IMAGE_SCALE_MODE_UNSPECIFIED = 0,
+  IMAGE_SCALE_MODE_FILL = 1,
+  IMAGE_SCALE_MODE_FIT = 2,
+  IMAGE_SCALE_MODE_CROP = 3,
+  IMAGE_SCALE_MODE_TILE = 4,
+  UNRECOGNIZED = -1,
+}
+
+export enum GradientPaintKind {
+  GRADIENT_PAINT_KIND_UNSPECIFIED = 0,
+  GRADIENT_PAINT_KIND_RADIAL = 1,
+  GRADIENT_PAINT_KIND_ANGULAR = 2,
+  GRADIENT_PAINT_KIND_DIAMOND = 3,
+  UNRECOGNIZED = -1,
+}
+
 export enum TextAlignment {
   TEXT_ALIGNMENT_UNSPECIFIED = 0,
   TEXT_ALIGNMENT_LEFT = 1,
@@ -232,6 +264,101 @@ export enum TextAutoSize {
   TEXT_AUTO_SIZE_FIXED = 1,
   TEXT_AUTO_SIZE_HEIGHT = 2,
   TEXT_AUTO_SIZE_WIDTH_AND_HEIGHT = 3,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * Figma TextNode.textTruncation. UNSPECIFIED is legacy wire absence and has
+ * the same effective behavior as DISABLED without changing old snapshots.
+ */
+export enum TextTruncation {
+  TEXT_TRUNCATION_UNSPECIFIED = 0,
+  TEXT_TRUNCATION_DISABLED = 1,
+  TEXT_TRUNCATION_ENDING = 2,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * Figma TextCase. UNSPECIFIED is legacy wire absence and has the same
+ * effective behavior as ORIGINAL without changing old document hashes.
+ */
+export enum TextCase {
+  TEXT_CASE_UNSPECIFIED = 0,
+  TEXT_CASE_ORIGINAL = 1,
+  TEXT_CASE_UPPER = 2,
+  TEXT_CASE_LOWER = 3,
+  TEXT_CASE_TITLE = 4,
+  TEXT_CASE_SMALL_CAPS = 5,
+  TEXT_CASE_SMALL_CAPS_FORCED = 6,
+  UNRECOGNIZED = -1,
+}
+
+export enum LeadingTrim {
+  LEADING_TRIM_UNSPECIFIED = 0,
+  LEADING_TRIM_NONE = 1,
+  LEADING_TRIM_CAP_HEIGHT = 2,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextDecoration {
+  TEXT_DECORATION_UNSPECIFIED = 0,
+  TEXT_DECORATION_UNDERLINE = 1,
+  TEXT_DECORATION_STRIKETHROUGH = 2,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextDecorationStyle {
+  TEXT_DECORATION_STYLE_UNSPECIFIED = 0,
+  TEXT_DECORATION_STYLE_SOLID = 1,
+  TEXT_DECORATION_STYLE_WAVY = 2,
+  TEXT_DECORATION_STYLE_DOTTED = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextDecorationOffsetUnit {
+  TEXT_DECORATION_OFFSET_UNIT_UNSPECIFIED = 0,
+  TEXT_DECORATION_OFFSET_UNIT_PIXELS = 1,
+  TEXT_DECORATION_OFFSET_UNIT_PERCENT = 2,
+  TEXT_DECORATION_OFFSET_UNIT_AUTO = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextDecorationThicknessUnit {
+  TEXT_DECORATION_THICKNESS_UNIT_UNSPECIFIED = 0,
+  TEXT_DECORATION_THICKNESS_UNIT_PIXELS = 1,
+  TEXT_DECORATION_THICKNESS_UNIT_PERCENT = 2,
+  TEXT_DECORATION_THICKNESS_UNIT_AUTO = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum HyperlinkType {
+  HYPERLINK_TYPE_UNSPECIFIED = 0,
+  HYPERLINK_TYPE_URL = 1,
+  HYPERLINK_TYPE_NODE = 2,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextWrapStyle {
+  TEXT_WRAP_STYLE_UNSPECIFIED = 0,
+  TEXT_WRAP_STYLE_AUTO = 1,
+  TEXT_WRAP_STYLE_BALANCE = 2,
+  TEXT_WRAP_STYLE_PRETTY = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum TextListType {
+  TEXT_LIST_TYPE_UNSPECIFIED = 0,
+  TEXT_LIST_TYPE_NONE = 1,
+  TEXT_LIST_TYPE_ORDERED = 2,
+  TEXT_LIST_TYPE_UNORDERED = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum LineHeightUnit {
+  LINE_HEIGHT_UNIT_UNSPECIFIED = 0,
+  LINE_HEIGHT_UNIT_PIXELS = 1,
+  LINE_HEIGHT_UNIT_PERCENT = 2,
+  LINE_HEIGHT_UNIT_AUTO = 3,
   UNRECOGNIZED = -1,
 }
 
@@ -311,7 +438,21 @@ export interface ResourceIndexEntry {
   mediaType: string;
   byteLength?: string | undefined;
   pixelWidth?: number | undefined;
-  pixelHeight?: number | undefined;
+  pixelHeight?:
+    | number
+    | undefined;
+  /**
+   * Immutable OpenType name-table projection for every admitted face. The
+   * browser uses these names only as Figma-compatible public identities; font
+   * bytes remain content addressed by asset_id/content_hash.
+   */
+  fontFaces: FontFaceMetadata[];
+}
+
+export interface FontFaceMetadata {
+  faceIndex: number;
+  family: string;
+  style: string;
 }
 
 export interface DocumentSnapshot {
@@ -498,6 +639,60 @@ export interface Paint {
   linearGradient?: LinearGradient | undefined;
 }
 
+export interface ImagePaint {
+  assetId: Uint8Array;
+  scaleMode: ImageScaleMode;
+  transform?:
+    | Transform
+    | undefined;
+  /**
+   * Figma ImagePaint rotation applies only to Fill/Fit/Tile and is
+   * canonicalized to 0/90/180/270 degrees.
+   */
+  rotationDegrees: number;
+  /** Presence-bearing Figma image adjustments. Each present value is in [-1, 1]. */
+  filters?: ImageFilters | undefined;
+}
+
+export interface ImageFilters {
+  exposure?: number | undefined;
+  contrast?: number | undefined;
+  saturation?: number | undefined;
+  temperature?: number | undefined;
+  tint?: number | undefined;
+  highlights?: number | undefined;
+  shadows?: number | undefined;
+}
+
+/**
+ * Non-linear gradients retain Figma's complete local-to-gradient transform.
+ * This payload belongs to the versioned PaintStack and has no lossy legacy
+ * Paint mirror.
+ */
+export interface GradientPaint {
+  kind: GradientPaintKind;
+  transform?: Transform | undefined;
+  stops: GradientStop[];
+}
+
+export interface PaintLayer {
+  solid?: Color | undefined;
+  linearGradient?: LinearGradient | undefined;
+  image?: ImagePaint | undefined;
+  gradient?: GradientPaint | undefined;
+  visible: boolean;
+  opacity: number;
+  blendMode: BlendMode;
+}
+
+/**
+ * Presence is semantic: a present wrapper with zero layers means explicit no
+ * paint, while an omitted wrapper selects the legacy singular/repeated fields.
+ */
+export interface PaintStack {
+  layers: PaintLayer[];
+}
+
 export interface FontVariation {
   /** exactly four ASCII bytes */
   tag: string;
@@ -520,13 +715,196 @@ export interface TextStyleRun {
   italic: boolean;
   letterSpacing: number;
   /** Optional per-run color; omission inherits the Text node fill. */
+  color?:
+    | Color
+    | undefined;
+  /**
+   * Presence-bearing Figma range fills. A present empty stack means no paint;
+   * omission falls back to color and then to the owning Text node fill.
+   */
+  fillStack?:
+    | PaintStack
+    | undefined;
+  /**
+   * Omission is the legacy ORIGINAL behavior. Presence requires engine
+   * semantics 16 so older readers cannot silently erase presentation case.
+   */
+  textCase?:
+    | TextCase
+    | undefined;
+  /** Figma range hyperlink metadata. Message presence distinguishes no link. */
+  hyperlink?:
+    | HyperlinkTarget
+    | undefined;
+  /** Omission is Figma NONE. Presence requires engine semantics 22. */
+  textDecoration?:
+    | TextDecoration
+    | undefined;
+  /** Omission is Figma SOLID. Non-default values require engine semantics 23. */
+  textDecorationStyle?:
+    | TextDecorationStyle
+    | undefined;
+  /** Omission is Figma AUTO. Explicit values require engine semantics 24. */
+  textDecorationOffset?:
+    | TextDecorationOffset
+    | undefined;
+  /** Omission is Figma AUTO. Explicit values require engine semantics 25. */
+  textDecorationThickness?: TextDecorationThickness | undefined;
+  textDecorationColor?:
+    | TextDecorationColor
+    | undefined;
+  /**
+   * Omission preserves the legacy continuous underline. true requires engine
+   * semantics 27 and enables Figma's descender-aware skip-ink behavior.
+   */
+  textDecorationSkipInk?:
+    | boolean
+    | undefined;
+  /**
+   * Omission is Figma NONE. CAP_HEIGHT requires engine semantics 28 and
+   * removes the outer leading above the first line and below the last line.
+   */
+  leadingTrim?: LeadingTrim | undefined;
+}
+
+export interface TextDecorationOffset {
+  value: number;
+  unit: TextDecorationOffsetUnit;
+}
+
+export interface TextDecorationThickness {
+  value: number;
+  unit: TextDecorationThicknessUnit;
+}
+
+/**
+ * AUTO remains wire absence. An explicit value is restricted to the SolidPaint
+ * fields that are already admitted by Canonical paint semantics.
+ */
+export interface TextDecorationColor {
   color?: Color | undefined;
+  visible: boolean;
+  opacity: number;
+  blendMode: BlendMode;
+}
+
+export interface HyperlinkTarget {
+  type: HyperlinkType;
+  value: string;
 }
 
 export interface ParagraphStyle {
   alignment: TextAlignment;
   lineHeight?: number | undefined;
   paragraphSpacing: number;
+  /**
+   * Omission preserves the legacy pixel interpretation. Explicit PERCENT or
+   * AUTO requires engine semantics 18; PIXELS is accepted on input and
+   * canonicalized back to omission so old documents keep their hashes.
+   */
+  lineHeightUnit?:
+    | LineHeightUnit
+    | undefined;
+  /**
+   * Presence-bearing first-line inset from the paragraph's left edge.
+   * Omission preserves legacy layout and canonical hashes.
+   */
+  paragraphIndent?:
+    | number
+    | undefined;
+  /**
+   * Omission preserves Figma AUTO and every legacy document hash. Explicit
+   * BALANCE/PRETTY requires engine semantics 20.
+   */
+  textWrapStyle?:
+    | TextWrapStyle
+    | undefined;
+  /**
+   * Omission preserves Figma NONE and every legacy document hash. Explicit
+   * ORDERED/UNORDERED requires engine semantics 29.
+   */
+  listType?:
+    | TextListType
+    | undefined;
+  /**
+   * Omission is Figma's zero list spacing and preserves legacy hashes.
+   * Positive values require engine semantics 30.
+   */
+  listSpacing?:
+    | number
+    | undefined;
+  /**
+   * Omission/false keeps list markers inside the text box. True moves the
+   * first marker column outside the text box and requires engine semantics 32.
+   */
+  hangingList?:
+    | boolean
+    | undefined;
+  /**
+   * Omission/false preserves legacy wrapping. True permits one boundary
+   * punctuation grapheme to hang outside each visual line and requires
+   * engine semantics 38.
+   */
+  hangingPunctuation?: boolean | undefined;
+}
+
+/**
+ * Sparse per-paragraph overrides keyed by the UTF-8 byte offset at which an
+ * authored paragraph begins. The record is intentionally append-only so later
+ * paragraph-level Figma fields can share the same durable coordinate model.
+ */
+export interface ParagraphStyleRun {
+  start: number;
+  /**
+   * Figma list nesting level. Presence, including explicit zero, requires
+   * engine semantics 31.
+   */
+  indentation?:
+    | number
+    | undefined;
+  /**
+   * Absence inherits ParagraphStyle.list_type. Explicit NONE disables the
+   * global list for this paragraph. Presence requires engine semantics 33.
+   */
+  listType?:
+    | TextListType
+    | undefined;
+  /**
+   * Absence inherits ParagraphStyle.list_spacing. Presence, including zero,
+   * requires engine semantics 34 and applies after this authored list item.
+   */
+  listSpacing?:
+    | number
+    | undefined;
+  /**
+   * Absence inherits ParagraphStyle.paragraph_spacing. Presence, including
+   * zero, requires engine semantics 35 and applies after this paragraph.
+   */
+  paragraphSpacing?:
+    | number
+    | undefined;
+  /**
+   * Absence inherits ParagraphStyle.paragraph_indent. Presence, including
+   * zero, requires engine semantics 36 and applies to this paragraph's first line.
+   */
+  paragraphIndent?:
+    | number
+    | undefined;
+  /**
+   * Per-paragraph line-height override. PIXELS uses line_height alone;
+   * PERCENT uses both fields; AUTO uses line_height_unit alone. Either field
+   * requires engine semantics 37. Both absent inherit ParagraphStyle.
+   */
+  lineHeight?: number | undefined;
+  lineHeightUnit?:
+    | LineHeightUnit
+    | undefined;
+  /**
+   * Absence inherits ParagraphStyle.text_wrap_style. Explicit AUTO disables
+   * an inherited BALANCE/PRETTY value for this paragraph. Presence requires
+   * engine semantics 39.
+   */
+  textWrapStyle?: TextWrapStyle | undefined;
 }
 
 export interface TextProperties {
@@ -534,6 +912,19 @@ export interface TextProperties {
   paragraph?: ParagraphStyle | undefined;
   autoSize: TextAutoSize;
   fallbackFonts: FontReference[];
+  textTruncation?:
+    | TextTruncation
+    | undefined;
+  /** Only valid with ENDING. Figma exposes null as absence and requires >= 1. */
+  maxLines?:
+    | number
+    | undefined;
+  /**
+   * Persistent insertion style for empty text. start/end must both be zero;
+   * keeping it separate from runs preserves the non-empty coverage invariant.
+   */
+  baseStyle?: TextStyleRun | undefined;
+  paragraphStyleRuns: ParagraphStyleRun[];
 }
 
 /**
@@ -684,6 +1075,8 @@ export interface SceneNode {
   blendMode: BlendMode;
   reactions: PrototypeReaction[];
   prototypeMetadata?: PrototypeMetadata | undefined;
+  fillStack?: PaintStack | undefined;
+  strokeStack?: PaintStack | undefined;
 }
 
 export interface SceneNode_ExtensionsEntry {
@@ -698,6 +1091,8 @@ export interface GeometryUpdate {
   width: number;
   height: number;
   rotation: number;
+  /** Leaves constrained descendants unchanged for resizeWithoutConstraints. */
+  ignoreConstraints: boolean;
 }
 
 export interface AppearanceUpdate {
@@ -731,6 +1126,8 @@ export interface AppearanceUpdate {
   effectStack: Effect[];
   autoLayout?: AutoLayout | undefined;
   blendMode: BlendMode;
+  fillStack?: PaintStack | undefined;
+  strokeStack?: PaintStack | undefined;
 }
 
 /**
@@ -826,6 +1223,15 @@ export interface ImageFillUpdate {
  * replicas apply the same deterministic result.
  */
 export interface SetVectorPath {
+  nodeId: Uint8Array;
+  vectorPath?: VectorPath | undefined;
+}
+
+/**
+ * Converts a vector-like shape into an immutable-base TextPath in place. The
+ * path is pre-resolved so every replica retains the same NodeId and geometry.
+ */
+export interface ConvertToTextPath {
   nodeId: Uint8Array;
   vectorPath?: VectorPath | undefined;
 }
@@ -967,6 +1373,7 @@ export interface ResolvedOperation {
   setAutoLayout?: AutoLayoutUpdate | undefined;
   connectVectorEndpoints?: ConnectVectorEndpoints | undefined;
   setNodeExtensions?: SetNodeExtensions | undefined;
+  convertToTextPath?: ConvertToTextPath | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -1488,6 +1895,7 @@ function createBaseResourceIndexEntry(): ResourceIndexEntry {
     byteLength: undefined,
     pixelWidth: undefined,
     pixelHeight: undefined,
+    fontFaces: [],
   };
 }
 
@@ -1510,6 +1918,9 @@ export const ResourceIndexEntry: MessageFns<ResourceIndexEntry> = {
     }
     if (message.pixelHeight !== undefined) {
       writer.uint32(48).uint32(message.pixelHeight);
+    }
+    for (const v of message.fontFaces) {
+      FontFaceMetadata.encode(v!, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -1569,6 +1980,14 @@ export const ResourceIndexEntry: MessageFns<ResourceIndexEntry> = {
           message.pixelHeight = reader.uint32();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.fontFaces.push(FontFaceMetadata.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1589,6 +2008,77 @@ export const ResourceIndexEntry: MessageFns<ResourceIndexEntry> = {
     message.byteLength = object.byteLength ?? undefined;
     message.pixelWidth = object.pixelWidth ?? undefined;
     message.pixelHeight = object.pixelHeight ?? undefined;
+    message.fontFaces = object.fontFaces?.map((e) => FontFaceMetadata.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseFontFaceMetadata(): FontFaceMetadata {
+  return { faceIndex: 0, family: "", style: "" };
+}
+
+export const FontFaceMetadata: MessageFns<FontFaceMetadata> = {
+  encode(message: FontFaceMetadata, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.faceIndex !== 0) {
+      writer.uint32(8).uint32(message.faceIndex);
+    }
+    if (message.family !== "") {
+      writer.uint32(18).string(message.family);
+    }
+    if (message.style !== "") {
+      writer.uint32(26).string(message.style);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FontFaceMetadata {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFontFaceMetadata();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.faceIndex = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.family = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.style = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<FontFaceMetadata>, I>>(base?: I): FontFaceMetadata {
+    return FontFaceMetadata.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<FontFaceMetadata>, I>>(object: I): FontFaceMetadata {
+    const message = createBaseFontFaceMetadata();
+    message.faceIndex = object.faceIndex ?? 0;
+    message.family = object.family ?? "";
+    message.style = object.style ?? "";
     return message;
   },
 };
@@ -3430,6 +3920,480 @@ export const Paint: MessageFns<Paint> = {
   },
 };
 
+function createBaseImagePaint(): ImagePaint {
+  return { assetId: new Uint8Array(0), scaleMode: 0, transform: undefined, rotationDegrees: 0, filters: undefined };
+}
+
+export const ImagePaint: MessageFns<ImagePaint> = {
+  encode(message: ImagePaint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.assetId.length !== 0) {
+      writer.uint32(10).bytes(message.assetId);
+    }
+    if (message.scaleMode !== 0) {
+      writer.uint32(16).int32(message.scaleMode);
+    }
+    if (message.transform !== undefined) {
+      Transform.encode(message.transform, writer.uint32(26).fork()).join();
+    }
+    if (message.rotationDegrees !== 0) {
+      writer.uint32(32).sint32(message.rotationDegrees);
+    }
+    if (message.filters !== undefined) {
+      ImageFilters.encode(message.filters, writer.uint32(42).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ImagePaint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseImagePaint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.assetId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.scaleMode = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.transform = Transform.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.rotationDegrees = reader.sint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.filters = ImageFilters.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ImagePaint>, I>>(base?: I): ImagePaint {
+    return ImagePaint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ImagePaint>, I>>(object: I): ImagePaint {
+    const message = createBaseImagePaint();
+    message.assetId = object.assetId ?? new Uint8Array(0);
+    message.scaleMode = object.scaleMode ?? 0;
+    message.transform = (object.transform !== undefined && object.transform !== null)
+      ? Transform.fromPartial(object.transform)
+      : undefined;
+    message.rotationDegrees = object.rotationDegrees ?? 0;
+    message.filters = (object.filters !== undefined && object.filters !== null)
+      ? ImageFilters.fromPartial(object.filters)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseImageFilters(): ImageFilters {
+  return {
+    exposure: undefined,
+    contrast: undefined,
+    saturation: undefined,
+    temperature: undefined,
+    tint: undefined,
+    highlights: undefined,
+    shadows: undefined,
+  };
+}
+
+export const ImageFilters: MessageFns<ImageFilters> = {
+  encode(message: ImageFilters, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.exposure !== undefined) {
+      writer.uint32(13).float(message.exposure);
+    }
+    if (message.contrast !== undefined) {
+      writer.uint32(21).float(message.contrast);
+    }
+    if (message.saturation !== undefined) {
+      writer.uint32(29).float(message.saturation);
+    }
+    if (message.temperature !== undefined) {
+      writer.uint32(37).float(message.temperature);
+    }
+    if (message.tint !== undefined) {
+      writer.uint32(45).float(message.tint);
+    }
+    if (message.highlights !== undefined) {
+      writer.uint32(53).float(message.highlights);
+    }
+    if (message.shadows !== undefined) {
+      writer.uint32(61).float(message.shadows);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ImageFilters {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseImageFilters();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 13) {
+            break;
+          }
+
+          message.exposure = reader.float();
+          continue;
+        }
+        case 2: {
+          if (tag !== 21) {
+            break;
+          }
+
+          message.contrast = reader.float();
+          continue;
+        }
+        case 3: {
+          if (tag !== 29) {
+            break;
+          }
+
+          message.saturation = reader.float();
+          continue;
+        }
+        case 4: {
+          if (tag !== 37) {
+            break;
+          }
+
+          message.temperature = reader.float();
+          continue;
+        }
+        case 5: {
+          if (tag !== 45) {
+            break;
+          }
+
+          message.tint = reader.float();
+          continue;
+        }
+        case 6: {
+          if (tag !== 53) {
+            break;
+          }
+
+          message.highlights = reader.float();
+          continue;
+        }
+        case 7: {
+          if (tag !== 61) {
+            break;
+          }
+
+          message.shadows = reader.float();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ImageFilters>, I>>(base?: I): ImageFilters {
+    return ImageFilters.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ImageFilters>, I>>(object: I): ImageFilters {
+    const message = createBaseImageFilters();
+    message.exposure = object.exposure ?? undefined;
+    message.contrast = object.contrast ?? undefined;
+    message.saturation = object.saturation ?? undefined;
+    message.temperature = object.temperature ?? undefined;
+    message.tint = object.tint ?? undefined;
+    message.highlights = object.highlights ?? undefined;
+    message.shadows = object.shadows ?? undefined;
+    return message;
+  },
+};
+
+function createBaseGradientPaint(): GradientPaint {
+  return { kind: 0, transform: undefined, stops: [] };
+}
+
+export const GradientPaint: MessageFns<GradientPaint> = {
+  encode(message: GradientPaint, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.kind !== 0) {
+      writer.uint32(8).int32(message.kind);
+    }
+    if (message.transform !== undefined) {
+      Transform.encode(message.transform, writer.uint32(18).fork()).join();
+    }
+    for (const v of message.stops) {
+      GradientStop.encode(v!, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GradientPaint {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGradientPaint();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.kind = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.transform = Transform.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stops.push(GradientStop.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GradientPaint>, I>>(base?: I): GradientPaint {
+    return GradientPaint.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GradientPaint>, I>>(object: I): GradientPaint {
+    const message = createBaseGradientPaint();
+    message.kind = object.kind ?? 0;
+    message.transform = (object.transform !== undefined && object.transform !== null)
+      ? Transform.fromPartial(object.transform)
+      : undefined;
+    message.stops = object.stops?.map((e) => GradientStop.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBasePaintLayer(): PaintLayer {
+  return {
+    solid: undefined,
+    linearGradient: undefined,
+    image: undefined,
+    gradient: undefined,
+    visible: false,
+    opacity: 0,
+    blendMode: 0,
+  };
+}
+
+export const PaintLayer: MessageFns<PaintLayer> = {
+  encode(message: PaintLayer, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.solid !== undefined) {
+      Color.encode(message.solid, writer.uint32(10).fork()).join();
+    }
+    if (message.linearGradient !== undefined) {
+      LinearGradient.encode(message.linearGradient, writer.uint32(18).fork()).join();
+    }
+    if (message.image !== undefined) {
+      ImagePaint.encode(message.image, writer.uint32(26).fork()).join();
+    }
+    if (message.gradient !== undefined) {
+      GradientPaint.encode(message.gradient, writer.uint32(58).fork()).join();
+    }
+    if (message.visible !== false) {
+      writer.uint32(32).bool(message.visible);
+    }
+    if (message.opacity !== 0) {
+      writer.uint32(45).float(message.opacity);
+    }
+    if (message.blendMode !== 0) {
+      writer.uint32(48).int32(message.blendMode);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PaintLayer {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePaintLayer();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.solid = Color.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.linearGradient = LinearGradient.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.image = ImagePaint.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.gradient = GradientPaint.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+        case 5: {
+          if (tag !== 45) {
+            break;
+          }
+
+          message.opacity = reader.float();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.blendMode = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PaintLayer>, I>>(base?: I): PaintLayer {
+    return PaintLayer.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PaintLayer>, I>>(object: I): PaintLayer {
+    const message = createBasePaintLayer();
+    message.solid = (object.solid !== undefined && object.solid !== null) ? Color.fromPartial(object.solid) : undefined;
+    message.linearGradient = (object.linearGradient !== undefined && object.linearGradient !== null)
+      ? LinearGradient.fromPartial(object.linearGradient)
+      : undefined;
+    message.image = (object.image !== undefined && object.image !== null)
+      ? ImagePaint.fromPartial(object.image)
+      : undefined;
+    message.gradient = (object.gradient !== undefined && object.gradient !== null)
+      ? GradientPaint.fromPartial(object.gradient)
+      : undefined;
+    message.visible = object.visible ?? false;
+    message.opacity = object.opacity ?? 0;
+    message.blendMode = object.blendMode ?? 0;
+    return message;
+  },
+};
+
+function createBasePaintStack(): PaintStack {
+  return { layers: [] };
+}
+
+export const PaintStack: MessageFns<PaintStack> = {
+  encode(message: PaintStack, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.layers) {
+      PaintLayer.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PaintStack {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePaintStack();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.layers.push(PaintLayer.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PaintStack>, I>>(base?: I): PaintStack {
+    return PaintStack.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PaintStack>, I>>(object: I): PaintStack {
+    const message = createBasePaintStack();
+    message.layers = object.layers?.map((e) => PaintLayer.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseFontVariation(): FontVariation {
   return { tag: "", value: 0 };
 }
@@ -3568,6 +4532,16 @@ function createBaseTextStyleRun(): TextStyleRun {
     italic: false,
     letterSpacing: 0,
     color: undefined,
+    fillStack: undefined,
+    textCase: undefined,
+    hyperlink: undefined,
+    textDecoration: undefined,
+    textDecorationStyle: undefined,
+    textDecorationOffset: undefined,
+    textDecorationThickness: undefined,
+    textDecorationColor: undefined,
+    textDecorationSkipInk: undefined,
+    leadingTrim: undefined,
   };
 }
 
@@ -3596,6 +4570,36 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     if (message.color !== undefined) {
       Color.encode(message.color, writer.uint32(66).fork()).join();
+    }
+    if (message.fillStack !== undefined) {
+      PaintStack.encode(message.fillStack, writer.uint32(74).fork()).join();
+    }
+    if (message.textCase !== undefined) {
+      writer.uint32(80).int32(message.textCase);
+    }
+    if (message.hyperlink !== undefined) {
+      HyperlinkTarget.encode(message.hyperlink, writer.uint32(90).fork()).join();
+    }
+    if (message.textDecoration !== undefined) {
+      writer.uint32(96).int32(message.textDecoration);
+    }
+    if (message.textDecorationStyle !== undefined) {
+      writer.uint32(104).int32(message.textDecorationStyle);
+    }
+    if (message.textDecorationOffset !== undefined) {
+      TextDecorationOffset.encode(message.textDecorationOffset, writer.uint32(114).fork()).join();
+    }
+    if (message.textDecorationThickness !== undefined) {
+      TextDecorationThickness.encode(message.textDecorationThickness, writer.uint32(122).fork()).join();
+    }
+    if (message.textDecorationColor !== undefined) {
+      TextDecorationColor.encode(message.textDecorationColor, writer.uint32(130).fork()).join();
+    }
+    if (message.textDecorationSkipInk !== undefined) {
+      writer.uint32(136).bool(message.textDecorationSkipInk);
+    }
+    if (message.leadingTrim !== undefined) {
+      writer.uint32(144).int32(message.leadingTrim);
     }
     return writer;
   },
@@ -3671,6 +4675,86 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.color = Color.decode(reader, reader.uint32());
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.fillStack = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.textCase = reader.int32() as any;
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.hyperlink = HyperlinkTarget.decode(reader, reader.uint32());
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.textDecoration = reader.int32() as any;
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.textDecorationStyle = reader.int32() as any;
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.textDecorationOffset = TextDecorationOffset.decode(reader, reader.uint32());
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.textDecorationThickness = TextDecorationThickness.decode(reader, reader.uint32());
+          continue;
+        }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.textDecorationColor = TextDecorationColor.decode(reader, reader.uint32());
+          continue;
+        }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.textDecorationSkipInk = reader.bool();
+          continue;
+        }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.leadingTrim = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3695,12 +4779,300 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     message.italic = object.italic ?? false;
     message.letterSpacing = object.letterSpacing ?? 0;
     message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
+    message.fillStack = (object.fillStack !== undefined && object.fillStack !== null)
+      ? PaintStack.fromPartial(object.fillStack)
+      : undefined;
+    message.textCase = object.textCase ?? undefined;
+    message.hyperlink = (object.hyperlink !== undefined && object.hyperlink !== null)
+      ? HyperlinkTarget.fromPartial(object.hyperlink)
+      : undefined;
+    message.textDecoration = object.textDecoration ?? undefined;
+    message.textDecorationStyle = object.textDecorationStyle ?? undefined;
+    message.textDecorationOffset = (object.textDecorationOffset !== undefined && object.textDecorationOffset !== null)
+      ? TextDecorationOffset.fromPartial(object.textDecorationOffset)
+      : undefined;
+    message.textDecorationThickness =
+      (object.textDecorationThickness !== undefined && object.textDecorationThickness !== null)
+        ? TextDecorationThickness.fromPartial(object.textDecorationThickness)
+        : undefined;
+    message.textDecorationColor = (object.textDecorationColor !== undefined && object.textDecorationColor !== null)
+      ? TextDecorationColor.fromPartial(object.textDecorationColor)
+      : undefined;
+    message.textDecorationSkipInk = object.textDecorationSkipInk ?? undefined;
+    message.leadingTrim = object.leadingTrim ?? undefined;
+    return message;
+  },
+};
+
+function createBaseTextDecorationOffset(): TextDecorationOffset {
+  return { value: 0, unit: 0 };
+}
+
+export const TextDecorationOffset: MessageFns<TextDecorationOffset> = {
+  encode(message: TextDecorationOffset, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.value !== 0) {
+      writer.uint32(9).double(message.value);
+    }
+    if (message.unit !== 0) {
+      writer.uint32(16).int32(message.unit);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextDecorationOffset {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextDecorationOffset();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.value = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.unit = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<TextDecorationOffset>, I>>(base?: I): TextDecorationOffset {
+    return TextDecorationOffset.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TextDecorationOffset>, I>>(object: I): TextDecorationOffset {
+    const message = createBaseTextDecorationOffset();
+    message.value = object.value ?? 0;
+    message.unit = object.unit ?? 0;
+    return message;
+  },
+};
+
+function createBaseTextDecorationThickness(): TextDecorationThickness {
+  return { value: 0, unit: 0 };
+}
+
+export const TextDecorationThickness: MessageFns<TextDecorationThickness> = {
+  encode(message: TextDecorationThickness, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.value !== 0) {
+      writer.uint32(9).double(message.value);
+    }
+    if (message.unit !== 0) {
+      writer.uint32(16).int32(message.unit);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextDecorationThickness {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextDecorationThickness();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.value = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.unit = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<TextDecorationThickness>, I>>(base?: I): TextDecorationThickness {
+    return TextDecorationThickness.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TextDecorationThickness>, I>>(object: I): TextDecorationThickness {
+    const message = createBaseTextDecorationThickness();
+    message.value = object.value ?? 0;
+    message.unit = object.unit ?? 0;
+    return message;
+  },
+};
+
+function createBaseTextDecorationColor(): TextDecorationColor {
+  return { color: undefined, visible: false, opacity: 0, blendMode: 0 };
+}
+
+export const TextDecorationColor: MessageFns<TextDecorationColor> = {
+  encode(message: TextDecorationColor, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.color !== undefined) {
+      Color.encode(message.color, writer.uint32(10).fork()).join();
+    }
+    if (message.visible !== false) {
+      writer.uint32(16).bool(message.visible);
+    }
+    if (message.opacity !== 0) {
+      writer.uint32(29).float(message.opacity);
+    }
+    if (message.blendMode !== 0) {
+      writer.uint32(32).int32(message.blendMode);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextDecorationColor {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextDecorationColor();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.color = Color.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 29) {
+            break;
+          }
+
+          message.opacity = reader.float();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.blendMode = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<TextDecorationColor>, I>>(base?: I): TextDecorationColor {
+    return TextDecorationColor.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TextDecorationColor>, I>>(object: I): TextDecorationColor {
+    const message = createBaseTextDecorationColor();
+    message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
+    message.visible = object.visible ?? false;
+    message.opacity = object.opacity ?? 0;
+    message.blendMode = object.blendMode ?? 0;
+    return message;
+  },
+};
+
+function createBaseHyperlinkTarget(): HyperlinkTarget {
+  return { type: 0, value: "" };
+}
+
+export const HyperlinkTarget: MessageFns<HyperlinkTarget> = {
+  encode(message: HyperlinkTarget, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.type !== 0) {
+      writer.uint32(8).int32(message.type);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): HyperlinkTarget {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseHyperlinkTarget();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.type = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<HyperlinkTarget>, I>>(base?: I): HyperlinkTarget {
+    return HyperlinkTarget.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<HyperlinkTarget>, I>>(object: I): HyperlinkTarget {
+    const message = createBaseHyperlinkTarget();
+    message.type = object.type ?? 0;
+    message.value = object.value ?? "";
     return message;
   },
 };
 
 function createBaseParagraphStyle(): ParagraphStyle {
-  return { alignment: 0, lineHeight: undefined, paragraphSpacing: 0 };
+  return {
+    alignment: 0,
+    lineHeight: undefined,
+    paragraphSpacing: 0,
+    lineHeightUnit: undefined,
+    paragraphIndent: undefined,
+    textWrapStyle: undefined,
+    listType: undefined,
+    listSpacing: undefined,
+    hangingList: undefined,
+    hangingPunctuation: undefined,
+  };
 }
 
 export const ParagraphStyle: MessageFns<ParagraphStyle> = {
@@ -3713,6 +5085,27 @@ export const ParagraphStyle: MessageFns<ParagraphStyle> = {
     }
     if (message.paragraphSpacing !== 0) {
       writer.uint32(25).double(message.paragraphSpacing);
+    }
+    if (message.lineHeightUnit !== undefined) {
+      writer.uint32(32).int32(message.lineHeightUnit);
+    }
+    if (message.paragraphIndent !== undefined) {
+      writer.uint32(41).double(message.paragraphIndent);
+    }
+    if (message.textWrapStyle !== undefined) {
+      writer.uint32(48).int32(message.textWrapStyle);
+    }
+    if (message.listType !== undefined) {
+      writer.uint32(56).int32(message.listType);
+    }
+    if (message.listSpacing !== undefined) {
+      writer.uint32(65).double(message.listSpacing);
+    }
+    if (message.hangingList !== undefined) {
+      writer.uint32(72).bool(message.hangingList);
+    }
+    if (message.hangingPunctuation !== undefined) {
+      writer.uint32(80).bool(message.hangingPunctuation);
     }
     return writer;
   },
@@ -3748,6 +5141,62 @@ export const ParagraphStyle: MessageFns<ParagraphStyle> = {
           message.paragraphSpacing = reader.double();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.lineHeightUnit = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.paragraphIndent = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.textWrapStyle = reader.int32() as any;
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.listType = reader.int32() as any;
+          continue;
+        }
+        case 8: {
+          if (tag !== 65) {
+            break;
+          }
+
+          message.listSpacing = reader.double();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.hangingList = reader.bool();
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.hangingPunctuation = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3765,12 +5214,180 @@ export const ParagraphStyle: MessageFns<ParagraphStyle> = {
     message.alignment = object.alignment ?? 0;
     message.lineHeight = object.lineHeight ?? undefined;
     message.paragraphSpacing = object.paragraphSpacing ?? 0;
+    message.lineHeightUnit = object.lineHeightUnit ?? undefined;
+    message.paragraphIndent = object.paragraphIndent ?? undefined;
+    message.textWrapStyle = object.textWrapStyle ?? undefined;
+    message.listType = object.listType ?? undefined;
+    message.listSpacing = object.listSpacing ?? undefined;
+    message.hangingList = object.hangingList ?? undefined;
+    message.hangingPunctuation = object.hangingPunctuation ?? undefined;
+    return message;
+  },
+};
+
+function createBaseParagraphStyleRun(): ParagraphStyleRun {
+  return {
+    start: 0,
+    indentation: undefined,
+    listType: undefined,
+    listSpacing: undefined,
+    paragraphSpacing: undefined,
+    paragraphIndent: undefined,
+    lineHeight: undefined,
+    lineHeightUnit: undefined,
+    textWrapStyle: undefined,
+  };
+}
+
+export const ParagraphStyleRun: MessageFns<ParagraphStyleRun> = {
+  encode(message: ParagraphStyleRun, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.start !== 0) {
+      writer.uint32(8).uint32(message.start);
+    }
+    if (message.indentation !== undefined) {
+      writer.uint32(16).uint32(message.indentation);
+    }
+    if (message.listType !== undefined) {
+      writer.uint32(24).int32(message.listType);
+    }
+    if (message.listSpacing !== undefined) {
+      writer.uint32(33).double(message.listSpacing);
+    }
+    if (message.paragraphSpacing !== undefined) {
+      writer.uint32(41).double(message.paragraphSpacing);
+    }
+    if (message.paragraphIndent !== undefined) {
+      writer.uint32(49).double(message.paragraphIndent);
+    }
+    if (message.lineHeight !== undefined) {
+      writer.uint32(57).double(message.lineHeight);
+    }
+    if (message.lineHeightUnit !== undefined) {
+      writer.uint32(64).int32(message.lineHeightUnit);
+    }
+    if (message.textWrapStyle !== undefined) {
+      writer.uint32(72).int32(message.textWrapStyle);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ParagraphStyleRun {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseParagraphStyleRun();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.start = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.indentation = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.listType = reader.int32() as any;
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.listSpacing = reader.double();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.paragraphSpacing = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.paragraphIndent = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 57) {
+            break;
+          }
+
+          message.lineHeight = reader.double();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.lineHeightUnit = reader.int32() as any;
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.textWrapStyle = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ParagraphStyleRun>, I>>(base?: I): ParagraphStyleRun {
+    return ParagraphStyleRun.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ParagraphStyleRun>, I>>(object: I): ParagraphStyleRun {
+    const message = createBaseParagraphStyleRun();
+    message.start = object.start ?? 0;
+    message.indentation = object.indentation ?? undefined;
+    message.listType = object.listType ?? undefined;
+    message.listSpacing = object.listSpacing ?? undefined;
+    message.paragraphSpacing = object.paragraphSpacing ?? undefined;
+    message.paragraphIndent = object.paragraphIndent ?? undefined;
+    message.lineHeight = object.lineHeight ?? undefined;
+    message.lineHeightUnit = object.lineHeightUnit ?? undefined;
+    message.textWrapStyle = object.textWrapStyle ?? undefined;
     return message;
   },
 };
 
 function createBaseTextProperties(): TextProperties {
-  return { runs: [], paragraph: undefined, autoSize: 0, fallbackFonts: [] };
+  return {
+    runs: [],
+    paragraph: undefined,
+    autoSize: 0,
+    fallbackFonts: [],
+    textTruncation: undefined,
+    maxLines: undefined,
+    baseStyle: undefined,
+    paragraphStyleRuns: [],
+  };
 }
 
 export const TextProperties: MessageFns<TextProperties> = {
@@ -3786,6 +5403,18 @@ export const TextProperties: MessageFns<TextProperties> = {
     }
     for (const v of message.fallbackFonts) {
       FontReference.encode(v!, writer.uint32(34).fork()).join();
+    }
+    if (message.textTruncation !== undefined) {
+      writer.uint32(40).int32(message.textTruncation);
+    }
+    if (message.maxLines !== undefined) {
+      writer.uint32(48).uint32(message.maxLines);
+    }
+    if (message.baseStyle !== undefined) {
+      TextStyleRun.encode(message.baseStyle, writer.uint32(58).fork()).join();
+    }
+    for (const v of message.paragraphStyleRuns) {
+      ParagraphStyleRun.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -3829,6 +5458,38 @@ export const TextProperties: MessageFns<TextProperties> = {
           message.fallbackFonts.push(FontReference.decode(reader, reader.uint32()));
           continue;
         }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.textTruncation = reader.int32() as any;
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.maxLines = reader.uint32();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.baseStyle = TextStyleRun.decode(reader, reader.uint32());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.paragraphStyleRuns.push(ParagraphStyleRun.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3849,6 +5510,12 @@ export const TextProperties: MessageFns<TextProperties> = {
       : undefined;
     message.autoSize = object.autoSize ?? 0;
     message.fallbackFonts = object.fallbackFonts?.map((e) => FontReference.fromPartial(e)) || [];
+    message.textTruncation = object.textTruncation ?? undefined;
+    message.maxLines = object.maxLines ?? undefined;
+    message.baseStyle = (object.baseStyle !== undefined && object.baseStyle !== null)
+      ? TextStyleRun.fromPartial(object.baseStyle)
+      : undefined;
+    message.paragraphStyleRuns = object.paragraphStyleRuns?.map((e) => ParagraphStyleRun.fromPartial(e)) || [];
     return message;
   },
 };
@@ -4719,6 +6386,8 @@ function createBaseSceneNode(): SceneNode {
     blendMode: 0,
     reactions: [],
     prototypeMetadata: undefined,
+    fillStack: undefined,
+    strokeStack: undefined,
   };
 }
 
@@ -4873,6 +6542,12 @@ export const SceneNode: MessageFns<SceneNode> = {
     }
     if (message.prototypeMetadata !== undefined) {
       PrototypeMetadata.encode(message.prototypeMetadata, writer.uint32(386).fork()).join();
+    }
+    if (message.fillStack !== undefined) {
+      PaintStack.encode(message.fillStack, writer.uint32(394).fork()).join();
+    }
+    if (message.strokeStack !== undefined) {
+      PaintStack.encode(message.strokeStack, writer.uint32(402).fork()).join();
     }
     return writer;
   },
@@ -5301,6 +6976,22 @@ export const SceneNode: MessageFns<SceneNode> = {
           message.prototypeMetadata = PrototypeMetadata.decode(reader, reader.uint32());
           continue;
         }
+        case 49: {
+          if (tag !== 394) {
+            break;
+          }
+
+          message.fillStack = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
+        case 50: {
+          if (tag !== 402) {
+            break;
+          }
+
+          message.strokeStack = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5395,6 +7086,12 @@ export const SceneNode: MessageFns<SceneNode> = {
     message.prototypeMetadata = (object.prototypeMetadata !== undefined && object.prototypeMetadata !== null)
       ? PrototypeMetadata.fromPartial(object.prototypeMetadata)
       : undefined;
+    message.fillStack = (object.fillStack !== undefined && object.fillStack !== null)
+      ? PaintStack.fromPartial(object.fillStack)
+      : undefined;
+    message.strokeStack = (object.strokeStack !== undefined && object.strokeStack !== null)
+      ? PaintStack.fromPartial(object.strokeStack)
+      : undefined;
     return message;
   },
 };
@@ -5458,7 +7155,7 @@ export const SceneNode_ExtensionsEntry: MessageFns<SceneNode_ExtensionsEntry> = 
 };
 
 function createBaseGeometryUpdate(): GeometryUpdate {
-  return { nodeId: new Uint8Array(0), x: 0, y: 0, width: 0, height: 0, rotation: 0 };
+  return { nodeId: new Uint8Array(0), x: 0, y: 0, width: 0, height: 0, rotation: 0, ignoreConstraints: false };
 }
 
 export const GeometryUpdate: MessageFns<GeometryUpdate> = {
@@ -5480,6 +7177,9 @@ export const GeometryUpdate: MessageFns<GeometryUpdate> = {
     }
     if (message.rotation !== 0) {
       writer.uint32(49).double(message.rotation);
+    }
+    if (message.ignoreConstraints !== false) {
+      writer.uint32(56).bool(message.ignoreConstraints);
     }
     return writer;
   },
@@ -5539,6 +7239,14 @@ export const GeometryUpdate: MessageFns<GeometryUpdate> = {
           message.rotation = reader.double();
           continue;
         }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.ignoreConstraints = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5559,6 +7267,7 @@ export const GeometryUpdate: MessageFns<GeometryUpdate> = {
     message.width = object.width ?? 0;
     message.height = object.height ?? 0;
     message.rotation = object.rotation ?? 0;
+    message.ignoreConstraints = object.ignoreConstraints ?? false;
     return message;
   },
 };
@@ -5595,6 +7304,8 @@ function createBaseAppearanceUpdate(): AppearanceUpdate {
     effectStack: [],
     autoLayout: undefined,
     blendMode: 0,
+    fillStack: undefined,
+    strokeStack: undefined,
   };
 }
 
@@ -5695,6 +7406,12 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
     }
     if (message.blendMode !== 0) {
       writer.uint32(240).int32(message.blendMode);
+    }
+    if (message.fillStack !== undefined) {
+      PaintStack.encode(message.fillStack, writer.uint32(250).fork()).join();
+    }
+    if (message.strokeStack !== undefined) {
+      PaintStack.encode(message.strokeStack, writer.uint32(258).fork()).join();
     }
     return writer;
   },
@@ -5976,6 +7693,22 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
           message.blendMode = reader.int32() as any;
           continue;
         }
+        case 31: {
+          if (tag !== 250) {
+            break;
+          }
+
+          message.fillStack = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
+        case 32: {
+          if (tag !== 258) {
+            break;
+          }
+
+          message.strokeStack = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6036,6 +7769,12 @@ export const AppearanceUpdate: MessageFns<AppearanceUpdate> = {
       ? AutoLayout.fromPartial(object.autoLayout)
       : undefined;
     message.blendMode = object.blendMode ?? 0;
+    message.fillStack = (object.fillStack !== undefined && object.fillStack !== null)
+      ? PaintStack.fromPartial(object.fillStack)
+      : undefined;
+    message.strokeStack = (object.strokeStack !== undefined && object.strokeStack !== null)
+      ? PaintStack.fromPartial(object.strokeStack)
+      : undefined;
     return message;
   },
 };
@@ -6796,6 +8535,66 @@ export const SetVectorPath: MessageFns<SetVectorPath> = {
   },
   fromPartial<I extends Exact<DeepPartial<SetVectorPath>, I>>(object: I): SetVectorPath {
     const message = createBaseSetVectorPath();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.vectorPath = (object.vectorPath !== undefined && object.vectorPath !== null)
+      ? VectorPath.fromPartial(object.vectorPath)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseConvertToTextPath(): ConvertToTextPath {
+  return { nodeId: new Uint8Array(0), vectorPath: undefined };
+}
+
+export const ConvertToTextPath: MessageFns<ConvertToTextPath> = {
+  encode(message: ConvertToTextPath, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.vectorPath !== undefined) {
+      VectorPath.encode(message.vectorPath, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConvertToTextPath {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConvertToTextPath();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.vectorPath = VectorPath.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConvertToTextPath>, I>>(base?: I): ConvertToTextPath {
+    return ConvertToTextPath.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConvertToTextPath>, I>>(object: I): ConvertToTextPath {
+    const message = createBaseConvertToTextPath();
     message.nodeId = object.nodeId ?? new Uint8Array(0);
     message.vectorPath = (object.vectorPath !== undefined && object.vectorPath !== null)
       ? VectorPath.fromPartial(object.vectorPath)
@@ -7699,6 +9498,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setAutoLayout: undefined,
     connectVectorEndpoints: undefined,
     setNodeExtensions: undefined,
+    convertToTextPath: undefined,
   };
 }
 
@@ -7781,6 +9581,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.setNodeExtensions !== undefined) {
       SetNodeExtensions.encode(message.setNodeExtensions, writer.uint32(210).fork()).join();
+    }
+    if (message.convertToTextPath !== undefined) {
+      ConvertToTextPath.encode(message.convertToTextPath, writer.uint32(218).fork()).join();
     }
     return writer;
   },
@@ -8000,6 +9803,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.setNodeExtensions = SetNodeExtensions.decode(reader, reader.uint32());
           continue;
         }
+        case 27: {
+          if (tag !== 218) {
+            break;
+          }
+
+          message.convertToTextPath = ConvertToTextPath.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8095,6 +9906,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
         : undefined;
     message.setNodeExtensions = (object.setNodeExtensions !== undefined && object.setNodeExtensions !== null)
       ? SetNodeExtensions.fromPartial(object.setNodeExtensions)
+      : undefined;
+    message.convertToTextPath = (object.convertToTextPath !== undefined && object.convertToTextPath !== null)
+      ? ConvertToTextPath.fromPartial(object.convertToTextPath)
       : undefined;
     return message;
   },

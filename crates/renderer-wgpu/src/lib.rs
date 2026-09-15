@@ -511,6 +511,10 @@ pub mod native_executor {
         pub width: f32,
         pub height: f32,
         pub rotation_degrees: f32,
+        /// Optional normalized-quad → world affine `[a, b, c, d, e, f]`.
+        /// Callers use this for skewed/reflected TextPath glyphs; `None`
+        /// preserves the centre-rotated compatibility rectangle above.
+        pub quad_transform: Option<[f32; 6]>,
         pub color_rgba: [f32; 4],
         pub mask_width: u32,
         pub mask_height: u32,
@@ -936,28 +940,33 @@ pub mod native_executor {
                             }],
                         }),
                         Some(wgpu::VertexBufferLayout {
-                            array_stride: FLOAT_BYTES * 13,
+                            array_stride: FLOAT_BYTES * 14,
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &[
                                 wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x4,
+                                    format: wgpu::VertexFormat::Float32x2,
                                     offset: 0,
                                     shader_location: 1,
                                 },
                                 wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32,
-                                    offset: FLOAT_BYTES * 4,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: FLOAT_BYTES * 2,
                                     shader_location: 2,
                                 },
                                 wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x4,
-                                    offset: FLOAT_BYTES * 5,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: FLOAT_BYTES * 4,
                                     shader_location: 3,
                                 },
                                 wgpu::VertexAttribute {
                                     format: wgpu::VertexFormat::Float32x4,
-                                    offset: FLOAT_BYTES * 9,
+                                    offset: FLOAT_BYTES * 6,
                                     shader_location: 4,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: FLOAT_BYTES * 10,
+                                    shader_location: 5,
                                 },
                             ],
                         }),
@@ -1382,19 +1391,35 @@ pub mod native_executor {
             }
             self.queue
                 .write_buffer(&self.camera, 0, bytemuck::cast_slice(&camera.floats()));
-            let mut instances = Vec::with_capacity(glyphs.len() * 13);
+            let mut instances = Vec::with_capacity(glyphs.len() * 14);
             let mut uploaded_glyphs = 0;
             for glyph in glyphs {
                 let (entry, uploaded) = self.ensure_glyph_atlas_entry(glyph)?;
                 if uploaded {
                     uploaded_glyphs += 1;
                 }
+                let [a, b, c, d, e, f] = glyph.quad_transform.unwrap_or_else(|| {
+                    let radians = glyph.rotation_degrees.to_radians();
+                    let cosine = radians.cos();
+                    let sine = radians.sin();
+                    let center_x = glyph.width * 0.5;
+                    let center_y = glyph.height * 0.5;
+                    [
+                        cosine * glyph.width,
+                        sine * glyph.width,
+                        -sine * glyph.height,
+                        cosine * glyph.height,
+                        glyph.x + center_x - cosine * center_x + sine * center_y,
+                        glyph.y + center_y - sine * center_x - cosine * center_y,
+                    ]
+                });
                 instances.extend_from_slice(&[
-                    glyph.x,
-                    glyph.y,
-                    glyph.width,
-                    glyph.height,
-                    glyph.rotation_degrees,
+                    e,
+                    f,
+                    a,
+                    b,
+                    c,
+                    d,
                     glyph.color_rgba[0],
                     glyph.color_rgba[1],
                     glyph.color_rgba[2],
@@ -1679,6 +1704,9 @@ pub mod native_executor {
                 ]
                 .into_iter()
                 .all(f32::is_finite)
+                || glyph
+                    .quad_transform
+                    .is_some_and(|transform| !transform.into_iter().all(f32::is_finite))
                 || !glyph
                     .color_rgba
                     .into_iter()
@@ -1997,17 +2025,14 @@ struct Camera { first: vec4<f32>, second: vec4<f32>, };
 @group(1) @binding(0) var glyph_mask: texture_2d<f32>;
 @group(1) @binding(1) var glyph_sampler: sampler;
 struct Input {
-  @location(0) local: vec2<f32>, @location(1) position_size: vec4<f32>,
-  @location(2) rotation_degrees: f32, @location(3) color: vec4<f32>, @location(4) atlas_uv_rect: vec4<f32>,
+  @location(0) local: vec2<f32>, @location(1) origin: vec2<f32>,
+  @location(2) basis_x: vec2<f32>, @location(3) basis_y: vec2<f32>,
+  @location(4) color: vec4<f32>, @location(5) atlas_uv_rect: vec4<f32>,
 };
 struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) color: vec4<f32>, };
 @vertex fn vs_main(input: Input) -> Output {
   var output: Output;
-  let size = input.position_size.zw;
-  let center = size * 0.5;
-  let radians = input.rotation_degrees * 0.01745329252;
-  let point = input.local * size - center;
-  let world = input.position_size.xy + center + vec2<f32>(point.x * cos(radians) - point.y * sin(radians), point.x * sin(radians) + point.y * cos(radians));
+  let world = input.origin + input.local.x * input.basis_x + input.local.y * input.basis_y;
   let screen = (world + camera.first.xy) * camera.first.z + vec2<f32>(camera.first.w * 0.5, camera.second.x * 0.5);
   output.position = vec4<f32>(screen.x / camera.first.w * 2.0 - 1.0, 1.0 - screen.y / camera.second.x * 2.0, 0.0, 1.0);
   output.uv = input.atlas_uv_rect.xy + input.local * input.atlas_uv_rect.zw;
@@ -2209,6 +2234,7 @@ struct Output { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
                 width: 20.0,
                 height: 20.0,
                 rotation_degrees: 0.0,
+                quad_transform: None,
                 color_rgba: [0.0, 1.0, 0.0, 1.0],
                 mask_width: 2,
                 mask_height: 2,

@@ -4,14 +4,22 @@
 //! canvas/GPU resources while this adapter owns only durable document semantics.
 
 use editor_core::{
-    ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
-    BooleanOperation, Command, ConstraintType, Constraints, DEFAULT_PAGE_ID, Document, DocumentId,
-    DropShadow, Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment,
-    LayoutMode, LayoutSizing, Node, NodeId, NodeKind, OperationEnvelope, OperationId, Origin, Page,
-    PageId, ParagraphStyle, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap,
-    StrokeJoin, TextAlign, TextAutoSize, TextProperties, TextStyleRun, Transaction, TransactionId,
-    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
+    ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
+    BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
+    DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
+    FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
+    LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    OperationEnvelope, OperationId, Origin, Page, PageId, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
+    TextTruncation, TextWrapStyle, Transaction, TransactionId, VectorPath, VectorPoint,
+    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    color::{
+        Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
+        ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
+        PaintLayerKind, PaintStack,
+    },
     geometry::{
         Bounds, DecorativeCapStyle, PerSideStrokeAlign, Point, StrokeCapStyle, StrokeJoinStyle,
         StrokeStyle, boolean_vector_paths, decorative_cap_mesh, flatten_vector_path,
@@ -32,6 +40,21 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct DocumentEngine {
     document: Document,
+}
+
+fn collect_geometry_change_ids(
+    changes: &[AppliedChange],
+    ids: &mut std::collections::BTreeSet<NodeId>,
+) {
+    for change in changes {
+        match change {
+            AppliedChange::Composite { changes } => collect_geometry_change_ids(changes, ids),
+            AppliedChange::GeometryChanged { id, .. } => {
+                ids.insert(*id);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl DocumentEngine {
@@ -272,6 +295,16 @@ impl DocumentEngine {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
                     let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
+                    let fill_stack = node
+                        .fill_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
+                    let stroke_stack = node
+                        .stroke_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
                     let page_id = node
                         .page_id
                         .as_deref()
@@ -310,11 +343,28 @@ impl DocumentEngine {
                             layout: auto_layout,
                         });
                     }
+                    if fill_stack.is_some() || stroke_stack.is_some() {
+                        commands.push(Command::SetPaintStacks {
+                            id: node_id,
+                            fill_stack,
+                            stroke_stack,
+                        });
+                    }
                 }
                 BatchCommand::Restore { node } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
                     let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
+                    let fill_stack = node
+                        .fill_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
+                    let stroke_stack = node
+                        .stroke_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
                     let page_id = node
                         .page_id
                         .as_deref()
@@ -328,6 +378,7 @@ impl DocumentEngine {
                         .transpose()?
                         .map(|id| AssetId(id.0));
                     let node = node_from_projection(node)?;
+                    let node_id = node.id;
                     commands.push(Command::RestoreNode {
                         page_id,
                         node,
@@ -335,24 +386,72 @@ impl DocumentEngine {
                         text_properties,
                     });
                     if auto_layout != AutoLayout::default() {
-                        let id = match commands.last() {
-                            Some(Command::RestoreNode { node, .. }) => node.id,
-                            _ => return Err(JsValue::from_str("INVALID_TRANSACTION")),
-                        };
                         commands.push(Command::SetAutoLayout {
-                            id,
+                            id: node_id,
                             layout: auto_layout,
                         });
                     }
+                    if fill_stack.is_some() || stroke_stack.is_some() {
+                        commands.push(Command::SetPaintStacks {
+                            id: node_id,
+                            fill_stack,
+                            stroke_stack,
+                        });
+                    }
+                }
+                BatchCommand::ConvertToTextPath { node } => {
+                    let text_properties =
+                        text_properties_from_projection(node.text_properties.as_ref())?
+                            .unwrap_or_default();
+                    let node = node_from_projection(node)?;
+                    if node.kind != NodeKind::TextPath {
+                        return Err(JsValue::from_str("INVALID_TEXT_PATH_CONVERSION"));
+                    }
+                    let path = node
+                        .vector_path
+                        .clone()
+                        .ok_or_else(|| JsValue::from_str("INVALID_VECTOR_PATH"))?;
+                    commands.push(Command::ConvertToTextPath { id: node.id, path });
+                    commands.push(Command::Rename {
+                        id: node.id,
+                        name: node.name,
+                    });
+                    commands.push(Command::SetText {
+                        id: node.id,
+                        text: node.text,
+                    });
+                    commands.push(Command::SetTextProperties {
+                        id: node.id,
+                        properties: text_properties,
+                    });
+                    commands.push(Command::SetNodeExtensions {
+                        id: node.id,
+                        extensions: node.extensions,
+                    });
                 }
                 // The Worker resolves a partial Inspector patch to this complete node
                 // payload before crossing the bridge. Keeping the bridge input fully
                 // concrete makes replay deterministic and lets the Rust reducer own
                 // the all-or-nothing validation of every derived core field.
-                BatchCommand::Update { node } => {
+                BatchCommand::Update {
+                    node,
+                    ignore_constraints,
+                    plain_text_only,
+                    rename_text_path,
+                } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
                     let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
+                    let fill_stack = node
+                        .fill_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
+                    let stroke_stack = node
+                        .stroke_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
                     let asset_id = node
                         .asset_id
                         .as_deref()
@@ -360,6 +459,40 @@ impl DocumentEngine {
                         .transpose()?
                         .map(|id| AssetId(id.0));
                     let node = node_from_projection(node)?;
+                    if plain_text_only {
+                        let supports_plain_text = matches!(
+                            node.kind,
+                            NodeKind::CodeBlock
+                                | NodeKind::ShapeWithText
+                                | NodeKind::Sticky
+                                | NodeKind::TableCell
+                                | NodeKind::TextPath
+                        );
+                        let supports_properties =
+                            matches!(node.kind, NodeKind::ShapeWithText | NodeKind::TextPath);
+                        if !supports_plain_text
+                            || (text_properties.is_some() && !supports_properties)
+                        {
+                            return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES"));
+                        }
+                        commands.push(Command::SetText {
+                            id: node.id,
+                            text: node.text,
+                        });
+                        if node.kind == NodeKind::TextPath && rename_text_path {
+                            commands.push(Command::Rename {
+                                id: node.id,
+                                name: node.name,
+                            });
+                        }
+                        if let Some(properties) = text_properties {
+                            commands.push(Command::SetTextProperties {
+                                id: node.id,
+                                properties,
+                            });
+                        }
+                        continue;
+                    }
                     let boolean_operation = node.boolean_operation;
                     let appearance = Appearance {
                         fill: node.fill,
@@ -390,13 +523,24 @@ impl DocumentEngine {
                         contents_hidden: node.contents_hidden,
                         clips_content: Some(node.clips_content),
                     };
-                    let geometry = Command::UpdateGeometry {
-                        id: node.id,
-                        x: node.x,
-                        y: node.y,
-                        width: node.width,
-                        height: node.height,
-                        rotation: node.rotation,
+                    let geometry = if ignore_constraints {
+                        Command::UpdateGeometryWithoutConstraints {
+                            id: node.id,
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            rotation: node.rotation,
+                        }
+                    } else {
+                        Command::UpdateGeometry {
+                            id: node.id,
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            rotation: node.rotation,
+                        }
                     };
                     let rename = Command::Rename {
                         id: node.id,
@@ -418,8 +562,16 @@ impl DocumentEngine {
                     } else {
                         commands.extend([geometry, rename, appearance]);
                     }
-                    if let Some(path) = node.vector_path {
-                        commands.push(Command::SetVectorPath { id: node.id, path });
+                    // TextPath owns an immutable base path installed by
+                    // ConvertToTextPath. A complete Inspector projection still
+                    // carries that path, but replaying it through SetVectorPath
+                    // would both violate the immutable contract and make every
+                    // geometry/appearance edit fail Core validation. Only the
+                    // node kinds with an authorable path emit this command.
+                    if matches!(node.kind, NodeKind::Vector | NodeKind::Highlight) {
+                        if let Some(path) = node.vector_path {
+                            commands.push(Command::SetVectorPath { id: node.id, path });
+                        }
                     }
                     if let Some(operation) = boolean_operation {
                         commands.push(Command::SetBooleanOperation {
@@ -437,7 +589,10 @@ impl DocumentEngine {
                     } else if asset_id.is_some() {
                         return Err(JsValue::from_str("INVALID_ASSET_REFERENCE"));
                     }
-                    if node.kind == NodeKind::Text {
+                    if matches!(
+                        node.kind,
+                        NodeKind::Text | NodeKind::ShapeWithText | NodeKind::TextPath
+                    ) {
                         commands.push(Command::SetText {
                             id: node.id,
                             text: node.text,
@@ -453,6 +608,13 @@ impl DocumentEngine {
                         commands.push(Command::SetAutoLayout {
                             id: node.id,
                             layout: auto_layout,
+                        });
+                    }
+                    if fill_stack.is_some() || stroke_stack.is_some() {
+                        commands.push(Command::SetPaintStacks {
+                            id: node.id,
+                            fill_stack,
+                            stroke_stack,
                         });
                     }
                 }
@@ -677,6 +839,309 @@ struct CoreSnapshot {
     retired_ids: Option<Vec<String>>,
 }
 
+fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
+    if !(1..=55).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 55
+            && snapshot
+                .resource_index
+                .as_ref()
+                .is_some_and(|assets| assets.iter().any(|asset| !asset.font_faces.is_empty())))
+        || (snapshot.schema_version < 22
+            && snapshot
+                .nodes
+                .iter()
+                .any(|node| node.fill_stack.is_some() || node.stroke_stack.is_some()))
+        || (snapshot.schema_version < 23
+            && snapshot.nodes.iter().any(|node| {
+                [&node.fill_stack, &node.stroke_stack]
+                    .into_iter()
+                    .filter_map(Option::as_ref)
+                    .flat_map(|stack| &stack.layers)
+                    .any(|layer| {
+                        layer
+                            .image
+                            .as_ref()
+                            .is_some_and(|image| image.rotation_degrees != 0)
+                    })
+            }))
+        || (snapshot.schema_version < 24
+            && snapshot
+                .nodes
+                .iter()
+                .any(|node| node.blend_mode == "pass-through"))
+        || (snapshot.schema_version < 25
+            && snapshot.nodes.iter().any(|node| {
+                matches!(node.blend_mode.as_str(), "linear-burn" | "linear-dodge")
+                    || [&node.fill_stack, &node.stroke_stack]
+                        .into_iter()
+                        .filter_map(Option::as_ref)
+                        .flat_map(|stack| &stack.layers)
+                        .any(|layer| {
+                            matches!(layer.blend_mode.as_str(), "linear-burn" | "linear-dodge")
+                        })
+            }))
+        || (snapshot.schema_version < 26
+            && snapshot.nodes.iter().any(|node| {
+                node.extensions
+                    .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION)
+                    .is_some_and(|value| value.as_slice() == [1])
+            }))
+        || (snapshot.schema_version < 27
+            && snapshot.nodes.iter().any(|node| {
+                [&node.fill_stack, &node.stroke_stack]
+                    .into_iter()
+                    .filter_map(Option::as_ref)
+                    .flat_map(|stack| &stack.layers)
+                    .any(|layer| {
+                        layer
+                            .image
+                            .as_ref()
+                            .is_some_and(|image| image.filters.is_some())
+                    })
+            }))
+        || (snapshot.schema_version < 28
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.text_truncation.as_deref() == Some("ending")
+                        || properties.max_lines.is_some()
+                })
+            }))
+        || (snapshot.schema_version < 29
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.fill_stack.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 30
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.base_style.is_some())
+            }))
+        || (snapshot.schema_version < 31
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.text_case.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_case.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 32
+            && snapshot
+                .nodes
+                .iter()
+                .any(|node| node.kind == "textPath" && node.text_properties.is_some()))
+        || (snapshot.schema_version < 33
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.paragraph.line_height_unit.is_some())
+            }))
+        || (snapshot.schema_version < 34
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.paragraph.paragraph_indent.is_some())
+            }))
+        || (snapshot.schema_version < 35
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.paragraph.text_wrap_style.is_some())
+            }))
+        || (snapshot.schema_version < 36
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.hyperlink.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.hyperlink.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 37
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 38
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_style.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_style.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 39
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_offset.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_offset.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 40
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_thickness.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_thickness.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 41
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_color.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_color.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 43
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.leading_trim.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.leading_trim.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 44
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.paragraph.list_type.is_some())
+            }))
+        || (snapshot.schema_version < 45
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph
+                        .list_spacing
+                        .is_some_and(|value| value != 0.0)
+                })
+            }))
+        || (snapshot.schema_version < 46
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| !properties.paragraph_style_runs.is_empty())
+            }))
+        || (snapshot.schema_version < 47
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.paragraph.hanging_list == Some(true))
+            }))
+        || (snapshot.schema_version < 48
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.list_type.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 49
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.list_spacing.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 50
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.paragraph_spacing.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 51
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.paragraph_indent.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 52
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 53
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.paragraph.hanging_punctuation.unwrap_or(false)
+                })
+            }))
+        || (snapshot.schema_version < 54
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.text_wrap_style.is_some())
+                })
+            }))
+        || (snapshot.schema_version < 42
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_skip_ink == Some(true))
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_skip_ink == Some(true))
+                })
+            }))
+    {
+        return Err("UNSUPPORTED_CORE_SNAPSHOT");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectionPage {
@@ -696,6 +1161,16 @@ struct ProjectionAsset {
     pixel_width: Option<u32>,
     #[serde(default)]
     pixel_height: Option<u32>,
+    #[serde(default)]
+    font_faces: Vec<ProjectionFontFace>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionFontFace {
+    face_index: u32,
+    family: String,
+    style: String,
 }
 
 fn default_document_color_profile() -> String {
@@ -756,6 +1231,10 @@ struct ProjectionNode {
     fill_gradient: Option<ProjectionLinearGradient>,
     #[serde(default)]
     fills: Vec<ProjectionPaint>,
+    /// v22 stores the presence-bearing Paint Stack. `Some({ layers: [] })`
+    /// deliberately differs from an absent legacy stack.
+    #[serde(default)]
+    fill_stack: Option<ProjectionPaintStack>,
     /// v9 persists Canonical stroke paint and width. The CSS value is only the
     /// deterministic Canvas/Inspector projection fallback.
     #[serde(default = "default_transparent_css")]
@@ -766,6 +1245,8 @@ struct ProjectionNode {
     stroke_gradient: Option<ProjectionLinearGradient>,
     #[serde(default)]
     strokes: Vec<ProjectionPaint>,
+    #[serde(default)]
+    stroke_stack: Option<ProjectionPaintStack>,
     #[serde(default)]
     stroke_width: f64,
     /// v16 persists Figma-compatible open-path endpoint styles, v17 adds
@@ -982,15 +1463,134 @@ struct ProjectionTextStyleRun {
     letter_spacing: f64,
     #[serde(default)]
     color: Option<ProjectionColor>,
+    #[serde(default)]
+    fill_stack: Option<ProjectionPaintStack>,
+    #[serde(default)]
+    text_case: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hyperlink: Option<ProjectionHyperlinkTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_offset: Option<ProjectionTextDecorationOffset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_thickness: Option<ProjectionTextDecorationThickness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_color: Option<ProjectionTextDecorationColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_skip_ink: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leading_trim: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionHyperlinkTarget {
+    r#type: String,
+    value: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionTextStyle {
+    #[serde(default)]
+    font: Option<ProjectionFontReference>,
+    font_size: f64,
+    font_weight: u16,
+    italic: bool,
+    letter_spacing: f64,
+    #[serde(default)]
+    color: Option<ProjectionColor>,
+    #[serde(default)]
+    fill_stack: Option<ProjectionPaintStack>,
+    #[serde(default)]
+    text_case: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hyperlink: Option<ProjectionHyperlinkTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_offset: Option<ProjectionTextDecorationOffset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_thickness: Option<ProjectionTextDecorationThickness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_color: Option<ProjectionTextDecorationColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_decoration_skip_ink: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leading_trim: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionTextDecorationOffset {
+    value: f64,
+    unit: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionTextDecorationThickness {
+    value: f64,
+    unit: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionTextDecorationColor {
+    color: ProjectionColor,
+    visible: bool,
+    opacity: f32,
+    blend_mode: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectionParagraphStyle {
     alignment: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     line_height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_height_unit: Option<String>,
     paragraph_spacing: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paragraph_indent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_wrap_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    list_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    list_spacing: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hanging_list: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hanging_punctuation: Option<bool>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionParagraphStyleRun {
+    start: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indentation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    list_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    list_spacing: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paragraph_spacing: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paragraph_indent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_height_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_wrap_style: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -999,9 +1599,17 @@ struct ProjectionTextProperties {
     #[serde(default)]
     runs: Vec<ProjectionTextStyleRun>,
     paragraph: ProjectionParagraphStyle,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paragraph_style_runs: Vec<ProjectionParagraphStyleRun>,
     auto_size: String,
     #[serde(default)]
     fallback_fonts: Vec<ProjectionFontReference>,
+    #[serde(default)]
+    text_truncation: Option<String>,
+    #[serde(default)]
+    max_lines: Option<u32>,
+    #[serde(default)]
+    base_style: Option<ProjectionTextStyle>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1073,6 +1681,65 @@ struct ProjectionPaint {
     color: Option<ProjectionColor>,
     #[serde(default)]
     gradient: Option<ProjectionLinearGradient>,
+    #[serde(default)]
+    gradient_paint: Option<ProjectionGradientPaint>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionPaintStack {
+    layers: Vec<ProjectionPaintLayer>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionPaintLayer {
+    #[serde(default)]
+    paint: Option<ProjectionPaint>,
+    #[serde(default)]
+    image: Option<ProjectionImagePaint>,
+    visible: bool,
+    opacity: f32,
+    blend_mode: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionImagePaint {
+    asset_id: String,
+    scale_mode: String,
+    transform: ProjectionTransform,
+    #[serde(default)]
+    rotation_degrees: i16,
+    #[serde(default)]
+    filters: Option<ProjectionImageFilters>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionImageFilters {
+    #[serde(default)]
+    exposure: Option<f32>,
+    #[serde(default)]
+    contrast: Option<f32>,
+    #[serde(default)]
+    saturation: Option<f32>,
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    tint: Option<f32>,
+    #[serde(default)]
+    highlights: Option<f32>,
+    #[serde(default)]
+    shadows: Option<f32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionGradientPaint {
+    kind: String,
+    transform: ProjectionTransform,
+    stops: Vec<ProjectionGradientStop>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1101,8 +1768,17 @@ enum BatchCommand {
     Restore {
         node: ProjectionNode,
     },
+    ConvertToTextPath {
+        node: ProjectionNode,
+    },
     Update {
         node: ProjectionNode,
+        #[serde(default)]
+        ignore_constraints: bool,
+        #[serde(default)]
+        plain_text_only: bool,
+        #[serde(default)]
+        rename_text_path: bool,
     },
     MoveVectorPoint {
         id: String,
@@ -1176,6 +1852,18 @@ impl DocumentEngine {
         }
     }
 
+    /// Sets the document identity before legacy projection hydration. The old
+    /// browser path serialized and reparsed the entire hydrated document only
+    /// to replace this field, doubling the live 100k-node state at peak.
+    #[wasm_bindgen]
+    pub fn seed_document_id(&mut self, document_id: &str) -> Result<(), JsValue> {
+        let id = parse_document_id(document_id)?;
+        if !self.document.seed_document_id(id) {
+            return Err(JsValue::from_str("DOCUMENT_ID_SEED_AFTER_HYDRATION"));
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(getter)]
     pub fn revision(&self) -> u64 {
         self.document.revision
@@ -1201,8 +1889,11 @@ impl DocumentEngine {
     /// used to safely bootstrap and recover a remote document.
     #[wasm_bindgen]
     pub fn snapshot_protobuf(&self) -> Result<Vec<u8>, JsValue> {
-        makefigma_document_codec::snapshot_from_document(&self.document, 3)
-            .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))
+        makefigma_document_codec::snapshot_from_document(
+            &self.document,
+            makefigma_document_codec::CURRENT_ENGINE_SEMANTICS_VERSION,
+        )
+        .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))
     }
 
     #[wasm_bindgen]
@@ -1235,8 +1926,245 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
+        let schema_version = if self
+            .document
+            .assets()
+            .any(|asset| !asset.font_faces.is_empty())
+        {
+            55
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.text_wrap_style.is_some())
+                })
+        }) {
+            54
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.hanging_punctuation)
+        }) {
+            53
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+                })
+        }) {
+            52
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.paragraph_indent.is_some())
+                })
+        }) {
+            51
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.paragraph_spacing.is_some())
+                })
+        }) {
+            50
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.list_spacing.is_some())
+                })
+        }) {
+            49
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .paragraph_style_runs
+                        .iter()
+                        .any(|run| run.list_type.is_some())
+                })
+        }) {
+            48
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.hanging_list)
+        }) {
+            47
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| !properties.paragraph_style_runs.is_empty())
+        }) {
+            46
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.list_spacing.is_some())
+        }) {
+            45
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.list_type.is_some())
+        }) {
+            44
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.leading_trim.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.leading_trim.is_some())
+                })
+        }) {
+            43
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_skip_ink == Some(true))
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_skip_ink == Some(true))
+                })
+        }) {
+            42
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_color.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_color.is_some())
+                })
+        }) {
+            41
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_thickness.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_thickness.is_some())
+                })
+        }) {
+            40
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_offset.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_offset.is_some())
+                })
+        }) {
+            39
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration_style.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration_style.is_some())
+                })
+        }) {
+            38
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.text_decoration.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.text_decoration.is_some())
+                })
+        }) {
+            37
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties.runs.iter().any(|run| run.hyperlink.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.hyperlink.is_some())
+                })
+        }) {
+            36
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.text_wrap_style.is_some())
+        }) {
+            35
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.paragraph_indent.is_some())
+        }) {
+            34
+        } else if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| properties.paragraph.line_height_unit.is_some())
+        }) {
+            33
+        } else {
+            32
+        };
         let snapshot = CoreSnapshot {
-            schema_version: 21,
+            schema_version,
             document_id: format_document_id(self.document.id()),
             revision: self.document.revision,
             can_undo: self.document.can_undo(),
@@ -1258,6 +2186,8 @@ impl DocumentEngine {
                         self.document.asset_for_node(node.id),
                         self.document.text_properties_for_node(node.id),
                         self.document.auto_layout_for_node(node.id),
+                        self.document.fill_stack_for_node(node.id),
+                        self.document.stroke_stack_for_node(node.id),
                     )
                 })
                 .collect(),
@@ -1533,6 +2463,7 @@ impl DocumentEngine {
         byte_length: u64,
         pixel_width: u32,
         pixel_height: u32,
+        font_faces_json: &str,
     ) -> Result<u64, JsValue> {
         let dimensions = match (pixel_width, pixel_height) {
             (0, 0) => (None, None),
@@ -1546,6 +2477,8 @@ impl DocumentEngine {
             byte_length,
             pixel_width: dimensions.0,
             pixel_height: dimensions.1,
+            font_faces: serde_json::from_str(font_faces_json)
+                .map_err(|_| JsValue::from_str("INVALID_ASSET_REFERENCE"))?,
         })?;
         self.submit_register_asset(parse_id(transaction_id)?, base_revision, asset)
             .map_err(core_error)
@@ -1558,9 +2491,7 @@ impl DocumentEngine {
     pub fn load_snapshot_json(&mut self, value: &str) -> Result<u64, JsValue> {
         let snapshot = serde_json::from_str::<CoreSnapshot>(value)
             .map_err(|_| JsValue::from_str("INVALID_CORE_SNAPSHOT"))?;
-        if !(1..=21).contains(&snapshot.schema_version) {
-            return Err(JsValue::from_str("UNSUPPORTED_CORE_SNAPSHOT"));
-        }
+        validate_core_snapshot_version(&snapshot).map_err(JsValue::from_str)?;
         let mut document = Document::with_id(parse_document_id(&snapshot.document_id)?);
         document.seed_color_profile(parse_document_color_profile(&snapshot.color_profile)?);
         for page in snapshot.pages.clone().unwrap_or_default() {
@@ -1591,6 +2522,16 @@ impl DocumentEngine {
                 .map(|id| AssetId(id.0));
             let text_properties = text_properties_from_projection(node.text_properties.as_ref())?;
             let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
+            let fill_stack = node
+                .fill_stack
+                .as_ref()
+                .map(paint_stack_from_projection)
+                .transpose()?;
+            let stroke_stack = node
+                .stroke_stack
+                .as_ref()
+                .map(paint_stack_from_projection)
+                .transpose()?;
             let node = node_from_projection(node)?;
             let node_id = node.id;
             if let Some(asset_id) = asset_id {
@@ -1607,12 +2548,16 @@ impl DocumentEngine {
             document
                 .seed_auto_layout(node_id, auto_layout)
                 .map_err(core_error)?;
+            document
+                .seed_paint_stacks(node_id, fill_stack, stroke_stack)
+                .map_err(core_error)?;
         }
         for id in snapshot.retired_ids.clone().unwrap_or_default() {
             document
                 .seed_retired_id(parse_id(&id)?)
                 .map_err(core_error)?;
         }
+        document.validate_seeded_structure().map_err(core_error)?;
         document.revision = snapshot.revision;
         // Schema v1 predates tombstones, v2 canonical text, v3 canonical color, v4
         // Canonical sibling positions, v6 DocumentColorProfile, v7 Paint, v8
@@ -1623,7 +2568,8 @@ impl DocumentEngine {
         // v16 adds StrokeCap endpoint semantics to open paths, v17 adds
         // independent TL/TR/BR/BL corner radii, v18 adds continuous corner
         // smoothing, v19 adds ordered fill/stroke stacks, v20 adds Auto Layout,
-        // and v21 adds an optional child cross-axis alignment override.
+        // v21 adds an optional child cross-axis alignment override, v22 carries
+        // presence-bearing Paint Stacks, and v23 preserves ImagePaint rotation.
         // v10 snapshots verify against the deterministic legacy DocumentId(0); v14
         // persists every current field.
         if snapshot.schema_version >= 16
@@ -1666,6 +2612,16 @@ impl DocumentEngine {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
                     let auto_layout = auto_layout_from_projection(node.auto_layout.as_ref())?;
+                    let fill_stack = node
+                        .fill_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
+                    let stroke_stack = node
+                        .stroke_stack
+                        .as_ref()
+                        .map(paint_stack_from_projection)
+                        .transpose()?;
                     let node = node_from_projection(node)?;
                     let node_id = node.id;
                     if let Some(asset_id) = asset_id {
@@ -1683,6 +2639,9 @@ impl DocumentEngine {
                     self.document
                         .seed_auto_layout(node_id, auto_layout)
                         .map_err(core_error)?;
+                    self.document
+                        .seed_paint_stacks(node_id, fill_stack, stroke_stack)
+                        .map_err(core_error)?;
                 }
                 BatchCommand::SetMask { id, enabled } => {
                     deferred_masks.push((parse_id(&id)?, enabled));
@@ -1691,6 +2650,7 @@ impl DocumentEngine {
                 | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
+                | BatchCommand::ConvertToTextPath { .. }
                 | BatchCommand::MoveVectorPoint { .. }
                 | BatchCommand::SetVectorSubpathClosed { .. }
                 | BatchCommand::InsertVectorPoint { .. }
@@ -1715,6 +2675,9 @@ impl DocumentEngine {
         for (id, enabled) in deferred_masks {
             self.document.seed_mask(id, enabled).map_err(core_error)?;
         }
+        self.document
+            .validate_seeded_structure()
+            .map_err(core_error)?;
         Ok(self.document.revision)
     }
 
@@ -2195,6 +3158,56 @@ impl DocumentEngine {
             .map_err(|_| JsValue::from_str("INVALID_TRANSACTION"))?;
         self.submit_batch(parse_id(transaction_id)?, base_revision, commands)
     }
+
+    /// Executes a resize-shaped Update batch against a structurally shared,
+    /// disposable document and returns only the nodes changed by Core. The live
+    /// document's revision, history and operation-dedupe state remain untouched.
+    /// The Engine Worker uses this during pointer movement so the transient
+    /// Frame/child geometry is produced by the same reducer as pointer-up.
+    #[wasm_bindgen]
+    pub fn preview_resize_transaction_json(
+        &self,
+        transaction_id: &str,
+        commands_json: &str,
+    ) -> Result<String, JsValue> {
+        let commands = serde_json::from_str::<Vec<BatchCommand>>(commands_json)
+            .map_err(|_| JsValue::from_str("INVALID_PREVIEW_TRANSACTION"))?;
+        if commands.is_empty()
+            || !commands
+                .iter()
+                .all(|command| matches!(command, BatchCommand::Update { .. }))
+        {
+            return Err(JsValue::from_str("INVALID_PREVIEW_TRANSACTION"));
+        }
+
+        let mut preview = Self {
+            document: self.document.clone(),
+        };
+        preview.submit_batch(parse_id(transaction_id)?, self.document.revision, commands)?;
+        let mut changed_ids = std::collections::BTreeSet::new();
+        if let Some(history) = preview.document.latest_undo_item() {
+            collect_geometry_change_ids(&history.changes, &mut changed_ids);
+        }
+        let changed = changed_ids
+            .into_iter()
+            .filter_map(|id| preview.document.node(id))
+            .map(|node| {
+                projection_node(
+                    node,
+                    preview
+                        .document
+                        .page_for_node(node.id)
+                        .unwrap_or(DEFAULT_PAGE_ID),
+                    preview.document.asset_for_node(node.id),
+                    preview.document.text_properties_for_node(node.id),
+                    preview.document.auto_layout_for_node(node.id),
+                    preview.document.fill_stack_for_node(node.id),
+                    preview.document.stroke_stack_for_node(node.id),
+                )
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&changed).map_err(|_| JsValue::from_str("INVALID_PREVIEW_PROJECTION"))
+    }
 }
 
 fn css_executor_rgba(color: Color, opacity: f64) -> [f32; 4] {
@@ -2209,7 +3222,7 @@ fn css_executor_rgba(color: Color, opacity: f64) -> [f32; 4] {
 
 #[wasm_bindgen]
 pub fn engine_semantics_version() -> u32 {
-    3
+    makefigma_document_codec::CURRENT_ENGINE_SEMANTICS_VERSION
 }
 
 /// Builds a transient GPU instance projection from a validated Core snapshot
@@ -3116,6 +4129,14 @@ pub fn fallback_text_layout_json(text: &str, max_graphemes_per_line: u32) -> Str
                 makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
                 makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
             },
+            "visualRuns": line.visual_runs.into_iter().map(|run| serde_json::json!({
+                "start": run.start,
+                "end": run.end,
+                "direction": match run.direction {
+                    makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
+                    makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
+                },
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "carets": layout.carets.into_iter().map(|caret| serde_json::json!({
             "byteOffset": caret.byte_offset,
@@ -3178,6 +4199,7 @@ pub fn shape_text_json(
         "unitsPerEm": shaped.units_per_em,
         "glyphs": shaped.glyphs.into_iter().map(|glyph| serde_json::json!({
             "glyphId": glyph.glyph_id,
+            "runIndex": glyph.run_index,
             "cluster": glyph.cluster,
             "xAdvance": glyph.x_advance,
             "yAdvance": glyph.y_advance,
@@ -3244,6 +4266,43 @@ pub fn rasterize_glyph_with_variations_json(
     .to_string())
 }
 
+/// Rasterizes one explicit glyph with the same variation coordinates and
+/// synthetic weight/style identity used by the owning metric Style Run.
+#[wasm_bindgen]
+pub fn rasterize_glyph_with_style_json(
+    font_bytes: &[u8],
+    face_index: u32,
+    variation_axes_json: &str,
+    font_weight: u16,
+    italic: bool,
+    glyph_id: u32,
+    pixel_size: u16,
+) -> Result<String, JsValue> {
+    let variations = parse_font_variations(variation_axes_json)?;
+    let raster = makefigma_graphics_core::rasterize_glyph_with_variations_and_style(
+        font_bytes,
+        face_index,
+        &variations,
+        glyph_id,
+        pixel_size,
+        makefigma_graphics_core::SyntheticFontStyle {
+            font_weight,
+            italic,
+        },
+    )
+    .map_err(|_| JsValue::from_str("INVALID_GLYPH_RASTER_INPUT"))?;
+    Ok(serde_json::json!({
+        "width": raster.width,
+        "height": raster.height,
+        "bearingX": raster.bearing_x,
+        "bearingY": raster.bearing_y,
+        "ascent": raster.ascent,
+        "advanceX": raster.advance_x,
+        "pixels": raster.pixels,
+    })
+    .to_string())
+}
+
 /// Produces ICU4X line ranges and Rustybuzz advances from explicit font bytes.
 /// The width is measured in em, so viewport zoom never changes the derived
 /// source ranges. Glyph pixels remain a renderer-owned cache.
@@ -3275,8 +4334,13 @@ pub fn layout_shaped_text_json(
                     makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
                 },
             })).collect::<Vec<_>>(),
+            "visualCarets": line.visual_carets.into_iter().map(|caret| serde_json::json!({
+                "byteOffset": caret.byte_offset,
+                "xAdvance": caret.x_advance,
+            })).collect::<Vec<_>>(),
             "glyphs": line.glyphs.into_iter().map(|glyph| serde_json::json!({
                 "glyphId": glyph.glyph_id,
+                "runIndex": glyph.run_index,
                 "cluster": glyph.cluster,
                 "xAdvance": glyph.x_advance,
                 "yAdvance": glyph.y_advance,
@@ -3329,8 +4393,98 @@ pub fn layout_shaped_text_with_variations_json(
                     makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
                 },
             })).collect::<Vec<_>>(),
+            "visualCarets": line.visual_carets.into_iter().map(|caret| serde_json::json!({
+                "byteOffset": caret.byte_offset,
+                "xAdvance": caret.x_advance,
+            })).collect::<Vec<_>>(),
             "glyphs": line.glyphs.into_iter().map(|glyph| serde_json::json!({
                 "glyphId": glyph.glyph_id,
+                "runIndex": glyph.run_index,
+                "cluster": glyph.cluster,
+                "xAdvance": glyph.x_advance,
+                "yAdvance": glyph.y_advance,
+                "xOffset": glyph.x_offset,
+                "yOffset": glyph.y_offset,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "carets": layout.carets.into_iter().map(|caret| serde_json::json!({
+            "byteOffset": caret.byte_offset,
+            "lineIndex": caret.line_index,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string())
+}
+
+/// Shapes metric-bearing Style Runs from one bounded concatenated font bundle.
+/// `runs_json` references byte windows in that bundle so callers do not encode
+/// large font files as JSON or persist them in the Canonical document.
+#[wasm_bindgen]
+pub fn layout_shaped_text_runs_json(
+    font_bundle: &[u8],
+    runs_json: &str,
+    text: &str,
+    max_width_px: f32,
+) -> Result<String, JsValue> {
+    let inputs = serde_json::from_str::<Vec<TextShapingRunInput>>(runs_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_RUNS"))?;
+    let variations = inputs
+        .iter()
+        .map(|run| parse_font_variation_inputs(&run.variation_axes))
+        .collect::<Result<Vec<_>, _>>()?;
+    let runs = inputs
+        .iter()
+        .zip(&variations)
+        .map(|(run, variations)| {
+            let font_end = run
+                .font_offset
+                .checked_add(run.font_length)
+                .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_FONT_RANGE"))?;
+            let font_bytes = font_bundle
+                .get(run.font_offset..font_end)
+                .filter(|bytes| !bytes.is_empty())
+                .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_FONT_RANGE"))?;
+            Ok(makefigma_graphics_core::TextShapingRun {
+                font_bytes,
+                face_index: run.face_index,
+                variations,
+                start: run.start,
+                end: run.end,
+                font_size: run.font_size,
+                synthetic_style: makefigma_graphics_core::SyntheticFontStyle {
+                    font_weight: run.font_weight,
+                    italic: run.italic,
+                },
+                letter_spacing: run.letter_spacing,
+            })
+        })
+        .collect::<Result<Vec<_>, JsValue>>()?;
+    let layout = makefigma_graphics_core::layout_shaped_text_runs(&runs, text, max_width_px)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_LAYOUT_INPUT"))?;
+    Ok(serde_json::json!({
+        "unitsPerEm": layout.units_per_em,
+        "lines": layout.lines.into_iter().map(|line| serde_json::json!({
+            "start": line.start,
+            "end": line.end,
+            "direction": match line.direction {
+                makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
+                makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
+            },
+            "advance": line.advance,
+            "visualRuns": line.visual_runs.into_iter().map(|run| serde_json::json!({
+                "start": run.start,
+                "end": run.end,
+                "direction": match run.direction {
+                    makefigma_graphics_core::TextDirection::LeftToRight => "ltr",
+                    makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
+                },
+            })).collect::<Vec<_>>(),
+            "visualCarets": line.visual_carets.into_iter().map(|caret| serde_json::json!({
+                "byteOffset": caret.byte_offset,
+                "xAdvance": caret.x_advance,
+            })).collect::<Vec<_>>(),
+            "glyphs": line.glyphs.into_iter().map(|glyph| serde_json::json!({
+                "glyphId": glyph.glyph_id,
+                "runIndex": glyph.run_index,
                 "cluster": glyph.cluster,
                 "xAdvance": glyph.x_advance,
                 "yAdvance": glyph.y_advance,
@@ -3348,6 +4502,30 @@ pub fn layout_shaped_text_with_variations_json(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TextShapingRunInput {
+    start: u32,
+    end: u32,
+    font_offset: usize,
+    font_length: usize,
+    #[serde(default)]
+    face_index: u32,
+    #[serde(default)]
+    variation_axes: Vec<FontVariationInput>,
+    font_size: f32,
+    #[serde(default = "default_font_weight")]
+    font_weight: u16,
+    #[serde(default)]
+    italic: bool,
+    #[serde(default)]
+    letter_spacing: f32,
+}
+
+fn default_font_weight() -> u16 {
+    400
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FontVariationInput {
     tag: String,
     value: f32,
@@ -3358,8 +4536,14 @@ fn parse_font_variations(
 ) -> Result<Vec<makefigma_graphics_core::FontVariation>, JsValue> {
     let values = serde_json::from_str::<Vec<FontVariationInput>>(value)
         .map_err(|_| JsValue::from_str("INVALID_FONT_VARIATIONS"))?;
+    parse_font_variation_inputs(&values)
+}
+
+fn parse_font_variation_inputs(
+    values: &[FontVariationInput],
+) -> Result<Vec<makefigma_graphics_core::FontVariation>, JsValue> {
     values
-        .into_iter()
+        .iter()
         .map(|axis| {
             let tag: [u8; 4] = axis
                 .tag
@@ -3402,7 +4586,8 @@ fn parse_id(value: &str) -> Result<NodeId, JsValue> {
 /// generic data corruption (ADR 0023, P0-3).
 fn snapshot_error_code(error: makefigma_document_codec::SnapshotError) -> &'static str {
     match error {
-        makefigma_document_codec::SnapshotError::UnsupportedFutureNode => {
+        makefigma_document_codec::SnapshotError::UnsupportedFutureNode
+        | makefigma_document_codec::SnapshotError::UnsupportedEngineSemantics => {
             "DOCUMENT_REQUIRES_NEWER_CLIENT"
         }
         makefigma_document_codec::SnapshotError::Invalid => "INVALID_CORE_SNAPSHOT",
@@ -3602,6 +4787,19 @@ fn parse_blend_mode(value: &str) -> Result<BlendMode, JsValue> {
         "overlay" => Ok(BlendMode::Overlay),
         "darken" => Ok(BlendMode::Darken),
         "lighten" => Ok(BlendMode::Lighten),
+        "color-dodge" => Ok(BlendMode::ColorDodge),
+        "color-burn" => Ok(BlendMode::ColorBurn),
+        "hard-light" => Ok(BlendMode::HardLight),
+        "soft-light" => Ok(BlendMode::SoftLight),
+        "difference" => Ok(BlendMode::Difference),
+        "exclusion" => Ok(BlendMode::Exclusion),
+        "hue" => Ok(BlendMode::Hue),
+        "saturation" => Ok(BlendMode::Saturation),
+        "color" => Ok(BlendMode::Color),
+        "luminosity" => Ok(BlendMode::Luminosity),
+        "pass-through" => Ok(BlendMode::PassThrough),
+        "linear-burn" => Ok(BlendMode::LinearBurn),
+        "linear-dodge" => Ok(BlendMode::LinearDodge),
         _ => Err(JsValue::from_str("INVALID_BLEND_MODE")),
     }
 }
@@ -3614,6 +4812,19 @@ fn format_blend_mode(mode: BlendMode) -> &'static str {
         BlendMode::Overlay => "overlay",
         BlendMode::Darken => "darken",
         BlendMode::Lighten => "lighten",
+        BlendMode::ColorDodge => "color-dodge",
+        BlendMode::ColorBurn => "color-burn",
+        BlendMode::HardLight => "hard-light",
+        BlendMode::SoftLight => "soft-light",
+        BlendMode::Difference => "difference",
+        BlendMode::Exclusion => "exclusion",
+        BlendMode::Hue => "hue",
+        BlendMode::Saturation => "saturation",
+        BlendMode::Color => "color",
+        BlendMode::Luminosity => "luminosity",
+        BlendMode::PassThrough => "pass-through",
+        BlendMode::LinearBurn => "linear-burn",
+        BlendMode::LinearDodge => "linear-dodge",
     }
 }
 
@@ -3689,6 +4900,206 @@ fn paint_from_projection(
     color_from_projection(color).map(Paint::Solid)
 }
 
+fn projection_paint_stack(stack: &PaintStack) -> ProjectionPaintStack {
+    ProjectionPaintStack {
+        layers: stack
+            .layers
+            .iter()
+            .map(|layer| {
+                let (paint, image) = match &layer.paint {
+                    PaintLayerKind::Solid(color) => (
+                        Some(ProjectionPaint {
+                            css: color.to_css_srgb_hex(),
+                            color: Some(projection_color(*color)),
+                            gradient: None,
+                            gradient_paint: None,
+                        }),
+                        None,
+                    ),
+                    PaintLayerKind::LinearGradient(gradient) => (
+                        Some(ProjectionPaint {
+                            css: gradient.stops[0].color.to_css_srgb_hex(),
+                            color: None,
+                            gradient: Some(ProjectionLinearGradient {
+                                start: gradient.start,
+                                end: gradient.end,
+                                stops: gradient
+                                    .stops
+                                    .iter()
+                                    .map(|stop| ProjectionGradientStop {
+                                        position: stop.position,
+                                        color: projection_color(stop.color),
+                                    })
+                                    .collect(),
+                            }),
+                            gradient_paint: None,
+                        }),
+                        None,
+                    ),
+                    PaintLayerKind::Image(image) => (
+                        None,
+                        Some(ProjectionImagePaint {
+                            asset_id: format_uuid(NodeId(image.asset_id.0)),
+                            scale_mode: match image.scale_mode {
+                                ImageScaleMode::Fill => "fill",
+                                ImageScaleMode::Fit => "fit",
+                                ImageScaleMode::Crop => "crop",
+                                ImageScaleMode::Tile => "tile",
+                            }
+                            .into(),
+                            transform: ProjectionTransform {
+                                a: image.transform.a,
+                                b: image.transform.b,
+                                c: image.transform.c,
+                                d: image.transform.d,
+                                e: image.transform.e,
+                                f: image.transform.f,
+                            },
+                            rotation_degrees: image.rotation_degrees,
+                            filters: image.filters.map(|filters| ProjectionImageFilters {
+                                exposure: filters.exposure,
+                                contrast: filters.contrast,
+                                saturation: filters.saturation,
+                                temperature: filters.temperature,
+                                tint: filters.tint,
+                                highlights: filters.highlights,
+                                shadows: filters.shadows,
+                            }),
+                        }),
+                    ),
+                    PaintLayerKind::Gradient(value) => (
+                        Some(ProjectionPaint {
+                            css: value.stops[0].color.to_css_srgb_hex(),
+                            color: None,
+                            gradient: None,
+                            gradient_paint: Some(ProjectionGradientPaint {
+                                kind: match value.kind {
+                                    GradientPaintKind::Radial => "radial",
+                                    GradientPaintKind::Angular => "angular",
+                                    GradientPaintKind::Diamond => "diamond",
+                                }
+                                .into(),
+                                transform: ProjectionTransform {
+                                    a: value.transform.a,
+                                    b: value.transform.b,
+                                    c: value.transform.c,
+                                    d: value.transform.d,
+                                    e: value.transform.e,
+                                    f: value.transform.f,
+                                },
+                                stops: value
+                                    .stops
+                                    .iter()
+                                    .map(|stop| ProjectionGradientStop {
+                                        position: stop.position,
+                                        color: projection_color(stop.color),
+                                    })
+                                    .collect(),
+                            }),
+                        }),
+                        None,
+                    ),
+                };
+                ProjectionPaintLayer {
+                    paint,
+                    image,
+                    visible: layer.visible,
+                    opacity: layer.opacity,
+                    blend_mode: format_blend_mode(layer.blend_mode).into(),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn paint_stack_from_projection(stack: &ProjectionPaintStack) -> Result<PaintStack, JsValue> {
+    Ok(PaintStack {
+        layers: stack
+            .layers
+            .iter()
+            .map(|layer| {
+                let paint = match (layer.paint.as_ref(), layer.image.as_ref()) {
+                    (Some(paint), None) if paint.gradient_paint.is_some() => {
+                        let gradient = paint.gradient_paint.as_ref().expect("guarded above");
+                        PaintLayerKind::Gradient(
+                            GradientPaint::new(
+                                match gradient.kind.as_str() {
+                                    "radial" => GradientPaintKind::Radial,
+                                    "angular" => GradientPaintKind::Angular,
+                                    "diamond" => GradientPaintKind::Diamond,
+                                    _ => return Err(JsValue::from_str("INVALID_PAINT_STACK")),
+                                },
+                                editor_core::geometry::AffineTransform {
+                                    a: gradient.transform.a,
+                                    b: gradient.transform.b,
+                                    c: gradient.transform.c,
+                                    d: gradient.transform.d,
+                                    e: gradient.transform.e,
+                                    f: gradient.transform.f,
+                                },
+                                gradient
+                                    .stops
+                                    .iter()
+                                    .map(|stop| {
+                                        Ok(GradientStop {
+                                            position: stop.position,
+                                            color: color_from_projection(&stop.color)?,
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, JsValue>>()?,
+                            )
+                            .map_err(|_| JsValue::from_str("INVALID_GRADIENT"))?,
+                        )
+                    }
+                    (Some(paint), None) => match paint_from_projection(
+                        &paint.css,
+                        paint.color.as_ref(),
+                        paint.gradient.as_ref(),
+                    )? {
+                        Paint::Solid(color) => PaintLayerKind::Solid(color),
+                        Paint::LinearGradient(gradient) => PaintLayerKind::LinearGradient(gradient),
+                    },
+                    (None, Some(image)) => PaintLayerKind::Image(ImagePaint {
+                        asset_id: AssetId(parse_id(&image.asset_id)?.0),
+                        scale_mode: match image.scale_mode.as_str() {
+                            "fill" => ImageScaleMode::Fill,
+                            "fit" => ImageScaleMode::Fit,
+                            "crop" => ImageScaleMode::Crop,
+                            "tile" => ImageScaleMode::Tile,
+                            _ => return Err(JsValue::from_str("INVALID_PAINT_STACK")),
+                        },
+                        transform: editor_core::geometry::AffineTransform {
+                            a: image.transform.a,
+                            b: image.transform.b,
+                            c: image.transform.c,
+                            d: image.transform.d,
+                            e: image.transform.e,
+                            f: image.transform.f,
+                        },
+                        rotation_degrees: image.rotation_degrees,
+                        filters: image.filters.map(|filters| ImageFilters {
+                            exposure: filters.exposure,
+                            contrast: filters.contrast,
+                            saturation: filters.saturation,
+                            temperature: filters.temperature,
+                            tint: filters.tint,
+                            highlights: filters.highlights,
+                            shadows: filters.shadows,
+                        }),
+                    }),
+                    _ => return Err(JsValue::from_str("INVALID_PAINT_STACK")),
+                };
+                Ok(PaintLayer {
+                    paint,
+                    visible: layer.visible,
+                    opacity: layer.opacity,
+                    blend_mode: parse_blend_mode(&layer.blend_mode)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?,
+    })
+}
+
 fn projection_page(page: &Page) -> ProjectionPage {
     ProjectionPage {
         id: format_page_id(page.id),
@@ -3720,6 +5131,15 @@ fn projection_asset(asset: &AssetReference) -> ProjectionAsset {
         byte_length: asset.byte_length,
         pixel_width: asset.dimensions.map(|[width, _]| width),
         pixel_height: asset.dimensions.map(|[_, height]| height),
+        font_faces: asset
+            .font_faces
+            .iter()
+            .map(|face| ProjectionFontFace {
+                face_index: face.face_index,
+                family: face.family.clone(),
+                style: face.style.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -3747,6 +5167,15 @@ fn asset_from_projection(asset: ProjectionAsset) -> Result<AssetReference, JsVal
         media_type: asset.media_type,
         byte_length: asset.byte_length,
         dimensions,
+        font_faces: asset
+            .font_faces
+            .into_iter()
+            .map(|face| FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family,
+                style: face.style,
+            })
+            .collect(),
     })
 }
 
@@ -3756,6 +5185,8 @@ fn projection_node(
     asset_id: Option<AssetId>,
     text_properties: Option<&TextProperties>,
     auto_layout: AutoLayout,
+    fill_stack: Option<&PaintStack>,
+    stroke_stack: Option<&PaintStack>,
 ) -> ProjectionNode {
     let project_paint = |paint: &Paint| match paint {
         Paint::Solid(color) => (
@@ -3842,9 +5273,11 @@ fn projection_node(
                     css,
                     color,
                     gradient,
+                    gradient_paint: None,
                 }
             })
             .collect(),
+        fill_stack: fill_stack.map(projection_paint_stack),
         stroke,
         stroke_color,
         stroke_gradient,
@@ -3857,9 +5290,11 @@ fn projection_node(
                     css,
                     color,
                     gradient,
+                    gradient_paint: None,
                 }
             })
             .collect(),
+        stroke_stack: stroke_stack.map(projection_paint_stack),
         stroke_width: node.stroke_width,
         stroke_cap_start: format_stroke_cap(node.stroke_cap_start),
         stroke_cap_end: format_stroke_cap(node.stroke_cap_end),
@@ -3950,6 +5385,30 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                 italic: run.italic,
                 letter_spacing: run.letter_spacing,
                 color: run.color.map(projection_color),
+                fill_stack: run.fill_stack.as_ref().map(projection_paint_stack),
+                text_case: run.text_case.map(format_text_case).map(str::to_owned),
+                hyperlink: run.hyperlink.as_ref().map(projection_hyperlink),
+                text_decoration: run
+                    .text_decoration
+                    .map(format_text_decoration)
+                    .map(str::to_owned),
+                text_decoration_style: run
+                    .text_decoration_style
+                    .map(format_text_decoration_style)
+                    .map(str::to_owned),
+                text_decoration_offset: run
+                    .text_decoration_offset
+                    .map(projection_text_decoration_offset),
+                text_decoration_thickness: run
+                    .text_decoration_thickness
+                    .map(projection_text_decoration_thickness),
+                text_decoration_color: run
+                    .text_decoration_color
+                    .map(projection_text_decoration_color),
+                text_decoration_skip_ink: run.text_decoration_skip_ink,
+                leading_trim: run.leading_trim.map(|value| match value {
+                    LeadingTrim::CapHeight => "capHeight".to_owned(),
+                }),
             })
             .collect(),
         paragraph: ProjectionParagraphStyle {
@@ -3961,8 +5420,60 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
             }
             .into(),
             line_height: properties.paragraph.line_height,
+            line_height_unit: properties
+                .paragraph
+                .line_height_unit
+                .map(|unit| match unit {
+                    LineHeightUnit::Percent => "percent".to_owned(),
+                    LineHeightUnit::Auto => "auto".to_owned(),
+                }),
             paragraph_spacing: properties.paragraph.paragraph_spacing,
+            paragraph_indent: properties.paragraph.paragraph_indent,
+            text_wrap_style: properties
+                .paragraph
+                .text_wrap_style
+                .map(|style| match style {
+                    TextWrapStyle::Auto => "auto".to_owned(),
+                    TextWrapStyle::Balance => "balance".to_owned(),
+                    TextWrapStyle::Pretty => "pretty".to_owned(),
+                }),
+            list_type: properties
+                .paragraph
+                .list_type
+                .map(|list_type| match list_type {
+                    TextListType::Ordered => "ordered".to_owned(),
+                    TextListType::Unordered => "unordered".to_owned(),
+                }),
+            list_spacing: properties.paragraph.list_spacing,
+            hanging_list: properties.paragraph.hanging_list.then_some(true),
+            hanging_punctuation: properties.paragraph.hanging_punctuation.then_some(true),
         },
+        paragraph_style_runs: properties
+            .paragraph_style_runs
+            .iter()
+            .map(|run| ProjectionParagraphStyleRun {
+                start: run.start,
+                indentation: run.indentation,
+                list_type: run.list_type.map(|value| match value {
+                    ParagraphListType::None => "none".to_owned(),
+                    ParagraphListType::Ordered => "ordered".to_owned(),
+                    ParagraphListType::Unordered => "unordered".to_owned(),
+                }),
+                list_spacing: run.list_spacing,
+                paragraph_spacing: run.paragraph_spacing,
+                paragraph_indent: run.paragraph_indent,
+                line_height: run.line_height,
+                line_height_unit: run.line_height_unit.map(|value| match value {
+                    LineHeightUnit::Percent => "percent".to_owned(),
+                    LineHeightUnit::Auto => "auto".to_owned(),
+                }),
+                text_wrap_style: run.text_wrap_style.map(|value| match value {
+                    TextWrapStyle::Auto => "auto".to_owned(),
+                    TextWrapStyle::Balance => "balance".to_owned(),
+                    TextWrapStyle::Pretty => "pretty".to_owned(),
+                }),
+            })
+            .collect(),
         auto_size: match properties.auto_size {
             TextAutoSize::Fixed => "fixed",
             TextAutoSize::Height => "height",
@@ -3974,6 +5485,44 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
             .iter()
             .map(projection_font_reference)
             .collect(),
+        text_truncation: (properties.text_truncation == TextTruncation::Ending)
+            .then(|| "ending".into()),
+        max_lines: properties.max_lines,
+        base_style: properties
+            .base_style
+            .as_ref()
+            .map(|style| ProjectionTextStyle {
+                font: style.font.as_ref().map(projection_font_reference),
+                font_size: style.font_size,
+                font_weight: style.font_weight,
+                italic: style.italic,
+                letter_spacing: style.letter_spacing,
+                color: style.color.map(projection_color),
+                fill_stack: style.fill_stack.as_ref().map(projection_paint_stack),
+                text_case: style.text_case.map(format_text_case).map(str::to_owned),
+                hyperlink: style.hyperlink.as_ref().map(projection_hyperlink),
+                text_decoration: style
+                    .text_decoration
+                    .map(format_text_decoration)
+                    .map(str::to_owned),
+                text_decoration_style: style
+                    .text_decoration_style
+                    .map(format_text_decoration_style)
+                    .map(str::to_owned),
+                text_decoration_offset: style
+                    .text_decoration_offset
+                    .map(projection_text_decoration_offset),
+                text_decoration_thickness: style
+                    .text_decoration_thickness
+                    .map(projection_text_decoration_thickness),
+                text_decoration_color: style
+                    .text_decoration_color
+                    .map(projection_text_decoration_color),
+                text_decoration_skip_ink: style.text_decoration_skip_ink,
+                leading_trim: style.leading_trim.map(|value| match value {
+                    LeadingTrim::CapHeight => "capHeight".to_owned(),
+                }),
+            }),
     }
 }
 
@@ -4002,7 +5551,7 @@ fn text_properties_from_projection(
                     .runs
                     .iter()
                     .map(|run| {
-                        Ok(TextStyleRun {
+                        Ok::<TextStyleRun, JsValue>(TextStyleRun {
                             start: run.start,
                             end: run.end,
                             font: run.font.as_ref().map(font_from_projection).transpose()?,
@@ -4011,6 +5560,57 @@ fn text_properties_from_projection(
                             italic: run.italic,
                             letter_spacing: run.letter_spacing,
                             color: run.color.as_ref().map(color_from_projection).transpose()?,
+                            fill_stack: run
+                                .fill_stack
+                                .as_ref()
+                                .map(paint_stack_from_projection)
+                                .transpose()?,
+                            text_case: run
+                                .text_case
+                                .as_deref()
+                                .map(text_case_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            hyperlink: run
+                                .hyperlink
+                                .as_ref()
+                                .map(hyperlink_from_projection)
+                                .transpose()?,
+                            text_decoration: run
+                                .text_decoration
+                                .as_deref()
+                                .map(text_decoration_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            text_decoration_style: run
+                                .text_decoration_style
+                                .as_deref()
+                                .map(text_decoration_style_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            text_decoration_offset: run
+                                .text_decoration_offset
+                                .as_ref()
+                                .map(text_decoration_offset_from_projection)
+                                .transpose()?,
+                            text_decoration_thickness: run
+                                .text_decoration_thickness
+                                .as_ref()
+                                .map(text_decoration_thickness_from_projection)
+                                .transpose()?,
+                            text_decoration_color: run
+                                .text_decoration_color
+                                .as_ref()
+                                .map(text_decoration_color_from_projection)
+                                .transpose()?,
+                            text_decoration_skip_ink: run
+                                .text_decoration_skip_ink
+                                .filter(|value| *value),
+                            leading_trim: match run.leading_trim.as_deref() {
+                                None | Some("none") => None,
+                                Some("capHeight") => Some(LeadingTrim::CapHeight),
+                                _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                            },
                         })
                     })
                     .collect::<Result<Vec<_>, JsValue>>()?,
@@ -4023,14 +5623,155 @@ fn text_properties_from_projection(
                         _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
                     },
                     line_height: properties.paragraph.line_height,
+                    line_height_unit: match properties.paragraph.line_height_unit.as_deref() {
+                        None | Some("pixels") => None,
+                        Some("percent") => Some(LineHeightUnit::Percent),
+                        Some("auto") => Some(LineHeightUnit::Auto),
+                        _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                    },
                     paragraph_spacing: properties.paragraph.paragraph_spacing,
+                    paragraph_indent: properties.paragraph.paragraph_indent,
+                    text_wrap_style: match properties.paragraph.text_wrap_style.as_deref() {
+                        None | Some("auto") => None,
+                        Some("balance") => Some(TextWrapStyle::Balance),
+                        Some("pretty") => Some(TextWrapStyle::Pretty),
+                        _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                    },
+                    list_type: match properties.paragraph.list_type.as_deref() {
+                        None | Some("none") => None,
+                        Some("ordered") => Some(TextListType::Ordered),
+                        Some("unordered") => Some(TextListType::Unordered),
+                        _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                    },
+                    list_spacing: properties
+                        .paragraph
+                        .list_spacing
+                        .filter(|value| *value != 0.0),
+                    hanging_list: properties.paragraph.hanging_list.unwrap_or(false),
+                    hanging_punctuation: properties.paragraph.hanging_punctuation.unwrap_or(false),
                 },
+                paragraph_style_runs: properties
+                    .paragraph_style_runs
+                    .iter()
+                    .map(|run| {
+                        let list_type = match run.list_type.as_deref() {
+                            None => None,
+                            Some("none") => Some(ParagraphListType::None),
+                            Some("ordered") => Some(ParagraphListType::Ordered),
+                            Some("unordered") => Some(ParagraphListType::Unordered),
+                            Some(_) => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                        };
+                        Ok(ParagraphStyleRun {
+                            start: run.start,
+                            indentation: run.indentation,
+                            list_type,
+                            list_spacing: run.list_spacing,
+                            paragraph_spacing: run.paragraph_spacing,
+                            paragraph_indent: run.paragraph_indent,
+                            line_height: run.line_height,
+                            line_height_unit: match run.line_height_unit.as_deref() {
+                                None | Some("pixels") => None,
+                                Some("percent") => Some(LineHeightUnit::Percent),
+                                Some("auto") => Some(LineHeightUnit::Auto),
+                                Some(_) => {
+                                    return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES"));
+                                }
+                            },
+                            text_wrap_style: match run.text_wrap_style.as_deref() {
+                                None => None,
+                                Some("auto") => Some(TextWrapStyle::Auto),
+                                Some("balance") => Some(TextWrapStyle::Balance),
+                                Some("pretty") => Some(TextWrapStyle::Pretty),
+                                Some(_) => {
+                                    return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES"));
+                                }
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>, JsValue>>()?,
                 auto_size: match properties.auto_size.as_str() {
                     "fixed" => TextAutoSize::Fixed,
                     "height" => TextAutoSize::Height,
                     "widthAndHeight" => TextAutoSize::WidthAndHeight,
                     _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
                 },
+                text_truncation: match properties.text_truncation.as_deref() {
+                    None | Some("disabled") => TextTruncation::Disabled,
+                    Some("ending") => TextTruncation::Ending,
+                    _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                },
+                max_lines: properties.max_lines,
+                base_style: properties
+                    .base_style
+                    .as_ref()
+                    .map(|style| {
+                        Ok::<TextStyleRun, JsValue>(TextStyleRun {
+                            start: 0,
+                            end: 0,
+                            font: style.font.as_ref().map(font_from_projection).transpose()?,
+                            font_size: style.font_size,
+                            font_weight: style.font_weight,
+                            italic: style.italic,
+                            letter_spacing: style.letter_spacing,
+                            color: style
+                                .color
+                                .as_ref()
+                                .map(color_from_projection)
+                                .transpose()?,
+                            fill_stack: style
+                                .fill_stack
+                                .as_ref()
+                                .map(paint_stack_from_projection)
+                                .transpose()?,
+                            text_case: style
+                                .text_case
+                                .as_deref()
+                                .map(text_case_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            hyperlink: style
+                                .hyperlink
+                                .as_ref()
+                                .map(hyperlink_from_projection)
+                                .transpose()?,
+                            text_decoration: style
+                                .text_decoration
+                                .as_deref()
+                                .map(text_decoration_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            text_decoration_style: style
+                                .text_decoration_style
+                                .as_deref()
+                                .map(text_decoration_style_from_projection)
+                                .transpose()?
+                                .flatten(),
+                            text_decoration_offset: style
+                                .text_decoration_offset
+                                .as_ref()
+                                .map(text_decoration_offset_from_projection)
+                                .transpose()?,
+                            text_decoration_thickness: style
+                                .text_decoration_thickness
+                                .as_ref()
+                                .map(text_decoration_thickness_from_projection)
+                                .transpose()?,
+                            text_decoration_color: style
+                                .text_decoration_color
+                                .as_ref()
+                                .map(text_decoration_color_from_projection)
+                                .transpose()?,
+                            text_decoration_skip_ink: style
+                                .text_decoration_skip_ink
+                                .filter(|value| *value),
+                            leading_trim: match style.leading_trim.as_deref() {
+                                None | Some("none") => None,
+                                Some("capHeight") => Some(LeadingTrim::CapHeight),
+                                _ => return Err(JsValue::from_str("INVALID_TEXT_PROPERTIES")),
+                            },
+                        })
+                    })
+                    .transpose()?,
                 fallback_fonts: properties
                     .fallback_fonts
                     .iter()
@@ -4039,6 +5780,162 @@ fn text_properties_from_projection(
             })
         })
         .transpose()
+}
+
+fn format_text_case(value: TextCase) -> &'static str {
+    match value {
+        TextCase::Original => "original",
+        TextCase::Upper => "upper",
+        TextCase::Lower => "lower",
+        TextCase::Title => "title",
+        TextCase::SmallCaps => "smallCaps",
+        TextCase::SmallCapsForced => "smallCapsForced",
+    }
+}
+
+fn projection_hyperlink(value: &HyperlinkTarget) -> ProjectionHyperlinkTarget {
+    ProjectionHyperlinkTarget {
+        r#type: match value.kind {
+            HyperlinkType::Url => "URL",
+            HyperlinkType::Node => "NODE",
+        }
+        .into(),
+        value: value.value.clone(),
+    }
+}
+
+fn format_text_decoration(value: TextDecoration) -> &'static str {
+    match value {
+        TextDecoration::Underline => "underline",
+        TextDecoration::Strikethrough => "strikethrough",
+    }
+}
+
+fn text_decoration_from_projection(value: &str) -> Result<Option<TextDecoration>, JsValue> {
+    match value {
+        "none" => Ok(None),
+        "underline" => Ok(Some(TextDecoration::Underline)),
+        "strikethrough" => Ok(Some(TextDecoration::Strikethrough)),
+        _ => Err(JsValue::from_str("INVALID_TEXT_DECORATION")),
+    }
+}
+
+fn format_text_decoration_style(value: TextDecorationStyle) -> &'static str {
+    match value {
+        TextDecorationStyle::Wavy => "wavy",
+        TextDecorationStyle::Dotted => "dotted",
+    }
+}
+
+fn text_decoration_style_from_projection(
+    value: &str,
+) -> Result<Option<TextDecorationStyle>, JsValue> {
+    match value {
+        "solid" => Ok(None),
+        "wavy" => Ok(Some(TextDecorationStyle::Wavy)),
+        "dotted" => Ok(Some(TextDecorationStyle::Dotted)),
+        _ => Err(JsValue::from_str("INVALID_TEXT_DECORATION_STYLE")),
+    }
+}
+
+fn projection_text_decoration_offset(
+    value: TextDecorationOffset,
+) -> ProjectionTextDecorationOffset {
+    match value {
+        TextDecorationOffset::Pixels(value) => ProjectionTextDecorationOffset {
+            value,
+            unit: "pixels".into(),
+        },
+        TextDecorationOffset::Percent(value) => ProjectionTextDecorationOffset {
+            value,
+            unit: "percent".into(),
+        },
+    }
+}
+
+fn text_decoration_offset_from_projection(
+    value: &ProjectionTextDecorationOffset,
+) -> Result<TextDecorationOffset, JsValue> {
+    match value.unit.as_str() {
+        "pixels" => Ok(TextDecorationOffset::Pixels(value.value)),
+        "percent" => Ok(TextDecorationOffset::Percent(value.value)),
+        _ => Err(JsValue::from_str("INVALID_TEXT_DECORATION_OFFSET")),
+    }
+}
+
+fn projection_text_decoration_thickness(
+    value: TextDecorationThickness,
+) -> ProjectionTextDecorationThickness {
+    match value {
+        TextDecorationThickness::Pixels(value) => ProjectionTextDecorationThickness {
+            value,
+            unit: "pixels".into(),
+        },
+        TextDecorationThickness::Percent(value) => ProjectionTextDecorationThickness {
+            value,
+            unit: "percent".into(),
+        },
+    }
+}
+
+fn text_decoration_thickness_from_projection(
+    value: &ProjectionTextDecorationThickness,
+) -> Result<TextDecorationThickness, JsValue> {
+    match value.unit.as_str() {
+        "pixels" => Ok(TextDecorationThickness::Pixels(value.value)),
+        "percent" => Ok(TextDecorationThickness::Percent(value.value)),
+        _ => Err(JsValue::from_str("INVALID_TEXT_DECORATION_THICKNESS")),
+    }
+}
+
+fn projection_text_decoration_color(value: TextDecorationColor) -> ProjectionTextDecorationColor {
+    ProjectionTextDecorationColor {
+        color: projection_color(value.color),
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode: format_blend_mode(value.blend_mode).into(),
+    }
+}
+
+fn text_decoration_color_from_projection(
+    value: &ProjectionTextDecorationColor,
+) -> Result<TextDecorationColor, JsValue> {
+    let blend_mode = parse_blend_mode(&value.blend_mode)?;
+    if matches!(blend_mode, BlendMode::PassThrough) {
+        return Err(JsValue::from_str("INVALID_TEXT_DECORATION_COLOR"));
+    }
+    Ok(TextDecorationColor {
+        color: color_from_projection(&value.color)?,
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode,
+    })
+}
+
+fn hyperlink_from_projection(
+    value: &ProjectionHyperlinkTarget,
+) -> Result<HyperlinkTarget, JsValue> {
+    let kind = match value.r#type.as_str() {
+        "URL" => HyperlinkType::Url,
+        "NODE" => HyperlinkType::Node,
+        _ => return Err(JsValue::from_str("INVALID_TEXT_HYPERLINK")),
+    };
+    Ok(HyperlinkTarget {
+        kind,
+        value: value.value.clone(),
+    })
+}
+
+fn text_case_from_projection(value: &str) -> Result<Option<TextCase>, JsValue> {
+    match value {
+        "original" => Ok(None),
+        "upper" => Ok(Some(TextCase::Upper)),
+        "lower" => Ok(Some(TextCase::Lower)),
+        "title" => Ok(Some(TextCase::Title)),
+        "smallCaps" => Ok(Some(TextCase::SmallCaps)),
+        "smallCapsForced" => Ok(Some(TextCase::SmallCapsForced)),
+        _ => Err(JsValue::from_str("INVALID_TEXT_CASE")),
+    }
 }
 
 fn font_from_projection(font: &ProjectionFontReference) -> Result<FontReference, JsValue> {
@@ -4790,6 +6687,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn document_identity_is_seeded_without_a_snapshot_round_trip() {
+        let mut engine = DocumentEngine::new();
+        let document_id = "00000000-0000-4000-8000-00000000f002";
+        engine.seed_document_id(document_id).unwrap();
+        engine
+            .seed_batch_json(
+                r##"[{"type":"create","node":{"id":"00000000-0000-4000-8000-00000000f003","name":"Seeded rectangle","kind":"rectangle","x":0,"y":0,"width":10,"height":10,"rotation":0,"fill":"#ffffff","stroke":"#00000000","strokeWidth":0,"opacity":1,"cornerRadius":0,"visible":true,"locked":false,"text":"","positionId":"00000000000000000000000000000001:00000000000000000000000000000000"}}]"##,
+            )
+            .unwrap();
+
+        let snapshot: serde_json::Value = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert_eq!(snapshot["documentId"], document_id);
+        assert_eq!(
+            engine.document.id(),
+            DocumentId(parse_id(document_id).unwrap().0)
+        );
+    }
+
     fn existing_rect(id: NodeId) -> Node {
         Node {
             id,
@@ -5049,8 +6965,12 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&layout).unwrap(),
             serde_json::json!({
                 "lines": [
-                    { "start": 0, "end": 5, "direction": "ltr" },
-                    { "start": 5, "end": 8, "direction": "ltr" },
+                    { "start": 0, "end": 5, "direction": "ltr", "visualRuns": [
+                        { "start": 0, "end": 5, "direction": "ltr" },
+                    ] },
+                    { "start": 5, "end": 8, "direction": "ltr", "visualRuns": [
+                        { "start": 5, "end": 8, "direction": "ltr" },
+                    ] },
                 ],
                 "carets": [
                     { "byteOffset": 0, "lineIndex": 0 },
@@ -5061,6 +6981,18 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn exposes_fallback_mixed_bidi_runs_for_live_caret_affinity() {
+        let layout =
+            serde_json::from_str::<serde_json::Value>(&fallback_text_layout_json("AאבB", 20))
+                .unwrap();
+        let runs = layout["lines"][0]["visualRuns"].as_array().unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0]["direction"], "ltr");
+        assert_eq!(runs[1]["direction"], "rtl");
+        assert_eq!(runs[2]["direction"], "ltr");
     }
 
     #[test]
@@ -5110,6 +7042,40 @@ mod tests {
             result["pixels"].as_array().map(Vec::len),
             Some((result["width"].as_u64().unwrap() * result["height"].as_u64().unwrap()) as usize),
         );
+    }
+
+    #[test]
+    fn exposes_deterministic_synthetic_font_style_rasters() {
+        let regular = serde_json::from_str::<serde_json::Value>(
+            &rasterize_glyph_with_style_json(
+                font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+                0,
+                "[]",
+                400,
+                false,
+                1,
+                48,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let bold_italic = serde_json::from_str::<serde_json::Value>(
+            &rasterize_glyph_with_style_json(
+                font_test_data::NOTO_SERIF_DISPLAY_TRIMMED,
+                0,
+                "[]",
+                700,
+                true,
+                1,
+                48,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(bold_italic["advanceX"], regular["advanceX"]);
+        assert_eq!(bold_italic["ascent"], regular["ascent"]);
+        assert_ne!(bold_italic["pixels"], regular["pixels"]);
     }
 
     #[test]
@@ -5163,6 +7129,127 @@ mod tests {
                 .as_array()
                 .is_some_and(|carets| carets.len() > 2)
         );
+        let positioned = result["lines"][0]["visualCarets"].as_array().unwrap();
+        assert_eq!(positioned.first().unwrap()["xAdvance"], 0);
+        assert_eq!(
+            positioned.last().unwrap()["xAdvance"],
+            result["lines"][0]["advance"]
+        );
+    }
+
+    #[test]
+    fn exposes_multi_run_font_sizes_through_a_bounded_font_bundle() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "office office";
+        let runs = serde_json::json!([
+            {
+                "start": 0,
+                "end": 7,
+                "fontOffset": 0,
+                "fontLength": font.len(),
+                "faceIndex": 0,
+                "variationAxes": [],
+                "fontSize": 16.0,
+                "letterSpacing": 0.0
+            },
+            {
+                "start": 7,
+                "end": source.len(),
+                "fontOffset": 0,
+                "fontLength": font.len(),
+                "faceIndex": 0,
+                "variationAxes": [],
+                "fontSize": 32.0,
+                "letterSpacing": 2.0
+            }
+        ]);
+        let result = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_json(font, &runs.to_string(), source, 50.0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(result["lines"].as_array().map(Vec::len), Some(2));
+        assert_eq!(result["lines"][0]["end"], 7);
+        assert_eq!(result["lines"][1]["start"], 7);
+        assert!(
+            result["lines"][1]["advance"].as_i64().unwrap()
+                > result["lines"][0]["advance"].as_i64().unwrap()
+        );
+        assert!(
+            result["lines"][0]["glyphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|glyph| glyph["runIndex"] == 0)
+        );
+        assert!(
+            result["lines"][1]["glyphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|glyph| glyph["runIndex"] == 1)
+        );
+    }
+
+    #[test]
+    fn exposes_signed_tracking_through_the_multi_run_wasm_boundary() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "office";
+        let request = |letter_spacing: f32| {
+            serde_json::json!([{
+                "start": 0,
+                "end": source.len(),
+                "fontOffset": 0,
+                "fontLength": font.len(),
+                "faceIndex": 0,
+                "variationAxes": [],
+                "fontSize": 16.0,
+                "letterSpacing": letter_spacing
+            }])
+        };
+        let layout = |letter_spacing| {
+            serde_json::from_str::<serde_json::Value>(
+                &layout_shaped_text_runs_json(
+                    font,
+                    &request(letter_spacing).to_string(),
+                    source,
+                    1_000.0,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let untracked = layout(0.0);
+        let expanded = layout(2.0);
+        let tightened = layout(-0.25);
+
+        assert!(
+            expanded["lines"][0]["advance"].as_i64().unwrap()
+                > untracked["lines"][0]["advance"].as_i64().unwrap()
+        );
+        assert!(
+            tightened["lines"][0]["advance"].as_i64().unwrap()
+                < untracked["lines"][0]["advance"].as_i64().unwrap()
+        );
+        assert_eq!(
+            expanded["lines"][0]["visualCarets"]
+                .as_array()
+                .map(Vec::len),
+            untracked["lines"][0]["visualCarets"]
+                .as_array()
+                .map(Vec::len)
+        );
+        for layout in [&expanded, &tightened] {
+            assert_eq!(
+                layout["lines"][0]["glyphs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|glyph| glyph["xAdvance"].as_i64().unwrap())
+                    .sum::<i64>(),
+                layout["lines"][0]["advance"].as_i64().unwrap()
+            );
+        }
     }
 
     #[test]
@@ -5407,10 +7494,11 @@ mod tests {
                 media_type: "image/png".into(),
                 byte_length: 128,
                 dimensions: Some([16, 8]),
+                font_faces: Vec::new(),
             })
             .unwrap();
         let snapshot = source.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":21"));
+        assert!(snapshot.contains("\"schemaVersion\":32"));
         assert!(snapshot.contains("\"documentId\":\"00000000-0000-0000-0000-00000000002a\""));
         let mut restored = DocumentEngine::new();
         restored.load_snapshot_json(&snapshot).unwrap();
@@ -5442,6 +7530,7 @@ mod tests {
                 128,
                 16,
                 8,
+                "[]",
             )
             .unwrap();
         assert_eq!(
@@ -6235,6 +8324,12 @@ mod tests {
             "DOCUMENT_REQUIRES_NEWER_CLIENT"
         );
         assert_eq!(
+            snapshot_error_code(
+                makefigma_document_codec::SnapshotError::UnsupportedEngineSemantics
+            ),
+            "DOCUMENT_REQUIRES_NEWER_CLIENT"
+        );
+        assert_eq!(
             snapshot_error_code(makefigma_document_codec::SnapshotError::Invalid),
             "INVALID_CORE_SNAPSHOT"
         );
@@ -6618,7 +8713,7 @@ mod tests {
                 "{version}"
             );
             let projection = migrated.snapshot_json();
-            assert!(projection.contains(r#""schemaVersion":21"#), "{version}");
+            assert!(projection.contains(r#""schemaVersion":32"#), "{version}");
 
             let mut round_trip = DocumentEngine::new();
             round_trip.load_snapshot_json(&projection).unwrap();
@@ -6726,7 +8821,7 @@ mod tests {
             }
 
             let projection = migrated.snapshot_json();
-            assert!(projection.contains(r#""schemaVersion":21"#), "{version}");
+            assert!(projection.contains(r#""schemaVersion":32"#), "{version}");
 
             // Re-migrating the current projection is idempotent and Hash-stable.
             let mut round_trip = DocumentEngine::new();
@@ -6957,6 +9052,8 @@ mod tests {
             kind: "rectangle".into(),
             asset_id: None,
             text_properties: None,
+            fill_stack: None,
+            stroke_stack: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -7059,6 +9156,9 @@ mod tests {
                     },
                     BatchCommand::Update {
                         node: first_as_group_child,
+                        ignore_constraints: false,
+                        plain_text_only: false,
+                        rename_text_path: false,
                     },
                 ],
             )
@@ -7125,7 +9225,12 @@ mod tests {
                                     .into(),
                         }],
                     },
-                    BatchCommand::Update { node: nested_group },
+                    BatchCommand::Update {
+                        node: nested_group,
+                        ignore_constraints: false,
+                        plain_text_only: false,
+                        rename_text_path: false,
+                    },
                 ],
             )
             .unwrap();
@@ -7154,6 +9259,7 @@ mod tests {
                                 byte_length: 128,
                                 pixel_width: Some(16),
                                 pixel_height: Some(8),
+                                font_faces: Vec::new(),
                             },
                         },
                         BatchCommand::Create { node: pasted_image },
@@ -7202,6 +9308,7 @@ mod tests {
                 media_type: "image/png".into(),
                 byte_length: 128,
                 dimensions: Some([16, 8]),
+                font_faces: Vec::new(),
             })
             .unwrap();
         let frame = ProjectionNode {
@@ -7211,6 +9318,8 @@ mod tests {
             kind: "frame".into(),
             asset_id: None,
             text_properties: None,
+            fill_stack: None,
+            stroke_stack: None,
             x: 0.0,
             y: 0.0,
             width: 320.0,
@@ -7273,6 +9382,9 @@ mod tests {
                 1,
                 vec![BatchCommand::Update {
                     node: image_filled.clone(),
+                    ignore_constraints: false,
+                    plain_text_only: false,
+                    rename_text_path: false,
                 }],
             )
             .unwrap();
@@ -7284,6 +9396,9 @@ mod tests {
                 2,
                 vec![BatchCommand::Update {
                     node: circular.clone(),
+                    ignore_constraints: false,
+                    plain_text_only: false,
+                    rename_text_path: false,
                 }],
             )
             .unwrap();
@@ -7291,7 +9406,16 @@ mod tests {
         outside.stroke_align = "outside".into();
         assert_eq!(
             engine
-                .submit_batch(NodeId(104), 3, vec![BatchCommand::Update { node: outside }])
+                .submit_batch(
+                    NodeId(104),
+                    3,
+                    vec![BatchCommand::Update {
+                        node: outside,
+                        ignore_constraints: false,
+                        plain_text_only: false,
+                        rename_text_path: false,
+                    }],
+                )
                 .unwrap(),
             4
         );
@@ -7315,6 +9439,8 @@ mod tests {
             kind: "rectangle".into(),
             asset_id: None,
             text_properties: None,
+            fill_stack: None,
+            stroke_stack: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -7436,15 +9562,39 @@ mod tests {
                         components: [0.8, 0.1, 0.2],
                         alpha: 1.0,
                     }),
+                    fill_stack: None,
+
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_color: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
                 }],
                 paragraph: ProjectionParagraphStyle {
                     alignment: "center".into(),
-                    line_height: Some(30.0),
+                    line_height: Some(150.0),
+                    line_height_unit: Some("percent".into()),
                     paragraph_spacing: 4.0,
+                    paragraph_indent: None,
+                    text_wrap_style: None,
+                    list_type: None,
+                    list_spacing: None,
+                    hanging_list: None,
+                    hanging_punctuation: None,
                 },
+                paragraph_style_runs: vec![],
                 auto_size: "height".into(),
                 fallback_fonts: vec![],
+                text_truncation: None,
+                max_lines: None,
+                base_style: None,
             }),
+            fill_stack: None,
+            stroke_stack: None,
             x: 0.0,
             y: 0.0,
             width: 240.0,
@@ -7505,6 +9655,9 @@ mod tests {
                 1,
                 vec![BatchCommand::Update {
                     node: text("After"),
+                    ignore_constraints: false,
+                    plain_text_only: false,
+                    rename_text_path: false,
                 }],
             )
             .unwrap();
@@ -7523,7 +9676,7 @@ mod tests {
         assert_eq!(engine.redo().unwrap(), 4);
 
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":21"));
+        assert!(snapshot.contains("\"schemaVersion\":33"));
         assert!(snapshot.contains("\"textProperties\":{\"runs\":[{\"start\":0,\"end\":5"));
         assert!(snapshot.contains("\"color\":{\"space\":\"srgb\""));
         assert!(snapshot.contains("\"stroke\":\"#00000000\""));
@@ -7539,8 +9692,24 @@ mod tests {
                 .document
                 .text_properties_for_node(id)
                 .unwrap()
+                .paragraph
+                .line_height_unit,
+            Some(LineHeightUnit::Percent)
+        );
+        assert_eq!(
+            restored
+                .document
+                .text_properties_for_node(id)
+                .unwrap()
                 .auto_size,
             TextAutoSize::Height
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 32;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
         );
 
         let mut v2: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
@@ -7851,6 +10020,8 @@ mod tests {
             kind: "rectangle".into(),
             asset_id: None,
             text_properties: None,
+            fill_stack: None,
+            stroke_stack: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -7970,7 +10141,7 @@ mod tests {
             .set_document_color_profile("00000000-0000-4000-8000-000000000099", 0, "display-p3")
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":21"));
+        assert!(snapshot.contains("\"schemaVersion\":32"));
         assert!(snapshot.contains("\"colorProfile\":\"display-p3\""));
 
         let mut restored = DocumentEngine::new();
@@ -7990,6 +10161,1665 @@ mod tests {
         assert_eq!(
             migrated.document.color_profile(),
             DocumentColorProfile::Srgb
+        );
+    }
+
+    #[test]
+    fn snapshot_v25_round_trips_rotated_image_paint_stacks() {
+        let mut engine = DocumentEngine::new();
+        let asset_id = AssetId(0xa001);
+        engine
+            .document
+            .seed_asset(AssetReference {
+                asset_id,
+                content_hash: [0xaa; 32],
+                media_type: "image/png".into(),
+                byte_length: 172,
+                dimensions: Some([24, 16]),
+                font_faces: Vec::new(),
+            })
+            .unwrap();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000401",
+            "name": "Image paint", "kind": "rectangle",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "fillStack": { "layers": [{
+                "image": {
+                    "assetId": "00000000-0000-0000-0000-00000000a001",
+                    "scaleMode": "fill",
+                    "transform": { "a": 1.0, "b": 0.0, "c": 0.0, "d": 1.0, "e": 0.0, "f": 0.0 },
+                    "rotationDegrees": 90
+                },
+                "visible": true, "opacity": 0.5, "blendMode": "color-dodge"
+            }]},
+            "strokeStack": { "layers": [] }
+        }))
+        .unwrap();
+
+        engine
+            .submit_batch(NodeId(0x402), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000401").unwrap();
+        assert!(matches!(
+            engine.document.fill_stack_for_node(node_id),
+            Some(PaintStack { layers })
+                if matches!(layers.as_slice(), [PaintLayer {
+                    paint: PaintLayerKind::Image(ImagePaint { asset_id: value, scale_mode: ImageScaleMode::Fill, rotation_degrees: 90, .. }),
+                    visible: true,
+                    opacity,
+                    blend_mode: BlendMode::ColorDodge,
+                }] if *value == asset_id && (*opacity - 0.5).abs() < f32::EPSILON)
+        ));
+        assert_eq!(
+            engine.document.stroke_stack_for_node(node_id),
+            Some(&PaintStack::default())
+        );
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"scaleMode\":\"fill\""));
+        assert!(snapshot.contains("\"rotationDegrees\":90"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.fill_stack_for_node(node_id),
+            engine.document.fill_stack_for_node(node_id)
+        );
+        assert_eq!(
+            restored.document.stroke_stack_for_node(node_id),
+            Some(&PaintStack::default())
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(22);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut legacy_v22: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        legacy_v22["schemaVersion"] = serde_json::json!(22);
+        legacy_v22.as_object_mut().unwrap().remove("canonicalHash");
+        legacy_v22["nodes"][0]["fillStack"]["layers"][0]["image"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rotationDegrees");
+        let mut legacy_engine = DocumentEngine::new();
+        legacy_engine
+            .load_snapshot_json(&legacy_v22.to_string())
+            .unwrap();
+        assert!(matches!(
+            &legacy_engine
+                .document
+                .fill_stack_for_node(node_id)
+                .unwrap()
+                .layers[0]
+                .paint,
+            PaintLayerKind::Image(ImagePaint {
+                rotation_degrees: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn snapshot_v27_round_trips_image_filters_and_v26_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let asset_id = AssetId(0xa011);
+        engine
+            .document
+            .seed_asset(AssetReference {
+                asset_id,
+                content_hash: [0xab; 32],
+                media_type: "image/png".into(),
+                byte_length: 172,
+                dimensions: Some([24, 16]),
+                font_faces: Vec::new(),
+            })
+            .unwrap();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000411",
+            "name": "Filtered image", "kind": "rectangle",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "fillStack": { "layers": [{
+                "image": {
+                    "assetId": "00000000-0000-0000-0000-00000000a011",
+                    "scaleMode": "fill",
+                    "transform": { "a": 1.0, "b": 0.0, "c": 0.0, "d": 1.0, "e": 0.0, "f": 0.0 },
+                    "filters": { "exposure": 0.25, "shadows": -0.5 }
+                },
+                "visible": true, "opacity": 1.0, "blendMode": "normal"
+            }]}
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x412), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000411").unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"exposure\":0.25"));
+        assert!(snapshot.contains("\"shadows\":-0.5"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.fill_stack_for_node(node_id),
+            engine.document.fill_stack_for_node(node_id)
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(26);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut legacy_v26: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        legacy_v26["schemaVersion"] = serde_json::json!(26);
+        legacy_v26.as_object_mut().unwrap().remove("canonicalHash");
+        legacy_v26["nodes"][0]["fillStack"]["layers"][0]["image"]
+            .as_object_mut()
+            .unwrap()
+            .remove("filters");
+        let mut legacy_engine = DocumentEngine::new();
+        legacy_engine
+            .load_snapshot_json(&legacy_v26.to_string())
+            .unwrap();
+        assert!(matches!(
+            &legacy_engine
+                .document
+                .fill_stack_for_node(node_id)
+                .unwrap()
+                .layers[0]
+                .paint,
+            PaintLayerKind::Image(ImagePaint { filters: None, .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_v28_round_trips_text_truncation_and_v27_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000431",
+            "name": "Truncated text", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "one two three four", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed",
+                "fallbackFonts": [],
+                "textTruncation": "ending",
+                "maxLines": 2
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x432), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000431").unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"textTruncation\":\"ending\""));
+        assert!(snapshot.contains("\"maxLines\":2"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.text_properties_for_node(node_id),
+            engine.document.text_properties_for_node(node_id)
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(27);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut legacy_v27: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        legacy_v27["schemaVersion"] = serde_json::json!(27);
+        legacy_v27.as_object_mut().unwrap().remove("canonicalHash");
+        legacy_v27["nodes"][0]["textProperties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("textTruncation");
+        legacy_v27["nodes"][0]["textProperties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxLines");
+        let mut legacy_engine = DocumentEngine::new();
+        legacy_engine
+            .load_snapshot_json(&legacy_v27.to_string())
+            .unwrap();
+        let properties = legacy_engine
+            .document
+            .text_properties_for_node(node_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(properties.text_truncation, TextTruncation::Disabled);
+        assert_eq!(properties.max_lines, None);
+    }
+
+    #[test]
+    fn snapshot_v29_round_trips_text_run_paint_stacks_and_v28_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000441",
+            "name": "Painted text", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "AB", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 2, "fontSize": 16.0, "fontWeight": 500,
+                    "italic": false, "letterSpacing": 0.0,
+                    "fillStack": { "layers": [] }
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x442), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"fillStack\":{\"layers\":[]}"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(28);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v30_round_trips_empty_text_base_style_and_v29_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000451",
+            "name": "Empty styled text", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [],
+                "baseStyle": {
+                    "fontSize": 22.0, "fontWeight": 600,
+                    "italic": true, "letterSpacing": 1.25,
+                    "fillStack": { "layers": [] }
+                },
+                "paragraph": { "alignment": "left", "lineHeight": 26.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x452), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"baseStyle\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(29);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v31_round_trips_text_case_and_v30_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000461",
+            "name": "Text case", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Case", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0, "textCase": "smallCapsForced"
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x462), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"textCase\":\"smallCapsForced\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(30);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v32_round_trips_text_path_styles_and_v31_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000471",
+            "name": "Curved label", "kind": "textPath",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Curve", "visible": true, "locked": false,
+            "vectorPath": {
+                "fillRule": "nonZero",
+                "subpaths": [{
+                    "closed": false,
+                    "points": [
+                        { "id": "00000000-0000-4000-8000-000000000472", "x": 0.0, "y": 20.0, "pointType": "corner" },
+                        { "id": "00000000-0000-4000-8000-000000000473", "x": 100.0, "y": 20.0, "pointType": "corner" }
+                    ]
+                }]
+            },
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 5, "fontSize": 18.0, "fontWeight": 600,
+                    "italic": false, "letterSpacing": 1.0
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 22.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x474), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"kind\":\"textPath\""));
+        assert!(snapshot.contains("\"fontSize\":18.0"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(31);
+        let mut mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+        mislabeled.nodes[0].text_properties = None;
+        assert_eq!(validate_core_snapshot_version(&mislabeled), Ok(()));
+    }
+
+    #[test]
+    fn snapshot_v34_round_trips_paragraph_indent_and_v33_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000047a",
+            "name": "Indented label", "kind": "shapeWithText",
+            "x": 0.0, "y": 0.0, "width": 100.0, "height": 60.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Inset", "visible": true, "locked": false,
+            "shapeWithTextType": "ROUNDED_RECTANGLE",
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 5, "fontSize": 18.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 22.0,
+                    "paragraphSpacing": 0.0, "paragraphIndent": 14.0
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x47b), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":34"));
+        assert!(snapshot.contains("\"paragraphIndent\":14.0"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(33);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v35_round_trips_text_wrap_style_and_v34_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000047c",
+            "name": "Balanced label", "kind": "shapeWithText",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 60.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "aa bb cc dd", "visible": true, "locked": false,
+            "shapeWithTextType": "ROUNDED_RECTANGLE",
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 11, "fontSize": 18.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 22.0,
+                    "paragraphSpacing": 0.0, "textWrapStyle": "balance"
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x47d), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":35"));
+        assert!(snapshot.contains("\"textWrapStyle\":\"balance\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(34);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v36_round_trips_text_hyperlink_and_v35_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000047e",
+            "name": "Linked label", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Link", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "hyperlink": { "type": "URL", "value": "https://example.com" }
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x47f), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":36"));
+        assert!(
+            snapshot.contains("\"hyperlink\":{\"type\":\"URL\",\"value\":\"https://example.com\"}")
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(35);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v37_round_trips_text_decoration_and_v36_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000480",
+            "name": "Underlined label", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Line", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline"
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x480), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":37"));
+        assert!(snapshot.contains("\"textDecoration\":\"underline\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(36);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v38_round_trips_text_decoration_style_and_v37_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000485",
+            "name": "Wavy label", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Wave", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline", "textDecorationStyle": "wavy"
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x486), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":38"));
+        assert!(snapshot.contains("\"textDecorationStyle\":\"wavy\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(37);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v39_round_trips_text_decoration_offset_and_v38_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000487",
+            "name": "Offset label", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Line", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline",
+                    "textDecorationOffset": { "value": -25.0, "unit": "percent" }
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x488), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":39"));
+        assert!(
+            snapshot.contains("\"textDecorationOffset\":{\"value\":-25.0,\"unit\":\"percent\"}")
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(38);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v40_round_trips_text_decoration_thickness_and_v39_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000489",
+            "name": "Thick label", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 90.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Line", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 4, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline",
+                    "textDecorationThickness": { "value": 12.5, "unit": "percent" }
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x48a), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":40"));
+        assert!(
+            snapshot.contains("\"textDecorationThickness\":{\"value\":12.5,\"unit\":\"percent\"}")
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(39);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v41_round_trips_text_decoration_color_and_v40_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000048b",
+            "name": "Colored underline", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Color", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 5, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline",
+                    "textDecorationColor": {
+                        "color": { "space": "srgb", "components": [1.0, 0.25, 0.5], "alpha": 1.0 },
+                        "visible": true, "opacity": 0.75, "blendMode": "multiply"
+                    }
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x48c), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":41"));
+        assert!(snapshot.contains("\"textDecorationColor\":{"));
+        assert!(snapshot.contains("\"blendMode\":\"multiply\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(40);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v42_round_trips_text_decoration_skip_ink_and_v41_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000048d",
+            "name": "Skip ink", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "glyph", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 5, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0,
+                    "textDecoration": "underline", "textDecorationSkipInk": true
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 20.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x48e), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":42"));
+        assert!(snapshot.contains("\"textDecorationSkipInk\":true"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(41);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v43_round_trips_leading_trim_and_v42_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000048f",
+            "name": "Cap height", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 30.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Cap", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 3, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0, "leadingTrim": "capHeight"
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 24.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x490), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":43"));
+        assert!(snapshot.contains("\"leadingTrim\":\"capHeight\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(42);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v44_round_trips_text_list_type_and_v43_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000491",
+            "name": "Ordered list", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 60.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered"
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x492), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":44"));
+        assert!(snapshot.contains("\"listType\":\"ordered\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(43);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v45_round_trips_text_list_spacing_and_v44_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000493",
+            "name": "Spaced list", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered", "listSpacing": 8.0
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x493), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":45"));
+        assert!(snapshot.contains("\"listSpacing\":8.0"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(44);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v46_round_trips_paragraph_indentation_and_v45_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000494",
+            "name": "Nested list", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered"
+                },
+                "paragraphStyleRuns": [{ "start": 4, "indentation": 2 }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x494), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":46"));
+        assert!(snapshot.contains("\"paragraphStyleRuns\":[{\"start\":4,\"indentation\":2}]"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(45);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v47_round_trips_hanging_list_and_v46_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000495",
+            "name": "Hanging list", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered", "hangingList": true
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x495), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":47"));
+        assert!(snapshot.contains("\"hangingList\":true"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(46);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v48_round_trips_paragraph_list_options_and_v47_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000496",
+            "name": "Mixed list", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered"
+                },
+                "paragraphStyleRuns": [{ "start": 4, "listType": "none" }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x496), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":48"));
+        assert!(snapshot.contains("\"paragraphStyleRuns\":[{\"start\":4,\"listType\":\"none\"}]"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(47);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v49_round_trips_paragraph_list_spacing_and_v48_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000497",
+            "name": "Mixed list spacing", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "listType": "ordered", "listSpacing": 8.0
+                },
+                "paragraphStyleRuns": [{ "start": 0, "listSpacing": 0.0 }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x497), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":49"));
+        assert!(snapshot.contains("\"paragraphStyleRuns\":[{\"start\":0,\"listSpacing\":0.0}]"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(48);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v50_round_trips_paragraph_spacing_and_v49_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000498",
+            "name": "Mixed paragraph spacing", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 8.0
+                },
+                "paragraphStyleRuns": [{ "start": 0, "paragraphSpacing": 0.0 }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x498), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":50"));
+        assert!(
+            snapshot.contains("\"paragraphStyleRuns\":[{\"start\":0,\"paragraphSpacing\":0.0}]")
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(49);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v51_round_trips_paragraph_indent_and_v50_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000499",
+            "name": "Mixed paragraph indent", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "paragraphIndent": 8.0
+                },
+                "paragraphStyleRuns": [{ "start": 0, "paragraphIndent": 0.0 }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x499), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":51"));
+        assert!(
+            snapshot.contains("\"paragraphStyleRuns\":[{\"start\":0,\"paragraphIndent\":0.0}]")
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(50);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v52_round_trips_paragraph_line_height_and_v51_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000049a",
+            "name": "Mixed paragraph line height", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 68.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0
+                },
+                "paragraphStyleRuns": [{
+                    "start": 0, "lineHeight": 150.0, "lineHeightUnit": "percent"
+                }, { "start": 4, "lineHeightUnit": "auto" }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x49a), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":52"));
+        assert!(snapshot.contains("\"lineHeightUnit\":\"percent\""));
+        assert!(snapshot.contains("\"lineHeightUnit\":\"auto\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(51);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v53_round_trips_hanging_punctuation_and_v52_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000049b",
+            "name": "Hanging punctuation", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 24.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "“Text.”", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 11, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "hangingPunctuation": true
+                },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x49b), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":53"));
+        assert!(snapshot.contains("\"hangingPunctuation\":true"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(52);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v54_round_trips_paragraph_text_wrap_style_and_v53_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-00000000049c",
+            "name": "Mixed paragraph wrapping", "kind": "text",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 48.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "One\nTwo", "visible": true, "locked": false,
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 7, "fontSize": 16.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": {
+                    "alignment": "left", "lineHeight": 20.0,
+                    "paragraphSpacing": 0.0, "textWrapStyle": "balance"
+                },
+                "paragraphStyleRuns": [{ "start": 4, "textWrapStyle": "auto" }],
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x49c), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":54"));
+        assert!(snapshot.contains("\"textWrapStyle\":\"auto\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(53);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v55_round_trips_font_face_metadata_and_v54_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        engine
+            .register_asset(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                "00000000-0000-0000-0000-000000000055",
+                &"55".repeat(32),
+                "font/ttf",
+                512,
+                0,
+                0,
+                r#"[{"faceIndex":0,"family":"Acme Sans","style":"Regular"}]"#,
+            )
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":55"));
+        assert!(snapshot.contains("\"family\":\"Acme Sans\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(54);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn complete_text_path_update_changes_rotation_without_replacing_its_base_path() {
+        let mut engine = DocumentEngine::new();
+        let mut node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000481",
+            "name": "Curved label", "kind": "textPath",
+            "x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0,
+            "rotation": 0.0,
+            "fill": "#111111", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "Curve", "visible": true, "locked": false,
+            "vectorPath": {
+                "fillRule": "nonZero",
+                "subpaths": [{
+                    "closed": false,
+                    "points": [
+                        { "id": "00000000-0000-4000-8000-000000000482", "x": 0.0, "y": 20.0, "pointType": "corner" },
+                        { "id": "00000000-0000-4000-8000-000000000483", "x": 100.0, "y": 20.0, "pointType": "corner" }
+                    ]
+                }]
+            },
+            "textProperties": {
+                "runs": [{
+                    "start": 0, "end": 5, "fontSize": 18.0, "fontWeight": 400,
+                    "italic": false, "letterSpacing": 0.0
+                }],
+                "paragraph": { "alignment": "left", "lineHeight": 22.0, "paragraphSpacing": 0.0 },
+                "autoSize": "fixed", "fallbackFonts": []
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(
+                NodeId(0x484),
+                0,
+                vec![BatchCommand::Create { node: node.clone() }],
+            )
+            .unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000481").unwrap();
+        let original_path = engine.document.node(node_id).unwrap().vector_path.clone();
+        node.rotation = 28.0;
+
+        assert_eq!(
+            engine
+                .submit_batch(
+                    NodeId(0x485),
+                    1,
+                    vec![BatchCommand::Update {
+                        node,
+                        ignore_constraints: false,
+                        plain_text_only: false,
+                        rename_text_path: false,
+                    }],
+                )
+                .unwrap(),
+            2,
+        );
+        let updated = engine.document.node(node_id).unwrap();
+        assert_eq!(updated.rotation, 28.0);
+        assert_eq!(updated.vector_path, original_path);
+    }
+
+    #[test]
+    fn snapshot_v25_retains_v24_pass_through_nodes() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000421",
+            "name": "Pass through frame", "kind": "frame",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "blendMode": "pass-through", "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x422), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"blendMode\":\"pass-through\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000421").unwrap();
+        assert_eq!(
+            restored.document.node(node_id).unwrap().blend_mode,
+            BlendMode::PassThrough
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(23);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v26_requires_isolated_normal_markers_to_use_the_new_schema() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000425",
+            "name": "Isolated normal frame", "kind": "frame",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "blendMode": "normal", "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "extensions": {
+                "makefigma.blend.normal-isolation.v1": [1]
+            }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(0x426), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"makefigma.blend.normal-isolation.v1\":[1]"));
+        let node_id = parse_id("00000000-0000-4000-8000-000000000425").unwrap();
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored
+                .document
+                .node(node_id)
+                .unwrap()
+                .extensions
+                .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION),
+            Some(&vec![1])
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(25);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(25);
+        legacy.as_object_mut().unwrap().remove("canonicalHash");
+        legacy["nodes"][0]["extensions"]
+            .as_object_mut()
+            .unwrap()
+            .remove(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION);
+        let mut legacy_engine = DocumentEngine::new();
+        legacy_engine
+            .load_snapshot_json(&legacy.to_string())
+            .unwrap();
+        assert!(
+            !legacy_engine
+                .document
+                .node(node_id)
+                .unwrap()
+                .extensions
+                .contains_key(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION)
+        );
+    }
+
+    #[test]
+    fn snapshot_v25_requires_linear_blend_nodes_to_use_the_new_schema() {
+        let mut engine = DocumentEngine::new();
+        for (offset, blend_mode) in ["linear-burn", "linear-dodge"].into_iter().enumerate() {
+            let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+                "id": format!("00000000-0000-4000-8000-00000000043{}", offset + 1),
+                "name": "Linear blend", "kind": "rectangle",
+                "x": offset as f64 * 140.0, "y": 0.0, "width": 120.0, "height": 80.0,
+                "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+                "opacity": 1.0, "blendMode": blend_mode, "cornerRadius": 0.0,
+                "text": "", "visible": true, "locked": false
+            }))
+            .unwrap();
+            engine
+                .submit_batch(
+                    NodeId(0x440 + offset as u128),
+                    engine.document.revision,
+                    vec![BatchCommand::Create { node }],
+                )
+                .unwrap();
+        }
+        let paint_layer_node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000433",
+            "name": "Linear paint layer", "kind": "rectangle",
+            "x": 280.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "blendMode": "normal", "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "fillStack": { "layers": [
+                { "paint": { "css": "#cc3355" }, "visible": true, "opacity": 0.75, "blendMode": "linear-dodge" }
+            ] }
+        }))
+        .unwrap();
+        engine
+            .submit_batch(
+                NodeId(0x443),
+                engine.document.revision,
+                vec![BatchCommand::Create {
+                    node: paint_layer_node,
+                }],
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":32"));
+        assert!(snapshot.contains("\"blendMode\":\"linear-burn\""));
+        assert!(snapshot.contains("\"blendMode\":\"linear-dodge\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored
+                .document
+                .node(parse_id("00000000-0000-4000-8000-000000000431").unwrap())
+                .unwrap()
+                .blend_mode,
+            BlendMode::LinearBurn
+        );
+        assert_eq!(
+            restored
+                .document
+                .fill_stack_for_node(parse_id("00000000-0000-4000-8000-000000000433").unwrap())
+                .unwrap()
+                .layers[0]
+                .blend_mode,
+            BlendMode::LinearDodge
+        );
+
+        let mut mislabeled: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        mislabeled["schemaVersion"] = serde_json::json!(24);
+        let mislabeled: CoreSnapshot = serde_json::from_value(mislabeled).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut paint_only: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        paint_only["schemaVersion"] = serde_json::json!(24);
+        for node in paint_only["nodes"].as_array_mut().unwrap() {
+            node["blendMode"] = serde_json::json!("normal");
+        }
+        let paint_only: CoreSnapshot = serde_json::from_value(paint_only).unwrap();
+        assert_eq!(
+            validate_core_snapshot_version(&paint_only),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn non_linear_gradient_paint_stacks_survive_projection_history_and_snapshot_round_trip() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000411",
+            "name": "Gradient paint", "kind": "rectangle",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false,
+            "fillStack": { "layers": [
+                { "paint": { "css": "#ff0000", "gradientPaint": {
+                    "kind": "radial", "transform": { "a": 1.5, "b": 0.25, "c": -0.1, "d": 1.2, "e": -0.2, "f": 0.1 },
+                    "stops": [
+                        { "position": 0.0, "color": { "space": "srgb", "components": [1.0, 0.0, 0.0], "alpha": 1.0 } },
+                        { "position": 1.0, "color": { "space": "linear-srgb", "components": [0.0, 0.0, 1.0], "alpha": 0.5 } }
+                    ]
+                } }, "visible": true, "opacity": 0.75, "blendMode": "screen" },
+                { "paint": { "css": "#00ff00", "gradientPaint": {
+                    "kind": "diamond", "transform": { "a": 1.0, "b": 0.0, "c": 0.0, "d": 1.0, "e": 0.0, "f": 0.0 },
+                    "stops": [
+                        { "position": 0.0, "color": { "space": "srgb", "components": [0.0, 1.0, 0.0], "alpha": 1.0 } },
+                        { "position": 1.0, "color": { "space": "srgb", "components": [0.0, 0.0, 0.0], "alpha": 0.0 } }
+                    ]
+                } }, "visible": true, "opacity": 1.0, "blendMode": "normal" }
+            ] }
+        })).unwrap();
+
+        engine
+            .submit_batch(NodeId(0x412), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+        let node_id = parse_id("00000000-0000-4000-8000-000000000411").unwrap();
+        let committed_hash = engine.canonical_hash();
+        let committed_projection = engine.snapshot_json();
+        assert!(committed_projection.contains("\"kind\":\"radial\""));
+        assert!(committed_projection.contains("\"kind\":\"diamond\""));
+        assert!(matches!(
+            engine.document.fill_stack_for_node(node_id),
+            Some(PaintStack { layers }) if matches!(layers.as_slice(), [
+                PaintLayer { paint: PaintLayerKind::Gradient(GradientPaint { kind: GradientPaintKind::Radial, .. }), .. },
+                PaintLayer { paint: PaintLayerKind::Gradient(GradientPaint { kind: GradientPaintKind::Diamond, .. }), .. },
+            ])
+        ));
+
+        engine.undo().unwrap();
+        assert!(engine.document.node(node_id).is_none());
+        engine.redo().unwrap();
+        assert_eq!(engine.canonical_hash(), committed_hash);
+
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&committed_projection).unwrap();
+        assert_eq!(restored.canonical_hash(), committed_hash);
+        assert_eq!(
+            restored.document.fill_stack_for_node(node_id),
+            engine.document.fill_stack_for_node(node_id)
         );
     }
 
@@ -8031,6 +11861,8 @@ mod tests {
                         kind: "rectangle".into(),
                         asset_id: None,
                         text_properties: None,
+                        fill_stack: None,
+                        stroke_stack: None,
                         x: 0.0,
                         y: 0.0,
                         width: 100.0,
@@ -8080,7 +11912,7 @@ mod tests {
             )
             .unwrap();
         let snapshot = engine.snapshot_json();
-        assert!(snapshot.contains("\"schemaVersion\":21"));
+        assert!(snapshot.contains("\"schemaVersion\":32"));
         assert!(snapshot.contains("\"fillGradient\""));
         assert!(snapshot.contains("\"strokeGradient\""));
         assert!(snapshot.contains("\"strokeWidth\":3.0"));
@@ -8181,7 +12013,7 @@ mod tests {
             Some(parse_page_id(design_page).unwrap())
         );
         let round_trip = restored.snapshot_json();
-        assert!(round_trip.contains("\"schemaVersion\":21"));
+        assert!(round_trip.contains("\"schemaVersion\":32"));
         assert!(round_trip.contains("\"pageId\":\"00000000-0000-4000-8000-000000000002\""));
 
         let mut v9 = current;
@@ -8422,6 +12254,8 @@ mod tests {
                     kind: "rectangle".into(),
                     asset_id: None,
                     text_properties: None,
+                    fill_stack: None,
+                    stroke_stack: None,
                     x: index as f64,
                     y: -(index as f64),
                     width: 100.0,
@@ -8467,6 +12301,9 @@ mod tests {
                     is_mask: false,
                     extensions: Default::default(),
                 },
+                ignore_constraints: false,
+                plain_text_only: false,
+                rename_text_path: false,
             });
         }
 
@@ -8474,5 +12311,149 @@ mod tests {
         assert_eq!(engine.document.revision, 1);
         assert_eq!(engine.document.node(NodeId(1_000)).unwrap().x, 1_000.0);
         assert_eq!(engine.document.node(NodeId(1_000)).unwrap().y, -1_000.0);
+    }
+
+    #[test]
+    fn resize_preview_is_read_only_and_matches_the_committed_core_projection() {
+        let mut engine = DocumentEngine::new();
+        let frame_id = "00000000-0000-4000-8000-000000001101";
+        let child_id = "00000000-0000-4000-8000-000000001102";
+        engine
+            .create_node(
+                "00000000-0000-4000-8000-000000001111",
+                0,
+                frame_id,
+                "frame",
+                "Frame",
+                0.0,
+                0.0,
+                200.0,
+                100.0,
+                0.0,
+                "#ffffff",
+                "transparent",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+        engine
+            .create_node(
+                "00000000-0000-4000-8000-000000001112",
+                1,
+                child_id,
+                "rectangle",
+                "Child",
+                20.0,
+                10.0,
+                50.0,
+                20.0,
+                0.0,
+                "#ff0000",
+                "transparent",
+                0.0,
+                1.0,
+                0.0,
+                true,
+                false,
+                "",
+            )
+            .unwrap();
+
+        let mut snapshot = serde_json::from_str::<CoreSnapshot>(&engine.snapshot_json()).unwrap();
+        let mut child = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == child_id)
+            .unwrap()
+            .clone();
+        child.parent_id = Some(frame_id.into());
+        child.constraints = Some(ProjectionConstraints {
+            horizontal: "stretch".into(),
+            vertical: "center".into(),
+        });
+        engine
+            .submit_batch(
+                NodeId(1_113),
+                2,
+                vec![
+                    BatchCommand::Reparent {
+                        parent_ids: vec![ParentUpdate {
+                            id: child_id.into(),
+                            parent_id: Some(frame_id.into()),
+                            position_id:
+                                "00000000000000000000000000000001:00000000000000000000000000000000"
+                                    .into(),
+                        }],
+                    },
+                    BatchCommand::Update {
+                        node: child,
+                        ignore_constraints: false,
+                        plain_text_only: false,
+                        rename_text_path: false,
+                    },
+                ],
+            )
+            .unwrap();
+
+        snapshot = serde_json::from_str::<CoreSnapshot>(&engine.snapshot_json()).unwrap();
+        let mut frame = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == frame_id)
+            .unwrap()
+            .clone();
+        frame.width = 300.0;
+        frame.height = 200.0;
+        let commands_json = serde_json::json!([{
+            "type": "update",
+            "node": frame,
+        }])
+        .to_string();
+        let before_snapshot = engine.snapshot_json();
+        let before_hash = engine.canonical_hash();
+        let before_revision = engine.document.revision;
+
+        let preview = serde_json::from_str::<Vec<ProjectionNode>>(
+            &engine
+                .preview_resize_transaction_json(
+                    "00000000-0000-4000-8000-000000001114",
+                    &commands_json,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(engine.document.revision, before_revision);
+        assert_eq!(engine.canonical_hash(), before_hash);
+        assert_eq!(engine.snapshot_json(), before_snapshot);
+        assert_eq!(preview.len(), 2);
+        let preview_child = preview.iter().find(|node| node.id == child_id).unwrap();
+        assert_eq!(preview_child.x, 20.0);
+        assert_eq!(preview_child.y, 60.0);
+        assert_eq!(preview_child.width, 150.0);
+        assert_eq!(preview_child.height, 20.0);
+
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000001115",
+                before_revision,
+                &commands_json,
+            )
+            .unwrap();
+        let committed = serde_json::from_str::<CoreSnapshot>(&engine.snapshot_json()).unwrap();
+        for preview_node in preview {
+            let committed_node = committed
+                .nodes
+                .iter()
+                .find(|node| node.id == preview_node.id)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(preview_node).unwrap(),
+                serde_json::to_value(committed_node).unwrap()
+            );
+        }
     }
 }

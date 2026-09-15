@@ -44,6 +44,16 @@ message ResourceIndexEntry {
   optional uint64 byte_length = 4;
   optional uint32 pixel_width = 5;
   optional uint32 pixel_height = 6;
+  // Immutable OpenType name-table projection for every admitted face. The
+  // browser uses these names only as Figma-compatible public identities; font
+  // bytes remain content addressed by asset_id/content_hash.
+  repeated FontFaceMetadata font_faces = 7;
+}
+
+message FontFaceMetadata {
+  uint32 face_index = 1;
+  string family = 2;
+  string style = 3;
 }
 
 message DocumentSnapshot {
@@ -140,9 +150,9 @@ enum StrokeAlign {
   STROKE_ALIGN_OUTSIDE = 3;
 }
 
-// E1's initial interoperable blend subset. Zero preserves the historical
+// CSS/Canvas-interoperable Figma blend subset. Zero preserves the historical
 // source-over result for snapshots and operation payloads authored before
-// Blend Mode existed.
+// Blend Mode existed. New values are append-only.
 enum BlendMode {
   BLEND_MODE_NORMAL = 0;
   BLEND_MODE_MULTIPLY = 1;
@@ -150,6 +160,21 @@ enum BlendMode {
   BLEND_MODE_OVERLAY = 3;
   BLEND_MODE_DARKEN = 4;
   BLEND_MODE_LIGHTEN = 5;
+  BLEND_MODE_COLOR_DODGE = 6;
+  BLEND_MODE_COLOR_BURN = 7;
+  BLEND_MODE_HARD_LIGHT = 8;
+  BLEND_MODE_SOFT_LIGHT = 9;
+  BLEND_MODE_DIFFERENCE = 10;
+  BLEND_MODE_EXCLUSION = 11;
+  BLEND_MODE_HUE = 12;
+  BLEND_MODE_SATURATION = 13;
+  BLEND_MODE_COLOR = 14;
+  BLEND_MODE_LUMINOSITY = 15;
+  // Node-only container mode. PaintLayer validation rejects this value.
+  BLEND_MODE_PASS_THROUGH = 16;
+  // Canvas nodes and Paint Stack layers use explicit bounded pixel compositing.
+  BLEND_MODE_LINEAR_BURN = 17;
+  BLEND_MODE_LINEAR_DODGE = 18;
 }
 
 // Figma's per-axis behavior when the containing Frame is resized. Unspecified
@@ -387,6 +412,69 @@ message Paint {
   }
 }
 
+enum ImageScaleMode {
+  IMAGE_SCALE_MODE_UNSPECIFIED = 0;
+  IMAGE_SCALE_MODE_FILL = 1;
+  IMAGE_SCALE_MODE_FIT = 2;
+  IMAGE_SCALE_MODE_CROP = 3;
+  IMAGE_SCALE_MODE_TILE = 4;
+}
+
+message ImagePaint {
+  bytes asset_id = 1;
+  ImageScaleMode scale_mode = 2;
+  Transform transform = 3;
+  // Figma ImagePaint rotation applies only to Fill/Fit/Tile and is
+  // canonicalized to 0/90/180/270 degrees.
+  sint32 rotation_degrees = 4;
+  // Presence-bearing Figma image adjustments. Each present value is in [-1, 1].
+  ImageFilters filters = 5;
+}
+
+message ImageFilters {
+  optional float exposure = 1;
+  optional float contrast = 2;
+  optional float saturation = 3;
+  optional float temperature = 4;
+  optional float tint = 5;
+  optional float highlights = 6;
+  optional float shadows = 7;
+}
+
+enum GradientPaintKind {
+  GRADIENT_PAINT_KIND_UNSPECIFIED = 0;
+  GRADIENT_PAINT_KIND_RADIAL = 1;
+  GRADIENT_PAINT_KIND_ANGULAR = 2;
+  GRADIENT_PAINT_KIND_DIAMOND = 3;
+}
+
+// Non-linear gradients retain Figma's complete local-to-gradient transform.
+// This payload belongs to the versioned PaintStack and has no lossy legacy
+// Paint mirror.
+message GradientPaint {
+  GradientPaintKind kind = 1;
+  Transform transform = 2;
+  repeated GradientStop stops = 3;
+}
+
+message PaintLayer {
+  oneof kind {
+    Color solid = 1;
+    LinearGradient linear_gradient = 2;
+    ImagePaint image = 3;
+    GradientPaint gradient = 7;
+  }
+  bool visible = 4;
+  float opacity = 5;
+  BlendMode blend_mode = 6;
+}
+
+// Presence is semantic: a present wrapper with zero layers means explicit no
+// paint, while an omitted wrapper selects the legacy singular/repeated fields.
+message PaintStack {
+  repeated PaintLayer layers = 1;
+}
+
 message FontVariation {
   string tag = 1; // exactly four ASCII bytes
   float value = 2;
@@ -413,6 +501,26 @@ enum TextAutoSize {
   TEXT_AUTO_SIZE_WIDTH_AND_HEIGHT = 3;
 }
 
+// Figma TextNode.textTruncation. UNSPECIFIED is legacy wire absence and has
+// the same effective behavior as DISABLED without changing old snapshots.
+enum TextTruncation {
+  TEXT_TRUNCATION_UNSPECIFIED = 0;
+  TEXT_TRUNCATION_DISABLED = 1;
+  TEXT_TRUNCATION_ENDING = 2;
+}
+
+// Figma TextCase. UNSPECIFIED is legacy wire absence and has the same
+// effective behavior as ORIGINAL without changing old document hashes.
+enum TextCase {
+  TEXT_CASE_UNSPECIFIED = 0;
+  TEXT_CASE_ORIGINAL = 1;
+  TEXT_CASE_UPPER = 2;
+  TEXT_CASE_LOWER = 3;
+  TEXT_CASE_TITLE = 4;
+  TEXT_CASE_SMALL_CAPS = 5;
+  TEXT_CASE_SMALL_CAPS_FORCED = 6;
+}
+
 message TextStyleRun {
   uint32 start = 1; // UTF-8 byte offset at a scalar boundary
   uint32 end = 2;
@@ -423,12 +531,173 @@ message TextStyleRun {
   double letter_spacing = 7;
   // Optional per-run color; omission inherits the Text node fill.
   optional Color color = 8;
+  // Presence-bearing Figma range fills. A present empty stack means no paint;
+  // omission falls back to color and then to the owning Text node fill.
+  optional PaintStack fill_stack = 9;
+  // Omission is the legacy ORIGINAL behavior. Presence requires engine
+  // semantics 16 so older readers cannot silently erase presentation case.
+  optional TextCase text_case = 10;
+  // Figma range hyperlink metadata. Message presence distinguishes no link.
+  HyperlinkTarget hyperlink = 11;
+  // Omission is Figma NONE. Presence requires engine semantics 22.
+  optional TextDecoration text_decoration = 12;
+  // Omission is Figma SOLID. Non-default values require engine semantics 23.
+  optional TextDecorationStyle text_decoration_style = 13;
+  // Omission is Figma AUTO. Explicit values require engine semantics 24.
+  optional TextDecorationOffset text_decoration_offset = 14;
+  // Omission is Figma AUTO. Explicit values require engine semantics 25.
+  optional TextDecorationThickness text_decoration_thickness = 15;
+  optional TextDecorationColor text_decoration_color = 16;
+  // Omission preserves the legacy continuous underline. true requires engine
+  // semantics 27 and enables Figma's descender-aware skip-ink behavior.
+  optional bool text_decoration_skip_ink = 17;
+  // Omission is Figma NONE. CAP_HEIGHT requires engine semantics 28 and
+  // removes the outer leading above the first line and below the last line.
+  optional LeadingTrim leading_trim = 18;
+}
+
+enum LeadingTrim {
+  LEADING_TRIM_UNSPECIFIED = 0;
+  LEADING_TRIM_NONE = 1;
+  LEADING_TRIM_CAP_HEIGHT = 2;
+}
+
+enum TextDecoration {
+  TEXT_DECORATION_UNSPECIFIED = 0;
+  TEXT_DECORATION_UNDERLINE = 1;
+  TEXT_DECORATION_STRIKETHROUGH = 2;
+}
+
+enum TextDecorationStyle {
+  TEXT_DECORATION_STYLE_UNSPECIFIED = 0;
+  TEXT_DECORATION_STYLE_SOLID = 1;
+  TEXT_DECORATION_STYLE_WAVY = 2;
+  TEXT_DECORATION_STYLE_DOTTED = 3;
+}
+
+message TextDecorationOffset {
+  double value = 1;
+  TextDecorationOffsetUnit unit = 2;
+}
+
+enum TextDecorationOffsetUnit {
+  TEXT_DECORATION_OFFSET_UNIT_UNSPECIFIED = 0;
+  TEXT_DECORATION_OFFSET_UNIT_PIXELS = 1;
+  TEXT_DECORATION_OFFSET_UNIT_PERCENT = 2;
+  TEXT_DECORATION_OFFSET_UNIT_AUTO = 3;
+}
+
+message TextDecorationThickness {
+  double value = 1;
+  TextDecorationThicknessUnit unit = 2;
+}
+
+// AUTO remains wire absence. An explicit value is restricted to the SolidPaint
+// fields that are already admitted by Canonical paint semantics.
+message TextDecorationColor {
+  Color color = 1;
+  bool visible = 2;
+  float opacity = 3;
+  BlendMode blend_mode = 4;
+}
+
+enum TextDecorationThicknessUnit {
+  TEXT_DECORATION_THICKNESS_UNIT_UNSPECIFIED = 0;
+  TEXT_DECORATION_THICKNESS_UNIT_PIXELS = 1;
+  TEXT_DECORATION_THICKNESS_UNIT_PERCENT = 2;
+  TEXT_DECORATION_THICKNESS_UNIT_AUTO = 3;
+}
+
+enum HyperlinkType {
+  HYPERLINK_TYPE_UNSPECIFIED = 0;
+  HYPERLINK_TYPE_URL = 1;
+  HYPERLINK_TYPE_NODE = 2;
+}
+
+message HyperlinkTarget {
+  HyperlinkType type = 1;
+  string value = 2;
 }
 
 message ParagraphStyle {
   TextAlignment alignment = 1;
   optional double line_height = 2;
   double paragraph_spacing = 3;
+  // Omission preserves the legacy pixel interpretation. Explicit PERCENT or
+  // AUTO requires engine semantics 18; PIXELS is accepted on input and
+  // canonicalized back to omission so old documents keep their hashes.
+  optional LineHeightUnit line_height_unit = 4;
+  // Presence-bearing first-line inset from the paragraph's left edge.
+  // Omission preserves legacy layout and canonical hashes.
+  optional double paragraph_indent = 5;
+  // Omission preserves Figma AUTO and every legacy document hash. Explicit
+  // BALANCE/PRETTY requires engine semantics 20.
+  optional TextWrapStyle text_wrap_style = 6;
+  // Omission preserves Figma NONE and every legacy document hash. Explicit
+  // ORDERED/UNORDERED requires engine semantics 29.
+  optional TextListType list_type = 7;
+  // Omission is Figma's zero list spacing and preserves legacy hashes.
+  // Positive values require engine semantics 30.
+  optional double list_spacing = 8;
+  // Omission/false keeps list markers inside the text box. True moves the
+  // first marker column outside the text box and requires engine semantics 32.
+  optional bool hanging_list = 9;
+  // Omission/false preserves legacy wrapping. True permits one boundary
+  // punctuation grapheme to hang outside each visual line and requires
+  // engine semantics 38.
+  optional bool hanging_punctuation = 10;
+}
+
+// Sparse per-paragraph overrides keyed by the UTF-8 byte offset at which an
+// authored paragraph begins. The record is intentionally append-only so later
+// paragraph-level Figma fields can share the same durable coordinate model.
+message ParagraphStyleRun {
+  uint32 start = 1;
+  // Figma list nesting level. Presence, including explicit zero, requires
+  // engine semantics 31.
+  optional uint32 indentation = 2;
+  // Absence inherits ParagraphStyle.list_type. Explicit NONE disables the
+  // global list for this paragraph. Presence requires engine semantics 33.
+  optional TextListType list_type = 3;
+  // Absence inherits ParagraphStyle.list_spacing. Presence, including zero,
+  // requires engine semantics 34 and applies after this authored list item.
+  optional double list_spacing = 4;
+  // Absence inherits ParagraphStyle.paragraph_spacing. Presence, including
+  // zero, requires engine semantics 35 and applies after this paragraph.
+  optional double paragraph_spacing = 5;
+  // Absence inherits ParagraphStyle.paragraph_indent. Presence, including
+  // zero, requires engine semantics 36 and applies to this paragraph's first line.
+  optional double paragraph_indent = 6;
+  // Per-paragraph line-height override. PIXELS uses line_height alone;
+  // PERCENT uses both fields; AUTO uses line_height_unit alone. Either field
+  // requires engine semantics 37. Both absent inherit ParagraphStyle.
+  optional double line_height = 7;
+  optional LineHeightUnit line_height_unit = 8;
+  // Absence inherits ParagraphStyle.text_wrap_style. Explicit AUTO disables
+  // an inherited BALANCE/PRETTY value for this paragraph. Presence requires
+  // engine semantics 39.
+  optional TextWrapStyle text_wrap_style = 9;
+}
+
+enum TextWrapStyle {
+  TEXT_WRAP_STYLE_UNSPECIFIED = 0;
+  TEXT_WRAP_STYLE_AUTO = 1;
+  TEXT_WRAP_STYLE_BALANCE = 2;
+  TEXT_WRAP_STYLE_PRETTY = 3;
+}
+
+enum TextListType {
+  TEXT_LIST_TYPE_UNSPECIFIED = 0;
+  TEXT_LIST_TYPE_NONE = 1;
+  TEXT_LIST_TYPE_ORDERED = 2;
+  TEXT_LIST_TYPE_UNORDERED = 3;
+}
+
+enum LineHeightUnit {
+  LINE_HEIGHT_UNIT_UNSPECIFIED = 0;
+  LINE_HEIGHT_UNIT_PIXELS = 1;
+  LINE_HEIGHT_UNIT_PERCENT = 2;
+  LINE_HEIGHT_UNIT_AUTO = 3;
 }
 
 message TextProperties {
@@ -436,6 +705,13 @@ message TextProperties {
   ParagraphStyle paragraph = 2;
   TextAutoSize auto_size = 3;
   repeated FontReference fallback_fonts = 4;
+  optional TextTruncation text_truncation = 5;
+  // Only valid with ENDING. Figma exposes null as absence and requires >= 1.
+  optional uint32 max_lines = 6;
+  // Persistent insertion style for empty text. start/end must both be zero;
+  // keeping it separate from runs preserves the non-empty coverage invariant.
+  optional TextStyleRun base_style = 7;
+  repeated ParagraphStyleRun paragraph_style_runs = 8;
 }
 
 // M3 prototype vocabulary. These records are append-only and intentionally
@@ -547,6 +823,8 @@ message SceneNode {
   BlendMode blend_mode = 46;
   repeated PrototypeReaction reactions = 47;
   optional PrototypeMetadata prototype_metadata = 48;
+  optional PaintStack fill_stack = 49;
+  optional PaintStack stroke_stack = 50;
 }
 
 message GeometryUpdate {
@@ -556,6 +834,8 @@ message GeometryUpdate {
   double width = 4;
   double height = 5;
   double rotation = 6;
+  // Leaves constrained descendants unchanged for resizeWithoutConstraints.
+  bool ignore_constraints = 7;
 }
 
 message AppearanceUpdate {
@@ -589,6 +869,8 @@ message AppearanceUpdate {
   repeated Effect effect_stack = 28;
   optional AutoLayout auto_layout = 29;
   BlendMode blend_mode = 30;
+  optional PaintStack fill_stack = 31;
+  optional PaintStack stroke_stack = 32;
 }
 
 // Canonical Frame layout configuration. Kept separate from AppearanceUpdate so
@@ -670,6 +952,13 @@ message ImageFillUpdate {
 // editing is intentionally represented by a complete resolved path so all
 // replicas apply the same deterministic result.
 message SetVectorPath {
+  bytes node_id = 1;
+  VectorPath vector_path = 2;
+}
+
+// Converts a vector-like shape into an immutable-base TextPath in place. The
+// path is pre-resolved so every replica retains the same NodeId and geometry.
+message ConvertToTextPath {
   bytes node_id = 1;
   VectorPath vector_path = 2;
 }
@@ -789,6 +1078,7 @@ message ResolvedOperation {
     AutoLayoutUpdate set_auto_layout = 24;
     ConnectVectorEndpoints connect_vector_endpoints = 25;
     SetNodeExtensions set_node_extensions = 26;
+    ConvertToTextPath convert_to_text_path = 27;
   }
 }
 

@@ -52,12 +52,20 @@ export class DocumentEngine {
      */
     move_nodes(transaction_id: string, base_revision: bigint, updates_json: string): bigint;
     constructor();
+    /**
+     * Executes a resize-shaped Update batch against a structurally shared,
+     * disposable document and returns only the nodes changed by Core. The live
+     * document's revision, history and operation-dedupe state remain untouched.
+     * The Engine Worker uses this during pointer movement so the transient
+     * Frame/child geometry is produced by the same reducer as pointer-up.
+     */
+    preview_resize_transaction_json(transaction_id: string, commands_json: string): string;
     redo(): bigint;
     /**
      * Adds only an already-admitted Asset Service record to the Canonical
      * Resource Index. Bytes remain owned by the resource service.
      */
-    register_asset(transaction_id: string, base_revision: bigint, asset_id: string, content_hash: string, media_type: string, byte_length: bigint, pixel_width: number, pixel_height: number): bigint;
+    register_asset(transaction_id: string, base_revision: bigint, asset_id: string, content_hash: string, media_type: string, byte_length: bigint, pixel_width: number, pixel_height: number, font_faces_json: string): bigint;
     rename_node(transaction_id: string, base_revision: bigint, node_id: string, name: string): bigint;
     /**
      * Equivalent to [`Self::render_graph_plan_json`], scoped to the active
@@ -82,6 +90,12 @@ export class DocumentEngine {
      * hydration of older local records and fixtures.
      */
     seed_batch_json(value: string): bigint;
+    /**
+     * Sets the document identity before legacy projection hydration. The old
+     * browser path serialized and reparsed the entire hydrated document only
+     * to replace this field, doubling the live 100k-node state at peak.
+     */
+    seed_document_id(document_id: string): void;
     /**
      * Loads an existing local snapshot without turning document hydration into a user
      * undo step. Only the Worker uses this while bootstrapping the projection.
@@ -155,6 +169,13 @@ export function gpu_scene_instances_from_snapshot_json(snapshot_json: string, pa
 export function layout_shaped_text_json(font_bytes: Uint8Array, face_index: number, text: string, max_width_em: number): string;
 
 /**
+ * Shapes metric-bearing Style Runs from one bounded concatenated font bundle.
+ * `runs_json` references byte windows in that bundle so callers do not encode
+ * large font files as JSON or persist them in the Canonical document.
+ */
+export function layout_shaped_text_runs_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number): string;
+
+/**
  * Produces ICU4X line ranges at the same Variable Font coordinates used by
  * the shaping and glyph-raster stages.
  */
@@ -193,6 +214,12 @@ export function preview_text_replacement_json(text: string, anchor: number, focu
  * neither the pixels nor the placement can enter Canonical Document state.
  */
 export function rasterize_glyph_json(font_bytes: Uint8Array, face_index: number, glyph_id: number, pixel_size: number): string;
+
+/**
+ * Rasterizes one explicit glyph with the same variation coordinates and
+ * synthetic weight/style identity used by the owning metric Style Run.
+ */
+export function rasterize_glyph_with_style_json(font_bytes: Uint8Array, face_index: number, variation_axes_json: string, font_weight: number, italic: boolean, glyph_id: number, pixel_size: number): string;
 
 /**
  * Rasterizes at the same declared variation coordinates as shaping. Pixels
@@ -331,14 +358,16 @@ export interface InitOutput {
     readonly documentengine_memory_stats_json: (a: number) => [number, number];
     readonly documentengine_move_nodes: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
     readonly documentengine_new: () => number;
+    readonly documentengine_preview_resize_transaction_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly documentengine_redo: (a: number) => [bigint, number, number];
-    readonly documentengine_register_asset: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number, m: number) => [bigint, number, number];
+    readonly documentengine_register_asset: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number, m: number, n: number, o: number) => [bigint, number, number];
     readonly documentengine_rename_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number) => [bigint, number, number];
     readonly documentengine_render_graph_plan_for_page_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly documentengine_render_graph_plan_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly documentengine_revision: (a: number) => bigint;
     readonly documentengine_seed_assets_json: (a: number, b: number, c: number) => [number, number];
     readonly documentengine_seed_batch_json: (a: number, b: number, c: number) => [bigint, number, number];
+    readonly documentengine_seed_document_id: (a: number, b: number, c: number) => [number, number];
     readonly documentengine_seed_node: (a: number, b: number, c: number, d: bigint, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number) => [bigint, number, number];
     readonly documentengine_set_document_color_profile: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [bigint, number, number];
     readonly documentengine_snapshot_json: (a: number) => [number, number];
@@ -349,12 +378,14 @@ export interface InitOutput {
     readonly fallback_text_layout_json: (a: number, b: number, c: number) => [number, number];
     readonly gpu_scene_instances_from_snapshot_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly layout_shaped_text_runs_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly parametric_shape_outline_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly preview_text_replacement_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly rasterize_glyph_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly rasterize_glyph_with_style_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly rasterize_glyph_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly shape_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly stroke_mesh_for_continuous_rounded_rectangle_with_radii_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];

@@ -8,10 +8,16 @@ pub mod authz;
 pub mod color;
 pub mod geometry;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
-use crate::color::{Color, ColorSpace, DocumentColorProfile, Paint};
+use crate::color::{
+    Color, ColorSpace, DocumentColorProfile, GradientPaintKind, ImageScaleMode, Paint,
+    PaintLayerKind, PaintStack,
+};
 use crate::geometry::{AffineTransform, Point};
+use im::{OrdMap as SharedOrdMap, OrdSet as SharedOrdSet, Vector as SharedVector};
 use sha2::{Digest, Sha256};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -28,6 +34,7 @@ pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1 * 1024 * 1024;
 pub const MAX_TEXT_STYLE_RUNS: usize = 4_096;
 pub const MAX_TEXT_FALLBACK_FONTS: usize = 32;
+pub const MAX_TEXT_HYPERLINK_BYTES: usize = 2_048;
 pub const MAX_FONT_VARIATION_AXES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -249,10 +256,50 @@ pub enum BlendMode {
     Overlay,
     Darken,
     Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+    PassThrough,
+    LinearBurn,
+    LinearDodge,
 }
 
-/// Figma-compatible per-axis response to a containing Frame resize. `None` on
-/// a node remains a deliberate legacy/no-constraint state.
+impl BlendMode {
+    pub fn requires_advanced_blend_semantics(self) -> bool {
+        matches!(
+            self,
+            Self::ColorDodge
+                | Self::ColorBurn
+                | Self::HardLight
+                | Self::SoftLight
+                | Self::Difference
+                | Self::Exclusion
+                | Self::Hue
+                | Self::Saturation
+                | Self::Color
+                | Self::Luminosity
+        )
+    }
+
+    pub fn requires_pass_through_semantics(self) -> bool {
+        self == Self::PassThrough
+    }
+
+    pub fn requires_linear_blend_semantics(self) -> bool {
+        matches!(self, Self::LinearBurn | Self::LinearDodge)
+    }
+}
+
+/// Figma-compatible per-axis response to a containing Frame resize. A missing
+/// wire value is retained for old Snapshot compatibility and executes as the
+/// Figma default `Min/Min` when the node is in an applicable Frame context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintType {
     Min,
@@ -546,6 +593,13 @@ pub struct Page {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFaceMetadata {
+    pub face_index: u32,
+    pub family: String,
+    pub style: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetReference {
     pub asset_id: AssetId,
     pub content_hash: [u8; 32],
@@ -554,6 +608,9 @@ pub struct AssetReference {
     /// Raster dimensions are present only for image resources; fonts retain
     /// `None` for both dimensions.
     pub dimensions: Option<[u32; 2]>,
+    /// Stable OpenType name-table projection, ordered by face index. Empty is
+    /// retained for legacy font resources created before semantics v40.
+    pub font_faces: Vec<FontFaceMetadata>,
 }
 
 /// A content-addressed font face. Font bytes stay in the Asset Service; the
@@ -580,6 +637,67 @@ pub enum TextAutoSize {
     WidthAndHeight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCase {
+    Original,
+    Upper,
+    Lower,
+    Title,
+    SmallCaps,
+    SmallCapsForced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecoration {
+    Underline,
+    Strikethrough,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadingTrim {
+    CapHeight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecorationStyle {
+    Wavy,
+    Dotted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextDecorationOffset {
+    Pixels(f64),
+    Percent(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextDecorationThickness {
+    Pixels(f64),
+    Percent(f64),
+}
+
+/// Figma TextDecorationColor's explicit SolidPaint value. AUTO is represented
+/// by absence on TextStyleRun so pre-existing documents retain their hashes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextDecorationColor {
+    pub color: Color,
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HyperlinkType {
+    Url,
+    Node,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HyperlinkTarget {
+    pub kind: HyperlinkType,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyleRun {
     /// UTF-8 byte offsets. Boundaries must coincide with Unicode scalar value
@@ -594,21 +712,154 @@ pub struct TextStyleRun {
     /// Optional per-run text color. Omission inherits the Text node's legacy
     /// fill, preserving existing documents and their canonical hashes.
     pub color: Option<Color>,
+    /// Presence-bearing Figma range fills. A present empty stack suppresses
+    /// glyph paint; omission retains the legacy color/node-fill fallback.
+    pub fill_stack: Option<PaintStack>,
+    /// Absence retains the legacy Original behavior and old canonical hash.
+    pub text_case: Option<TextCase>,
+    /// Range hyperlink metadata. Absence retains legacy hashes.
+    pub hyperlink: Option<HyperlinkTarget>,
+    /// Omission is Figma NONE and preserves legacy hashes. Advanced
+    /// decoration styling remains in separate append-only capability slices.
+    pub text_decoration: Option<TextDecoration>,
+    /// Omission is Figma SOLID when decoration is active. WAVY/DOTTED are
+    /// versioned separately so existing decorated documents keep their hash.
+    pub text_decoration_style: Option<TextDecorationStyle>,
+    /// Omission is Figma AUTO. Explicit pixels and percentages are versioned
+    /// separately so existing decorated documents retain their hash.
+    pub text_decoration_offset: Option<TextDecorationOffset>,
+    /// Omission is Figma AUTO. Explicit pixels and percentages are versioned
+    /// separately so existing decorated documents retain their hash.
+    pub text_decoration_thickness: Option<TextDecorationThickness>,
+    /// Omission is Figma AUTO. Explicit values retain the admitted SolidPaint
+    /// color, visibility, opacity and paint blend fields.
+    pub text_decoration_color: Option<TextDecorationColor>,
+    /// Omission preserves the legacy continuous underline. `Some(true)` opts
+    /// into Figma's descender-aware skip-ink behavior.
+    pub text_decoration_skip_ink: Option<bool>,
+    /// Omission is Figma NONE and preserves legacy line boxes and hashes.
+    /// CAP_HEIGHT removes only the outer leading of the text block.
+    pub leading_trim: Option<LeadingTrim>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParagraphStyle {
     pub alignment: TextAlign,
     pub line_height: Option<f64>,
+    /// Omission preserves the legacy pixel interpretation and canonical hash.
+    /// Explicit relative units require a newer engine semantics version.
+    pub line_height_unit: Option<LineHeightUnit>,
     pub paragraph_spacing: f64,
+    /// Presence-bearing first-line inset. Omission preserves legacy hashes.
+    pub paragraph_indent: Option<f64>,
+    /// Omission is Figma AUTO and preserves legacy hashes.
+    pub text_wrap_style: Option<TextWrapStyle>,
+    /// Omission is Figma NONE and preserves legacy hashes. Explicit list
+    /// markers apply to the first visual line of each hard-break paragraph.
+    pub list_type: Option<TextListType>,
+    /// Omission is Figma's zero spacing between authored list items.
+    pub list_spacing: Option<f64>,
+    /// False keeps the marker column inside the text box. True hangs the first
+    /// marker column outside it. Only true is serialized and hashed.
+    pub hanging_list: bool,
+    /// False preserves legacy wrapping. True permits one leading/trailing
+    /// punctuation grapheme to hang outside each visual line.
+    pub hanging_punctuation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParagraphStyleRun {
+    /// UTF-8 byte offset at an authored paragraph boundary.
+    pub start: u32,
+    /// Figma list nesting level. None inherits the effective list default.
+    pub indentation: Option<u32>,
+    /// None inherits the global list type; `ParagraphListType::None`
+    /// explicitly disables it for this paragraph.
+    pub list_type: Option<ParagraphListType>,
+    /// None inherits the global spacing; explicit zero disables spacing after
+    /// this authored list item.
+    pub list_spacing: Option<f64>,
+    /// None inherits the global paragraph spacing; explicit zero disables the
+    /// gap after this authored paragraph.
+    pub paragraph_spacing: Option<f64>,
+    /// None inherits the global first-line indent; explicit zero disables it
+    /// for this authored paragraph.
+    pub paragraph_indent: Option<f64>,
+    /// Per-paragraph line-height value. `None` plus `Auto` is explicit AUTO;
+    /// both fields absent inherit the global paragraph style.
+    pub line_height: Option<f64>,
+    pub line_height_unit: Option<LineHeightUnit>,
+    /// None inherits the global wrap style. Explicit Auto disables an
+    /// inherited Balance/Pretty value for this paragraph.
+    pub text_wrap_style: Option<TextWrapStyle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineHeightUnit {
+    Percent,
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextWrapStyle {
+    Auto,
+    Balance,
+    Pretty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextListType {
+    Ordered,
+    Unordered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphListType {
+    None,
+    Ordered,
+    Unordered,
+}
+
+impl ParagraphStyle {
+    pub fn effective_line_height(&self, font_size: f64) -> f64 {
+        let safe_font_size = if font_size.is_finite() && font_size > 0.0 {
+            font_size
+        } else {
+            20.0
+        };
+        match self.line_height_unit {
+            None => self.line_height.unwrap_or(20.0),
+            Some(LineHeightUnit::Percent) => {
+                safe_font_size * self.line_height.unwrap_or(100.0) / 100.0
+            }
+            // The font-independent Core cannot inspect browser FontFace metrics.
+            // A 1.2em line box is deterministic and shared by every executor.
+            Some(LineHeightUnit::Auto) => safe_font_size * 1.2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextProperties {
     pub runs: Vec<TextStyleRun>,
     pub paragraph: ParagraphStyle,
+    /// Sparse per-paragraph overrides. Absence retains the legacy global
+    /// paragraph record and its canonical hash.
+    pub paragraph_style_runs: Vec<ParagraphStyleRun>,
     pub auto_size: TextAutoSize,
     pub fallback_fonts: Vec<FontReference>,
+    pub text_truncation: TextTruncation,
+    pub max_lines: Option<u32>,
+    /// Persistent insertion style. Its range fields are always zero and it is
+    /// stored outside `runs`, whose entries continue to cover non-empty text.
+    pub base_style: Option<TextStyleRun>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextTruncation {
+    #[default]
+    Disabled,
+    Ending,
 }
 
 impl Default for TextProperties {
@@ -618,59 +869,235 @@ impl Default for TextProperties {
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
                 line_height: Some(20.0),
+                line_height_unit: None,
                 paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::Fixed,
             fallback_fonts: Vec::new(),
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         }
     }
 }
 
 pub const DEFAULT_PAGE_ID: PageId = PageId(1);
 
+const SMALL_CHILD_BUCKET_LIMIT: usize = 8;
+
+/**
+ * Most design nodes have only a handful of direct children. Allocating one
+ * B-tree node for every Group/Boolean parent made a 100k structural document
+ * exceed the browser's WASM heap budget. Keep small sibling sets in one sorted
+ * allocation and promote only genuinely wide parents to a persistent OrdSet.
+ */
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildBucket {
+    Small(Vec<(PositionId, NodeId)>),
+    Tree(SharedOrdSet<(PositionId, NodeId)>),
+}
+
+impl Default for ChildBucket {
+    fn default() -> Self {
+        Self::Small(Vec::new())
+    }
+}
+
+impl ChildBucket {
+    fn insert(&mut self, value: (PositionId, NodeId)) -> bool {
+        match self {
+            Self::Small(children) => match children.binary_search(&value) {
+                Ok(_) => false,
+                Err(index) if children.len() < SMALL_CHILD_BUCKET_LIMIT => {
+                    children.insert(index, value);
+                    true
+                }
+                Err(_) => {
+                    let mut tree = children.iter().copied().collect::<SharedOrdSet<_>>();
+                    let inserted = tree.insert(value).is_none();
+                    *self = Self::Tree(tree);
+                    inserted
+                }
+            },
+            Self::Tree(children) => children.insert(value).is_none(),
+        }
+    }
+
+    fn remove(&mut self, value: &(PositionId, NodeId)) -> bool {
+        let removed = match self {
+            Self::Small(children) => children
+                .binary_search(value)
+                .map(|index| {
+                    children.remove(index);
+                })
+                .is_ok(),
+            Self::Tree(children) => children.remove(value).is_some(),
+        };
+        if let Self::Tree(children) = self
+            && children.len() <= SMALL_CHILD_BUCKET_LIMIT
+        {
+            *self = Self::Small(children.iter().copied().collect());
+        }
+        removed
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Small(children) => children.len(),
+            Self::Tree(children) => children.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn contains_position(&self, position: PositionId) -> bool {
+        match self {
+            Self::Small(children) => children
+                .binary_search_by_key(&position, |(candidate, _)| *candidate)
+                .is_ok(),
+            Self::Tree(children) => children
+                .range((position, NodeId(0))..=(position, NodeId(u128::MAX)))
+                .next()
+                .is_some(),
+        }
+    }
+
+    fn iter(&self) -> ChildBucketIter<'_> {
+        match self {
+            Self::Small(children) => ChildBucketIter::Small(children.iter()),
+            Self::Tree(children) => ChildBucketIter::Tree(children.iter()),
+        }
+    }
+}
+
+enum ChildBucketIter<'a> {
+    Small(std::slice::Iter<'a, (PositionId, NodeId)>),
+    Tree(im::ordset::Iter<'a, (PositionId, NodeId)>),
+}
+
+impl<'a> Iterator for ChildBucketIter<'a> {
+    type Item = &'a (PositionId, NodeId);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(children) => children.next(),
+            Self::Tree(children) => children.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Small(children) => children.size_hint(),
+            Self::Tree(children) => children.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for ChildBucketIter<'_> {}
+
+impl<'a> IntoIterator for &'a ChildBucket {
+    type Item = &'a (PositionId, NodeId);
+    type IntoIter = ChildBucketIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SharedNode(Arc<Node>);
+
+impl SharedNode {
+    fn as_ref(&self) -> &Node {
+        self.0.as_ref()
+    }
+
+    fn into_node(self) -> Node {
+        Arc::unwrap_or_clone(self.0)
+    }
+}
+
+impl From<Node> for SharedNode {
+    fn from(node: Node) -> Self {
+        Self(Arc::new(node))
+    }
+}
+
+impl Deref for SharedNode {
+    type Target = Node;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl DerefMut for SharedNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     id: DocumentId,
     pub revision: u64,
     color_profile: DocumentColorProfile,
-    pages: BTreeMap<PageId, Page>,
+    pages: SharedOrdMap<PageId, Page>,
     /// Kept separately from `Node` during the Phase 0 → Phase 1 migration so the
     /// public node construction contract remains source-compatible. The mapping is
     /// nevertheless canonical state and participates in hashing and snapshots.
-    node_pages: BTreeMap<NodeId, PageId>,
-    /// Tracks the unique ordering key for each sibling set, so malformed
-    /// snapshots cannot leave rendering order dependent on a node-ID tiebreaker.
-    sibling_positions: BTreeSet<(PageId, Option<NodeId>, PositionId)>,
-    node_assets: BTreeMap<NodeId, AssetId>,
-    node_text_properties: BTreeMap<NodeId, TextProperties>,
+    node_pages: SharedOrdMap<NodeId, PageId>,
+    /// Derived structural index. This is intentionally excluded from snapshots
+    /// and canonical hashing: it is rebuilt by the same mutation paths that own
+    /// `nodes` and `node_pages`, and only accelerates ordered child traversal.
+    children_by_parent: SharedOrdMap<(PageId, Option<NodeId>), ChildBucket>,
+    /// Structural containers whose minimum-child invariant may have changed.
+    /// Hydration may temporarily leave entries here; a successful transaction or
+    /// explicit hydration validation drains the set.
+    structural_validation_pending: BTreeSet<NodeId>,
+    node_assets: SharedOrdMap<NodeId, AssetId>,
+    node_text_properties: SharedOrdMap<NodeId, TextProperties>,
+    /// Presence-bearing Paint Stack records. A map entry with zero layers is
+    /// canonical explicit-empty state; no entry selects the legacy fields.
+    node_paint_stacks: SharedOrdMap<(NodeId, bool), PaintStack>,
     /// Explicit entries only; omitted records are exactly `AutoLayout::default`.
-    node_auto_layout: BTreeMap<NodeId, AutoLayout>,
+    node_auto_layout: SharedOrdMap<NodeId, AutoLayout>,
     /// Retained page membership for node tombstones; undo/redo therefore restores
     /// a node to the page it came from.
-    retired_node_pages: BTreeMap<NodeId, PageId>,
-    retired_node_assets: BTreeMap<NodeId, AssetId>,
-    retired_node_text_properties: BTreeMap<NodeId, TextProperties>,
-    retired_node_auto_layout: BTreeMap<NodeId, AutoLayout>,
-    nodes: BTreeMap<NodeId, Node>,
+    retired_node_pages: SharedOrdMap<NodeId, PageId>,
+    retired_node_assets: SharedOrdMap<NodeId, AssetId>,
+    retired_node_text_properties: SharedOrdMap<NodeId, TextProperties>,
+    retired_node_auto_layout: SharedOrdMap<NodeId, AutoLayout>,
+    retired_node_paint_stacks: SharedOrdMap<(NodeId, bool), PaintStack>,
+    nodes: SharedOrdMap<NodeId, SharedNode>,
     /// Versioned Resource Index. Asset references are canonical state even before
     /// an Image/Text node consumes them, so cache eviction cannot alter a document.
-    assets: BTreeMap<AssetId, AssetReference>,
+    assets: SharedOrdMap<AssetId, AssetReference>,
     node_bytes: usize,
     /// IDs are never allocated to an unrelated new node after deletion.
-    retired_ids: BTreeSet<NodeId>,
-    undo_stack: Vec<HistoryItem>,
-    redo_stack: Vec<HistoryItem>,
+    retired_ids: SharedOrdSet<NodeId>,
+    undo_stack: SharedVector<Arc<HistoryItem>>,
+    redo_stack: SharedVector<Arc<HistoryItem>>,
     undo_bytes: usize,
     redo_bytes: usize,
     /// Dedupe state belongs to the canonical document: retrying an already accepted
     /// transaction must not create a second revision or history item.
-    accepted_transactions: BTreeMap<TransactionId, AcceptedTransactionRecord>,
-    accepted_transaction_order: VecDeque<TransactionId>,
+    accepted_transactions: SharedOrdMap<TransactionId, Arc<AcceptedTransactionRecord>>,
+    accepted_transaction_order: SharedVector<TransactionId>,
     accepted_transaction_bytes: usize,
     /// Operation delivery is at-least-once. This independent cache ensures a reused
     /// operation ID cannot either mutate twice or silently carry a different payload.
-    accepted_operations: BTreeMap<OperationId, AcceptedOperationRecord>,
-    accepted_operation_order: VecDeque<OperationId>,
+    accepted_operations: SharedOrdMap<OperationId, Arc<AcceptedOperationRecord>>,
+    accepted_operation_order: SharedVector<OperationId>,
     accepted_operation_bytes: usize,
 }
 
@@ -716,6 +1143,17 @@ pub enum Command {
         height: f64,
         rotation: f64,
     },
+    /// Updates the container geometry without propagating Constraints to its
+    /// descendants. This is the durable form of Figma's Command/Ctrl resize
+    /// modifier and Plugin API `resizeWithoutConstraints` method.
+    UpdateGeometryWithoutConstraints {
+        id: NodeId,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        rotation: f64,
+    },
     Rename {
         id: NodeId,
         name: String,
@@ -724,9 +1162,25 @@ pub enum Command {
         id: NodeId,
         appearance: Appearance,
     },
+    /// Replaces the presence-bearing Paint Stack records without rewriting
+    /// legacy paint mirrors. `None` removes the new record and restores legacy
+    /// fallback; `Some(empty)` is an explicit no-paint stack.
+    SetPaintStacks {
+        id: NodeId,
+        fill_stack: Option<PaintStack>,
+        stroke_stack: Option<PaintStack>,
+    },
     /// Replaces a complete validated VectorPath in one history/replication
     /// unit. This remains the import/snapshot escape hatch for vector edits.
     SetVectorPath {
+        id: NodeId,
+        path: VectorPath,
+    },
+    /// Converts one live vector-like shape to Figma's immutable-base TextPath
+    /// while retaining its NodeId, page, parent and sibling position. The
+    /// resolved path is carried by the command so replicas never derive shape
+    /// geometry independently.
+    ConvertToTextPath {
         id: NodeId,
         path: VectorPath,
     },
@@ -736,7 +1190,8 @@ pub enum Command {
         id: NodeId,
         operation: BooleanOperation,
     },
-    /// Marks a paintable layer as an alpha mask for its following siblings.
+    /// Marks a paintable layer, or a Group whose descendants provide alpha,
+    /// as an alpha mask for its following siblings.
     /// The relationship is intentionally expressed by durable sibling order;
     /// the mask flag itself is stored in the reserved Phase 2 extension key so
     /// snapshots predating G4 remain byte-for-byte compatible.
@@ -912,6 +1367,13 @@ pub enum AppliedChange {
         before: Appearance,
         after: Appearance,
     },
+    PaintStacksChanged {
+        id: NodeId,
+        before_fill: Option<PaintStack>,
+        before_stroke: Option<PaintStack>,
+        after_fill: Option<PaintStack>,
+        after_stroke: Option<PaintStack>,
+    },
     AutoLayoutChanged {
         id: NodeId,
         before: Option<AutoLayout>,
@@ -921,6 +1383,11 @@ pub enum AppliedChange {
         id: NodeId,
         before: VectorPath,
         after: VectorPath,
+    },
+    NodeRecordChanged {
+        id: NodeId,
+        before: Node,
+        after: Node,
     },
     BooleanOperationChanged {
         id: NodeId,
@@ -1163,36 +1630,41 @@ impl Document {
             id,
             revision: 0,
             color_profile: DocumentColorProfile::Srgb,
-            pages: BTreeMap::from([(
+            pages: [(
                 DEFAULT_PAGE_ID,
                 Page {
                     id: DEFAULT_PAGE_ID,
                     name: "Page 1".into(),
                     position: PositionId::for_node(NodeId(DEFAULT_PAGE_ID.0)),
                 },
-            )]),
-            node_pages: BTreeMap::new(),
-            sibling_positions: BTreeSet::new(),
-            node_assets: BTreeMap::new(),
-            node_text_properties: BTreeMap::new(),
-            node_auto_layout: BTreeMap::new(),
-            retired_node_pages: BTreeMap::new(),
-            retired_node_assets: BTreeMap::new(),
-            retired_node_text_properties: BTreeMap::new(),
-            retired_node_auto_layout: BTreeMap::new(),
-            nodes: BTreeMap::new(),
-            assets: BTreeMap::new(),
+            )]
+            .into_iter()
+            .collect(),
+            node_pages: SharedOrdMap::new(),
+            children_by_parent: SharedOrdMap::new(),
+            structural_validation_pending: BTreeSet::new(),
+            node_assets: SharedOrdMap::new(),
+            node_text_properties: SharedOrdMap::new(),
+            node_paint_stacks: SharedOrdMap::new(),
+            node_auto_layout: SharedOrdMap::new(),
+            retired_node_pages: SharedOrdMap::new(),
+            retired_node_assets: SharedOrdMap::new(),
+            retired_node_text_properties: SharedOrdMap::new(),
+            retired_node_auto_layout: SharedOrdMap::new(),
+            retired_node_paint_stacks: SharedOrdMap::new(),
+            nodes: SharedOrdMap::new(),
+            assets: SharedOrdMap::new(),
             node_bytes: 0,
-            retired_ids: BTreeSet::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            retired_ids: SharedOrdSet::new(),
+            undo_stack: SharedVector::new(),
+            redo_stack: SharedVector::new(),
             undo_bytes: 0,
             redo_bytes: 0,
-            accepted_transactions: BTreeMap::new(),
-            accepted_transaction_order: VecDeque::new(),
+            accepted_transactions: SharedOrdMap::new(),
+            accepted_transaction_order: SharedVector::new(),
             accepted_transaction_bytes: 0,
-            accepted_operations: BTreeMap::new(),
-            accepted_operation_order: VecDeque::new(),
+            accepted_operations: SharedOrdMap::new(),
+            accepted_operation_order: SharedVector::new(),
             accepted_operation_bytes: 0,
         }
     }
@@ -1201,8 +1673,40 @@ impl Document {
         self.id
     }
 
+    /// Installs the durable identity before trusted hydration begins. This is
+    /// intentionally narrower than an edit: once any canonical or derived
+    /// document state exists, identity changes are rejected rather than
+    /// rebuilding the complete document under a second ID.
+    pub fn seed_document_id(&mut self, id: DocumentId) -> bool {
+        let pristine = self.revision == 0
+            && self.nodes.is_empty()
+            && self.node_pages.is_empty()
+            && self.children_by_parent.is_empty()
+            && self.structural_validation_pending.is_empty()
+            && self.node_assets.is_empty()
+            && self.node_text_properties.is_empty()
+            && self.node_paint_stacks.is_empty()
+            && self.node_auto_layout.is_empty()
+            && self.retired_node_pages.is_empty()
+            && self.retired_node_assets.is_empty()
+            && self.retired_node_text_properties.is_empty()
+            && self.retired_node_auto_layout.is_empty()
+            && self.retired_node_paint_stacks.is_empty()
+            && self.assets.is_empty()
+            && self.retired_ids.is_empty()
+            && self.undo_stack.is_empty()
+            && self.redo_stack.is_empty()
+            && self.accepted_transactions.is_empty()
+            && self.accepted_operations.is_empty();
+        if !pristine {
+            return false;
+        }
+        self.id = id;
+        true
+    }
+
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.values()
+        self.nodes.values().map(SharedNode::as_ref)
     }
 
     pub fn pages(&self) -> impl Iterator<Item = &Page> {
@@ -1225,6 +1729,14 @@ impl Document {
     /// default text semantics, preserving snapshots written before rich text.
     pub fn text_properties_for_node(&self, id: NodeId) -> Option<&TextProperties> {
         self.node_text_properties.get(&id)
+    }
+
+    pub fn fill_stack_for_node(&self, id: NodeId) -> Option<&PaintStack> {
+        self.node_paint_stacks.get(&(id, false))
+    }
+
+    pub fn stroke_stack_for_node(&self, id: NodeId) -> Option<&PaintStack> {
+        self.node_paint_stacks.get(&(id, true))
     }
 
     /// An absent record is exactly the stable Auto Layout default.
@@ -1261,17 +1773,44 @@ impl Document {
         if !self.pages.contains_key(&page_id) {
             return Err(CommandError::MissingPage { id: page_id });
         }
-        let mut nodes = self
-            .nodes
-            .values()
-            .filter(|node| self.node_pages.get(&node.id) == Some(&page_id))
-            .collect::<Vec<_>>();
-        nodes.sort_unstable_by_key(|node| (node.parent_id, node.position, node.id));
-        Ok(nodes)
+        Ok(self
+            .children_by_parent
+            .range((page_id, None)..=(page_id, Some(NodeId(u128::MAX))))
+            .flat_map(|(_, children)| children)
+            .filter_map(|(_, id)| self.nodes.get(id).map(SharedNode::as_ref))
+            .collect())
+    }
+
+    /// Returns the direct children of one page-local parent in canonical sibling
+    /// order. Root nodes use `None` as the parent.
+    pub fn ordered_children(
+        &self,
+        page_id: PageId,
+        parent_id: Option<NodeId>,
+    ) -> Result<Vec<&Node>, CommandError> {
+        if !self.pages.contains_key(&page_id) {
+            return Err(CommandError::MissingPage { id: page_id });
+        }
+        if let Some(parent_id) = parent_id {
+            if self.node_pages.get(&parent_id) != Some(&page_id) {
+                return Err(CommandError::MissingParent { id: parent_id });
+            }
+        }
+        Ok(self
+            .children_by_parent
+            .get(&(page_id, parent_id))
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, id)| self.nodes.get(id).map(SharedNode::as_ref))
+            .collect())
     }
 
     pub fn ordered_nodes(&self) -> Vec<&Node> {
-        let mut nodes = self.nodes.values().collect::<Vec<_>>();
+        let mut nodes = self
+            .nodes
+            .values()
+            .map(SharedNode::as_ref)
+            .collect::<Vec<_>>();
         nodes.sort_unstable_by_key(|node| (node.parent_id, node.position, node.id));
         nodes
     }
@@ -1315,7 +1854,7 @@ impl Document {
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(&id)
+        self.nodes.get(&id).map(SharedNode::as_ref)
     }
 
     /// A lock on any ancestor makes a descendant read-only. The visited set
@@ -1356,6 +1895,13 @@ impl Document {
 
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    /// Returns the newest local history record without exposing or mutating
+    /// the persistent history collection. Disposable preview engines use this
+    /// to project only reducer-derived changes instead of scanning every node.
+    pub fn latest_undo_item(&self) -> Option<&HistoryItem> {
+        self.undo_stack.back().map(AsRef::as_ref)
     }
 
     pub fn memory_stats(&self) -> MemoryStats {
@@ -1421,6 +1967,7 @@ impl Document {
                 hash_text_properties(&mut hasher, properties);
             }
         }
+        hash_document_paint_stacks(&mut hasher, &self.node_paint_stacks);
         if !self.node_auto_layout.is_empty() {
             hasher.update(b"makefigma/editor-core/auto-layout-v1");
             hash_len(&mut hasher, self.node_auto_layout.len());
@@ -1442,6 +1989,15 @@ impl Document {
                     hasher.update(height.to_be_bytes());
                 }
                 None => hasher.update([0]),
+            }
+            if !asset.font_faces.is_empty() {
+                hasher.update(b"makefigma/editor-core/font-face-metadata-v1");
+                hash_len(&mut hasher, asset.font_faces.len());
+                for face in &asset.font_faces {
+                    hasher.update(face.face_index.to_be_bytes());
+                    hash_text(&mut hasher, &face.family);
+                    hash_text(&mut hasher, &face.style);
+                }
             }
         }
         hash_len(&mut hasher, self.retired_ids.len());
@@ -1502,10 +2058,26 @@ impl Document {
             .nodes
             .get(&id)
             .ok_or(CommandError::MissingNode { id })?;
-        if node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, &properties) {
+        if !supports_text_properties(&node.kind)
+            || !self.valid_text_properties(&node.text, &properties)
+        {
             return Err(CommandError::InvalidTextProperties);
         }
         self.replace_text_properties(id, properties);
+        Ok(())
+    }
+
+    /// Trusted Snapshot hydration for the versioned presence-bearing Paint
+    /// Stack. This path does not create history, but applies the same validation
+    /// and document budget rules as an ordinary command.
+    pub fn seed_paint_stacks(
+        &mut self,
+        id: NodeId,
+        fill_stack: Option<PaintStack>,
+        stroke_stack: Option<PaintStack>,
+    ) -> Result<(), CommandError> {
+        self.validate_paint_stacks(id, fill_stack.as_ref(), stroke_stack.as_ref())?;
+        self.replace_paint_stacks(id, fill_stack, stroke_stack)?;
         Ok(())
     }
 
@@ -1551,6 +2123,12 @@ impl Document {
         Ok(())
     }
 
+    /// Closes the temporary structural-invariant window used while a trusted
+    /// snapshot or seed batch is installed parent-before-child.
+    pub fn validate_seeded_structure(&mut self) -> Result<(), CommandError> {
+        self.ensure_non_empty_groups()
+    }
+
     /// Replaces the deterministic default Page metadata while hydrating a
     /// trusted snapshot. The identity remains stable, but imported documents
     /// can preserve the source page name and ordering key without retaining a
@@ -1571,10 +2149,18 @@ impl Document {
     }
 
     fn insert_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
+        let valid_font_faces = asset.font_faces.len() <= 16
+            && asset.font_faces.iter().enumerate().all(|(index, face)| {
+                face.face_index as usize == index
+                    && valid_font_metadata_name(&face.family)
+                    && valid_font_metadata_name(&face.style)
+            });
         if asset.media_type.trim().is_empty()
             || asset.byte_length == 0
             || asset.content_hash == [0; 32]
             || matches!(asset.dimensions, Some([0, _] | [_, 0]))
+            || !valid_font_faces
+            || (!asset.font_faces.is_empty() && !asset.media_type.starts_with("font/"))
         {
             return Err(CommandError::InvalidAsset);
         }
@@ -1602,9 +2188,22 @@ impl Document {
         transaction: Transaction,
         origin: Origin,
     ) -> Result<AppliedTransaction, CommandError> {
+        if let Some(applied) = self.validate_transaction_request(&transaction)? {
+            return Ok(applied);
+        }
+        let mut next = self.clone();
+        let applied = next.apply_transaction_in_place(transaction, origin, self)?;
+        *self = next;
+        Ok(applied)
+    }
+
+    fn validate_transaction_request(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<Option<AppliedTransaction>, CommandError> {
         if let Some(previous) = self.accepted_transactions.get(&transaction.id) {
-            return if previous.transaction == transaction {
-                Ok(previous.applied.clone())
+            return if &previous.transaction == transaction {
+                Ok(Some(previous.applied.clone()))
             } else {
                 Err(CommandError::TransactionIdConflict { id: transaction.id })
             };
@@ -1623,18 +2222,29 @@ impl Document {
         {
             return Err(CommandError::ResourceLimit);
         }
+        Ok(None)
+    }
 
-        let mut next = self.clone();
+    /// Mutates only a private candidate owned by `submit` or `submit_operation`.
+    /// Any error discards that candidate before it can become observable.
+    fn apply_transaction_in_place(
+        &mut self,
+        transaction: Transaction,
+        origin: Origin,
+        confirmed: &Document,
+    ) -> Result<AppliedTransaction, CommandError> {
         let mut changes = Vec::with_capacity(transaction.commands.len());
         for command in &transaction.commands {
-            changes.push(next.apply(command)?);
+            changes.push(self.apply(command)?);
         }
         changes.extend(
-            next.reflow_auto_layout(next.auto_layout_dirty_frames(&transaction.commands, self))?,
+            self.reflow_auto_layout(
+                self.auto_layout_dirty_frames(&transaction.commands, confirmed),
+            )?,
         );
-        next.ensure_non_empty_groups()?;
-        next.revision += 1;
-        let accepted_revision = next.revision;
+        self.ensure_non_empty_groups()?;
+        self.revision += 1;
+        let accepted_revision = self.revision;
         let history_item = HistoryItem {
             transaction_id: transaction.id,
             origin,
@@ -1646,22 +2256,21 @@ impl Document {
             return Err(CommandError::ResourceLimit);
         }
         if origin == Origin::LocalUser {
-            next.push_undo(history_item.clone());
-            next.clear_redo();
+            self.push_undo(history_item.clone());
+            self.clear_redo();
         }
         let applied = AppliedTransaction {
             transaction_id: transaction.id,
             accepted_revision,
             history_item,
         };
-        next.insert_accepted_transaction(
+        self.insert_accepted_transaction(
             transaction.id,
             AcceptedTransactionRecord {
                 transaction,
                 applied: applied.clone(),
             },
         );
-        *self = next;
         Ok(applied)
     }
 
@@ -1689,8 +2298,12 @@ impl Document {
             return Err(CommandError::ResourceLimit);
         }
 
+        let accepted_transaction = self.validate_transaction_request(&operation.transaction)?;
         let mut next = self.clone();
-        let accepted_transaction = next.submit(operation.transaction.clone(), origin)?;
+        let accepted_transaction = match accepted_transaction {
+            Some(applied) => applied,
+            None => next.apply_transaction_in_place(operation.transaction.clone(), origin, self)?,
+        };
         let applied = AppliedOperation {
             operation_id: operation.operation_id,
             transaction_id: operation.transaction_id,
@@ -1713,22 +2326,26 @@ impl Document {
     /// Replays the inverse of the latest local user intent. Revisions remain monotonic:
     /// undo and redo are new accepted document states, never a rewind of revision.
     pub fn undo(&mut self) -> Option<u64> {
-        let item = self.undo_stack.pop()?;
+        let item = self.undo_stack.pop_back()?;
         self.undo_bytes = self.undo_bytes.saturating_sub(item.estimated_bytes());
         for change in item.changes.iter().rev() {
             self.apply_inverse(change);
         }
+        self.ensure_non_empty_groups()
+            .expect("accepted history must restore a valid structure");
         self.revision += 1;
         self.push_redo(item);
         Some(self.revision)
     }
 
     pub fn redo(&mut self) -> Option<u64> {
-        let item = self.redo_stack.pop()?;
+        let item = self.redo_stack.pop_back()?;
         self.redo_bytes = self.redo_bytes.saturating_sub(item.estimated_bytes());
         for change in &item.changes {
             self.apply_forward(change);
         }
+        self.ensure_non_empty_groups()
+            .expect("accepted history must replay a valid structure");
         self.revision += 1;
         self.push_undo(item);
         Some(self.revision)
@@ -1739,25 +2356,27 @@ impl Document {
         self.redo_bytes = 0;
     }
 
-    fn push_undo(&mut self, item: HistoryItem) {
+    fn push_undo(&mut self, item: impl Into<Arc<HistoryItem>>) {
+        let item = item.into();
         self.undo_bytes += item.estimated_bytes();
-        self.undo_stack.push(item);
+        self.undo_stack.push_back(item);
         while self.undo_stack.len() > MAX_HISTORY_ITEMS || self.undo_bytes > MAX_HISTORY_BYTES {
-            if let Some(discarded) = self.undo_stack.first() {
+            if let Some(discarded) = self.undo_stack.front() {
                 self.undo_bytes = self.undo_bytes.saturating_sub(discarded.estimated_bytes());
             }
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
     }
 
-    fn push_redo(&mut self, item: HistoryItem) {
+    fn push_redo(&mut self, item: impl Into<Arc<HistoryItem>>) {
+        let item = item.into();
         self.redo_bytes += item.estimated_bytes();
-        self.redo_stack.push(item);
+        self.redo_stack.push_back(item);
         while self.redo_stack.len() > MAX_HISTORY_ITEMS || self.redo_bytes > MAX_HISTORY_BYTES {
-            if let Some(discarded) = self.redo_stack.first() {
+            if let Some(discarded) = self.redo_stack.front() {
                 self.redo_bytes = self.redo_bytes.saturating_sub(discarded.estimated_bytes());
             }
-            self.redo_stack.remove(0);
+            self.redo_stack.pop_front();
         }
     }
 
@@ -1767,7 +2386,7 @@ impl Document {
         record: AcceptedTransactionRecord,
     ) {
         self.accepted_transaction_bytes += record.estimated_bytes();
-        self.accepted_transactions.insert(id, record);
+        self.accepted_transactions.insert(id, Arc::new(record));
         self.accepted_transaction_order.push_back(id);
         while self.accepted_transactions.len() > MAX_DEDUPE_ITEMS
             || self.accepted_transaction_bytes > MAX_DEDUPE_BYTES
@@ -1785,7 +2404,7 @@ impl Document {
 
     fn insert_accepted_operation(&mut self, id: OperationId, record: AcceptedOperationRecord) {
         self.accepted_operation_bytes += record.estimated_bytes;
-        self.accepted_operations.insert(id, record);
+        self.accepted_operations.insert(id, Arc::new(record));
         self.accepted_operation_order.push_back(id);
         while self.accepted_operations.len() > MAX_OPERATION_DEDUPE_ITEMS
             || self.accepted_operation_bytes > MAX_OPERATION_DEDUPE_BYTES
@@ -1843,14 +2462,24 @@ impl Document {
                 self.assert_parent_mutable(node.parent_id)?;
                 self.create_node_in_page(DEFAULT_PAGE_ID, node.clone())
             }
-            Command::UpdateGeometry {
+            command @ (Command::UpdateGeometry {
                 id,
                 x,
                 y,
                 width,
                 height,
                 rotation,
-            } => {
+            }
+            | Command::UpdateGeometryWithoutConstraints {
+                id,
+                x,
+                y,
+                width,
+                height,
+                rotation,
+            }) => {
+                let ignore_constraints =
+                    matches!(command, Command::UpdateGeometryWithoutConstraints { .. });
                 self.assert_mutable(*id)?;
                 let after = Geometry {
                     x: *x,
@@ -1902,14 +2531,8 @@ impl Document {
                     return Err(CommandError::InvalidGeometry);
                 }
                 let frame_before = self.geometry_for(*id);
-                // Constraints are preserved for round-trip compatibility, but
-                // an active Auto Layout Frame is the sole owner of descendant
-                // placement and sizing. Applying both systems during a resize
-                // would transiently rewrite the child before layout reflows.
-                let frame_has_active_auto_layout =
-                    is_frame_like(&kind) && self.auto_layout_for_node(*id).mode != LayoutMode::None;
                 let constrained_children = if is_frame_like(&kind)
-                    && !frame_has_active_auto_layout
+                    && !ignore_constraints
                     && after.rotation == 0.0
                     && self.nodes.get(id).is_some_and(|node| {
                         node.relative_transform.is_none() && node.rotation == 0.0
@@ -1918,6 +2541,9 @@ impl Document {
                     self.nodes
                         .values()
                         .filter(|child| {
+                            if !self.constraints_apply_for_child(*id, child.id) {
+                                return false;
+                            }
                             if child.relative_transform.is_some() {
                                 return false;
                             }
@@ -1937,7 +2563,7 @@ impl Document {
                             false
                         })
                         .filter_map(|child| {
-                            child.constraints.map(|constraints| {
+                            effective_constraints(child).map(|constraints| {
                                 geometry_for_constraints(
                                     before,
                                     after,
@@ -1962,8 +2588,7 @@ impl Document {
                 // including below one or more transformed Groups. Unlike legacy
                 // world-space coordinates, their constraints remain correct when
                 // the Frame itself is rotated or has an arbitrary affine matrix.
-                let mut matrix_constrained_children = if is_frame_like(&kind)
-                    && !frame_has_active_auto_layout
+                let mut matrix_constrained_children = if is_frame_like(&kind) && !ignore_constraints
                 {
                     let frame_before_local = Geometry {
                         x: 0.0,
@@ -1982,7 +2607,10 @@ impl Document {
                     self.nodes
                         .values()
                         .filter_map(|child| {
-                            let constraints = child.constraints?;
+                            if !self.constraints_apply_for_child(*id, child.id) {
+                                return None;
+                            }
+                            let constraints = effective_constraints(child)?;
                             let (child_to_frame, parent_to_frame) =
                                 self.relative_transform_to_frame(child.id, *id)?;
                             let child_before = Geometry {
@@ -2034,10 +2662,7 @@ impl Document {
                 // the same per-axis rule as modern children.  Group paths are
                 // intentionally not guessed here: a legacy Group has derived
                 // world bounds and must be migrated as a complete subtree.
-                if is_frame_like(&kind)
-                    && !frame_has_active_auto_layout
-                    && constrained_children.is_empty()
-                {
+                if is_frame_like(&kind) && !ignore_constraints && constrained_children.is_empty() {
                     let frame_before_transform = self
                         .node_world_transform(*id)
                         .ok_or(CommandError::InvalidGeometry)?;
@@ -2059,11 +2684,17 @@ impl Document {
                         rotation: 0.0,
                     };
                     let legacy_direct = self
-                        .nodes
-                        .values()
-                        .filter_map(|child| {
-                            let constraints = child.constraints?;
-                            (child.parent_id == Some(*id) && child.relative_transform.is_none())
+                        .child_ids_for(*id)
+                        .into_iter()
+                        .filter_map(|child_id| {
+                            if !self.constraints_apply_for_child(*id, child_id) {
+                                return None;
+                            }
+                            let child = self.nodes.get(&child_id)?;
+                            let constraints = effective_constraints(child)?;
+                            child
+                                .relative_transform
+                                .is_none()
                                 .then_some((child, constraints))
                         })
                         .map(|(child, constraints)| {
@@ -2113,14 +2744,15 @@ impl Document {
                     let mut local_to_frame = BTreeMap::new();
                     local_to_frame.insert(*id, AffineTransform::IDENTITY);
                     let mut pending = self
-                        .nodes
-                        .values()
-                        .filter(|node| {
-                            node.parent_id == Some(*id)
-                                && node.kind == NodeKind::Group
-                                && node.relative_transform.is_none()
+                        .child_ids_for(*id)
+                        .into_iter()
+                        .filter(|child_id| {
+                            self.constraints_apply_for_child(*id, *child_id)
+                                && self.nodes.get(child_id).is_some_and(|node| {
+                                    node.kind == NodeKind::Group
+                                        && node.relative_transform.is_none()
+                                })
                         })
-                        .map(|node| node.id)
                         .collect::<Vec<_>>();
                     let mut legacy_group_subtree = Vec::new();
                     while let Some(child_id) = pending.pop() {
@@ -2136,10 +2768,7 @@ impl Document {
                         if matches!(
                             child.kind,
                             NodeKind::Frame | NodeKind::Section | NodeKind::BooleanOperation
-                        ) && self
-                            .nodes
-                            .values()
-                            .any(|descendant| descendant.parent_id == Some(child_id))
+                        ) && self.has_children(child_id)
                         {
                             continue;
                         }
@@ -2160,8 +2789,7 @@ impl Document {
                             height: child.height,
                             rotation: child_to_frame.b.atan2(child_to_frame.a).to_degrees(),
                         };
-                        let child_after_local = child
-                            .constraints
+                        let child_after_local = effective_constraints(child)
                             .map(|constraints| {
                                 geometry_for_constraints(
                                     frame_before_local,
@@ -2188,7 +2816,9 @@ impl Document {
                         // matrix unless the Frame resize changed its constrained
                         // Frame-local placement. Legacy links always need their
                         // one-time Relative-v1 conversion.
-                        if child.relative_transform.is_none() || child.constraints.is_some() {
+                        if child.relative_transform.is_none()
+                            || effective_constraints(child).is_some()
+                        {
                             let child_after_geometry = geometry_for_relative_transform(
                                 child_after_transform,
                                 child_after_local.width,
@@ -2202,12 +2832,7 @@ impl Document {
                             ));
                         }
                         if child.kind == NodeKind::Group {
-                            pending.extend(
-                                self.nodes
-                                    .values()
-                                    .filter(|descendant| descendant.parent_id == Some(child_id))
-                                    .map(|descendant| descendant.id),
-                            );
+                            pending.extend(self.child_ids_for(child_id));
                         }
                     }
                     matrix_constrained_children.extend(legacy_group_subtree);
@@ -2458,7 +3083,7 @@ impl Document {
                     return Err(CommandError::InvalidAppearance);
                 }
                 if (after.drop_shadow.is_some() || !after.effect_stack.is_empty())
-                    && is_structural_container(&node.kind)
+                    && node.kind == NodeKind::BooleanOperation
                 {
                     return Err(CommandError::InvalidAppearance);
                 }
@@ -2570,9 +3195,31 @@ impl Document {
                 // group/ungroup batch), not on an appearance edit.
                 Ok(appearance_change)
             }
+            Command::SetPaintStacks {
+                id,
+                fill_stack,
+                stroke_stack,
+            } => {
+                self.assert_mutable(*id)?;
+                self.validate_paint_stacks(*id, fill_stack.as_ref(), stroke_stack.as_ref())?;
+                let before_fill = self.node_paint_stacks.get(&(*id, false)).cloned();
+                let before_stroke = self.node_paint_stacks.get(&(*id, true)).cloned();
+                self.replace_paint_stacks(*id, fill_stack.clone(), stroke_stack.clone())?;
+                Ok(AppliedChange::PaintStacksChanged {
+                    id: *id,
+                    before_fill,
+                    before_stroke,
+                    after_fill: fill_stack.clone(),
+                    after_stroke: stroke_stack.clone(),
+                })
+            }
             Command::SetVectorPath { id, path } => {
                 self.assert_mutable(*id)?;
                 self.replace_vector_path(*id, path.clone())
+            }
+            Command::ConvertToTextPath { id, path } => {
+                self.assert_mutable(*id)?;
+                self.convert_to_text_path(*id, path.clone())
             }
             Command::SetBooleanOperation { id, operation } => {
                 self.assert_mutable(*id)?;
@@ -2600,8 +3247,21 @@ impl Document {
                         .nodes
                         .get(id)
                         .ok_or(CommandError::MissingNode { id: *id })?;
-                    if is_structural_container(&node.kind)
-                        || matches!(node.kind, NodeKind::Section | NodeKind::Slice)
+                    let invalid_boolean_mask = node.kind == NodeKind::BooleanOperation && {
+                        let operands = self.child_ids_for(*id);
+                        operands.len() < 2
+                            || operands.iter().any(|operand_id| {
+                                self.nodes.get(operand_id).is_none_or(|operand| {
+                                    operand.kind != NodeKind::Vector
+                                        || operand.vector_path.is_none()
+                                })
+                            })
+                    };
+                    if *enabled
+                        && (matches!(node.kind, NodeKind::Section | NodeKind::Slice)
+                            || (matches!(node.kind, NodeKind::Group | NodeKind::TransformGroup)
+                                && !self.has_children(*id))
+                            || invalid_boolean_mask)
                     {
                         return Err(CommandError::InvalidGeometry);
                     }
@@ -3003,13 +3663,22 @@ impl Document {
                 let after_properties = before_properties.as_ref().and_then(|properties| {
                     let mut next = properties.clone();
                     next.runs.clear();
+                    next.paragraph_style_runs.clear();
                     (next != TextProperties::default()).then_some(next)
                 });
                 let node = self
                     .nodes
                     .get_mut(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
-                if node.kind != NodeKind::Text {
+                if !matches!(
+                    node.kind,
+                    NodeKind::Text
+                        | NodeKind::CodeBlock
+                        | NodeKind::ShapeWithText
+                        | NodeKind::Sticky
+                        | NodeKind::TableCell
+                        | NodeKind::TextPath
+                ) {
                     return Err(CommandError::InvalidText);
                 }
                 let before_bytes = node.estimated_bytes();
@@ -3042,7 +3711,7 @@ impl Document {
                     .nodes
                     .get(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
-                if node.kind != NodeKind::Text
+                if !supports_text_properties(&node.kind)
                     || !self.valid_text_properties(&node.text, properties)
                 {
                     return Err(CommandError::InvalidTextProperties);
@@ -3097,11 +3766,7 @@ impl Document {
                         )
                     })
                     .ok_or(CommandError::MissingNode { id: *id })?;
-                if *position != before
-                    && self
-                        .sibling_positions
-                        .contains(&(page_id, parent_id, *position))
-                {
+                if *position != before && self.has_child_position(page_id, parent_id, *position) {
                     return Err(CommandError::DuplicatePosition {
                         parent_id,
                         position: *position,
@@ -3113,9 +3778,8 @@ impl Document {
                     .ok_or(CommandError::MissingNode { id: *id })?;
                 let before = node.position;
                 node.position = *position;
-                self.sibling_positions.remove(&(page_id, parent_id, before));
-                self.sibling_positions
-                    .insert((page_id, parent_id, *position));
+                self.unindex_child(page_id, parent_id, before, *id);
+                self.index_child(page_id, parent_id, *position, *id);
                 Ok(AppliedChange::NodePositionChanged {
                     id: *id,
                     before,
@@ -3180,9 +3844,7 @@ impl Document {
                     }
                 }
                 if (*parent_id != before_parent_id || *position != before_position)
-                    && self
-                        .sibling_positions
-                        .contains(&(page_id, *parent_id, *position))
+                    && self.has_child_position(page_id, *parent_id, *position)
                 {
                     return Err(CommandError::DuplicatePosition {
                         parent_id: *parent_id,
@@ -3194,10 +3856,8 @@ impl Document {
                     .iter()
                     .filter_map(|id| self.geometry_for(*id).map(|geometry| (*id, geometry)))
                     .collect::<Vec<_>>();
-                self.sibling_positions
-                    .remove(&(page_id, before_parent_id, before_position));
-                self.sibling_positions
-                    .insert((page_id, *parent_id, *position));
+                self.unindex_child(page_id, before_parent_id, before_position, *id);
+                self.index_child(page_id, *parent_id, *position, *id);
                 let node = self
                     .nodes
                     .get_mut(id)
@@ -3235,13 +3895,14 @@ impl Document {
             }
             Command::Delete { id } => {
                 self.assert_mutable(*id)?;
-                if self.nodes.values().any(|node| node.parent_id == Some(*id)) {
+                if self.has_children(*id) {
                     return Err(CommandError::NodeHasChildren { id: *id });
                 }
                 let node = self
                     .nodes
                     .get(id)
                     .cloned()
+                    .map(SharedNode::into_node)
                     .ok_or(CommandError::MissingNode { id: *id })?;
                 let affected_groups = self.group_ancestor_ids([node.parent_id]);
                 let before_bounds = affected_groups
@@ -3253,14 +3914,20 @@ impl Document {
                     .collect::<Vec<_>>();
                 let reference_changes = self.clear_prototype_destination(*id);
                 self.nodes.remove(id);
+                self.structural_validation_pending.remove(id);
                 self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
                 if let Some(properties) = self.node_text_properties.remove(id) {
                     self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
                     self.retired_node_text_properties.insert(*id, properties);
                 }
+                for stroke in [false, true] {
+                    if let Some(stack) = self.node_paint_stacks.remove(&(*id, stroke)) {
+                        self.node_bytes = self.node_bytes.saturating_sub(stack.estimated_bytes());
+                        self.retired_node_paint_stacks.insert((*id, stroke), stack);
+                    }
+                }
                 let page_id = self.node_pages.remove(id).unwrap_or(DEFAULT_PAGE_ID);
-                self.sibling_positions
-                    .remove(&(page_id, node.parent_id, node.position));
+                self.unindex_child(page_id, node.parent_id, node.position, node.id);
                 self.retired_node_pages.insert(*id, page_id);
                 if let Some(asset_id) = self.node_assets.remove(id) {
                     self.retired_node_assets.insert(*id, asset_id);
@@ -3330,11 +3997,22 @@ impl Document {
             }
             AppliedChange::NameChanged { id, before, .. } => self.set_name(*id, before),
             AppliedChange::AppearanceChanged { id, before, .. } => self.set_appearance(*id, before),
+            AppliedChange::PaintStacksChanged {
+                id,
+                before_fill,
+                before_stroke,
+                ..
+            } => {
+                let _ = self.replace_paint_stacks(*id, before_fill.clone(), before_stroke.clone());
+            }
             AppliedChange::AutoLayoutChanged { id, before, .. } => {
                 self.replace_auto_layout_option(*id, before.clone());
             }
             AppliedChange::VectorPathChanged { id, before, .. } => {
                 self.set_vector_path(*id, before)
+            }
+            AppliedChange::NodeRecordChanged { id, before, .. } => {
+                self.set_node_record(*id, before)
             }
             AppliedChange::BooleanOperationChanged { id, before, .. } => {
                 if let Some(node) = self.nodes.get_mut(id) {
@@ -3395,10 +4073,19 @@ impl Document {
             }
             AppliedChange::NameChanged { id, after, .. } => self.set_name(*id, after),
             AppliedChange::AppearanceChanged { id, after, .. } => self.set_appearance(*id, after),
+            AppliedChange::PaintStacksChanged {
+                id,
+                after_fill,
+                after_stroke,
+                ..
+            } => {
+                let _ = self.replace_paint_stacks(*id, after_fill.clone(), after_stroke.clone());
+            }
             AppliedChange::AutoLayoutChanged { id, after, .. } => {
                 self.replace_auto_layout_option(*id, after.clone());
             }
             AppliedChange::VectorPathChanged { id, after, .. } => self.set_vector_path(*id, after),
+            AppliedChange::NodeRecordChanged { id, after, .. } => self.set_node_record(*id, after),
             AppliedChange::BooleanOperationChanged { id, after, .. } => {
                 if let Some(node) = self.nodes.get_mut(id) {
                     node.boolean_operation = Some(*after);
@@ -3498,6 +4185,89 @@ impl Document {
         }
     }
 
+    fn validate_paint_stacks(
+        &self,
+        id: NodeId,
+        fill_stack: Option<&PaintStack>,
+        stroke_stack: Option<&PaintStack>,
+    ) -> Result<(), CommandError> {
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        if is_structural_container(&node.kind)
+            && (fill_stack.is_some_and(|stack| !stack.layers.is_empty())
+                || stroke_stack.is_some_and(|stack| !stack.layers.is_empty()))
+        {
+            return Err(CommandError::InvalidAppearance);
+        }
+        for stack in [fill_stack, stroke_stack].into_iter().flatten() {
+            if !stack.is_valid()
+                || stack.layers.iter().any(|layer| match layer.paint {
+                    PaintLayerKind::Image(image) => !self
+                        .assets
+                        .get(&image.asset_id)
+                        .is_some_and(|asset| asset.media_type.starts_with("image/")),
+                    _ => false,
+                })
+            {
+                return Err(CommandError::InvalidAppearance);
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_paint_stacks(
+        &mut self,
+        id: NodeId,
+        fill_stack: Option<PaintStack>,
+        stroke_stack: Option<PaintStack>,
+    ) -> Result<(), CommandError> {
+        let before_bytes = self
+            .node_paint_stacks
+            .get(&(id, false))
+            .map(PaintStack::estimated_bytes)
+            .unwrap_or(0)
+            + self
+                .node_paint_stacks
+                .get(&(id, true))
+                .map(PaintStack::estimated_bytes)
+                .unwrap_or(0);
+        let after_bytes = fill_stack
+            .as_ref()
+            .map(PaintStack::estimated_bytes)
+            .unwrap_or(0)
+            + stroke_stack
+                .as_ref()
+                .map(PaintStack::estimated_bytes)
+                .unwrap_or(0);
+        let next_document_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
+        if next_document_bytes > MAX_DOCUMENT_BYTES {
+            return Err(CommandError::ResourceLimit);
+        }
+        match fill_stack {
+            Some(stack) => {
+                self.node_paint_stacks.insert((id, false), stack);
+            }
+            None => {
+                self.node_paint_stacks.remove(&(id, false));
+            }
+        }
+        match stroke_stack {
+            Some(stack) => {
+                self.node_paint_stacks.insert((id, true), stack);
+            }
+            None => {
+                self.node_paint_stacks.remove(&(id, true));
+            }
+        }
+        self.node_bytes = next_document_bytes;
+        Ok(())
+    }
+
     /// The dirty set follows touched nodes only through their ancestor chain;
     /// it never defaults to an all-page layout scan.
     fn auto_layout_dirty_frames(
@@ -3517,9 +4287,12 @@ impl Document {
                     touched.insert(node.id);
                 }
                 Command::UpdateGeometry { id, .. }
+                | Command::UpdateGeometryWithoutConstraints { id, .. }
                 | Command::Rename { id, .. }
                 | Command::SetAppearance { id, .. }
+                | Command::SetPaintStacks { id, .. }
                 | Command::SetVectorPath { id, .. }
+                | Command::ConvertToTextPath { id, .. }
                 | Command::SetBooleanOperation { id, .. }
                 | Command::SetMask { id, .. }
                 | Command::SetNodeExtensions { id, .. }
@@ -3627,12 +4400,36 @@ impl Document {
     /// glyph painting with an available font.
     fn auto_layout_text_size(&self, node: &Node) -> (f64, f64) {
         let properties = self.node_text_properties.get(&node.id);
-        let line_height = properties
-            .and_then(|value| value.paragraph.line_height)
-            .unwrap_or(20.0);
+        let paragraph_font_size = properties
+            .and_then(|value| {
+                value
+                    .runs
+                    .iter()
+                    .map(|run| run.font_size)
+                    .filter(|size| size.is_finite() && *size > 0.0)
+                    .max_by(f64::total_cmp)
+                    .or_else(|| value.base_style.as_ref().map(|style| style.font_size))
+            })
+            .unwrap_or(31.0);
         let paragraph_spacing = properties
             .map(|value| value.paragraph.paragraph_spacing)
             .unwrap_or(0.0);
+        let paragraph_starts = paragraph_start_offsets(&node.text);
+        let paragraph_list_types = paragraph_starts
+            .iter()
+            .map(|start| properties.and_then(|value| paragraph_list_type_at(value, *start)))
+            .collect::<Vec<_>>();
+        let has_ordered_list = paragraph_list_types
+            .iter()
+            .any(|value| *value == Some(TextListType::Ordered));
+        let has_unordered_list = paragraph_list_types
+            .iter()
+            .any(|value| *value == Some(TextListType::Unordered));
+        let hanging_list = properties.is_some_and(|value| {
+            value.paragraph.hanging_list && (has_ordered_list || has_unordered_list)
+        });
+        let hanging_punctuation =
+            properties.is_some_and(|value| value.paragraph.hanging_punctuation);
         let runs = properties.map(|value| value.runs.as_slice()).unwrap_or(&[]);
         // Height-auto text keeps its authored width. Measure its soft wraps in
         // Core as well, so snapshot replay does not depend on a browser font
@@ -3641,20 +4438,78 @@ impl Document {
             .filter(|value| value.auto_size == TextAutoSize::Height)
             .map(|_| node.width)
             .filter(|width| width.is_finite() && *width > 0.0);
-        let mut line_width = 0.0_f64;
+        let ordered_marker_width = if has_ordered_list {
+            // Canvas/SVG reserve one stable gutter for the complete block.
+            // Use the largest authored number here as well so paragraph 10
+            // cannot change width between Core replay and browser layout.
+            let marker_columns = paragraph_starts.len().to_string().len() as f64 + 2.0;
+            paragraph_font_size * 0.6 * marker_columns
+        } else {
+            0.0
+        };
+        let unordered_marker_width = if has_unordered_list {
+            paragraph_font_size * 1.2
+        } else {
+            0.0
+        };
+        let list_marker_width = ordered_marker_width.max(unordered_marker_width);
+        let indentation_offset = |paragraph_start: usize| {
+            let level = properties
+                .map(|value| paragraph_indentation_at(value, paragraph_start))
+                .unwrap_or(0);
+            level.saturating_sub(1) as f64 * list_marker_width
+        };
+        let first_line_width = |paragraph_start: usize| {
+            let has_list = properties
+                .and_then(|value| paragraph_list_type_at(value, paragraph_start))
+                .is_some();
+            properties
+                .map(|value| paragraph_indent_at(value, paragraph_start))
+                .unwrap_or(0.0)
+                + if has_list && !hanging_list {
+                    list_marker_width
+                } else {
+                    0.0
+                }
+                + indentation_offset(paragraph_start)
+        };
+        let mut paragraph_start = 0usize;
+        let mut line_width = first_line_width(0);
         let mut widest = 0.0_f64;
-        let mut lines = 1usize;
-        let mut paragraph_breaks = 0usize;
+        let mut line_height_total = 0.0_f64;
+        let mut paragraph_spacing_total = 0.0_f64;
+        let mut list_spacing_total = 0.0_f64;
         let mut glyphs_on_line = 0usize;
+        let mut hanging_leading_width = 0.0_f64;
+        let mut hanging_trailing_width = 0.0_f64;
         for (offset, grapheme) in node.text.grapheme_indices(true) {
             if matches!(grapheme, "\n" | "\r" | "\r\n" | "\u{2028}" | "\u{2029}") {
                 // CRLF is one grapheme and one paragraph boundary, matching
                 // DOM editing/export semantics without splitting source bytes.
-                widest = widest.max(line_width);
-                line_width = 0.0;
+                widest = widest.max(line_width - hanging_leading_width - hanging_trailing_width);
+                line_height_total += properties
+                    .map(|value| {
+                        paragraph_line_height_at(value, paragraph_start, paragraph_font_size)
+                    })
+                    .unwrap_or(20.0);
+                let next_paragraph_start = offset + grapheme.len();
+                paragraph_spacing_total += properties
+                    .map(|value| paragraph_spacing_at(value, paragraph_start))
+                    .unwrap_or(paragraph_spacing);
+                let current_list =
+                    properties.and_then(|value| paragraph_list_type_at(value, paragraph_start));
+                let next_list = properties
+                    .and_then(|value| paragraph_list_type_at(value, next_paragraph_start));
+                if current_list.is_some() && next_list.is_some() {
+                    list_spacing_total += properties
+                        .map(|value| paragraph_list_spacing_at(value, paragraph_start))
+                        .unwrap_or(0.0);
+                }
+                paragraph_start = next_paragraph_start;
+                line_width = first_line_width(paragraph_start);
                 glyphs_on_line = 0;
-                lines += 1;
-                paragraph_breaks += 1;
+                hanging_leading_width = 0.0;
+                hanging_trailing_width = 0.0;
                 continue;
             }
             let run = runs
@@ -3669,25 +4524,73 @@ impl Document {
             let spacing = (glyphs_on_line > 0)
                 .then_some(letter_spacing)
                 .unwrap_or(0.0);
+            let hangs_at_end = hanging_punctuation && is_hanging_end_punctuation(grapheme);
+            let candidate_effective_width = line_width + spacing + advance
+                - hanging_leading_width
+                - if hangs_at_end { advance } else { 0.0 };
             if glyphs_on_line > 0
-                && wrap_width.is_some_and(|width| line_width + spacing + advance > width)
+                && wrap_width.is_some_and(|width| candidate_effective_width > width)
             {
-                widest = widest.max(line_width);
-                line_width = 0.0;
+                widest = widest.max(line_width - hanging_leading_width - hanging_trailing_width);
+                line_height_total += properties
+                    .map(|value| {
+                        paragraph_line_height_at(value, paragraph_start, paragraph_font_size)
+                    })
+                    .unwrap_or(20.0);
+                line_width = indentation_offset(paragraph_start);
                 glyphs_on_line = 0;
-                lines += 1;
+                hanging_leading_width = 0.0;
             }
             if glyphs_on_line > 0 {
                 line_width += letter_spacing;
             }
             line_width += advance;
+            if glyphs_on_line == 0 && hanging_punctuation && is_hanging_start_punctuation(grapheme)
+            {
+                hanging_leading_width = advance;
+            }
+            hanging_trailing_width = if hanging_punctuation && is_hanging_end_punctuation(grapheme)
+            {
+                advance
+            } else {
+                0.0
+            };
             glyphs_on_line += 1;
         }
-        widest = widest.max(line_width);
+        widest = widest.max(line_width - hanging_leading_width - hanging_trailing_width);
+        line_height_total += properties
+            .map(|value| paragraph_line_height_at(value, paragraph_start, paragraph_font_size))
+            .unwrap_or(20.0);
+        let first_style =
+            properties.and_then(|value| value.runs.first().or(value.base_style.as_ref()));
+        let last_style =
+            properties.and_then(|value| value.runs.last().or(value.base_style.as_ref()));
+        let first_line_height = properties
+            .map(|value| paragraph_line_height_at(value, 0, paragraph_font_size))
+            .unwrap_or(20.0);
+        let last_line_height = properties
+            .map(|value| paragraph_line_height_at(value, paragraph_start, paragraph_font_size))
+            .unwrap_or(20.0);
+        let top_trim = first_style
+            .filter(|style| style.leading_trim == Some(LeadingTrim::CapHeight))
+            .map(|style| {
+                ((first_line_height - style.font_size) / 2.0 + style.font_size * 0.1).max(0.0)
+            })
+            .unwrap_or(0.0);
+        let bottom_trim = last_style
+            .filter(|style| style.leading_trim == Some(LeadingTrim::CapHeight))
+            .map(|style| {
+                let baseline = (last_line_height - style.font_size) / 2.0 + style.font_size * 0.8;
+                (last_line_height - baseline).max(0.0)
+            })
+            .unwrap_or(0.0);
         (
             normalize_layout_number(widest.max(1.0)),
             normalize_layout_number(
-                (lines as f64 * line_height + paragraph_breaks as f64 * paragraph_spacing).max(1.0),
+                (line_height_total + paragraph_spacing_total + list_spacing_total
+                    - top_trim
+                    - bottom_trim)
+                    .max(1.0),
             ),
         )
     }
@@ -3703,14 +4606,21 @@ impl Document {
             return counter_extent.max(0.0);
         }
         let properties = self.node_text_properties.get(&node.id);
-        let line_height = properties
-            .and_then(|value| value.paragraph.line_height)
-            .unwrap_or(20.0);
         let font_size = properties
             .and_then(|value| value.runs.first())
             .map(|run| run.font_size)
             .unwrap_or(31.0);
-        normalize_layout_number((line_height - font_size) / 2.0 + font_size * 0.8)
+        let line_height = properties
+            .map(|value| value.paragraph.effective_line_height(font_size))
+            .unwrap_or(20.0);
+        let leading_trim = properties
+            .and_then(|value| value.runs.first().or(value.base_style.as_ref()))
+            .and_then(|style| style.leading_trim);
+        normalize_layout_number(if leading_trim == Some(LeadingTrim::CapHeight) {
+            font_size * 0.7
+        } else {
+            (line_height - font_size) / 2.0 + font_size * 0.8
+        })
     }
 
     fn reflow_auto_layout(
@@ -3720,7 +4630,7 @@ impl Document {
         const MAX_LAYOUT_NODES: usize = 10_000;
         const MAX_LAYOUT_ITERATIONS: usize = 32;
         let mut changes = Vec::new();
-        let mut visited_nodes = 0usize;
+        let mut visited_nodes = BTreeSet::new();
         for _iteration in 0..MAX_LAYOUT_ITERATIONS {
             let changes_before_iteration = changes.len();
             for frame_id in dirty_frames.iter().copied() {
@@ -3736,15 +4646,13 @@ impl Document {
                 if !is_frame_like(&frame.kind) || frame.relative_transform.is_some() {
                     return Err(CommandError::AutoLayoutUnsupported);
                 }
-                let mut children = self
-                    .nodes
-                    .values()
-                    .filter(|node| node.parent_id == Some(frame_id))
-                    .cloned()
+                let children = self
+                    .child_ids_for(frame_id)
+                    .into_iter()
+                    .filter_map(|id| self.nodes.get(&id).map(|node| node.as_ref().clone()))
                     .collect::<Vec<_>>();
-                children.sort_unstable_by_key(|node| (node.position, node.id));
-                visited_nodes = visited_nodes.saturating_add(children.len());
-                if visited_nodes > MAX_LAYOUT_NODES {
+                visited_nodes.extend(children.iter().map(|child| child.id));
+                if visited_nodes.len() > MAX_LAYOUT_NODES {
                     return Err(CommandError::AutoLayoutLimit);
                 }
                 let flow = children
@@ -3832,7 +4740,7 @@ impl Document {
                             layout.max_width,
                         ),
                         clamp_size(
-                            if layout.counter_sizing == LayoutSizing::Hug {
+                            if layout.counter_sizing == LayoutSizing::Hug && !layout.wrap {
                                 top + intrinsic_counter + bottom
                             } else {
                                 frame.height
@@ -3886,7 +4794,7 @@ impl Document {
                         after,
                     });
                 }
-                let frame = self
+                let mut frame = self
                     .nodes
                     .get(&frame_id)
                     .cloned()
@@ -3896,30 +4804,41 @@ impl Document {
                 } else {
                     frame.height - top - bottom
                 };
-                let counter_extent = if horizontal {
+                let mut counter_extent = if horizontal {
                     frame.height - top - bottom
                 } else {
                     frame.width - left - right
                 };
-                if primary_extent < 0.0 || counter_extent < 0.0 {
+                if primary_extent < 0.0
+                    || (counter_extent < 0.0
+                        && !(layout.wrap && layout.counter_sizing == LayoutSizing::Hug))
+                {
                     return Err(CommandError::InvalidAutoLayout);
                 }
                 if layout.wrap {
                     if layout.primary_sizing != LayoutSizing::Fixed
-                        || layout.counter_sizing != LayoutSizing::Fixed
-                        || flow.iter().any(|child| {
-                            let (primary_sizing, counter_sizing) =
-                                self.auto_layout_child_sizing(child, horizontal);
-                            primary_sizing != LayoutSizing::Fixed
-                                || counter_sizing != LayoutSizing::Fixed
-                        })
+                        || layout.counter_sizing == LayoutSizing::Fill
                     {
                         return Err(CommandError::AutoLayoutUnsupported);
                     }
-                    let mut lines = Vec::<Vec<(Node, f64, f64)>>::new();
+                    struct WrapItem {
+                        node: Node,
+                        primary_sizing: LayoutSizing,
+                        primary: f64,
+                        primary_max: Option<f64>,
+                        counter_sizing: LayoutSizing,
+                        counter: f64,
+                        counter_max: Option<f64>,
+                    }
+                    let mut lines = Vec::<Vec<WrapItem>>::new();
                     let mut line_primary = 0.0;
                     for child in flow {
                         let child_layout = self.auto_layout_for_node(child.id);
+                        let (primary_sizing, counter_sizing) =
+                            self.auto_layout_child_sizing(&child, horizontal);
+                        let (text_width, text_height) = (child.kind == NodeKind::Text)
+                            .then(|| self.auto_layout_text_size(&child))
+                            .unwrap_or((child.width, child.height));
                         let (primary_min, primary_max, counter_min, counter_max) = if horizontal {
                             (
                                 child_layout.min_width,
@@ -3935,24 +4854,45 @@ impl Document {
                                 child_layout.max_width,
                             )
                         };
-                        let primary = clamp_size(
-                            if horizontal {
-                                child.width
-                            } else {
-                                child.height
-                            },
-                            primary_min,
-                            primary_max,
-                        );
-                        let counter = clamp_size(
-                            if horizontal {
-                                child.height
-                            } else {
-                                child.width
-                            },
-                            counter_min,
-                            counter_max,
-                        );
+                        // Wrapped FILL items use their declared minimum as the
+                        // stable flex basis. This avoids feeding a prior
+                        // reflow's expanded geometry back into line breaking;
+                        // the remaining primary extent is distributed per row
+                        // after the row membership is fixed.
+                        let primary = match primary_sizing {
+                            LayoutSizing::Fill => primary_min.unwrap_or(0.0),
+                            LayoutSizing::Hug => clamp_size(
+                                if horizontal { text_width } else { text_height },
+                                primary_min,
+                                primary_max,
+                            ),
+                            LayoutSizing::Fixed => clamp_size(
+                                if horizontal {
+                                    child.width
+                                } else {
+                                    child.height
+                                },
+                                primary_min,
+                                primary_max,
+                            ),
+                        };
+                        let counter = match counter_sizing {
+                            LayoutSizing::Fill => counter_min.unwrap_or(0.0),
+                            LayoutSizing::Hug => clamp_size(
+                                if horizontal { text_height } else { text_width },
+                                counter_min,
+                                counter_max,
+                            ),
+                            LayoutSizing::Fixed => clamp_size(
+                                if horizontal {
+                                    child.height
+                                } else {
+                                    child.width
+                                },
+                                counter_min,
+                                counter_max,
+                            ),
+                        };
                         let next_primary = if lines.last().is_some_and(|line| !line.is_empty()) {
                             line_primary + layout.item_spacing + primary
                         } else {
@@ -3973,20 +4913,178 @@ impl Document {
                         } else {
                             line_primary + layout.item_spacing + primary
                         };
-                        line.push((child, primary, counter));
+                        line.push(WrapItem {
+                            node: child,
+                            primary_sizing,
+                            primary,
+                            primary_max,
+                            counter_sizing,
+                            counter,
+                            counter_max,
+                        });
                     }
-                    let total_track_extent = lines
-                        .iter()
-                        .map(|line| {
-                            line.iter()
-                                .map(|(_, _, counter)| *counter)
-                                .fold(0.0, f64::max)
-                        })
-                        .sum::<f64>();
-                    let track_spacing = match layout.track_alignment {
-                        WrapTrackAlignment::Auto => {
-                            layout.track_spacing.unwrap_or(layout.item_spacing)
+                    // Each row owns an independent FILL distribution. Maximum
+                    // constraints retire saturated items before the remaining
+                    // width is shared by the rest, matching the non-wrap path.
+                    for line in &mut lines {
+                        let regular_spacing =
+                            layout.item_spacing * line.len().saturating_sub(1) as f64;
+                        let fixed_content_extent = line
+                            .iter()
+                            .filter(|item| item.primary_sizing != LayoutSizing::Fill)
+                            .map(|item| item.primary)
+                            .sum::<f64>();
+                        let mut fill_indices = line
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, item)| {
+                                (item.primary_sizing == LayoutSizing::Fill).then_some(index)
+                            })
+                            .collect::<Vec<_>>();
+                        let available_fill_extent =
+                            primary_extent - fixed_content_extent - regular_spacing;
+                        let minimum_fill_extent = fill_indices
+                            .iter()
+                            .map(|index| line[*index].primary)
+                            .sum::<f64>();
+                        if !fill_indices.is_empty()
+                            && minimum_fill_extent > available_fill_extent + 1e-6
+                        {
+                            return Err(CommandError::InvalidAutoLayout);
                         }
+                        let mut remaining_fill_extent =
+                            (available_fill_extent - minimum_fill_extent).max(0.0);
+                        while remaining_fill_extent > 1e-6 && !fill_indices.is_empty() {
+                            let share = remaining_fill_extent / fill_indices.len() as f64;
+                            let constrained = fill_indices
+                                .iter()
+                                .copied()
+                                .filter(|index| {
+                                    line[*index].primary_max.is_some_and(|maximum| {
+                                        maximum - line[*index].primary < share
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            if constrained.is_empty() {
+                                for index in fill_indices {
+                                    line[index].primary += share;
+                                }
+                                break;
+                            }
+                            for index in constrained {
+                                let maximum = line[index]
+                                    .primary_max
+                                    .expect("constrained wrapped fill has a maximum");
+                                remaining_fill_extent -= maximum - line[index].primary;
+                                line[index].primary = maximum;
+                            }
+                            fill_indices.retain(|index| {
+                                !line[*index].primary_max.is_some_and(|maximum| {
+                                    (maximum - line[*index].primary).abs() <= 1e-6
+                                })
+                            });
+                        }
+                    }
+                    let mut track_extents = lines
+                        .iter()
+                        .map(|line| line.iter().map(|item| item.counter).fold(0.0, f64::max))
+                        .collect::<Vec<_>>();
+                    let automatic_track_spacing =
+                        layout.track_spacing.unwrap_or(layout.item_spacing);
+                    let has_counter_fill = lines
+                        .iter()
+                        .flatten()
+                        .any(|item| item.counter_sizing == LayoutSizing::Fill);
+                    let all_counter_fill = has_counter_fill
+                        && lines
+                            .iter()
+                            .flatten()
+                            .all(|item| item.counter_sizing == LayoutSizing::Fill);
+                    if layout.counter_sizing == LayoutSizing::Hug {
+                        if has_counter_fill {
+                            return Err(CommandError::AutoLayoutUnsupported);
+                        }
+                        let intrinsic_spacing = match layout.track_alignment {
+                            WrapTrackAlignment::Auto => {
+                                automatic_track_spacing
+                                    * track_extents.len().saturating_sub(1) as f64
+                            }
+                            WrapTrackAlignment::SpaceBetween => 0.0,
+                        };
+                        let intrinsic_counter_extent =
+                            track_extents.iter().sum::<f64>() + intrinsic_spacing;
+                        let candidate_counter = if horizontal {
+                            clamp_size(
+                                top + intrinsic_counter_extent + bottom,
+                                layout.min_height,
+                                layout.max_height,
+                            )
+                        } else {
+                            clamp_size(
+                                left + intrinsic_counter_extent + right,
+                                layout.min_width,
+                                layout.max_width,
+                            )
+                        };
+                        let current_counter = if horizontal {
+                            frame.height
+                        } else {
+                            frame.width
+                        };
+                        if current_counter != candidate_counter {
+                            let before = Geometry {
+                                x: frame.x,
+                                y: frame.y,
+                                width: frame.width,
+                                height: frame.height,
+                                rotation: frame.rotation,
+                            };
+                            if horizontal {
+                                frame.height = normalize_layout_number(candidate_counter);
+                            } else {
+                                frame.width = normalize_layout_number(candidate_counter);
+                            }
+                            let after = Geometry {
+                                x: frame.x,
+                                y: frame.y,
+                                width: frame.width,
+                                height: frame.height,
+                                rotation: frame.rotation,
+                            };
+                            let stored =
+                                self.nodes.get_mut(&frame_id).expect("layout frame exists");
+                            (stored.width, stored.height) = (after.width, after.height);
+                            changes.push(AppliedChange::GeometryChanged {
+                                id: frame_id,
+                                before,
+                                after,
+                            });
+                            counter_extent = if horizontal {
+                                frame.height - top - bottom
+                            } else {
+                                frame.width - left - right
+                            };
+                        }
+                    }
+                    // Figma's AUTO track alignment stretches the tracks only
+                    // when every flow child is STRETCH. Child max constraints
+                    // may cap the painted child while the track itself still
+                    // consumes its equal share of the container.
+                    if layout.track_alignment == WrapTrackAlignment::Auto && all_counter_fill {
+                        let available_track_extent = counter_extent
+                            - automatic_track_spacing
+                                * track_extents.len().saturating_sub(1) as f64;
+                        let minimum_track_extent = track_extents.iter().sum::<f64>();
+                        if minimum_track_extent > available_track_extent + 1e-6 {
+                            return Err(CommandError::InvalidAutoLayout);
+                        }
+                        let extra = (available_track_extent - minimum_track_extent).max(0.0)
+                            / track_extents.len() as f64;
+                        track_extents.iter_mut().for_each(|extent| *extent += extra);
+                    }
+                    let total_track_extent = track_extents.iter().sum::<f64>();
+                    let track_spacing = match layout.track_alignment {
+                        WrapTrackAlignment::Auto => automatic_track_spacing,
                         WrapTrackAlignment::SpaceBetween if lines.len() > 1 => {
                             ((counter_extent - total_track_extent).max(0.0))
                                 / (lines.len() - 1) as f64
@@ -3995,8 +5093,7 @@ impl Document {
                     };
                     let mut counter_cursor = 0.0;
                     for (line_index, line) in lines.iter().enumerate() {
-                        let content_primary =
-                            line.iter().map(|(_, primary, _)| *primary).sum::<f64>();
+                        let content_primary = line.iter().map(|item| item.primary).sum::<f64>();
                         let regular_spacing =
                             layout.item_spacing * line.len().saturating_sub(1) as f64;
                         let (mut primary_cursor, spacing) = match layout.primary_alignment {
@@ -4020,37 +5117,49 @@ impl Document {
                                 return Err(CommandError::InvalidAutoLayout);
                             }
                         };
-                        let line_counter = line
-                            .iter()
-                            .map(|(_, _, counter)| *counter)
-                            .fold(0.0, f64::max);
+                        let line_counter = track_extents[line_index];
                         let line_baseline = (horizontal
                             && layout.counter_alignment == LayoutAlignment::Baseline)
                             .then(|| {
                                 line.iter()
-                                    .filter(|(child, _, _)| {
-                                        self.auto_layout_for_node(child.id).align_self.is_none()
+                                    .filter(|item| {
+                                        item.counter_sizing != LayoutSizing::Fill
+                                            && self
+                                                .auto_layout_for_node(item.node.id)
+                                                .align_self
+                                                .is_none()
                                     })
-                                    .map(|(child, _, counter)| {
-                                        self.auto_layout_baseline_offset(child, *counter)
+                                    .map(|item| {
+                                        self.auto_layout_baseline_offset(&item.node, item.counter)
                                     })
                                     .fold(0.0, f64::max)
                             })
                             .unwrap_or(0.0);
-                        for (child, primary, counter) in line {
+                        for item in line {
+                            let child = &item.node;
+                            let primary = item.primary;
+                            let counter = if item.counter_sizing == LayoutSizing::Fill {
+                                clamp_size(line_counter, Some(item.counter), item.counter_max)
+                            } else {
+                                item.counter
+                            };
                             let counter_alignment = self
                                 .auto_layout_for_node(child.id)
                                 .align_self
                                 .unwrap_or(layout.counter_alignment);
-                            let counter_offset = match counter_alignment {
-                                LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
-                                LayoutAlignment::Center => {
-                                    ((line_counter - *counter).max(0.0)) / 2.0
-                                }
-                                LayoutAlignment::End => (line_counter - *counter).max(0.0),
-                                LayoutAlignment::Baseline => {
-                                    line_baseline
-                                        - self.auto_layout_baseline_offset(child, *counter)
+                            let counter_offset = if item.counter_sizing == LayoutSizing::Fill {
+                                0.0
+                            } else {
+                                match counter_alignment {
+                                    LayoutAlignment::Start | LayoutAlignment::SpaceBetween => 0.0,
+                                    LayoutAlignment::Center => {
+                                        ((line_counter - counter).max(0.0)) / 2.0
+                                    }
+                                    LayoutAlignment::End => (line_counter - counter).max(0.0),
+                                    LayoutAlignment::Baseline => {
+                                        line_baseline
+                                            - self.auto_layout_baseline_offset(child, counter)
+                                    }
                                 }
                             };
                             let (x, y) = if horizontal {
@@ -4064,19 +5173,19 @@ impl Document {
                                     frame.y + top + primary_cursor,
                                 )
                             };
-                            primary_cursor += *primary + spacing;
+                            primary_cursor += primary + spacing;
                             let after = Geometry {
                                 x: normalize_layout_number(x),
                                 y: normalize_layout_number(y),
                                 width: normalize_layout_number(if horizontal {
-                                    *primary
+                                    primary
                                 } else {
-                                    *counter
+                                    counter
                                 }),
                                 height: normalize_layout_number(if horizontal {
-                                    *counter
+                                    counter
                                 } else {
-                                    *primary
+                                    primary
                                 }),
                                 rotation: child.rotation,
                             };
@@ -4511,6 +5620,87 @@ impl Document {
         }
     }
 
+    fn set_node_record(&mut self, id: NodeId, node: &Node) {
+        if let Some(before) = self.nodes.get(&id) {
+            let before_bytes = before.estimated_bytes();
+            let after_bytes = node.estimated_bytes();
+            self.nodes.insert(id, node.clone().into());
+            self.node_bytes = self
+                .node_bytes
+                .saturating_sub(before_bytes)
+                .saturating_add(after_bytes);
+        }
+    }
+
+    fn convert_to_text_path(
+        &mut self,
+        id: NodeId,
+        path: VectorPath,
+    ) -> Result<AppliedChange, CommandError> {
+        if !valid_vector_path(&path) {
+            return Err(CommandError::InvalidGeometry);
+        }
+        let before = self
+            .nodes
+            .get(&id)
+            .map(|node| node.as_ref().clone())
+            .ok_or(CommandError::MissingNode { id })?;
+        if !matches!(
+            before.kind,
+            NodeKind::Vector
+                | NodeKind::Rectangle
+                | NodeKind::Ellipse
+                | NodeKind::Polygon
+                | NodeKind::Star
+                | NodeKind::Line
+        ) || self.has_children(id)
+        {
+            return Err(CommandError::InvalidGeometry);
+        }
+        let mut after = before.clone();
+        after.kind = NodeKind::TextPath;
+        after.vector_path = Some(path);
+        after.arc_data = None;
+        after.parametric_shape = None;
+        after.boolean_operation = None;
+        after.corner_radius = 0.0;
+        after.corner_radii.clear();
+        after.corner_smoothing = 0.0;
+        after.stroke_weights.clear();
+        after.text.clear();
+        after.contents_hidden = false;
+        after.clips_content = false;
+        if !valid_geometry(
+            &after.kind,
+            Geometry {
+                x: after.x,
+                y: after.y,
+                width: after.width,
+                height: after.height,
+                rotation: after.rotation,
+            },
+        ) || !valid_vector_path_for_kind(&after.kind, after.vector_path.as_ref())
+        {
+            return Err(CommandError::InvalidGeometry);
+        }
+        let before_bytes = before.estimated_bytes();
+        let after_bytes = after.estimated_bytes();
+        if self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes)
+            > MAX_DOCUMENT_BYTES
+        {
+            return Err(CommandError::ResourceLimit);
+        }
+        self.nodes.insert(id, after.clone().into());
+        self.node_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
+        Ok(AppliedChange::NodeRecordChanged { id, before, after })
+    }
+
     fn vector_path_for_node(&self, id: NodeId) -> Result<VectorPath, CommandError> {
         let node = self
             .nodes
@@ -4572,10 +5762,10 @@ impl Document {
     fn set_node_position(&mut self, id: NodeId, position: PositionId) {
         if let Some(node) = self.nodes.get(&id) {
             let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
-            self.sibling_positions
-                .remove(&(page_id, node.parent_id, node.position));
-            self.sibling_positions
-                .insert((page_id, node.parent_id, position));
+            let parent_id = node.parent_id;
+            let before = node.position;
+            self.unindex_child(page_id, parent_id, before, id);
+            self.index_child(page_id, parent_id, position, id);
         }
         if let Some(node) = self.nodes.get_mut(&id) {
             node.position = position;
@@ -4585,10 +5775,10 @@ impl Document {
     fn set_node_parent(&mut self, id: NodeId, parent_id: Option<NodeId>, position: PositionId) {
         if let Some(node) = self.nodes.get(&id) {
             let page_id = self.node_pages.get(&id).copied().unwrap_or(DEFAULT_PAGE_ID);
-            self.sibling_positions
-                .remove(&(page_id, node.parent_id, node.position));
-            self.sibling_positions
-                .insert((page_id, parent_id, position));
+            let before_parent_id = node.parent_id;
+            let before_position = node.position;
+            self.unindex_child(page_id, before_parent_id, before_position, id);
+            self.index_child(page_id, parent_id, position, id);
         }
         if let Some(node) = self.nodes.get_mut(&id) {
             node.parent_id = parent_id;
@@ -4634,7 +5824,7 @@ impl Document {
     /// `relative_transform` inherits its parent's world matrix.
     fn refresh_group_bounds(&mut self, mut group_id: Option<NodeId>) {
         while let Some(id) = group_id {
-            let Some(group) = self.nodes.get(&id).cloned() else {
+            let Some(group) = self.nodes.get(&id).map(|node| node.as_ref().clone()) else {
                 break;
             };
             if !is_structural_container(&group.kind) {
@@ -4649,12 +5839,7 @@ impl Document {
                 group_id = group.parent_id;
                 continue;
             }
-            let children = self
-                .nodes
-                .values()
-                .filter(|node| node.parent_id == Some(id))
-                .map(|node| node.id)
-                .collect::<Vec<_>>();
+            let children = self.child_ids_for(id);
             if children.is_empty() {
                 break;
             }
@@ -4682,6 +5867,37 @@ impl Document {
 
     fn node_world_transform(&self, id: NodeId) -> Option<AffineTransform> {
         self.node_world_transform_inner(id, &mut BTreeSet::new())
+    }
+
+    /// Constraints belong to the closest Frame-like ancestor. An active Auto
+    /// Layout Frame suspends them for flow children, but an absolute direct
+    /// child—and descendants reached only through its structural Group or
+    /// Boolean subtree—continues to use the Frame's Constraints contract.
+    fn constraints_apply_for_child(&self, frame_id: NodeId, child_id: NodeId) -> bool {
+        if self.auto_layout_for_node(frame_id).mode == LayoutMode::None {
+            return true;
+        }
+        let mut current_id = child_id;
+        let mut visited = BTreeSet::new();
+        while visited.insert(current_id) {
+            let Some(current) = self.nodes.get(&current_id) else {
+                return false;
+            };
+            let Some(parent_id) = current.parent_id else {
+                return false;
+            };
+            if parent_id == frame_id {
+                return self.auto_layout_for_node(current_id).absolute;
+            }
+            let Some(parent) = self.nodes.get(&parent_id) else {
+                return false;
+            };
+            if !is_structural_container(&parent.kind) {
+                return false;
+            }
+            current_id = parent_id;
+        }
+        false
     }
 
     /// Resolves a Relative-v1 node and its immediate parent into the local
@@ -4779,12 +5995,10 @@ impl Document {
     fn dissolve_empty_groups_from(&mut self, mut group_id: Option<NodeId>) -> Vec<Node> {
         let mut dissolved = Vec::new();
         while let Some(id) = group_id {
-            let Some(group) = self.nodes.get(&id).cloned() else {
+            let Some(group) = self.nodes.get(&id).map(|node| node.as_ref().clone()) else {
                 break;
             };
-            if group.kind != NodeKind::Group
-                || self.nodes.values().any(|node| node.parent_id == Some(id))
-            {
+            if group.kind != NodeKind::Group || self.has_children(id) {
                 break;
             }
             group_id = group.parent_id;
@@ -4800,35 +6014,22 @@ impl Document {
     /// the normal construction path). The atomic boundary, not an individual
     /// command, owns the invariant so alternate clients and operation replay
     /// cannot persist an invalid structural shell.
-    fn ensure_non_empty_groups(&self) -> Result<(), CommandError> {
-        if let Some(group) = self
-            .nodes
-            .values()
-            .filter(|node| node.kind == NodeKind::Group)
-            .find(|group| {
-                !self
-                    .nodes
-                    .values()
-                    .any(|node| node.parent_id == Some(group.id))
-            })
-        {
-            return Err(CommandError::EmptyGroup { id: group.id });
+    fn ensure_non_empty_groups(&mut self) -> Result<(), CommandError> {
+        for id in self.structural_validation_pending.iter().copied() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            match node.kind {
+                NodeKind::Group if !self.has_children(id) => {
+                    return Err(CommandError::EmptyGroup { id });
+                }
+                NodeKind::BooleanOperation if self.child_count_for(id) < 2 => {
+                    return Err(CommandError::InsufficientBooleanOperands { id });
+                }
+                _ => {}
+            }
         }
-        if let Some(boolean) = self
-            .nodes
-            .values()
-            .filter(|node| node.kind == NodeKind::BooleanOperation)
-            .find(|boolean| {
-                self.nodes
-                    .values()
-                    .filter(|node| node.parent_id == Some(boolean.id))
-                    .take(2)
-                    .count()
-                    < 2
-            })
-        {
-            return Err(CommandError::InsufficientBooleanOperands { id: boolean.id });
-        }
+        self.structural_validation_pending.clear();
         Ok(())
     }
 
@@ -4890,13 +6091,34 @@ impl Document {
 
     fn valid_text_properties(&self, text: &str, properties: &TextProperties) -> bool {
         if properties.runs.len() > MAX_TEXT_STYLE_RUNS
+            || properties.paragraph_style_runs.len() > MAX_TEXT_STYLE_RUNS
             || properties.fallback_fonts.len() > MAX_TEXT_FALLBACK_FONTS
+            || (properties.max_lines.is_some()
+                && (properties.text_truncation != TextTruncation::Ending
+                    || properties.max_lines == Some(0)))
             || !properties.paragraph.paragraph_spacing.is_finite()
             || properties.paragraph.paragraph_spacing < 0.0
             || properties
                 .paragraph
+                .paragraph_indent
+                .is_some_and(|value| !value.is_finite() || value < 0.0)
+            || properties
+                .paragraph
+                .list_spacing
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || properties
+                .paragraph
                 .line_height
                 .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || properties.paragraph.text_wrap_style == Some(TextWrapStyle::Auto)
+            || match properties.paragraph.line_height_unit {
+                None => false,
+                Some(LineHeightUnit::Percent) => properties.paragraph.line_height.is_none(),
+                Some(LineHeightUnit::Auto) => properties.paragraph.line_height.is_some(),
+            }
+            || properties.base_style.as_ref().is_some_and(|style| {
+                style.start != 0 || style.end != 0 || !self.valid_text_style_payload(style)
+            })
         {
             return false;
         }
@@ -4909,17 +6131,7 @@ impl Document {
                 || end > text.len()
                 || !text.is_char_boundary(start)
                 || !text.is_char_boundary(end)
-                || !run.font_size.is_finite()
-                || !(0.1..=10_000.0).contains(&run.font_size)
-                || run.font_weight == 0
-                || run.font_weight > 1_000
-                || !run.letter_spacing.is_finite()
-                || !(-10_000.0..=10_000.0).contains(&run.letter_spacing)
-                || !run.color.is_none_or(Color::is_valid)
-                || !run
-                    .font
-                    .as_ref()
-                    .is_none_or(|font| self.valid_font_reference(font))
+                || !self.valid_text_style_payload(run)
             {
                 return false;
             }
@@ -4928,11 +6140,135 @@ impl Document {
         if !properties.runs.is_empty() && expected_start != text.len() {
             return false;
         }
+        let paragraph_starts = paragraph_start_offsets(text);
+        let mut previous_paragraph_start = None;
+        if !properties.paragraph_style_runs.iter().all(|run| {
+            let start = run.start as usize;
+            let ordered = previous_paragraph_start.is_none_or(|previous| previous < start);
+            previous_paragraph_start = Some(start);
+            let inherited_list_type = properties.paragraph.list_type;
+            let effective_list_type = run
+                .list_type
+                .map(paragraph_list_type_value)
+                .unwrap_or(inherited_list_type);
+            let list_override_is_canonical = run
+                .list_type
+                .is_none_or(|value| paragraph_list_type_value(value) != inherited_list_type);
+            let inherited_list_spacing = properties.paragraph.list_spacing.unwrap_or(0.0);
+            let list_spacing_override_is_canonical = run.list_spacing.is_none_or(|value| {
+                value.is_finite() && value >= 0.0 && value != inherited_list_spacing
+            });
+            let paragraph_spacing_override_is_canonical =
+                run.paragraph_spacing.is_none_or(|value| {
+                    value.is_finite()
+                        && value >= 0.0
+                        && value != properties.paragraph.paragraph_spacing
+                });
+            let inherited_paragraph_indent = properties.paragraph.paragraph_indent.unwrap_or(0.0);
+            let paragraph_indent_override_is_canonical = run.paragraph_indent.is_none_or(|value| {
+                value.is_finite() && value >= 0.0 && value != inherited_paragraph_indent
+            });
+            let line_height_override_present =
+                run.line_height.is_some() || run.line_height_unit.is_some();
+            let line_height_override_is_valid = match (run.line_height, run.line_height_unit) {
+                (None, None) => true,
+                (Some(value), None | Some(LineHeightUnit::Percent)) => {
+                    value.is_finite() && value > 0.0
+                }
+                (None, Some(LineHeightUnit::Auto)) => true,
+                (Some(_), Some(LineHeightUnit::Auto)) | (None, Some(LineHeightUnit::Percent)) => {
+                    false
+                }
+            };
+            let line_height_override_is_canonical = !line_height_override_present
+                || run.line_height != properties.paragraph.line_height
+                || run.line_height_unit != properties.paragraph.line_height_unit;
+            let inherited_text_wrap_style = properties.paragraph.text_wrap_style;
+            let text_wrap_style_override_is_canonical = run.text_wrap_style.is_none_or(|value| {
+                paragraph_text_wrap_style_value(value) != inherited_text_wrap_style
+            });
+            let default_indentation = u32::from(effective_list_type.is_some());
+            ordered
+                && paragraph_starts.binary_search(&start).is_ok()
+                && (run.indentation.is_some()
+                    || run.list_type.is_some()
+                    || run.list_spacing.is_some()
+                    || run.paragraph_spacing.is_some()
+                    || run.paragraph_indent.is_some()
+                    || line_height_override_present
+                    || run.text_wrap_style.is_some())
+                && list_override_is_canonical
+                && list_spacing_override_is_canonical
+                && paragraph_spacing_override_is_canonical
+                && paragraph_indent_override_is_canonical
+                && line_height_override_is_valid
+                && line_height_override_is_canonical
+                && text_wrap_style_override_is_canonical
+                && run
+                    .indentation
+                    .is_none_or(|value| value <= 100 && value != default_indentation)
+        }) {
+            return false;
+        }
         let mut seen_fonts = BTreeSet::new();
         properties
             .fallback_fonts
             .iter()
             .all(|font| seen_fonts.insert(font.asset_id) && self.valid_font_reference(font))
+    }
+
+    fn valid_text_style_payload(&self, style: &TextStyleRun) -> bool {
+        style.font_size.is_finite()
+            && (0.1..=10_000.0).contains(&style.font_size)
+            && style.font_weight > 0
+            && style.font_weight <= 1_000
+            && style.letter_spacing.is_finite()
+            && (-10_000.0..=10_000.0).contains(&style.letter_spacing)
+            && style.color.is_none_or(Color::is_valid)
+            && style.fill_stack.as_ref().is_none_or(PaintStack::is_valid)
+            && style.text_case != Some(TextCase::Original)
+            && style.text_decoration_offset.is_none_or(|offset| {
+                let value = match offset {
+                    TextDecorationOffset::Pixels(value) | TextDecorationOffset::Percent(value) => {
+                        value
+                    }
+                };
+                value.is_finite() && (-10_000.0..=10_000.0).contains(&value)
+            })
+            && style.text_decoration_thickness.is_none_or(|thickness| {
+                let value = match thickness {
+                    TextDecorationThickness::Pixels(value)
+                    | TextDecorationThickness::Percent(value) => value,
+                };
+                value.is_finite() && (0.0..=10_000.0).contains(&value)
+            })
+            && style.text_decoration_color.is_none_or(|decoration| {
+                decoration.color.is_valid()
+                    && decoration.color.alpha == 1.0
+                    && decoration.opacity.is_finite()
+                    && (0.0..=1.0).contains(&decoration.opacity)
+                    && !matches!(decoration.blend_mode, BlendMode::PassThrough)
+            })
+            && style.text_decoration_skip_ink != Some(false)
+            && style.hyperlink.as_ref().is_none_or(|hyperlink| {
+                !hyperlink.value.is_empty()
+                    && hyperlink.value.len() <= MAX_TEXT_HYPERLINK_BYTES
+                    && !hyperlink.value.contains('\0')
+            })
+            && !(style.color.is_some() && style.fill_stack.is_some())
+            && !style.fill_stack.as_ref().is_some_and(|stack| {
+                stack.layers.iter().any(|layer| match layer.paint {
+                    PaintLayerKind::Image(image) => !self
+                        .assets
+                        .get(&image.asset_id)
+                        .is_some_and(|asset| asset.media_type.starts_with("image/")),
+                    _ => false,
+                })
+            })
+            && style
+                .font
+                .as_ref()
+                .is_none_or(|font| self.valid_font_reference(font))
     }
 
     fn valid_font_reference(&self, font: &FontReference) -> bool {
@@ -4946,16 +6282,115 @@ impl Document {
                 .all(|(tag, value)| tag.len() == 4 && tag.is_ascii() && value.is_finite())
     }
 
+    fn index_child(
+        &mut self,
+        page_id: PageId,
+        parent_id: Option<NodeId>,
+        position: PositionId,
+        id: NodeId,
+    ) {
+        self.children_by_parent
+            .entry((page_id, parent_id))
+            .or_default()
+            .insert((position, id));
+        if let Some(parent_id) = parent_id {
+            self.mark_structural_validation(parent_id);
+        }
+    }
+
+    fn unindex_child(
+        &mut self,
+        page_id: PageId,
+        parent_id: Option<NodeId>,
+        position: PositionId,
+        id: NodeId,
+    ) {
+        let key = (page_id, parent_id);
+        let remove_key = self
+            .children_by_parent
+            .get_mut(&key)
+            .is_some_and(|children| {
+                children.remove(&(position, id));
+                children.is_empty()
+            });
+        if remove_key {
+            self.children_by_parent.remove(&key);
+        }
+        if let Some(parent_id) = parent_id {
+            self.mark_structural_validation(parent_id);
+        }
+    }
+
+    fn mark_structural_validation(&mut self, id: NodeId) {
+        if self
+            .nodes
+            .get(&id)
+            .is_some_and(|node| matches!(node.kind, NodeKind::Group | NodeKind::BooleanOperation))
+        {
+            self.structural_validation_pending.insert(id);
+        }
+    }
+
+    fn child_ids(&self, page_id: PageId, parent_id: Option<NodeId>) -> Vec<NodeId> {
+        self.children_by_parent
+            .get(&(page_id, parent_id))
+            .into_iter()
+            .flatten()
+            .map(|(_, id)| *id)
+            .collect()
+    }
+
+    fn child_ids_for(&self, parent_id: NodeId) -> Vec<NodeId> {
+        let page_id = self
+            .node_pages
+            .get(&parent_id)
+            .copied()
+            .unwrap_or(DEFAULT_PAGE_ID);
+        self.child_ids(page_id, Some(parent_id))
+    }
+
+    fn child_count_for(&self, parent_id: NodeId) -> usize {
+        let page_id = self
+            .node_pages
+            .get(&parent_id)
+            .copied()
+            .unwrap_or(DEFAULT_PAGE_ID);
+        self.children_by_parent
+            .get(&(page_id, Some(parent_id)))
+            .map_or(0, ChildBucket::len)
+    }
+
+    fn has_children(&self, parent_id: NodeId) -> bool {
+        self.child_count_for(parent_id) != 0
+    }
+
+    fn has_child_position(
+        &self,
+        page_id: PageId,
+        parent_id: Option<NodeId>,
+        position: PositionId,
+    ) -> bool {
+        self.children_by_parent
+            .get(&(page_id, parent_id))
+            .is_some_and(|children| children.contains_position(position))
+    }
+
     fn retire_node(&mut self, id: NodeId) {
         let page_id = self.node_pages.remove(&id).unwrap_or(DEFAULT_PAGE_ID);
         if let Some(node) = self.nodes.remove(&id) {
-            self.sibling_positions
-                .remove(&(page_id, node.parent_id, node.position));
+            self.unindex_child(page_id, node.parent_id, node.position, node.id);
             self.node_bytes = self.node_bytes.saturating_sub(node.estimated_bytes());
         }
+        self.structural_validation_pending.remove(&id);
         if let Some(properties) = self.node_text_properties.remove(&id) {
             self.node_bytes = self.node_bytes.saturating_sub(properties.estimated_bytes());
             self.retired_node_text_properties.insert(id, properties);
+        }
+        for stroke in [false, true] {
+            if let Some(stack) = self.node_paint_stacks.remove(&(id, stroke)) {
+                self.node_bytes = self.node_bytes.saturating_sub(stack.estimated_bytes());
+                self.retired_node_paint_stacks.insert((id, stroke), stack);
+            }
         }
         self.retired_node_pages.insert(id, page_id);
         if let Some(asset_id) = self.node_assets.remove(&id) {
@@ -5071,35 +6506,43 @@ impl Document {
         if self.retired_ids.contains(&node.id) {
             return Err(CommandError::RetiredNodeId { id: node.id });
         }
-        self.nodes.insert(node.id, node.clone());
+        self.nodes.insert(node.id, node.clone().into());
         self.node_pages.insert(node.id, page_id);
-        self.sibling_positions
-            .insert((page_id, node.parent_id, node.position));
+        self.index_child(page_id, node.parent_id, node.position, node.id);
+        self.mark_structural_validation(node.id);
         if let Some(asset_id) = asset_id {
             self.node_assets.insert(node.id, asset_id);
         }
         self.retired_node_pages.remove(&node.id);
         self.retired_node_assets.remove(&node.id);
         self.retired_node_text_properties.remove(&node.id);
+        self.retired_node_paint_stacks.remove(&(node.id, false));
+        self.retired_node_paint_stacks.remove(&(node.id, true));
         self.node_bytes += node.estimated_bytes();
         Ok(AppliedChange::NodeCreated { node })
     }
 
     fn restore_node(&mut self, node: &Node) {
-        self.nodes.insert(node.id, node.clone());
+        self.nodes.insert(node.id, node.clone().into());
         let page_id = self
             .retired_node_pages
             .remove(&node.id)
             .unwrap_or(DEFAULT_PAGE_ID);
         self.node_pages.insert(node.id, page_id);
-        self.sibling_positions
-            .insert((page_id, node.parent_id, node.position));
+        self.index_child(page_id, node.parent_id, node.position, node.id);
+        self.mark_structural_validation(node.id);
         if let Some(asset_id) = self.retired_node_assets.remove(&node.id) {
             self.node_assets.insert(node.id, asset_id);
         }
         if let Some(properties) = self.retired_node_text_properties.remove(&node.id) {
             self.node_bytes = self.node_bytes.saturating_add(properties.estimated_bytes());
             self.node_text_properties.insert(node.id, properties);
+        }
+        for stroke in [false, true] {
+            if let Some(stack) = self.retired_node_paint_stacks.remove(&(node.id, stroke)) {
+                self.node_bytes = self.node_bytes.saturating_add(stack.estimated_bytes());
+                self.node_paint_stacks.insert((node.id, stroke), stack);
+            }
         }
         self.node_bytes += node.estimated_bytes();
         self.retired_ids.remove(&node.id);
@@ -5125,15 +6568,6 @@ impl Document {
             return Err(CommandError::ResourceLimit);
         }
         self.validate_node_page(page_id, &node)?;
-        if self
-            .sibling_positions
-            .contains(&(page_id, node.parent_id, node.position))
-        {
-            return Err(CommandError::DuplicatePosition {
-                parent_id: node.parent_id,
-                position: node.position,
-            });
-        }
         if node.kind == NodeKind::Image && asset_id.is_none() {
             return Err(CommandError::InvalidAsset);
         }
@@ -5148,7 +6582,8 @@ impl Document {
             }
         }
         if text_properties.as_ref().is_some_and(|properties| {
-            node.kind != NodeKind::Text || !self.valid_text_properties(&node.text, properties)
+            !supports_text_properties(&node.kind)
+                || !self.valid_text_properties(&node.text, properties)
         }) {
             return Err(CommandError::InvalidTextProperties);
         }
@@ -5164,10 +6599,10 @@ impl Document {
         {
             return Err(CommandError::ResourceLimit);
         }
-        self.nodes.insert(node.id, node.clone());
+        self.nodes.insert(node.id, node.clone().into());
         self.node_pages.insert(node.id, page_id);
-        self.sibling_positions
-            .insert((page_id, node.parent_id, node.position));
+        self.index_child(page_id, node.parent_id, node.position, node.id);
+        self.mark_structural_validation(node.id);
         if let Some(asset_id) = asset_id {
             self.node_assets.insert(node.id, asset_id);
         }
@@ -5177,6 +6612,8 @@ impl Document {
         self.retired_node_pages.remove(&node.id);
         self.retired_node_assets.remove(&node.id);
         self.retired_node_text_properties.remove(&node.id);
+        self.retired_node_paint_stacks.remove(&(node.id, false));
+        self.retired_node_paint_stacks.remove(&(node.id, true));
         self.retired_ids.remove(&node.id);
         self.node_bytes = self
             .node_bytes
@@ -5241,6 +6678,11 @@ impl Document {
         if node.clips_content && !is_frame_like(&node.kind) {
             return Err(CommandError::InvalidAppearance);
         }
+        if (node.drop_shadow.is_some() || !node.effect_stack.is_empty())
+            && node.kind == NodeKind::BooleanOperation
+        {
+            return Err(CommandError::InvalidAppearance);
+        }
         if node.kind == NodeKind::Slice && !valid_slice_node(node) {
             return Err(CommandError::InvalidAppearance);
         }
@@ -5252,6 +6694,7 @@ impl Document {
                 node.kind,
                 NodeKind::Text
                     | NodeKind::CodeBlock
+                    | NodeKind::ShapeWithText
                     | NodeKind::Sticky
                     | NodeKind::TableCell
                     | NodeKind::TextPath
@@ -5294,10 +6737,7 @@ impl Document {
                 return Err(CommandError::MissingParent { id: parent_id });
             }
         }
-        if self
-            .sibling_positions
-            .contains(&(page_id, node.parent_id, node.position))
-        {
+        if self.has_child_position(page_id, node.parent_id, node.position) {
             return Err(CommandError::DuplicatePosition {
                 parent_id: node.parent_id,
                 position: node.position,
@@ -5305,6 +6745,13 @@ impl Document {
         }
         Ok(())
     }
+}
+
+fn valid_font_metadata_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 impl Transaction {
@@ -5433,14 +6880,29 @@ impl Command {
                         .unwrap_or(0)
             }
             Command::Create(node) => node.estimated_bytes(),
-            Command::UpdateGeometry { .. } => {
+            Command::UpdateGeometry { .. } | Command::UpdateGeometryWithoutConstraints { .. } => {
                 std::mem::size_of::<Geometry>() + std::mem::size_of::<NodeId>()
             }
             Command::Rename { name, .. } => std::mem::size_of::<NodeId>() + name.len(),
             Command::SetAppearance { appearance, .. } => {
                 std::mem::size_of::<NodeId>() + appearance.estimated_bytes()
             }
-            Command::SetVectorPath { path, .. } => {
+            Command::SetPaintStacks {
+                fill_stack,
+                stroke_stack,
+                ..
+            } => {
+                std::mem::size_of::<NodeId>()
+                    + fill_stack
+                        .as_ref()
+                        .map(PaintStack::estimated_bytes)
+                        .unwrap_or(0)
+                    + stroke_stack
+                        .as_ref()
+                        .map(PaintStack::estimated_bytes)
+                        .unwrap_or(0)
+            }
+            Command::SetVectorPath { path, .. } | Command::ConvertToTextPath { path, .. } => {
                 std::mem::size_of::<NodeId>() + path.estimated_bytes()
             }
             Command::SetBooleanOperation { .. } => {
@@ -5510,7 +6972,17 @@ impl Command {
             }
             Command::SetDocumentColorProfile { .. } => std::mem::size_of::<DocumentColorProfile>(),
             Command::RegisterAsset { asset } => {
-                std::mem::size_of::<AssetReference>() + asset.media_type.len()
+                std::mem::size_of::<AssetReference>()
+                    + asset.media_type.len()
+                    + asset
+                        .font_faces
+                        .iter()
+                        .map(|face| {
+                            std::mem::size_of::<FontFaceMetadata>()
+                                + face.family.len()
+                                + face.style.len()
+                        })
+                        .sum::<usize>()
             }
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
@@ -5580,8 +7052,36 @@ impl TextProperties {
                             .as_ref()
                             .map(FontReference::estimated_bytes)
                             .unwrap_or(0)
+                        + run
+                            .fill_stack
+                            .as_ref()
+                            .map(PaintStack::estimated_bytes)
+                            .unwrap_or(0)
+                        + run.hyperlink.as_ref().map_or(0, |value| value.value.len())
                 })
                 .sum::<usize>()
+            + self.paragraph_style_runs.len() * std::mem::size_of::<ParagraphStyleRun>()
+            + self
+                .base_style
+                .as_ref()
+                .map(|style| {
+                    std::mem::size_of::<TextStyleRun>()
+                        + style
+                            .font
+                            .as_ref()
+                            .map(FontReference::estimated_bytes)
+                            .unwrap_or(0)
+                        + style
+                            .fill_stack
+                            .as_ref()
+                            .map(PaintStack::estimated_bytes)
+                            .unwrap_or(0)
+                        + style
+                            .hyperlink
+                            .as_ref()
+                            .map_or(0, |value| value.value.len())
+                })
+                .unwrap_or(0)
             + self
                 .fallback_fonts
                 .iter()
@@ -5620,10 +7120,27 @@ impl AppliedChange {
             AppliedChange::AppearanceChanged { before, after, .. } => {
                 std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
             }
+            AppliedChange::PaintStacksChanged {
+                before_fill,
+                before_stroke,
+                after_fill,
+                after_stroke,
+                ..
+            } => {
+                std::mem::size_of::<NodeId>()
+                    + [before_fill, before_stroke, after_fill, after_stroke]
+                        .into_iter()
+                        .flatten()
+                        .map(PaintStack::estimated_bytes)
+                        .sum::<usize>()
+            }
             AppliedChange::AutoLayoutChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AutoLayout>>() * 2
             }
             AppliedChange::VectorPathChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::NodeRecordChanged { before, after, .. } => {
                 std::mem::size_of::<NodeId>() + before.estimated_bytes() + after.estimated_bytes()
             }
             AppliedChange::BooleanOperationChanged { .. } => {
@@ -5688,14 +7205,27 @@ impl AppliedChange {
                 std::mem::size_of::<DocumentColorProfile>() * 2
             }
             AppliedChange::AssetRegistered { asset } => {
-                std::mem::size_of::<AssetReference>() + asset.media_type.len()
+                std::mem::size_of::<AssetReference>()
+                    + asset.media_type.len()
+                    + asset
+                        .font_faces
+                        .iter()
+                        .map(|face| {
+                            std::mem::size_of::<FontFaceMetadata>()
+                                + face.family.len()
+                                + face.style.len()
+                        })
+                        .sum::<usize>()
             }
         }
     }
 }
 
 impl HistoryItem {
-    fn estimated_bytes(&self) -> usize {
+    /// Conservative heap-size estimate used by the history admission budget and
+    /// performance evidence. This excludes allocator bookkeeping and shared
+    /// persistent-tree nodes, so it must not be reported as process RSS.
+    pub fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<HistoryItem>()
             + self
                 .changes
@@ -5968,6 +7498,131 @@ fn hash_paint_stack(hasher: &mut Sha256, paints: &[Paint], marker: u8) {
     }
 }
 
+fn hash_versioned_paint_stack(hasher: &mut Sha256, stack: &PaintStack) {
+    hash_len(hasher, stack.layers.len());
+    for layer in &stack.layers {
+        hasher.update([u8::from(layer.visible)]);
+        hasher.update(layer.opacity.to_bits().to_be_bytes());
+        hasher.update([match layer.blend_mode {
+            BlendMode::Normal => 0,
+            BlendMode::Multiply => 1,
+            BlendMode::Screen => 2,
+            BlendMode::Overlay => 3,
+            BlendMode::Darken => 4,
+            BlendMode::Lighten => 5,
+            BlendMode::ColorDodge => 6,
+            BlendMode::ColorBurn => 7,
+            BlendMode::HardLight => 8,
+            BlendMode::SoftLight => 9,
+            BlendMode::Difference => 10,
+            BlendMode::Exclusion => 11,
+            BlendMode::Hue => 12,
+            BlendMode::Saturation => 13,
+            BlendMode::Color => 14,
+            BlendMode::Luminosity => 15,
+            BlendMode::PassThrough => 16,
+            BlendMode::LinearBurn => 17,
+            BlendMode::LinearDodge => 18,
+        }]);
+        match &layer.paint {
+            PaintLayerKind::Solid(color) => {
+                hasher.update([0]);
+                hash_color(hasher, *color);
+            }
+            PaintLayerKind::LinearGradient(gradient) => {
+                hasher.update([1]);
+                hash_paint(hasher, &Paint::LinearGradient(gradient.clone()));
+            }
+            PaintLayerKind::Image(image) => {
+                hasher.update([2]);
+                hasher.update(image.asset_id.0.to_be_bytes());
+                hasher.update([match image.scale_mode {
+                    ImageScaleMode::Fill => 0,
+                    ImageScaleMode::Fit => 1,
+                    ImageScaleMode::Crop => 2,
+                    ImageScaleMode::Tile => 3,
+                }]);
+                for value in [
+                    image.transform.a,
+                    image.transform.b,
+                    image.transform.c,
+                    image.transform.d,
+                    image.transform.e,
+                    image.transform.f,
+                ] {
+                    hash_number(hasher, value);
+                }
+                hasher.update(image.rotation_degrees.to_be_bytes());
+                hash_image_filters(hasher, image.filters);
+            }
+            PaintLayerKind::Gradient(gradient) => {
+                hasher.update([3]);
+                hasher.update([match gradient.kind {
+                    GradientPaintKind::Radial => 0,
+                    GradientPaintKind::Angular => 1,
+                    GradientPaintKind::Diamond => 2,
+                }]);
+                for value in [
+                    gradient.transform.a,
+                    gradient.transform.b,
+                    gradient.transform.c,
+                    gradient.transform.d,
+                    gradient.transform.e,
+                    gradient.transform.f,
+                ] {
+                    hash_number(hasher, value);
+                }
+                hash_len(hasher, gradient.stops.len());
+                for stop in &gradient.stops {
+                    hasher.update(stop.position.to_bits().to_be_bytes());
+                    hash_color(hasher, stop.color);
+                }
+            }
+        }
+    }
+}
+
+fn hash_image_filters(hasher: &mut Sha256, filters: Option<crate::color::ImageFilters>) {
+    let Some(filters) = filters else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    for value in [
+        filters.exposure,
+        filters.contrast,
+        filters.saturation,
+        filters.temperature,
+        filters.tint,
+        filters.highlights,
+        filters.shadows,
+    ] {
+        match value {
+            Some(value) => {
+                hasher.update([1]);
+                hash_number(hasher, f64::from(value));
+            }
+            None => hasher.update([0]),
+        }
+    }
+}
+
+fn hash_document_paint_stacks(
+    hasher: &mut Sha256,
+    stacks: &SharedOrdMap<(NodeId, bool), PaintStack>,
+) {
+    if stacks.is_empty() {
+        return;
+    }
+    hasher.update(b"document-paint-stacks-v1");
+    hash_len(hasher, stacks.len());
+    for ((node_id, stroke), stack) in stacks {
+        hasher.update(node_id.0.to_be_bytes());
+        hasher.update([u8::from(*stroke)]);
+        hash_versioned_paint_stack(hasher, stack);
+    }
+}
+
 fn hash_stroke_cap(hasher: &mut Sha256, cap: StrokeCap) {
     hasher.update([match cap {
         StrokeCap::None => 0,
@@ -6002,6 +7657,34 @@ fn hash_font_reference(hasher: &mut Sha256, font: &FontReference) {
     }
 }
 
+fn hash_text_style_payload(hasher: &mut Sha256, style: &TextStyleRun) {
+    match &style.font {
+        Some(font) => {
+            hasher.update([1]);
+            hash_font_reference(hasher, font);
+        }
+        None => hasher.update([0]),
+    }
+    hash_number(hasher, style.font_size);
+    hasher.update(style.font_weight.to_be_bytes());
+    hasher.update([u8::from(style.italic)]);
+    hash_number(hasher, style.letter_spacing);
+    match style.color {
+        Some(color) => {
+            hasher.update([1]);
+            hash_color(hasher, color);
+        }
+        None => hasher.update([0]),
+    }
+    match &style.fill_stack {
+        Some(stack) => {
+            hasher.update([1]);
+            hash_versioned_paint_stack(hasher, stack);
+        }
+        None => hasher.update([0]),
+    }
+}
+
 fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
     hash_len(hasher, properties.runs.len());
     for run in &properties.runs {
@@ -6033,6 +7716,20 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
             }
         }
     }
+    // Append only when a run uses the versioned stack so every legacy text
+    // hash, including color-bearing semantics-13 documents, stays unchanged.
+    if properties.runs.iter().any(|run| run.fill_stack.is_some()) {
+        hasher.update(b"makefigma/editor-core/text-run-paint-stack-v1");
+        for run in &properties.runs {
+            match &run.fill_stack {
+                Some(stack) => {
+                    hasher.update([1]);
+                    hash_versioned_paint_stack(hasher, stack);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
     hasher.update([match properties.paragraph.alignment {
         TextAlign::Left => 0,
         TextAlign::Center => 1,
@@ -6047,6 +7744,184 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
         None => hasher.update([0]),
     }
     hash_number(hasher, properties.paragraph.paragraph_spacing);
+    if let Some(unit) = properties.paragraph.line_height_unit {
+        hasher.update(b"makefigma/editor-core/line-height-unit-v1");
+        hasher.update([match unit {
+            LineHeightUnit::Percent => 1,
+            LineHeightUnit::Auto => 2,
+        }]);
+    }
+    if let Some(indent) = properties.paragraph.paragraph_indent {
+        hasher.update(b"makefigma/editor-core/paragraph-indent-v1");
+        hash_number(hasher, indent);
+    }
+    if let Some(style) = properties.paragraph.text_wrap_style {
+        hasher.update(b"makefigma/editor-core/text-wrap-style-v1");
+        hasher.update([match style {
+            TextWrapStyle::Auto => 0,
+            TextWrapStyle::Balance => 1,
+            TextWrapStyle::Pretty => 2,
+        }]);
+    }
+    if let Some(list_type) = properties.paragraph.list_type {
+        hasher.update(b"makefigma/editor-core/text-list-type-v1");
+        hasher.update([match list_type {
+            TextListType::Ordered => 1,
+            TextListType::Unordered => 2,
+        }]);
+    }
+    if let Some(spacing) = properties.paragraph.list_spacing {
+        hasher.update(b"makefigma/editor-core/text-list-spacing-v1");
+        hash_number(hasher, spacing);
+    }
+    if properties.paragraph.hanging_list {
+        hasher.update(b"makefigma/editor-core/text-hanging-list-v1");
+    }
+    if properties.paragraph.hanging_punctuation {
+        hasher.update(b"makefigma/editor-core/text-hanging-punctuation-v1");
+    }
+    if !properties.paragraph_style_runs.is_empty() {
+        hasher.update(b"makefigma/editor-core/paragraph-style-runs-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.indentation {
+                Some(value) => {
+                    hasher.update([1]);
+                    hasher.update(value.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
+    // Keep semantics-31 indentation hashes byte-for-byte stable. The new
+    // field receives its own conditional domain only when an override exists.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_type.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-list-options-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.list_type {
+                Some(value) => {
+                    hasher.update([1]);
+                    hasher.update([match value {
+                        ParagraphListType::None => 0,
+                        ParagraphListType::Ordered => 1,
+                        ParagraphListType::Unordered => 2,
+                    }]);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
+    // Preserve every earlier paragraph-run hash. Per-paragraph paragraph
+    // spacing receives a conditional domain only when an override exists.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_spacing.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-spacing-run-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.paragraph_spacing {
+                Some(value) => {
+                    hasher.update([1]);
+                    hash_number(hasher, value);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
+    // Preserve every earlier paragraph-run hash. Per-paragraph first-line
+    // indent receives a conditional domain only when an override exists.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_indent.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-indent-run-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.paragraph_indent {
+                Some(value) => {
+                    hasher.update([1]);
+                    hash_number(hasher, value);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
+    // Preserve every earlier paragraph-run hash. The structured line-height
+    // override enters one conditional domain only when either member exists.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-line-height-run-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.line_height {
+                Some(value) => {
+                    hasher.update([1]);
+                    hash_number(hasher, value);
+                }
+                None => hasher.update([0]),
+            }
+            match run.line_height_unit {
+                Some(LineHeightUnit::Percent) => hasher.update([1]),
+                Some(LineHeightUnit::Auto) => hasher.update([2]),
+                None => hasher.update([0]),
+            }
+        }
+    }
+    // Preserve every earlier paragraph-run hash. A range wrap override gets
+    // its own domain and keeps explicit AUTO distinct from inheritance.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.text_wrap_style.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-text-wrap-style-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.text_wrap_style {
+                Some(TextWrapStyle::Auto) => hasher.update([0]),
+                Some(TextWrapStyle::Balance) => hasher.update([1]),
+                Some(TextWrapStyle::Pretty) => hasher.update([2]),
+                None => hasher.update([255]),
+            }
+        }
+    }
+    // Keep semantics-31 indentation and semantics-33 list-option hashes stable.
+    // Per-paragraph spacing enters a separate domain only when it is present.
+    if properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_spacing.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/paragraph-list-spacing-v1");
+        hash_len(hasher, properties.paragraph_style_runs.len());
+        for run in &properties.paragraph_style_runs {
+            hasher.update(run.start.to_be_bytes());
+            match run.list_spacing {
+                Some(value) => {
+                    hasher.update([1]);
+                    hash_number(hasher, value);
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
     hasher.update([match properties.auto_size {
         TextAutoSize::Fixed => 0,
         TextAutoSize::Height => 1,
@@ -6055,6 +7930,319 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
     hash_len(hasher, properties.fallback_fonts.len());
     for font in &properties.fallback_fonts {
         hash_font_reference(hasher, font);
+    }
+    // Append only for the new behavior so legacy TextProperties retain their
+    // pre-truncation canonical hash byte-for-byte.
+    if properties.text_truncation == TextTruncation::Ending || properties.max_lines.is_some() {
+        hasher.update(b"makefigma/editor-core/text-truncation-v1");
+        hasher.update([match properties.text_truncation {
+            TextTruncation::Disabled => 0,
+            TextTruncation::Ending => 1,
+        }]);
+        match properties.max_lines {
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update(value.to_be_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    if let Some(style) = &properties.base_style {
+        hasher.update(b"makefigma/editor-core/text-base-style-v1");
+        hash_text_style_payload(hasher, style);
+    }
+    if properties.runs.iter().any(|run| run.text_case.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_case.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-case-v1");
+        for run in &properties.runs {
+            hash_optional_text_case(hasher, run.text_case);
+        }
+        hash_optional_text_case(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_case),
+        );
+    }
+    if properties.runs.iter().any(|run| run.hyperlink.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.hyperlink.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-hyperlink-v1");
+        for run in &properties.runs {
+            hash_optional_hyperlink(hasher, run.hyperlink.as_ref());
+        }
+        hash_optional_hyperlink(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.hyperlink.as_ref()),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-v1");
+        for run in &properties.runs {
+            hash_optional_text_decoration(hasher, run.text_decoration);
+        }
+        hash_optional_text_decoration(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_style.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_style.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-style-v1");
+        for run in &properties.runs {
+            hash_optional_text_decoration_style(hasher, run.text_decoration_style);
+        }
+        hash_optional_text_decoration_style(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_style),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_offset.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_offset.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-offset-v1");
+        for run in &properties.runs {
+            hash_optional_text_decoration_offset(hasher, run.text_decoration_offset);
+        }
+        hash_optional_text_decoration_offset(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_offset),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_thickness.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_thickness.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-thickness-v1");
+        for run in &properties.runs {
+            hash_optional_text_decoration_thickness(hasher, run.text_decoration_thickness);
+        }
+        hash_optional_text_decoration_thickness(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_thickness),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_color.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_color.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-color-v1");
+        for run in &properties.runs {
+            hash_optional_text_decoration_color(hasher, run.text_decoration_color);
+        }
+        hash_optional_text_decoration_color(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_color),
+        );
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_skip_ink.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_skip_ink.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/text-decoration-skip-ink-v1");
+        for run in &properties.runs {
+            hasher.update([u8::from(run.text_decoration_skip_ink == Some(true))]);
+        }
+        hasher.update([u8::from(
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_skip_ink)
+                == Some(true),
+        )]);
+    }
+    if properties.runs.iter().any(|run| run.leading_trim.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.leading_trim.is_some())
+    {
+        hasher.update(b"makefigma/editor-core/leading-trim-v1");
+        for run in &properties.runs {
+            hasher.update([u8::from(run.leading_trim == Some(LeadingTrim::CapHeight))]);
+        }
+        hasher.update([u8::from(
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.leading_trim)
+                == Some(LeadingTrim::CapHeight),
+        )]);
+    }
+}
+
+fn hash_optional_text_decoration_offset(hasher: &mut Sha256, value: Option<TextDecorationOffset>) {
+    match value {
+        None => hasher.update([0]),
+        Some(TextDecorationOffset::Pixels(value)) => {
+            hasher.update([1]);
+            hash_number(hasher, value);
+        }
+        Some(TextDecorationOffset::Percent(value)) => {
+            hasher.update([2]);
+            hash_number(hasher, value);
+        }
+    }
+}
+
+fn hash_optional_text_decoration_thickness(
+    hasher: &mut Sha256,
+    value: Option<TextDecorationThickness>,
+) {
+    match value {
+        None => hasher.update([0]),
+        Some(TextDecorationThickness::Pixels(value)) => {
+            hasher.update([1]);
+            hash_number(hasher, value);
+        }
+        Some(TextDecorationThickness::Percent(value)) => {
+            hasher.update([2]);
+            hash_number(hasher, value);
+        }
+    }
+}
+
+fn hash_optional_text_decoration_color(hasher: &mut Sha256, value: Option<TextDecorationColor>) {
+    match value {
+        None => hasher.update([0]),
+        Some(value) => {
+            hasher.update([1]);
+            hash_color(hasher, value.color);
+            hasher.update([u8::from(value.visible)]);
+            hasher.update(value.opacity.to_bits().to_be_bytes());
+            hasher.update([match value.blend_mode {
+                BlendMode::Normal => 0,
+                BlendMode::Multiply => 1,
+                BlendMode::Screen => 2,
+                BlendMode::Overlay => 3,
+                BlendMode::Darken => 4,
+                BlendMode::Lighten => 5,
+                BlendMode::ColorDodge => 6,
+                BlendMode::ColorBurn => 7,
+                BlendMode::HardLight => 8,
+                BlendMode::SoftLight => 9,
+                BlendMode::Difference => 10,
+                BlendMode::Exclusion => 11,
+                BlendMode::Hue => 12,
+                BlendMode::Saturation => 13,
+                BlendMode::Color => 14,
+                BlendMode::Luminosity => 15,
+                BlendMode::PassThrough => 16,
+                BlendMode::LinearBurn => 17,
+                BlendMode::LinearDodge => 18,
+            }]);
+        }
+    }
+}
+
+fn hash_optional_text_decoration_style(hasher: &mut Sha256, value: Option<TextDecorationStyle>) {
+    hasher.update([match value {
+        None => 0,
+        Some(TextDecorationStyle::Wavy) => 1,
+        Some(TextDecorationStyle::Dotted) => 2,
+    }]);
+}
+
+fn hash_optional_text_decoration(hasher: &mut Sha256, value: Option<TextDecoration>) {
+    hasher.update([match value {
+        None => 0,
+        Some(TextDecoration::Underline) => 1,
+        Some(TextDecoration::Strikethrough) => 2,
+    }]);
+}
+
+fn hash_optional_hyperlink(hasher: &mut Sha256, value: Option<&HyperlinkTarget>) {
+    match value {
+        Some(value) => {
+            hasher.update([
+                1,
+                match value.kind {
+                    HyperlinkType::Url => 1,
+                    HyperlinkType::Node => 2,
+                },
+            ]);
+            hash_text(hasher, &value.value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_optional_text_case(hasher: &mut Sha256, value: Option<TextCase>) {
+    match value {
+        Some(value) => hasher.update([
+            1,
+            match value {
+                TextCase::Original => 0,
+                TextCase::Upper => 1,
+                TextCase::Lower => 2,
+                TextCase::Title => 3,
+                TextCase::SmallCaps => 4,
+                TextCase::SmallCapsForced => 5,
+            },
+        ]),
+        None => hasher.update([0]),
     }
 }
 
@@ -6164,6 +8352,19 @@ fn hash_node(hasher: &mut Sha256, node: &Node) {
             BlendMode::Overlay => 3,
             BlendMode::Darken => 4,
             BlendMode::Lighten => 5,
+            BlendMode::ColorDodge => 6,
+            BlendMode::ColorBurn => 7,
+            BlendMode::HardLight => 8,
+            BlendMode::SoftLight => 9,
+            BlendMode::Difference => 10,
+            BlendMode::Exclusion => 11,
+            BlendMode::Hue => 12,
+            BlendMode::Saturation => 13,
+            BlendMode::Color => 14,
+            BlendMode::Luminosity => 15,
+            BlendMode::PassThrough => 16,
+            BlendMode::LinearBurn => 17,
+            BlendMode::LinearDodge => 18,
         }]);
     }
     if let Some(shape) = node.parametric_shape {
@@ -6272,6 +8473,20 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                 hash_number(hasher, value);
             }
         }
+        Command::UpdateGeometryWithoutConstraints {
+            id,
+            x,
+            y,
+            width,
+            height,
+            rotation,
+        } => {
+            hasher.update([36]);
+            hasher.update(id.0.to_be_bytes());
+            for value in [*x, *y, *width, *height, *rotation] {
+                hash_number(hasher, value);
+            }
+        }
         Command::Rename { id, name } => {
             hasher.update([3]);
             hasher.update(id.0.to_be_bytes());
@@ -6298,6 +8513,19 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                     BlendMode::Overlay => 3,
                     BlendMode::Darken => 4,
                     BlendMode::Lighten => 5,
+                    BlendMode::ColorDodge => 6,
+                    BlendMode::ColorBurn => 7,
+                    BlendMode::HardLight => 8,
+                    BlendMode::SoftLight => 9,
+                    BlendMode::Difference => 10,
+                    BlendMode::Exclusion => 11,
+                    BlendMode::Hue => 12,
+                    BlendMode::Saturation => 13,
+                    BlendMode::Color => 14,
+                    BlendMode::Luminosity => 15,
+                    BlendMode::PassThrough => 16,
+                    BlendMode::LinearBurn => 17,
+                    BlendMode::LinearDodge => 18,
                 }]);
             }
             if let Some(shape) = appearance.parametric_shape {
@@ -6339,8 +8567,30 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                 hasher.update([2]);
             }
         }
+        Command::SetPaintStacks {
+            id,
+            fill_stack,
+            stroke_stack,
+        } => {
+            hasher.update(b"makefigma/editor-core/set-paint-stacks-v1");
+            hasher.update(id.0.to_be_bytes());
+            for stack in [fill_stack, stroke_stack] {
+                match stack {
+                    Some(stack) => {
+                        hasher.update([1]);
+                        hash_versioned_paint_stack(hasher, stack);
+                    }
+                    None => hasher.update([0]),
+                }
+            }
+        }
         Command::SetVectorPath { id, path } => {
             hasher.update([16]);
+            hasher.update(id.0.to_be_bytes());
+            hash_vector_path(hasher, path);
+        }
+        Command::ConvertToTextPath { id, path } => {
+            hasher.update(b"makefigma/editor-core/convert-to-text-path-v1");
             hasher.update(id.0.to_be_bytes());
             hash_vector_path(hasher, path);
         }
@@ -6547,6 +8797,15 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                 }
                 None => hasher.update([0]),
             }
+            if !asset.font_faces.is_empty() {
+                hasher.update(b"makefigma/editor-core/font-face-metadata-v1");
+                hash_len(hasher, asset.font_faces.len());
+                for face in &asset.font_faces {
+                    hasher.update(face.face_index.to_be_bytes());
+                    hash_text(hasher, &face.family);
+                    hash_text(hasher, &face.style);
+                }
+            }
         }
         Command::SetDocumentColorProfile { profile } => {
             hasher.update([6]);
@@ -6568,6 +8827,171 @@ fn image_fill_supported(kind: &NodeKind) -> bool {
             | NodeKind::Ellipse
             | NodeKind::Image
     )
+}
+
+/// Canonical text style records are owned by Text, by the embedded TextSublayer
+/// of ShapeWithText, and by Figma's non-resizable TextPath text surface.
+fn supports_text_properties(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Text | NodeKind::ShapeWithText | NodeKind::TextPath
+    )
+}
+
+fn paragraph_start_offsets(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if matches!(grapheme, "\n" | "\r" | "\r\n" | "\u{2028}" | "\u{2029}") {
+            starts.push(offset + grapheme.len());
+        }
+    }
+    starts
+}
+
+fn paragraph_indentation_at(properties: &TextProperties, paragraph_start: usize) -> u32 {
+    properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .and_then(|index| properties.paragraph_style_runs[index].indentation)
+        .unwrap_or_else(|| u32::from(paragraph_list_type_at(properties, paragraph_start).is_some()))
+}
+
+fn paragraph_list_type_at(
+    properties: &TextProperties,
+    paragraph_start: usize,
+) -> Option<TextListType> {
+    properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .and_then(|index| properties.paragraph_style_runs[index].list_type)
+        .map(paragraph_list_type_value)
+        .unwrap_or(properties.paragraph.list_type)
+}
+
+fn paragraph_list_spacing_at(properties: &TextProperties, paragraph_start: usize) -> f64 {
+    properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .and_then(|index| properties.paragraph_style_runs[index].list_spacing)
+        .or(properties.paragraph.list_spacing)
+        .unwrap_or(0.0)
+}
+
+fn paragraph_spacing_at(properties: &TextProperties, paragraph_start: usize) -> f64 {
+    properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .and_then(|index| properties.paragraph_style_runs[index].paragraph_spacing)
+        .unwrap_or(properties.paragraph.paragraph_spacing)
+}
+
+fn paragraph_indent_at(properties: &TextProperties, paragraph_start: usize) -> f64 {
+    properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .and_then(|index| properties.paragraph_style_runs[index].paragraph_indent)
+        .or(properties.paragraph.paragraph_indent)
+        .unwrap_or(0.0)
+}
+
+fn is_hanging_start_punctuation(grapheme: &str) -> bool {
+    matches!(
+        grapheme,
+        "\"" | "'"
+            | "“"
+            | "‘"
+            | "«"
+            | "‹"
+            | "「"
+            | "『"
+            | "《"
+            | "〈"
+            | "【"
+            | "〔"
+            | "〖"
+            | "〘"
+            | "〚"
+            | "（"
+            | "［"
+            | "｛"
+    )
+}
+
+fn is_hanging_end_punctuation(grapheme: &str) -> bool {
+    matches!(
+        grapheme,
+        "\"" | "'"
+            | ","
+            | "."
+            | "!"
+            | "?"
+            | ":"
+            | ";"
+            | "”"
+            | "’"
+            | "»"
+            | "›"
+            | "」"
+            | "』"
+            | "》"
+            | "〉"
+            | "】"
+            | "〕"
+            | "〗"
+            | "〙"
+            | "〛"
+            | "）"
+            | "］"
+            | "｝"
+            | "、"
+            | "。"
+            | "，"
+            | "．"
+            | "！"
+            | "？"
+            | "："
+            | "；"
+            | "…"
+    )
+}
+
+fn paragraph_line_height_at(
+    properties: &TextProperties,
+    paragraph_start: usize,
+    font_size: f64,
+) -> f64 {
+    let run = properties
+        .paragraph_style_runs
+        .binary_search_by_key(&(paragraph_start as u32), |run| run.start)
+        .ok()
+        .map(|index| &properties.paragraph_style_runs[index]);
+    match run.map(|run| (run.line_height, run.line_height_unit)) {
+        Some((Some(value), Some(LineHeightUnit::Percent))) => font_size * value / 100.0,
+        Some((None, Some(LineHeightUnit::Auto))) => font_size * 1.2,
+        Some((Some(value), None)) => value,
+        _ => properties.paragraph.effective_line_height(font_size),
+    }
+}
+
+fn paragraph_list_type_value(value: ParagraphListType) -> Option<TextListType> {
+    match value {
+        ParagraphListType::None => None,
+        ParagraphListType::Ordered => Some(TextListType::Ordered),
+        ParagraphListType::Unordered => Some(TextListType::Unordered),
+    }
+}
+
+fn paragraph_text_wrap_style_value(value: TextWrapStyle) -> Option<TextWrapStyle> {
+    match value {
+        TextWrapStyle::Auto => None,
+        TextWrapStyle::Balance => Some(TextWrapStyle::Balance),
+        TextWrapStyle::Pretty => Some(TextWrapStyle::Pretty),
+    }
 }
 
 fn node_legacy_transform(node: &Node) -> Option<AffineTransform> {
@@ -6606,6 +9030,7 @@ fn valid_geometry(kind: &NodeKind, geometry: Geometry) -> bool {
         && geometry.width > 0.0
         && match kind {
             NodeKind::Line | NodeKind::Connector => geometry.height == 0.0,
+            NodeKind::TextPath => geometry.height >= 0.0,
             NodeKind::Slide => {
                 geometry.width == 1920.0 && geometry.height == 1080.0 && geometry.rotation == 0.0
             }
@@ -6632,7 +9057,7 @@ fn can_contain_children(kind: &NodeKind) -> bool {
     )
 }
 
-fn can_parent_contain_child(parent: &NodeKind, child: &NodeKind) -> bool {
+pub fn can_parent_contain_child(parent: &NodeKind, child: &NodeKind) -> bool {
     match parent {
         NodeKind::ComponentSet => *child == NodeKind::Component,
         NodeKind::SlideGrid => *child == NodeKind::SlideRow,
@@ -6765,6 +9190,19 @@ fn geometry_for_constraints(
     } else {
         Err(CommandError::InvalidGeometry)
     }
+}
+
+fn effective_constraints(node: &Node) -> Option<Constraints> {
+    if matches!(
+        node.kind,
+        NodeKind::Group | NodeKind::BooleanOperation | NodeKind::Section | NodeKind::Slide
+    ) {
+        return None;
+    }
+    Some(node.constraints.unwrap_or(Constraints {
+        horizontal: ConstraintType::Min,
+        vertical: ConstraintType::Min,
+    }))
 }
 
 /// Keeps the historical x/y/rotation projection populated for a Relative-v1
@@ -7394,6 +9832,59 @@ mod tests {
         }
     }
 
+    fn assert_children_index_matches_nodes(document: &Document) {
+        let mut expected =
+            BTreeMap::<(PageId, Option<NodeId>), BTreeSet<(PositionId, NodeId)>>::new();
+        for node in document.nodes.values() {
+            let page_id = document
+                .node_pages
+                .get(&node.id)
+                .copied()
+                .unwrap_or(DEFAULT_PAGE_ID);
+            expected
+                .entry((page_id, node.parent_id))
+                .or_default()
+                .insert((node.position, node.id));
+        }
+        let actual = document
+            .children_by_parent
+            .iter()
+            .map(|(key, bucket)| (*key, bucket.iter().copied().collect::<BTreeSet<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn document_identity_can_only_be_seeded_before_hydration() {
+        let mut document = Document::empty();
+        assert!(document.seed_document_id(DocumentId(41)));
+        assert_eq!(document.id(), DocumentId(41));
+
+        document.seed_node(node(1)).unwrap();
+        assert!(!document.seed_document_id(DocumentId(42)));
+        assert_eq!(document.id(), DocumentId(41));
+    }
+
+    #[test]
+    fn child_bucket_promotes_and_demotes_without_changing_order() {
+        let mut bucket = ChildBucket::default();
+        for id in (1..=9u128).rev() {
+            assert!(bucket.insert((PositionId::for_node(NodeId(id)), NodeId(id))));
+        }
+        assert!(matches!(bucket, ChildBucket::Tree(_)));
+        assert_eq!(
+            bucket.iter().map(|(_, id)| id.0).collect::<Vec<_>>(),
+            (1..=9).collect::<Vec<_>>()
+        );
+        assert!(bucket.remove(&(PositionId::for_node(NodeId(5)), NodeId(5))));
+        assert!(matches!(bucket, ChildBucket::Small(_)));
+        assert_eq!(
+            bucket.iter().map(|(_, id)| id.0).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 6, 7, 8, 9]
+        );
+        assert!(!bucket.insert((PositionId::for_node(NodeId(4)), NodeId(4))));
+    }
+
     #[test]
     fn transaction_is_atomic() {
         let mut document = Document::empty();
@@ -7407,6 +9898,67 @@ mod tests {
         assert_eq!(result, Err(CommandError::MissingNode { id: NodeId(2) }));
         assert_eq!(document.nodes().count(), 0);
         assert_eq!(document.revision, 0);
+    }
+
+    #[test]
+    fn persistent_candidate_copies_only_the_touched_node_payload() {
+        let mut document = Document::empty();
+        document.seed_node(node(1)).unwrap();
+        document.seed_node(node(2)).unwrap();
+        let confirmed = document.clone();
+
+        assert!(Arc::ptr_eq(
+            &confirmed.nodes.get(&NodeId(1)).unwrap().0,
+            &document.nodes.get(&NodeId(1)).unwrap().0,
+        ));
+        assert!(Arc::ptr_eq(
+            &confirmed.nodes.get(&NodeId(2)).unwrap().0,
+            &document.nodes.get(&NodeId(2)).unwrap().0,
+        ));
+
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::Rename {
+                        id: NodeId(1),
+                        name: "renamed".into(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(confirmed.node(NodeId(1)).unwrap().name, "Card");
+        assert_eq!(document.node(NodeId(1)).unwrap().name, "renamed");
+        assert!(!Arc::ptr_eq(
+            &confirmed.nodes.get(&NodeId(1)).unwrap().0,
+            &document.nodes.get(&NodeId(1)).unwrap().0,
+        ));
+        assert!(Arc::ptr_eq(
+            &confirmed.nodes.get(&NodeId(2)).unwrap().0,
+            &document.nodes.get(&NodeId(2)).unwrap().0,
+        ));
+
+        let accepted = document.clone();
+        let failed = document.submit(
+            transaction(
+                1,
+                vec![
+                    Command::Rename {
+                        id: NodeId(1),
+                        name: "must roll back".into(),
+                    },
+                    Command::Rename {
+                        id: NodeId(99),
+                        name: "missing".into(),
+                    },
+                ],
+            ),
+            Origin::LocalUser,
+        );
+        assert_eq!(failed, Err(CommandError::MissingNode { id: NodeId(99) }));
+        assert_eq!(document, accepted);
     }
 
     #[test]
@@ -7551,6 +10103,52 @@ mod tests {
             document.node(second.id).map(|node| (node.x, node.y)),
             Some((88.0, 50.0))
         );
+    }
+
+    #[test]
+    fn auto_layout_node_budget_counts_unique_nodes_across_convergence_iterations() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.kind = NodeKind::Frame;
+        frame.width = 70_000.0;
+        frame.height = 100.0;
+        document.seed_node(frame.clone()).unwrap();
+        for id in 2..=6_001u128 {
+            let mut child = node(id);
+            child.parent_id = Some(frame.id);
+            child.width = 10.0;
+            child.height = 10.0;
+            document.seed_node(child).unwrap();
+        }
+        document
+            .seed_auto_layout(
+                frame.id,
+                AutoLayout {
+                    mode: LayoutMode::Horizontal,
+                    ..AutoLayout::default()
+                },
+            )
+            .unwrap();
+
+        let applied = document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::UpdateGeometry {
+                        id: frame.id,
+                        x: frame.x,
+                        y: frame.y,
+                        width: 70_001.0,
+                        height: frame.height,
+                        rotation: frame.rotation,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(applied.history_item.changes.len(), 6_000);
+        assert_eq!(document.node(NodeId(6_001)).unwrap().x, 59_990.0);
     }
 
     #[test]
@@ -8293,7 +10891,223 @@ mod tests {
     }
 
     #[test]
-    fn auto_layout_rejects_wrap_with_fill_children_atomically() {
+    fn auto_layout_wrap_distributes_fill_per_track_and_stretches_counter_axis() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 120.0;
+        frame.height = 100.0;
+        let mut first = node(2);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(frame.id);
+        first.width = 50.0;
+        first.height = 20.0;
+        let mut flexible = node(3);
+        flexible.kind = NodeKind::Rectangle;
+        flexible.parent_id = Some(frame.id);
+        flexible.width = 240.0;
+        flexible.height = 160.0;
+        let flexible_layout = AutoLayout {
+            primary_sizing: LayoutSizing::Fill,
+            counter_sizing: LayoutSizing::Fill,
+            min_width: Some(20.0),
+            max_width: Some(40.0),
+            min_height: Some(10.0),
+            ..AutoLayout::default()
+        };
+        let mut third = node(4);
+        third.kind = NodeKind::Rectangle;
+        third.parent_id = Some(frame.id);
+        third.width = 80.0;
+        third.height = 10.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(flexible.clone()),
+                        Command::Create(third.clone()),
+                        Command::SetAutoLayout {
+                            id: flexible.id,
+                            layout: flexible_layout.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                wrap: true,
+                                item_spacing: 10.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            document
+                .node(flexible.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((60.0, 0.0, 40.0, 20.0))
+        );
+        assert_eq!(
+            document
+                .node(third.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((0.0, 30.0, 80.0, 10.0))
+        );
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAutoLayout {
+                        id: flexible.id,
+                        layout: AutoLayout {
+                            max_width: Some(30.0),
+                            ..flexible_layout
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(flexible.id).map(|node| node.width),
+            Some(30.0)
+        );
+        document.undo().unwrap();
+        assert_eq!(
+            document.node(flexible.id).map(|node| node.width),
+            Some(40.0)
+        );
+    }
+
+    #[test]
+    fn auto_layout_wrap_stretches_tracks_when_every_child_stretches() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        let mut children = [node(2), node(3), node(4)];
+        for child in &mut children {
+            child.kind = NodeKind::Rectangle;
+            child.parent_id = Some(frame.id);
+            child.width = 45.0;
+            child.height = 10.0;
+        }
+        let stretch = AutoLayout {
+            counter_sizing: LayoutSizing::Fill,
+            min_height: Some(10.0),
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(children[0].clone()),
+                        Command::Create(children[1].clone()),
+                        Command::Create(children[2].clone()),
+                        Command::SetAutoLayout {
+                            id: children[0].id,
+                            layout: stretch.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: children[1].id,
+                            layout: stretch.clone(),
+                        },
+                        Command::SetAutoLayout {
+                            id: children[2].id,
+                            layout: stretch,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                wrap: true,
+                                item_spacing: 10.0,
+                                track_spacing: Some(10.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| {
+                    document
+                        .node(child.id)
+                        .map(|node| (node.x, node.y, node.width, node.height))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (0.0, 0.0, 45.0, 45.0),
+                (55.0, 0.0, 45.0, 45.0),
+                (0.0, 55.0, 45.0, 45.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_layout_wrap_hugs_the_complete_counter_axis_track_stack() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 1.0;
+        let mut children = [node(2), node(3), node(4)];
+        for (child, height) in children.iter_mut().zip([20.0, 30.0, 10.0]) {
+            child.kind = NodeKind::Rectangle;
+            child.parent_id = Some(frame.id);
+            child.width = 40.0;
+            child.height = height;
+        }
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(children[0].clone()),
+                        Command::Create(children[1].clone()),
+                        Command::Create(children[2].clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [5.0; 4],
+                                item_spacing: 10.0,
+                                track_spacing: Some(7.0),
+                                wrap: true,
+                                counter_sizing: LayoutSizing::Hug,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(document.node(frame.id).map(|node| node.height), Some(57.0));
+        assert_eq!(
+            document.node(children[2].id).map(|node| (node.x, node.y)),
+            Some((5.0, 42.0))
+        );
+    }
+
+    #[test]
+    fn auto_layout_wrap_rejects_counter_hug_with_stretch_children_atomically() {
         let mut document = Document::empty();
         let mut frame = node(1);
         frame.width = 100.0;
@@ -8309,7 +11123,7 @@ mod tests {
                     Command::SetAutoLayout {
                         id: child.id,
                         layout: AutoLayout {
-                            primary_sizing: LayoutSizing::Fill,
+                            counter_sizing: LayoutSizing::Fill,
                             ..AutoLayout::default()
                         },
                     },
@@ -8318,6 +11132,7 @@ mod tests {
                         layout: AutoLayout {
                             mode: LayoutMode::Horizontal,
                             wrap: true,
+                            counter_sizing: LayoutSizing::Hug,
                             ..AutoLayout::default()
                         },
                     },
@@ -8385,6 +11200,106 @@ mod tests {
     }
 
     #[test]
+    fn reparent_into_wrapped_auto_layout_preserves_fixed_child_extent() {
+        let mut document = Document::empty();
+        let mut target = node(1);
+        target.kind = NodeKind::Frame;
+        target.width = 240.0;
+        target.height = 180.0;
+        let mut source = node(2);
+        source.kind = NodeKind::Frame;
+        source.x = 340.0;
+        source.width = 400.0;
+        source.height = 200.0;
+        let mut children = [node(3), node(4), node(5)];
+        for (child, height) in children.iter_mut().zip([30.0, 50.0, 40.0]) {
+            child.kind = NodeKind::Rectangle;
+            child.parent_id = Some(target.id);
+            child.width = 100.0;
+            child.height = height;
+        }
+        let mut moved = node(6);
+        moved.kind = NodeKind::Rectangle;
+        moved.parent_id = Some(source.id);
+        moved.width = 180.0;
+        moved.height = 40.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(target.clone()),
+                        Command::Create(source.clone()),
+                        Command::Create(children[0].clone()),
+                        Command::Create(children[1].clone()),
+                        Command::Create(children[2].clone()),
+                        Command::Create(moved.clone()),
+                        Command::SetAutoLayout {
+                            id: moved.id,
+                            layout: AutoLayout {
+                                primary_sizing: LayoutSizing::Fill,
+                                min_width: Some(120.0),
+                                max_width: Some(180.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: target.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [10.0; 4],
+                                item_spacing: 10.0,
+                                wrap: true,
+                                track_alignment: WrapTrackAlignment::SpaceBetween,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: source.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [20.0; 4],
+                                item_spacing: 12.0,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![
+                        Command::SetAutoLayout {
+                            id: moved.id,
+                            layout: AutoLayout {
+                                min_width: Some(120.0),
+                                max_width: Some(180.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetNodeParent {
+                            id: moved.id,
+                            parent_id: Some(target.id),
+                            position: PositionId {
+                                key: 10,
+                                actor: ActorId(1),
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let moved = document.node(moved.id).unwrap();
+        assert_eq!((moved.width, moved.height), (180.0, 40.0));
+        assert_eq!((moved.x, moved.y), (10.0, 130.0));
+    }
+
+    #[test]
     fn auto_layout_hug_measures_auto_sized_text_in_core() {
         let mut document = Document::empty();
         let mut frame = node(1);
@@ -8406,14 +11321,35 @@ mod tests {
                 italic: false,
                 letter_spacing: 0.0,
                 color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
                 line_height: Some(12.0),
+                line_height_unit: None,
                 paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::WidthAndHeight,
             fallback_fonts: Vec::new(),
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         document
             .submit(
@@ -8480,14 +11416,35 @@ mod tests {
                 italic: false,
                 letter_spacing: 0.0,
                 color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
                 line_height: Some(12.0),
+                line_height_unit: None,
                 paragraph_spacing: 3.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::WidthAndHeight,
             fallback_fonts: Vec::new(),
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         document
             .submit(
@@ -8555,14 +11512,35 @@ mod tests {
                 italic: false,
                 letter_spacing: 0.0,
                 color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
                 line_height: Some(12.0),
+                line_height_unit: None,
                 paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::Height,
             fallback_fonts: Vec::new(),
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         document
             .submit(
@@ -8621,14 +11599,35 @@ mod tests {
                 italic: false,
                 letter_spacing: 0.0,
                 color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Left,
                 line_height: Some(12.0),
+                line_height_unit: None,
                 paragraph_spacing: 0.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::Height,
             fallback_fonts: Vec::new(),
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         document
             .submit(
@@ -9323,6 +12322,7 @@ mod tests {
             media_type: "image/png".into(),
             byte_length: 128,
             dimensions: Some([16, 8]),
+            font_faces: Vec::new(),
         };
         document.seed_asset(asset.clone()).unwrap();
         assert_eq!(document.asset(AssetId(7)), Some(&asset));
@@ -9337,10 +12337,123 @@ mod tests {
                 content_hash: [0; 32],
                 media_type: "image/png".into(),
                 byte_length: 1,
-                dimensions: None
+                dimensions: None,
+                font_faces: Vec::new(),
             }),
             Err(CommandError::InvalidAsset)
         );
+
+        let named_font = AssetReference {
+            asset_id: AssetId(9),
+            content_hash: [3; 32],
+            media_type: "font/ttf".into(),
+            byte_length: 512,
+            dimensions: None,
+            font_faces: vec![FontFaceMetadata {
+                face_index: 0,
+                family: "Acme Sans".into(),
+                style: "Regular".into(),
+            }],
+        };
+        let before_font = document.canonical_hash();
+        document.seed_asset(named_font.clone()).unwrap();
+        assert_ne!(document.canonical_hash(), before_font);
+        let mut invalid_faces = named_font;
+        invalid_faces.asset_id = AssetId(10);
+        invalid_faces.font_faces[0].face_index = 1;
+        assert_eq!(
+            document.seed_asset(invalid_faces),
+            Err(CommandError::InvalidAsset)
+        );
+    }
+
+    #[test]
+    fn versioned_paint_stacks_preserve_presence_hash_and_history() {
+        use crate::color::{ImagePaint, PaintLayer, PaintLayerKind};
+
+        let asset = AssetReference {
+            asset_id: AssetId(77),
+            content_hash: [7; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([4, 4]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::empty();
+        document.seed_asset(asset.clone()).unwrap();
+        document.seed_node(node(78)).unwrap();
+        let legacy_hash = document.canonical_hash_hex();
+
+        document
+            .submit(
+                Transaction {
+                    id: TransactionId(780),
+                    base_revision: 0,
+                    commands: vec![Command::SetPaintStacks {
+                        id: NodeId(78),
+                        fill_stack: Some(PaintStack::default()),
+                        stroke_stack: Some(PaintStack {
+                            layers: vec![PaintLayer {
+                                paint: PaintLayerKind::Image(ImagePaint {
+                                    asset_id: asset.asset_id,
+                                    scale_mode: ImageScaleMode::Fit,
+                                    transform: AffineTransform::IDENTITY,
+                                    rotation_degrees: 90,
+                                    filters: None,
+                                }),
+                                visible: false,
+                                opacity: 0.5,
+                                blend_mode: BlendMode::Multiply,
+                            }],
+                        }),
+                    }],
+                },
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.fill_stack_for_node(NodeId(78)),
+            Some(&PaintStack::default())
+        );
+        assert_eq!(
+            document
+                .stroke_stack_for_node(NodeId(78))
+                .unwrap()
+                .layers
+                .len(),
+            1
+        );
+        let stacked_hash = document.canonical_hash_hex();
+        assert_ne!(stacked_hash, legacy_hash);
+
+        document.undo().unwrap();
+        assert_eq!(document.fill_stack_for_node(NodeId(78)), None);
+        assert_eq!(document.stroke_stack_for_node(NodeId(78)), None);
+        assert_eq!(document.canonical_hash_hex(), legacy_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), stacked_hash);
+        assert!(matches!(
+            &document.stroke_stack_for_node(NodeId(78)).unwrap().layers[0].paint,
+            PaintLayerKind::Image(ImagePaint {
+                rotation_degrees: 90,
+                ..
+            })
+        ));
+
+        document
+            .submit(
+                Transaction {
+                    id: TransactionId(781),
+                    base_revision: document.revision,
+                    commands: vec![Command::Delete { id: NodeId(78) }],
+                },
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.fill_stack_for_node(NodeId(78)), None);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), stacked_hash);
     }
 
     #[test]
@@ -9351,6 +12464,7 @@ mod tests {
             media_type: "image/png".into(),
             byte_length: 128,
             dimensions: Some([16, 8]),
+            font_faces: Vec::new(),
         };
         let mut document = Document::empty();
         let baseline = document.canonical_hash_hex();
@@ -9382,6 +12496,7 @@ mod tests {
             media_type: "image/png".into(),
             byte_length: 256,
             dimensions: Some([64, 32]),
+            font_faces: Vec::new(),
         };
         let mut document = Document::empty();
         document
@@ -9431,6 +12546,7 @@ mod tests {
             media_type: "image/png".into(),
             byte_length: 128,
             dimensions: Some([16, 8]),
+            font_faces: Vec::new(),
         };
         let mut document = Document::empty();
         document.seed_asset(asset.clone()).unwrap();
@@ -10111,6 +13227,278 @@ mod tests {
     }
 
     #[test]
+    fn children_index_tracks_hydration_reorder_reparent_delete_and_history() {
+        let mut document = Document::empty();
+        let page_two = Page {
+            id: PageId(2),
+            name: "Page 2".into(),
+            position: PositionId::for_node(NodeId(2)),
+        };
+        document.seed_page(page_two).unwrap();
+
+        let mut page_two_parent = node(100);
+        page_two_parent.kind = NodeKind::Group;
+        page_two_parent.name = "Page two parent".into();
+        document
+            .seed_node_on_page(PageId(2), page_two_parent)
+            .unwrap();
+        let mut later_child = node(102);
+        later_child.parent_id = Some(NodeId(100));
+        later_child.position = PositionId {
+            key: 20,
+            actor: ActorId(1),
+        };
+        document.seed_node_on_page(PageId(2), later_child).unwrap();
+        let mut earlier_child = node(101);
+        earlier_child.parent_id = Some(NodeId(100));
+        earlier_child.position = PositionId {
+            key: 10,
+            actor: ActorId(1),
+        };
+        document
+            .seed_node_on_page(PageId(2), earlier_child)
+            .unwrap();
+
+        assert_eq!(
+            document
+                .ordered_children(PageId(2), Some(NodeId(100)))
+                .unwrap()
+                .into_iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![NodeId(101), NodeId(102)]
+        );
+        let hash_before_validation = document.canonical_hash();
+        document.validate_seeded_structure().unwrap();
+        assert_eq!(document.canonical_hash(), hash_before_validation);
+        assert_children_index_matches_nodes(&document);
+
+        let parent = node(1);
+        let mut child_two = node(2);
+        child_two.parent_id = Some(NodeId(1));
+        let mut child_three = node(3);
+        child_three.parent_id = Some(NodeId(1));
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(parent),
+                        Command::Create(child_two),
+                        Command::Create(child_three),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_children_index_matches_nodes(&document);
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodePosition {
+                        id: NodeId(3),
+                        position: PositionId {
+                            key: 1,
+                            actor: ActorId(9),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .ordered_children(DEFAULT_PAGE_ID, Some(NodeId(1)))
+                .unwrap()
+                .into_iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![NodeId(3), NodeId(2)]
+        );
+        assert_children_index_matches_nodes(&document);
+
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetNodeParent {
+                        id: NodeId(3),
+                        parent_id: None,
+                        position: PositionId {
+                            key: 30,
+                            actor: ActorId(9),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_children_index_matches_nodes(&document);
+
+        document
+            .submit(
+                transaction(3, vec![Command::Delete { id: NodeId(2) }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_children_index_matches_nodes(&document);
+        document.undo().unwrap();
+        assert_children_index_matches_nodes(&document);
+        document.redo().unwrap();
+        assert_children_index_matches_nodes(&document);
+
+        let before = document.clone();
+        assert!(
+            document
+                .submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetNodePosition {
+                            id: NodeId(3),
+                            position: PositionId::for_node(NodeId(1)),
+                        }],
+                    ),
+                    Origin::LocalUser,
+                )
+                .is_err()
+        );
+        assert_eq!(document, before);
+        assert_children_index_matches_nodes(&document);
+    }
+
+    #[test]
+    fn children_index_matches_full_scan_after_randomized_structural_history() {
+        let mut document = Document::empty();
+        let mut commands = Vec::new();
+        for id in 1..=20 {
+            commands.push(Command::Create(node(id)));
+        }
+        for id in 21..=100 {
+            let mut child = node(id);
+            child.kind = NodeKind::Rectangle;
+            child.parent_id = Some(NodeId(1 + (id % 20)));
+            commands.push(Command::Create(child));
+        }
+        document
+            .submit(transaction(0, commands), Origin::LocalUser)
+            .unwrap();
+
+        let mut random = 0x4d59_5df4_d0f3_3173u64;
+        for step in 0..300u128 {
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let child_id = NodeId(21 + u128::from(random % 80));
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let parent_id = match random % 21 {
+                0 => None,
+                value => Some(NodeId(u128::from(value))),
+            };
+            let revision = document.revision;
+            document
+                .submit(
+                    transaction(
+                        revision,
+                        vec![Command::SetNodeParent {
+                            id: child_id,
+                            parent_id,
+                            position: PositionId {
+                                key: 10_000 + step,
+                                actor: ActorId(77),
+                            },
+                        }],
+                    ),
+                    Origin::LocalUser,
+                )
+                .unwrap();
+            assert_children_index_matches_nodes(&document);
+
+            if step % 25 == 0 {
+                let revision = document.revision;
+                document
+                    .submit(
+                        transaction(revision, vec![Command::Delete { id: child_id }]),
+                        Origin::LocalUser,
+                    )
+                    .unwrap();
+                assert_children_index_matches_nodes(&document);
+                document.undo().unwrap();
+                assert_children_index_matches_nodes(&document);
+                document.redo().unwrap();
+                assert_children_index_matches_nodes(&document);
+                document.undo().unwrap();
+                assert_children_index_matches_nodes(&document);
+            }
+        }
+    }
+
+    #[test]
+    fn children_index_scales_to_the_document_node_limit() {
+        let mut document = Document::empty();
+        let mut next_id = 1u128;
+        for _ in 0..20_000 {
+            let group_id = NodeId(next_id);
+            let mut group = node(next_id);
+            group.kind = NodeKind::Group;
+            document.seed_node(group).unwrap();
+            next_id += 1;
+            let mut child = node(next_id);
+            child.kind = NodeKind::Rectangle;
+            child.parent_id = Some(group_id);
+            document.seed_node(child).unwrap();
+            next_id += 1;
+        }
+        for _ in 0..20_000 {
+            let boolean_id = NodeId(next_id);
+            let mut boolean = node(next_id);
+            boolean.kind = NodeKind::BooleanOperation;
+            boolean.boolean_operation = Some(BooleanOperation::Union);
+            document.seed_node(boolean).unwrap();
+            next_id += 1;
+            for _ in 0..2 {
+                let mut operand = node(next_id);
+                operand.kind = NodeKind::Rectangle;
+                operand.parent_id = Some(boolean_id);
+                document.seed_node(operand).unwrap();
+                next_id += 1;
+            }
+        }
+
+        assert_eq!(next_id - 1, MAX_DOCUMENT_NODES as u128);
+        document.validate_seeded_structure().unwrap();
+        assert!(document.structural_validation_pending.is_empty());
+        let roots = document.ordered_children(DEFAULT_PAGE_ID, None).unwrap();
+        assert_eq!(roots.len(), 40_000);
+        assert_eq!(roots.first().map(|node| node.id), Some(NodeId(1)));
+        assert_eq!(
+            document
+                .ordered_nodes_on_page(DEFAULT_PAGE_ID)
+                .unwrap()
+                .len(),
+            MAX_DOCUMENT_NODES
+        );
+        assert_children_index_matches_nodes(&document);
+
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::Rename {
+                        id: NodeId(1),
+                        name: "Renamed group".into(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.structural_validation_pending.is_empty());
+    }
+
+    #[test]
     fn transaction_rejects_an_empty_group_without_mutating_document_state() {
         let mut document = Document::empty();
         let mut group = node(1);
@@ -10427,6 +13815,258 @@ mod tests {
                     }]
                 ),
                 Origin::LocalUser
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
+    }
+
+    #[test]
+    fn group_mask_requires_descendant_alpha_structure_and_is_undoable() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::Group;
+        let mut child = node(2);
+        child.kind = NodeKind::Ellipse;
+        child.parent_id = Some(NodeId(1));
+        let mut target = node(3);
+        target.kind = NodeKind::Rectangle;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(group),
+                        Command::Create(child),
+                        Command::Create(target),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetMask {
+                        id: NodeId(1),
+                        enabled: true,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(is_alpha_mask(document.node(NodeId(1)).unwrap()));
+        let masked = document.canonical_hash_hex();
+        assert_ne!(masked, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), masked);
+
+        let mut invalid = Document::empty();
+        let mut empty_group = node(4);
+        empty_group.kind = NodeKind::Group;
+        let mut following = node(5);
+        following.kind = NodeKind::Rectangle;
+        assert_eq!(
+            invalid.submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(empty_group),
+                        Command::Create(following),
+                        Command::SetMask {
+                            id: NodeId(4),
+                            enabled: true
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
+    }
+
+    #[test]
+    fn transform_group_mask_requires_descendant_alpha_structure_and_is_undoable() {
+        let mut document = Document::empty();
+        let mut group = node(1);
+        group.kind = NodeKind::TransformGroup;
+        let mut child = node(2);
+        child.kind = NodeKind::Ellipse;
+        child.parent_id = Some(NodeId(1));
+        let mut target = node(3);
+        target.kind = NodeKind::Rectangle;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(group),
+                        Command::Create(child),
+                        Command::Create(target),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetMask {
+                        id: NodeId(1),
+                        enabled: true,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(is_alpha_mask(document.node(NodeId(1)).unwrap()));
+        let masked = document.canonical_hash_hex();
+        assert_ne!(masked, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), masked);
+
+        let mut invalid = Document::empty();
+        let mut empty_group = node(4);
+        empty_group.kind = NodeKind::TransformGroup;
+        let mut following = node(5);
+        following.kind = NodeKind::Rectangle;
+        assert_eq!(
+            invalid.submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(empty_group),
+                        Command::Create(following),
+                        Command::SetMask {
+                            id: NodeId(4),
+                            enabled: true,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidGeometry)
+        );
+    }
+
+    #[test]
+    fn vector_boolean_mask_is_hashed_and_undoable() {
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                points: vec![
+                    VectorPoint {
+                        id: PointId(1),
+                        position: Point { x: 0.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(2),
+                        position: Point { x: 80.0, y: 0.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(3),
+                        position: Point { x: 0.0, y: 60.0 },
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                ],
+            }],
+        };
+        let mut boolean = node(1);
+        boolean.kind = NodeKind::BooleanOperation;
+        boolean.boolean_operation = Some(BooleanOperation::Subtract);
+        let mut first = node(2);
+        first.kind = NodeKind::Vector;
+        first.parent_id = Some(NodeId(1));
+        first.vector_path = Some(path.clone());
+        let mut second = node(3);
+        second.kind = NodeKind::Vector;
+        second.parent_id = Some(NodeId(1));
+        second.vector_path = Some(path);
+        let mut target = node(4);
+        target.kind = NodeKind::Rectangle;
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(boolean),
+                        Command::Create(first),
+                        Command::Create(second),
+                        Command::Create(target),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetMask {
+                        id: NodeId(1),
+                        enabled: true,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(is_alpha_mask(document.node(NodeId(1)).unwrap()));
+        let masked = document.canonical_hash_hex();
+        assert_ne!(masked, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), masked);
+
+        let mut unsupported = Document::empty();
+        let mut boolean = node(10);
+        boolean.kind = NodeKind::BooleanOperation;
+        boolean.boolean_operation = Some(BooleanOperation::Union);
+        let mut first = node(11);
+        first.kind = NodeKind::Rectangle;
+        first.parent_id = Some(NodeId(10));
+        let mut second = node(12);
+        second.kind = NodeKind::Ellipse;
+        second.parent_id = Some(NodeId(10));
+        let mut target = node(13);
+        target.kind = NodeKind::Rectangle;
+        assert_eq!(
+            unsupported.submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(boolean),
+                        Command::Create(first),
+                        Command::Create(second),
+                        Command::Create(target),
+                        Command::SetMask {
+                            id: NodeId(10),
+                            enabled: true,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
             ),
             Err(CommandError::InvalidGeometry)
         );
@@ -10787,6 +14427,183 @@ mod tests {
         );
         document.redo().unwrap();
         assert_eq!(document.node(NodeId(2)).unwrap().width, 200.0);
+    }
+
+    #[test]
+    fn frame_resize_without_constraints_leaves_child_geometry_unchanged() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(frame.id);
+        child.x = 20.0;
+        child.y = 20.0;
+        child.width = 100.0;
+        child.height = 30.0;
+        child.constraints = Some(Constraints {
+            horizontal: ConstraintType::Stretch,
+            vertical: ConstraintType::Center,
+        });
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometryWithoutConstraints {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 300.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!(
+            (child.x, child.y, child.width, child.height),
+            (20.0, 20.0, 100.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn omitted_legacy_constraints_execute_as_figma_min_min_default() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.x = 100.0;
+        frame.y = 50.0;
+        frame.width = 200.0;
+        frame.height = 100.0;
+        let mut child = node(2);
+        child.kind = NodeKind::Rectangle;
+        child.parent_id = Some(NodeId(1));
+        child.x = 120.0;
+        child.y = 60.0;
+        child.width = 40.0;
+        child.height = 20.0;
+        assert_eq!(child.constraints, None);
+        document
+            .submit(
+                transaction(0, vec![Command::Create(frame), Command::Create(child)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 180.0,
+                        y: 90.0,
+                        width: 260.0,
+                        height: 140.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let child = document.node(NodeId(2)).unwrap();
+        assert_eq!(
+            (child.x, child.y, child.width, child.height),
+            (200.0, 100.0, 40.0, 20.0)
+        );
+        // The old absence encoding stays byte-compatible until a user edits
+        // constraints, while its execution is no longer a hidden sixth mode.
+        assert_eq!(child.constraints, None);
+    }
+
+    #[test]
+    fn active_auto_layout_applies_constraints_only_to_absolute_children() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        let mut flow = node(2);
+        flow.kind = NodeKind::Rectangle;
+        flow.parent_id = Some(frame.id);
+        flow.width = 10.0;
+        flow.height = 10.0;
+        flow.constraints = Some(Constraints {
+            horizontal: ConstraintType::Max,
+            vertical: ConstraintType::Max,
+        });
+        let mut absolute = node(3);
+        absolute.kind = NodeKind::Rectangle;
+        absolute.parent_id = Some(frame.id);
+        absolute.x = 70.0;
+        absolute.y = 60.0;
+        absolute.width = 10.0;
+        absolute.height = 10.0;
+        absolute.constraints = flow.constraints;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame),
+                        Command::Create(flow),
+                        Command::Create(absolute),
+                        Command::SetAutoLayout {
+                            id: NodeId(1),
+                            layout: AutoLayout {
+                                mode: LayoutMode::Horizontal,
+                                padding: [5.0, 5.0, 5.0, 5.0],
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: NodeId(3),
+                            layout: AutoLayout {
+                                absolute: true,
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::UpdateGeometry {
+                        id: NodeId(1),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 200.0,
+                        height: 200.0,
+                        rotation: 0.0,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.node(NodeId(2)).map(|node| (node.x, node.y)),
+            Some((5.0, 5.0))
+        );
+        assert_eq!(
+            document.node(NodeId(3)).map(|node| (node.x, node.y)),
+            Some((170.0, 160.0))
+        );
     }
 
     #[test]
@@ -12678,6 +16495,1281 @@ mod tests {
     }
 
     #[test]
+    fn shape_with_text_text_sublayer_properties_are_canonical_and_undoable() {
+        let mut document = Document::empty();
+        let mut shape = node(41);
+        shape.kind = NodeKind::ShapeWithText;
+        shape.text = "Approve".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(shape)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetText {
+                        id: NodeId(41),
+                        text: "Review".into(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.node(NodeId(41)).unwrap().text, "Review");
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 6,
+                font: None,
+                font_size: 18.0,
+                font_weight: 650,
+                italic: false,
+                letter_spacing: 1.5,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: ParagraphStyle {
+                alignment: TextAlign::Center,
+                line_height: Some(24.0),
+                line_height_unit: None,
+                paragraph_spacing: 4.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
+            },
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(41),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.text_properties_for_node(NodeId(41)),
+            Some(&properties)
+        );
+        assert_eq!(document.undo(), Some(4));
+        assert_eq!(document.text_properties_for_node(NodeId(41)), None);
+        assert_eq!(document.redo(), Some(5));
+        assert_eq!(
+            document.text_properties_for_node(NodeId(41)),
+            Some(&properties)
+        );
+    }
+
+    #[test]
+    fn line_height_units_are_validated_hashed_and_resolved() {
+        let pixels = ParagraphStyle {
+            alignment: TextAlign::Left,
+            line_height: Some(24.0),
+            line_height_unit: None,
+            paragraph_spacing: 0.0,
+            paragraph_indent: None,
+            text_wrap_style: None,
+            list_type: None,
+            list_spacing: None,
+            hanging_list: false,
+            hanging_punctuation: false,
+        };
+        let percent = ParagraphStyle {
+            line_height: Some(150.0),
+            line_height_unit: Some(LineHeightUnit::Percent),
+            ..pixels.clone()
+        };
+        let auto = ParagraphStyle {
+            line_height: None,
+            line_height_unit: Some(LineHeightUnit::Auto),
+            ..pixels.clone()
+        };
+        assert_eq!(pixels.effective_line_height(20.0), 24.0);
+        assert_eq!(percent.effective_line_height(20.0), 30.0);
+        assert_eq!(auto.effective_line_height(20.0), 24.0);
+
+        let mut document = Document::empty();
+        let mut shape = node(42);
+        shape.kind = NodeKind::ShapeWithText;
+        shape.text = "A".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(shape)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let base = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 20.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: pixels,
+            ..TextProperties::default()
+        };
+        let percent_properties = TextProperties {
+            paragraph: percent,
+            ..base.clone()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(42),
+                        properties: percent_properties,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let percent_hash = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(42),
+                        properties: TextProperties {
+                            paragraph: auto,
+                            ..base.clone()
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), percent_hash);
+        let invalid_auto = TextProperties {
+            paragraph: ParagraphStyle {
+                line_height: Some(20.0),
+                line_height_unit: Some(LineHeightUnit::Auto),
+                ..base.paragraph.clone()
+            },
+            ..base
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    3,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(42),
+                        properties: invalid_auto
+                    }]
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+    }
+
+    #[test]
+    fn paragraph_indent_is_validated_hashed_and_included_in_auto_size() {
+        let mut document = Document::empty();
+        let mut text = node(43);
+        text.kind = NodeKind::Text;
+        text.text = "abcd".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text.clone())]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 10.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            paragraph: ParagraphStyle {
+                paragraph_indent: Some(12.0),
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                ..ParagraphStyle {
+                    alignment: TextAlign::Left,
+                    line_height: Some(20.0),
+                    line_height_unit: None,
+                    paragraph_spacing: 0.0,
+                    paragraph_indent: None,
+                    text_wrap_style: None,
+                    list_type: None,
+                    list_spacing: None,
+                    hanging_list: false,
+                    hanging_punctuation: false,
+                }
+            },
+            auto_size: TextAutoSize::WidthAndHeight,
+            ..TextProperties::default()
+        };
+        let legacy_hash = document.canonical_hash();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(43),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), legacy_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(43)).unwrap()),
+            (36.0, 20.0)
+        );
+
+        let mut cap_height = properties.clone();
+        cap_height.runs[0].leading_trim = Some(LeadingTrim::CapHeight);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(43),
+                        properties: cap_height,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(43)).unwrap()),
+            (36.0, 7.0)
+        );
+
+        let invalid = TextProperties {
+            paragraph: ParagraphStyle {
+                paragraph_indent: Some(-1.0),
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                ..properties.paragraph.clone()
+            },
+            ..properties
+        };
+        assert!(!document.valid_text_properties("abcd", &invalid));
+    }
+
+    #[test]
+    fn text_wrap_style_is_presence_hashed_and_undoable() {
+        let mut document = Document::empty();
+        let mut text = node(44);
+        text.kind = NodeKind::ShapeWithText;
+        text.text = "aa bb cc dd".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let legacy_hash = document.canonical_hash();
+        let mut properties = TextProperties::default();
+        properties.paragraph.text_wrap_style = Some(TextWrapStyle::Balance);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(44),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let balance_hash = document.canonical_hash();
+        assert_ne!(balance_hash, legacy_hash);
+
+        properties.paragraph.text_wrap_style = Some(TextWrapStyle::Pretty);
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(44),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), balance_hash);
+        assert_eq!(document.undo(), Some(4));
+        assert_eq!(
+            document
+                .text_properties_for_node(NodeId(44))
+                .unwrap()
+                .paragraph
+                .text_wrap_style,
+            Some(TextWrapStyle::Balance)
+        );
+    }
+
+    #[test]
+    fn paragraph_text_wrap_style_overrides_are_canonical_hashed_and_undoable() {
+        let mut document = Document::empty();
+        let mut text = node(152);
+        text.kind = NodeKind::Text;
+        text.text = "One\nTwo".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut properties = TextProperties::default();
+        properties.paragraph.text_wrap_style = Some(TextWrapStyle::Balance);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(152),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let inherited_hash = document.canonical_hash();
+
+        properties.paragraph_style_runs = vec![ParagraphStyleRun {
+            start: 4,
+            indentation: None,
+            list_type: None,
+            list_spacing: None,
+            paragraph_spacing: None,
+            paragraph_indent: None,
+            line_height: None,
+            line_height_unit: None,
+            text_wrap_style: Some(TextWrapStyle::Auto),
+        }];
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(152),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), inherited_hash);
+
+        let mut redundant = properties.clone();
+        redundant.paragraph_style_runs[0].text_wrap_style = Some(TextWrapStyle::Balance);
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(152),
+                        properties: redundant,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+
+        assert_eq!(document.undo(), Some(4));
+        assert!(
+            document
+                .text_properties_for_node(NodeId(152))
+                .unwrap()
+                .paragraph_style_runs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn text_list_type_is_presence_hashed_undoable_and_included_in_auto_size() {
+        let mut document = Document::empty();
+        let mut text = node(45);
+        text.kind = NodeKind::Text;
+        text.text = (1..=10)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let legacy_hash = document.canonical_hash();
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::WidthAndHeight;
+        properties.paragraph.list_type = Some(TextListType::Ordered);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(45),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let ordered_hash = document.canonical_hash();
+        assert_ne!(ordered_hash, legacy_hash);
+        // Default 31px text: the widest content is two glyphs (37.2px) and a
+        // four-column `10. ` gutter is 74.4px.
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(45)).unwrap()),
+            (111.6, 200.0)
+        );
+
+        properties.paragraph.list_type = Some(TextListType::Unordered);
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(45),
+                        properties,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), ordered_hash);
+        assert_eq!(document.undo(), Some(4));
+        assert_eq!(
+            document
+                .text_properties_for_node(NodeId(45))
+                .unwrap()
+                .paragraph
+                .list_type,
+            Some(TextListType::Ordered)
+        );
+    }
+
+    #[test]
+    fn text_list_spacing_is_presence_hashed_validated_undoable_and_included_in_auto_size() {
+        let mut document = Document::empty();
+        let mut text = node(46);
+        text.kind = NodeKind::Text;
+        text.text = "One\nTwo".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::Height;
+        properties.paragraph.list_type = Some(TextListType::Ordered);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(46),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let zero_spacing_hash = document.canonical_hash();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(46)).unwrap()),
+            (111.6, 40.0)
+        );
+
+        let mut invalid = properties.clone();
+        invalid.paragraph.list_spacing = Some(-1.0);
+        assert!(
+            document
+                .submit(
+                    transaction(
+                        2,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(46),
+                            properties: invalid,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                )
+                .is_err()
+        );
+        assert_eq!(document.canonical_hash(), zero_spacing_hash);
+
+        properties.paragraph.list_spacing = Some(8.0);
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(46),
+                        properties,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), zero_spacing_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(46)).unwrap()),
+            (111.6, 48.0)
+        );
+
+        assert!(document.undo().is_some());
+        assert_eq!(document.canonical_hash(), zero_spacing_hash);
+        assert_eq!(
+            document
+                .text_properties_for_node(NodeId(46))
+                .unwrap()
+                .paragraph
+                .list_spacing,
+            None
+        );
+    }
+
+    #[test]
+    fn paragraph_list_spacing_overrides_are_canonical_hashed_and_measured_per_boundary() {
+        let mut document = Document::empty();
+        let mut text = node(47);
+        text.kind = NodeKind::Text;
+        text.text = "One\nTwo".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::Height;
+        properties.paragraph.list_type = Some(TextListType::Ordered);
+        properties.paragraph.list_spacing = Some(8.0);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(47),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let global_hash = document.canonical_hash();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(47)).unwrap()),
+            (111.6, 48.0)
+        );
+
+        properties.paragraph_style_runs = vec![ParagraphStyleRun {
+            start: 0,
+            indentation: None,
+            list_type: None,
+            list_spacing: Some(0.0),
+            paragraph_spacing: None,
+            paragraph_indent: None,
+            line_height: None,
+            line_height_unit: None,
+            text_wrap_style: None,
+        }];
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(47),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let disabled_hash = document.canonical_hash();
+        assert_ne!(disabled_hash, global_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(47)).unwrap()),
+            (111.6, 40.0)
+        );
+
+        properties.paragraph_style_runs[0].list_spacing = Some(12.0);
+        document
+            .submit(
+                transaction(
+                    3,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(47),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), disabled_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(47)).unwrap()),
+            (111.6, 52.0)
+        );
+
+        for invalid_spacing in [8.0, -1.0, f64::NAN] {
+            let mut invalid = properties.clone();
+            invalid.paragraph_style_runs[0].list_spacing = Some(invalid_spacing);
+            assert!(
+                document
+                    .submit(
+                        transaction(
+                            document.revision,
+                            vec![Command::SetTextProperties {
+                                id: NodeId(47),
+                                properties: invalid,
+                            }],
+                        ),
+                        Origin::LocalUser,
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_spacing_overrides_are_canonical_hashed_and_measured_per_boundary() {
+        let mut document = Document::empty();
+        let mut text = node(147);
+        text.kind = NodeKind::Text;
+        text.text = "One\nTwo\nThree".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::Height;
+        properties.paragraph.paragraph_spacing = 8.0;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(147),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let global_hash = document.canonical_hash();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(147)).unwrap()),
+            (93.0, 76.0)
+        );
+
+        properties.paragraph_style_runs = vec![
+            ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: Some(0.0),
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: Some(12.0),
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+        ];
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(147),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), global_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(147)).unwrap()),
+            (93.0, 72.0)
+        );
+
+        for invalid_spacing in [8.0, -1.0, f64::NAN] {
+            let mut invalid = properties.clone();
+            invalid.paragraph_style_runs[0].paragraph_spacing = Some(invalid_spacing);
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(147),
+                            properties: invalid,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_indent_overrides_are_canonical_hashed_and_measured_per_paragraph() {
+        let mut document = Document::empty();
+        let mut text = node(149);
+        text.kind = NodeKind::Text;
+        text.text = "A\nA".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::WidthAndHeight;
+        properties.paragraph.paragraph_indent = Some(8.0);
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(149),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(149)).unwrap()),
+            (26.6, 40.0)
+        );
+        let inherited_hash = document.canonical_hash();
+        properties.paragraph_style_runs = vec![
+            ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: Some(0.0),
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 2,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: Some(12.0),
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+        ];
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(149),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), inherited_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(149)).unwrap()),
+            (30.6, 40.0)
+        );
+
+        for invalid_indent in [8.0, -1.0, f64::NAN] {
+            let mut invalid = properties.clone();
+            invalid.paragraph_style_runs[0].paragraph_indent = Some(invalid_indent);
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(149),
+                            properties: invalid,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_line_height_overrides_are_atomic_hashed_and_measured_per_visual_line() {
+        let mut document = Document::empty();
+        let mut text = node(150);
+        text.kind = NodeKind::Text;
+        text.text = "A\nA".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::WidthAndHeight;
+        let inherited_hash = document.canonical_hash();
+        properties.paragraph_style_runs = vec![
+            ParagraphStyleRun {
+                start: 0,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: Some(30.0),
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 2,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: Some(LineHeightUnit::Auto),
+                text_wrap_style: None,
+            },
+        ];
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(150),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), inherited_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(150)).unwrap()),
+            (18.6, 67.2)
+        );
+
+        for (line_height, unit) in [
+            (None, Some(LineHeightUnit::Percent)),
+            (Some(20.0), Some(LineHeightUnit::Auto)),
+            (Some(0.0), None),
+        ] {
+            let mut invalid = properties.clone();
+            invalid.paragraph_style_runs[0].line_height = line_height;
+            invalid.paragraph_style_runs[0].line_height_unit = unit;
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(150),
+                            properties: invalid
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+        }
+    }
+
+    #[test]
+    fn hanging_punctuation_changes_hash_and_core_auto_size_width() {
+        let mut document = Document::empty();
+        let mut text = node(151);
+        text.kind = NodeKind::Text;
+        text.text = "“AB。”".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::WidthAndHeight;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(151),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let legacy_hash = document.canonical_hash();
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(151)).unwrap()),
+            (93.0, 20.0)
+        );
+
+        properties.paragraph.hanging_punctuation = true;
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(151),
+                        properties,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), legacy_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(151)).unwrap()),
+            (55.8, 20.0)
+        );
+    }
+
+    #[test]
+    fn paragraph_style_runs_validate_hash_and_measure_nested_list_indentation() {
+        let mut document = Document::empty();
+        let mut text = node(48);
+        text.kind = NodeKind::Text;
+        text.text = "One\nTwo".into();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut properties = TextProperties::default();
+        properties.auto_size = TextAutoSize::WidthAndHeight;
+        properties.paragraph.list_type = Some(TextListType::Ordered);
+        let base_hash = document.canonical_hash();
+        properties.paragraph_style_runs = vec![ParagraphStyleRun {
+            start: 4,
+            indentation: Some(2),
+            list_type: None,
+            list_spacing: None,
+            paragraph_spacing: None,
+            paragraph_indent: None,
+            line_height: None,
+            line_height_unit: None,
+            text_wrap_style: None,
+        }];
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(48),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), base_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(48)).unwrap()),
+            (167.4, 40.0)
+        );
+
+        let inside_marker_hash = document.canonical_hash();
+        properties.paragraph.hanging_list = true;
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(48),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), inside_marker_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(48)).unwrap()),
+            (111.6, 40.0)
+        );
+
+        let hanging_hash = document.canonical_hash();
+        properties.paragraph.hanging_list = false;
+        properties.paragraph_style_runs = vec![ParagraphStyleRun {
+            start: 4,
+            indentation: None,
+            list_type: Some(ParagraphListType::None),
+            list_spacing: None,
+            paragraph_spacing: None,
+            paragraph_indent: None,
+            line_height: None,
+            line_height_unit: None,
+            text_wrap_style: None,
+        }];
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(48),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), hanging_hash);
+        assert_eq!(
+            document.auto_layout_text_size(document.node(NodeId(48)).unwrap()),
+            (111.6, 40.0)
+        );
+
+        for invalid_run in [
+            ParagraphStyleRun {
+                start: 2,
+                indentation: Some(2),
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 4,
+                indentation: Some(101),
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: None,
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+            ParagraphStyleRun {
+                start: 4,
+                indentation: None,
+                list_type: Some(ParagraphListType::Ordered),
+                list_spacing: None,
+                paragraph_spacing: None,
+                paragraph_indent: None,
+                line_height: None,
+                line_height_unit: None,
+                text_wrap_style: None,
+            },
+        ] {
+            let mut invalid = properties.clone();
+            invalid.paragraph_style_runs = vec![invalid_run];
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(48),
+                            properties: invalid,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+        }
+        assert!(document.undo().is_some());
+        assert!(
+            document
+                .text_properties_for_node(NodeId(48))
+                .unwrap()
+                .paragraph
+                .hanging_list
+        );
+        assert!(document.undo().is_some());
+        assert!(
+            !document
+                .text_properties_for_node(NodeId(48))
+                .unwrap()
+                .paragraph
+                .hanging_list
+        );
+        assert!(document.undo().is_some());
+        assert!(document.text_properties_for_node(NodeId(48)).is_none());
+    }
+
+    #[test]
+    fn empty_text_base_style_is_canonical_validated_and_undoable() {
+        let mut document = Document::empty();
+        let mut shape = node(42);
+        shape.kind = NodeKind::ShapeWithText;
+        shape.text.clear();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(shape)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let style = TextStyleRun {
+            start: 0,
+            end: 0,
+            font: None,
+            font_size: 22.0,
+            font_weight: 600,
+            italic: true,
+            letter_spacing: 1.25,
+            color: None,
+            fill_stack: Some(PaintStack { layers: vec![] }),
+            text_case: None,
+            hyperlink: None,
+            text_decoration: None,
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            text_decoration_color: None,
+        };
+        let properties = TextProperties {
+            base_style: Some(style.clone()),
+            ..TextProperties::default()
+        };
+        let baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(42),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.text_properties_for_node(NodeId(42)),
+            Some(&properties)
+        );
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        assert_eq!(document.undo(), Some(3));
+        assert_eq!(document.text_properties_for_node(NodeId(42)), None);
+        assert_eq!(document.redo(), Some(4));
+        assert_eq!(
+            document.text_properties_for_node(NodeId(42)),
+            Some(&properties)
+        );
+
+        let mut invalid = properties;
+        invalid.base_style.as_mut().unwrap().end = 1;
+        assert_eq!(
+            document.submit(
+                transaction(
+                    4,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(42),
+                        properties: invalid,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+    }
+
+    #[test]
     fn rich_text_properties_are_canonical_validated_and_undoable() {
         let font = AssetReference {
             asset_id: AssetId(12),
@@ -12685,6 +17777,7 @@ mod tests {
             media_type: "font/woff2".into(),
             byte_length: 256,
             dimensions: None,
+            font_faces: Vec::new(),
         };
         let mut text_node = node(13);
         text_node.kind = NodeKind::Text;
@@ -12720,6 +17813,16 @@ mod tests {
                     italic: false,
                     letter_spacing: 0.0,
                     color: None,
+                    fill_stack: None,
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
+                    text_decoration_color: None,
                 },
                 TextStyleRun {
                     start: 1,
@@ -12730,6 +17833,16 @@ mod tests {
                     italic: false,
                     letter_spacing: 0.0,
                     color: None,
+                    fill_stack: None,
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
+                    text_decoration_color: None,
                 },
                 TextStyleRun {
                     start: 5,
@@ -12740,15 +17853,36 @@ mod tests {
                     italic: false,
                     letter_spacing: 0.0,
                     color: None,
+                    fill_stack: None,
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
+                    text_decoration_color: None,
                 },
             ],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Center,
                 line_height: Some(24.0),
+                line_height_unit: None,
                 paragraph_spacing: 8.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::Height,
             fallback_fonts: vec![font_reference.clone()],
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         let baseline = document.canonical_hash_hex();
         document
@@ -12845,6 +17979,16 @@ mod tests {
                 italic: false,
                 letter_spacing: 0.0,
                 color: Some(Color::from_srgb_u8([220, 38, 38], 255)),
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
             }],
             ..TextProperties::default()
         };
@@ -12888,7 +18032,620 @@ mod tests {
     }
 
     #[test]
-    fn drop_shadow_is_hashed_undoable_and_rejects_invalid_or_structural_usage() {
+    fn text_case_is_canonical_hashed_undoable_and_normalizes_original_by_rejection() {
+        let mut text = node(90);
+        text.kind = NodeKind::Text;
+        text.text = "straße".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 7,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: Some(TextCase::Upper),
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(90),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let case_hash = document.canonical_hash_hex();
+        assert_ne!(case_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), case_hash);
+
+        let mut duplicate_original = properties;
+        duplicate_original.runs[0].text_case = Some(TextCase::Original);
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(90),
+                        properties: duplicate_original,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+    }
+
+    #[test]
+    fn text_hyperlink_is_canonical_hashed_undoable_and_validated_atomically() {
+        let mut text = node(92);
+        text.kind = NodeKind::Text;
+        text.text = "AB".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 2,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: Some(HyperlinkTarget {
+                    kind: HyperlinkType::Url,
+                    value: "https://example.com".into(),
+                }),
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(92),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let url_hash = document.canonical_hash_hex();
+        assert_ne!(url_hash, baseline);
+        assert_eq!(document.undo(), Some(3));
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        assert_eq!(document.redo(), Some(4));
+        assert_eq!(document.canonical_hash_hex(), url_hash);
+
+        let mut node_target = properties.clone();
+        node_target.runs[0].hyperlink = Some(HyperlinkTarget {
+            kind: HyperlinkType::Node,
+            value: "123:456".into(),
+        });
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(92),
+                        properties: node_target,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), url_hash);
+
+        for invalid_value in [
+            String::new(),
+            "contains\0nul".into(),
+            "x".repeat(MAX_TEXT_HYPERLINK_BYTES + 1),
+        ] {
+            let before_revision = document.revision;
+            let before_hash = document.canonical_hash_hex();
+            let mut invalid = properties.clone();
+            invalid.runs[0].hyperlink.as_mut().unwrap().value = invalid_value;
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(92),
+                            properties: invalid,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+            assert_eq!(document.revision, before_revision);
+            assert_eq!(document.canonical_hash_hex(), before_hash);
+        }
+    }
+
+    #[test]
+    fn text_decoration_is_canonical_hashed_and_undoable() {
+        let mut text = node(93);
+        text.kind = NodeKind::Text;
+        text.text = "AB".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 2,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let underline_hash = document.canonical_hash_hex();
+        assert_ne!(underline_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), underline_hash);
+
+        let mut strikethrough = properties;
+        strikethrough.runs[0].text_decoration = Some(TextDecoration::Strikethrough);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: strikethrough,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), underline_hash);
+
+        let solid_hash = document.canonical_hash_hex();
+        let mut wavy = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        wavy.runs[0].text_decoration_style = Some(TextDecorationStyle::Wavy);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: wavy,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), solid_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), solid_hash);
+
+        let mut offset = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        offset.runs[0].text_decoration = Some(TextDecoration::Underline);
+        offset.runs[0].text_decoration_offset = Some(TextDecorationOffset::Pixels(3.5));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: offset.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let pixel_offset_hash = document.canonical_hash_hex();
+        assert_ne!(pixel_offset_hash, solid_hash);
+
+        offset.runs[0].text_decoration_offset = Some(TextDecorationOffset::Percent(20.0));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: offset.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), pixel_offset_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), pixel_offset_hash);
+
+        let mut thickness = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        thickness.runs[0].text_decoration_thickness = Some(TextDecorationThickness::Pixels(2.5));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: thickness.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let pixel_thickness_hash = document.canonical_hash_hex();
+        assert_ne!(pixel_thickness_hash, pixel_offset_hash);
+
+        thickness.runs[0].text_decoration_thickness = Some(TextDecorationThickness::Percent(12.5));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: thickness.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash_hex(), pixel_thickness_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), pixel_thickness_hash);
+
+        thickness.runs[0].text_decoration_thickness = Some(TextDecorationThickness::Pixels(-1.0));
+        let before_revision = document.revision;
+        let before_hash = document.canonical_hash_hex();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: thickness,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+        assert_eq!(document.revision, before_revision);
+        assert_eq!(document.canonical_hash_hex(), before_hash);
+
+        let mut decoration_color = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        decoration_color.runs[0].text_decoration = Some(TextDecoration::Underline);
+        decoration_color.runs[0].text_decoration_color = Some(TextDecorationColor {
+            color: Color {
+                space: ColorSpace::Srgb,
+                components: [1.0, 0.25, 0.5],
+                alpha: 1.0,
+            },
+            visible: true,
+            opacity: 0.75,
+            blend_mode: BlendMode::Multiply,
+        });
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: decoration_color.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let decoration_color_hash = document.canonical_hash_hex();
+        assert_ne!(decoration_color_hash, before_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), before_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), decoration_color_hash);
+
+        for invalid in [
+            TextDecorationColor {
+                opacity: f32::NAN,
+                ..decoration_color.runs[0].text_decoration_color.unwrap()
+            },
+            TextDecorationColor {
+                color: Color {
+                    alpha: 0.5,
+                    ..decoration_color.runs[0]
+                        .text_decoration_color
+                        .unwrap()
+                        .color
+                },
+                ..decoration_color.runs[0].text_decoration_color.unwrap()
+            },
+            TextDecorationColor {
+                blend_mode: BlendMode::PassThrough,
+                ..decoration_color.runs[0].text_decoration_color.unwrap()
+            },
+        ] {
+            let mut properties = decoration_color.clone();
+            properties.runs[0].text_decoration_color = Some(invalid);
+            let before_revision = document.revision;
+            let before_hash = document.canonical_hash_hex();
+            assert_eq!(
+                document.submit(
+                    transaction(
+                        document.revision,
+                        vec![Command::SetTextProperties {
+                            id: NodeId(93),
+                            properties,
+                        }],
+                    ),
+                    Origin::LocalUser,
+                ),
+                Err(CommandError::InvalidTextProperties)
+            );
+            assert_eq!(document.revision, before_revision);
+            assert_eq!(document.canonical_hash_hex(), before_hash);
+        }
+
+        let mut skip_ink = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        skip_ink.runs[0].text_decoration_skip_ink = Some(true);
+        let continuous_hash = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: skip_ink.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let skip_ink_hash = document.canonical_hash_hex();
+        assert_ne!(skip_ink_hash, continuous_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), continuous_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), skip_ink_hash);
+
+        let mut cap_height = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        cap_height.runs[0].leading_trim = Some(LeadingTrim::CapHeight);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: cap_height,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let cap_height_hash = document.canonical_hash_hex();
+        assert_ne!(cap_height_hash, skip_ink_hash);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), skip_ink_hash);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), cap_height_hash);
+
+        skip_ink.runs[0].text_decoration_skip_ink = Some(false);
+        let before_revision = document.revision;
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: skip_ink,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+        assert_eq!(document.revision, before_revision);
+
+        let mut invalid_offset = document
+            .text_properties_for_node(NodeId(93))
+            .cloned()
+            .unwrap();
+        invalid_offset.runs[0].text_decoration_offset =
+            Some(TextDecorationOffset::Pixels(f64::NAN));
+        let before_revision = document.revision;
+        let before_hash = document.canonical_hash_hex();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(93),
+                        properties: invalid_offset,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+        assert_eq!(document.revision, before_revision);
+        assert_eq!(document.canonical_hash_hex(), before_hash);
+    }
+
+    #[test]
+    fn rich_text_run_paint_stack_is_hashed_undoable_and_exclusive_with_legacy_color() {
+        let mut text = node(2);
+        text.kind = NodeKind::Text;
+        text.text = "AB".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let stack = PaintStack {
+            layers: vec![crate::color::PaintLayer {
+                paint: PaintLayerKind::Solid(Color::from_srgb_u8([59, 130, 246], 255)),
+                visible: true,
+                opacity: 0.75,
+                blend_mode: BlendMode::Multiply,
+            }],
+        };
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 2,
+                font: None,
+                font_size: 16.0,
+                font_weight: 500,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: Some(stack.clone()),
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(2),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let stacked_hash = document.canonical_hash_hex();
+        assert_ne!(stacked_hash, baseline);
+        assert_eq!(
+            document.text_properties_for_node(NodeId(2)).unwrap().runs[0].fill_stack,
+            Some(stack)
+        );
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), stacked_hash);
+
+        let mut invalid = properties;
+        invalid.runs[0].color = Some(Color::from_srgb_u8([255, 0, 0], 255));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(2),
+                        properties: invalid,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextProperties),
+        );
+    }
+
+    #[test]
+    fn effects_are_hashed_undoable_allow_groups_and_reject_boolean_operations() {
         let mut document = Document::empty();
         document
             .submit(
@@ -13123,19 +18880,97 @@ mod tests {
             )
             .unwrap();
         let mut group_appearance = appearance_for_node(document.node(NodeId(2)).unwrap());
-        group_appearance.drop_shadow = appearance.drop_shadow;
+        group_appearance.effect_stack = vec![Effect::LayerBlur(LayerBlur {
+            radius: 4.0,
+            visible: true,
+        })];
+        let group_baseline = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAppearance {
+                        id: NodeId(2),
+                        appearance: group_appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let group_effect_hash = document.canonical_hash_hex();
+        assert_ne!(group_effect_hash, group_baseline);
+        assert_eq!(
+            document.node(NodeId(2)).unwrap().effect_stack,
+            group_appearance.effect_stack
+        );
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), group_baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), group_effect_hash);
+
+        let mut boolean = node(4);
+        boolean.kind = NodeKind::BooleanOperation;
+        boolean.boolean_operation = Some(BooleanOperation::Union);
+        let mut first_operand = node(5);
+        first_operand.parent_id = Some(NodeId(4));
+        let mut second_operand = node(6);
+        second_operand.parent_id = Some(NodeId(4));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![
+                        Command::Create(boolean),
+                        Command::Create(first_operand),
+                        Command::Create(second_operand),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut boolean_appearance = appearance_for_node(document.node(NodeId(4)).unwrap());
+        boolean_appearance.effect_stack = vec![Effect::LayerBlur(LayerBlur {
+            radius: 4.0,
+            visible: true,
+        })];
         assert_eq!(
             document.submit(
                 transaction(
                     document.revision,
                     vec![Command::SetAppearance {
-                        id: NodeId(2),
-                        appearance: group_appearance
+                        id: NodeId(4),
+                        appearance: boolean_appearance
                     }]
                 ),
                 Origin::LocalUser
             ),
             Err(CommandError::InvalidAppearance)
+        );
+
+        let mut created_with_effect = node(7);
+        created_with_effect.kind = NodeKind::BooleanOperation;
+        created_with_effect.boolean_operation = Some(BooleanOperation::Union);
+        created_with_effect.effect_stack = vec![Effect::LayerBlur(LayerBlur {
+            radius: 4.0,
+            visible: true,
+        })];
+        let mut created_operand_a = node(8);
+        created_operand_a.parent_id = Some(NodeId(7));
+        let mut created_operand_b = node(9);
+        created_operand_b.parent_id = Some(NodeId(7));
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![
+                        Command::Create(created_with_effect),
+                        Command::Create(created_operand_a),
+                        Command::Create(created_operand_b),
+                    ],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidAppearance),
         );
     }
 
@@ -13326,6 +19161,60 @@ mod tests {
         );
         assert_eq!(document.revision, 0);
         assert_eq!(document.nodes().count(), 0);
+    }
+
+    #[test]
+    fn operation_candidate_is_atomic_when_a_later_command_fails() {
+        let document_id = DocumentId(44);
+        let operation = OperationEnvelope::new(
+            document_id,
+            OperationId(93),
+            ActorId(7),
+            vec![],
+            Transaction {
+                id: TransactionId(84),
+                base_revision: 0,
+                commands: vec![Command::Create(node(1)), Command::Delete { id: NodeId(99) }],
+            },
+        );
+        let mut document = Document::with_id(document_id);
+        let before = document.clone();
+
+        assert_eq!(
+            document.submit_operation(operation, Origin::RemoteOperation),
+            Err(CommandError::MissingNode { id: NodeId(99) })
+        );
+        assert_eq!(document, before);
+    }
+
+    #[test]
+    fn operation_can_reference_an_already_accepted_identical_transaction() {
+        let document_id = DocumentId(45);
+        let transaction = Transaction {
+            id: TransactionId(85),
+            base_revision: 0,
+            commands: vec![Command::Create(node(1))],
+        };
+        let mut document = Document::with_id(document_id);
+        let accepted = document
+            .submit(transaction.clone(), Origin::LocalUser)
+            .unwrap();
+        let operation = OperationEnvelope::new(
+            document_id,
+            OperationId(94),
+            ActorId(7),
+            vec![],
+            transaction,
+        );
+
+        let applied = document
+            .submit_operation(operation, Origin::RemoteOperation)
+            .unwrap();
+        assert_eq!(applied.accepted_revision, accepted.accepted_revision);
+        assert_eq!(document.revision, 1);
+        assert_eq!(document.memory_stats().operation_dedupe_items, 1);
+        assert_eq!(document.undo(), Some(2));
+        assert!(document.undo().is_none());
     }
 
     #[test]
@@ -14185,7 +20074,7 @@ mod tests {
     }
 
     #[test]
-    fn blend_mode_is_hashed_and_undoable() {
+    fn pass_through_blend_mode_is_hashed_and_undoable() {
         let mut document = Document::empty();
         document
             .submit(
@@ -14195,7 +20084,7 @@ mod tests {
             .unwrap();
         let baseline = document.canonical_hash_hex();
         let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
-        appearance.blend_mode = BlendMode::Multiply;
+        appearance.blend_mode = BlendMode::PassThrough;
 
         document
             .submit(
@@ -14212,7 +20101,7 @@ mod tests {
         let blended = document.canonical_hash_hex();
         assert_eq!(
             document.node(NodeId(1)).unwrap().blend_mode,
-            BlendMode::Multiply
+            BlendMode::PassThrough
         );
         assert_ne!(blended, baseline);
         document.undo().unwrap();
@@ -14223,6 +20112,56 @@ mod tests {
         assert_eq!(document.canonical_hash_hex(), baseline);
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), blended);
+    }
+
+    #[test]
+    fn linear_blend_modes_are_distinct_in_hash_and_history() {
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let mut appearance = appearance_for_node(document.node(NodeId(1)).unwrap());
+        appearance.blend_mode = BlendMode::LinearBurn;
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance: appearance.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let burn = document.canonical_hash_hex();
+        appearance.blend_mode = BlendMode::LinearDodge;
+        document
+            .submit(
+                transaction(
+                    2,
+                    vec![Command::SetAppearance {
+                        id: NodeId(1),
+                        appearance,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let dodge = document.canonical_hash_hex();
+        assert_ne!(baseline, burn);
+        assert_ne!(burn, dodge);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), burn);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), dodge);
     }
 
     #[test]
@@ -14493,5 +20432,201 @@ mod tests {
                 .subpaths[0]
                 .closed
         );
+    }
+
+    #[test]
+    fn text_ending_truncation_is_validated_hashed_and_undoable() {
+        let mut text = node(1);
+        text.kind = NodeKind::Text;
+        text.text = "one two three".into();
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(text)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let properties = TextProperties {
+            text_truncation: TextTruncation::Ending,
+            max_lines: Some(2),
+            ..TextProperties::default()
+        };
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextProperties {
+                        id: NodeId(1),
+                        properties: properties.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let truncated = document.canonical_hash_hex();
+        assert_ne!(truncated, baseline);
+        assert_eq!(
+            document.text_properties_for_node(NodeId(1)),
+            Some(&properties)
+        );
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), truncated);
+
+        let revision = document.revision;
+        let hash = document.canonical_hash();
+        for invalid in [
+            TextProperties {
+                text_truncation: TextTruncation::Ending,
+                max_lines: Some(0),
+                ..TextProperties::default()
+            },
+            TextProperties {
+                text_truncation: TextTruncation::Disabled,
+                max_lines: Some(1),
+                ..TextProperties::default()
+            },
+        ] {
+            assert!(
+                document
+                    .submit(
+                        transaction(
+                            revision,
+                            vec![Command::SetTextProperties {
+                                id: NodeId(1),
+                                properties: invalid
+                            }]
+                        ),
+                        Origin::LocalUser,
+                    )
+                    .is_err()
+            );
+            assert_eq!(document.revision, revision);
+            assert_eq!(document.canonical_hash(), hash);
+        }
+    }
+
+    #[test]
+    fn text_path_conversion_retains_identity_and_restores_the_source_on_undo() {
+        let mut rectangle = node(91);
+        rectangle.kind = NodeKind::Rectangle;
+        rectangle.name = "Source rectangle".into();
+        rectangle.corner_radius = 12.0;
+        let position = rectangle.position;
+        let path = VectorPath {
+            fill_rule: FillRule::NonZero,
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                points: vec![
+                    VectorPoint {
+                        id: PointId(911),
+                        position: Point::new(0.0, 0.0).unwrap(),
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(912),
+                        position: Point::new(240.0, 0.0).unwrap(),
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(913),
+                        position: Point::new(240.0, 160.0).unwrap(),
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                    VectorPoint {
+                        id: PointId(914),
+                        position: Point::new(0.0, 160.0).unwrap(),
+                        handle_in: None,
+                        handle_out: None,
+                        point_type: VectorPointType::Corner,
+                    },
+                ],
+            }],
+        };
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(rectangle)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let source_hash = document.canonical_hash_hex();
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![
+                        Command::ConvertToTextPath {
+                            id: NodeId(91),
+                            path: path.clone(),
+                        },
+                        Command::Rename {
+                            id: NodeId(91),
+                            name: "Text path".into(),
+                        },
+                        Command::SetText {
+                            id: NodeId(91),
+                            text: "hello".into(),
+                        },
+                        Command::SetTextProperties {
+                            id: NodeId(91),
+                            properties: TextProperties {
+                                runs: vec![TextStyleRun {
+                                    start: 0,
+                                    end: 5,
+                                    font: None,
+                                    font_size: 18.0,
+                                    font_weight: 400,
+                                    italic: false,
+                                    letter_spacing: 0.0,
+                                    color: None,
+                                    fill_stack: None,
+                                    text_case: None,
+                                    hyperlink: None,
+                                    text_decoration: None,
+                                    text_decoration_style: None,
+                                    text_decoration_offset: None,
+                                    text_decoration_thickness: None,
+                                    text_decoration_skip_ink: None,
+                                    leading_trim: None,
+                                    text_decoration_color: None,
+                                }],
+                                ..TextProperties::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let converted_hash = document.canonical_hash_hex();
+        let converted = document.node(NodeId(91)).unwrap();
+        assert_eq!(converted.id, NodeId(91));
+        assert_eq!(converted.position, position);
+        assert_eq!(converted.kind, NodeKind::TextPath);
+        assert_eq!(converted.vector_path.as_ref(), Some(&path));
+        assert_eq!(converted.corner_radius, 0.0);
+        assert!(document.text_properties_for_node(NodeId(91)).is_some());
+
+        document.undo().unwrap();
+        let restored = document.node(NodeId(91)).unwrap();
+        assert_eq!(restored.kind, NodeKind::Rectangle);
+        assert_eq!(restored.name, "Source rectangle");
+        assert_eq!(restored.corner_radius, 12.0);
+        assert!(restored.vector_path.is_none());
+        assert!(document.text_properties_for_node(NodeId(91)).is_none());
+        assert_eq!(document.canonical_hash_hex(), source_hash);
+
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash_hex(), converted_hash);
+        assert_eq!(document.node(NodeId(91)).unwrap().kind, NodeKind::TextPath);
     }
 }

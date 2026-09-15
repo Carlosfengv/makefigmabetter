@@ -5,11 +5,19 @@ use std::collections::{HashMap, HashSet};
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
-    Effect, FillRule, FontReference, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
-    LayoutSizing, Node, NodeId, NodeKind, Page, PageId, ParagraphStyle, ParametricShape, PointId,
-    PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextProperties,
-    TextStyleRun, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    color::{Color, ColorSpace, DocumentColorProfile, GradientStop, LinearGradient, Paint},
+    Effect, FillRule, FontFaceMetadata, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
+    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
+    NodeId, NodeKind, Page, PageId, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
+    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
+    color::{
+        Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
+        ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
+        PaintLayerKind, PaintStack,
+    },
 };
 use makefigma_protocol::v1;
 use prost::Message;
@@ -17,7 +25,7 @@ use sha2::Digest;
 
 use crate::{
     CanonicalReducer, DocumentState, Hash, Id, ReducedDocument, ReductionInput, ServiceError,
-    operation_adapter::commands_from_payload,
+    operation_adapter::commands_from_payload_with_semantics,
 };
 
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
@@ -46,10 +54,11 @@ impl CanonicalReducer for CoreOperationReducer {
                 minimum: self.engine_semantics_version,
             });
         }
-        let mut document = makefigma_document_codec::document_from_snapshot(
+        let mut document = makefigma_document_codec::document_from_snapshot_with_engine_semantics(
             &current.snapshot,
             current.document_id,
             current.document_hash,
+            self.engine_semantics_version,
         )
         .map_err(|_| ServiceError::ReducerRejected)?;
         if document.revision != current.accepted_revision
@@ -60,7 +69,230 @@ impl CanonicalReducer for CoreOperationReducer {
                 actual: input.operation.base_revision,
             });
         }
-        let commands = commands_from_payload(&input.operation.payload)?;
+        let commands = commands_from_payload_with_semantics(
+            &input.operation.payload,
+            self.engine_semantics_version,
+        )?;
+        if self.engine_semantics_version
+            < makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION
+            && commands_require_shape_with_text_text_semantics(&document, &commands)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_run_paint_stack)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_base_style)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_case)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION
+            && commands_require_text_path_semantics(&document, &commands)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_PATH_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_line_height_unit)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_indent)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_wrap_style)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_list_type)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_list_spacing)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_style_runs)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_hanging_list)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_list_options)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_list_spacing)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_spacing)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_indent_run)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_line_height)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_hanging_punctuation)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum:
+                    makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_paragraph_text_wrap_style)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum:
+                    makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_hyperlink)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration_style)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration_offset)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration_thickness)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum:
+                    makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration_color)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_text_decoration_skip_ink)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum:
+                    makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
+            < makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+            && commands.iter().any(command_has_leading_trim)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum: makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+            });
+        }
         validate_delete_subtree_completeness(&document, &commands)?;
         let transaction_id = NodeId(id(&input.operation.transaction_id)?);
         document
@@ -84,6 +316,69 @@ impl CanonicalReducer for CoreOperationReducer {
             document_hash,
         })
     }
+}
+
+fn commands_require_shape_with_text_text_semantics(
+    document: &Document,
+    commands: &[Command],
+) -> bool {
+    let created_kinds = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Create(node) | Command::CreateInPage { node, .. } => {
+                Some((node.id, &node.kind))
+            }
+            Command::CreateImageInPage { node, .. } => Some((node.id, &node.kind)),
+            Command::RestoreNode { node, .. } => Some((node.id, &node.kind)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    commands.iter().any(|command| match command {
+        Command::SetTextProperties { id, .. } => {
+            created_kinds
+                .get(id)
+                .is_some_and(|kind| **kind == NodeKind::ShapeWithText)
+                || document
+                    .node(*id)
+                    .is_some_and(|node| node.kind == NodeKind::ShapeWithText)
+        }
+        Command::RestoreNode {
+            node,
+            text_properties,
+            ..
+        } => node.kind == NodeKind::ShapeWithText && text_properties.is_some(),
+        _ => false,
+    })
+}
+
+fn commands_require_text_path_semantics(document: &Document, commands: &[Command]) -> bool {
+    let created_text_paths = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Create(node) | Command::CreateInPage { node, .. }
+                if node.kind == NodeKind::TextPath =>
+            {
+                Some(node.id)
+            }
+            Command::RestoreNode { node, .. } if node.kind == NodeKind::TextPath => Some(node.id),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    commands.iter().any(|command| match command {
+        Command::ConvertToTextPath { .. } => true,
+        Command::SetTextProperties { id, .. } => {
+            created_text_paths.contains(id)
+                || document
+                    .node(*id)
+                    .is_some_and(|node| node.kind == NodeKind::TextPath)
+        }
+        Command::RestoreNode {
+            node,
+            text_properties,
+            ..
+        } => node.kind == NodeKind::TextPath && text_properties.is_some(),
+        _ => false,
+    })
 }
 
 /// Server-side guard that a container delete carries its complete subtree.
@@ -156,6 +451,368 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
+        && document.assets().any(|asset| !asset.font_faces.is_empty())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document.fill_stack_for_node(node.id).is_some()
+                || document.stroke_stack_for_node(node.id).is_some()
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_non_linear_gradient)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_fill_stack)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_base_style)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_case)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_line_height_unit)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_indent)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_wrap_style)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_list_type)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_list_spacing)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_style_runs)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hanging_list)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_list_options)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_list_spacing)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_spacing)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_indent_run)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_line_height)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hanging_punctuation)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_paragraph_text_wrap_style)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_hyperlink)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_style)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_offset)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_thickness)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_color)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_skip_ink)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_leading_trim)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.blend_mode.requires_advanced_blend_semantics()
+                || [
+                    document.fill_stack_for_node(node.id),
+                    document.stroke_stack_for_node(node.id),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|stack| &stack.layers)
+                .any(|layer| layer.blend_mode.requires_advanced_blend_semantics())
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_rotated_image)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| node.blend_mode.requires_pass_through_semantics())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.blend_mode.requires_linear_blend_semantics()
+                || [
+                    document.fill_stack_for_node(node.id),
+                    document.stroke_stack_for_node(node.id),
+                ]
+                .into_iter()
+                .flatten()
+                .any(paint_stack_has_linear_blend)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.extensions
+                .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION)
+                .is_some_and(|value| value.as_slice() == [1])
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            [
+                document.fill_stack_for_node(node.id),
+                document.stroke_stack_for_node(node.id),
+            ]
+            .into_iter()
+            .flatten()
+            .any(paint_stack_has_image_filters)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version < makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_truncation)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            node.kind == NodeKind::ShapeWithText
+                && document.text_properties_for_node(node.id).is_some()
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     let mut pages = document.pages().cloned().collect::<Vec<_>>();
     pages.sort_by_key(|page| (page.position, page.id));
     let page_chunks = pages
@@ -172,6 +829,8 @@ pub fn snapshot_from_document(
                         document.asset_for_node(node.id),
                         document.text_properties_for_node(node.id),
                         document.auto_layout_for_node(node.id),
+                        document.fill_stack_for_node(node.id),
+                        document.stroke_stack_for_node(node.id),
                     )
                     .encode_to_vec();
                     Ok(v1::SceneNodeRef {
@@ -219,9 +878,23 @@ pub fn document_from_snapshot(
     {
         return Err(ServiceError::ReducerRejected);
     }
+    if snapshot.engine_semantics_version
+        > makefigma_document_codec::CURRENT_ENGINE_SEMANTICS_VERSION
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: snapshot.engine_semantics_version,
+        });
+    }
+    let declared_engine_semantics_version = snapshot.engine_semantics_version;
     let mut document = Document::with_id(DocumentId(id(&snapshot.document_id)?));
     document.seed_color_profile(profile_from_proto(snapshot.document_color_profile)?);
     for asset in snapshot.resource_index {
+        if declared_engine_semantics_version
+            < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
+            && !asset.font_faces.is_empty()
+        {
+            return Err(ServiceError::ReducerRejected);
+        }
         document
             .seed_asset(asset_from_proto(asset)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
@@ -241,8 +914,292 @@ pub fn document_from_snapshot(
         for reference in chunk.nodes {
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| ServiceError::ReducerRejected)?;
-            let (page_id, node, asset_id, text_properties, auto_layout) =
+            let (page_id, node, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
                 node_from_proto(node_proto)?;
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
+                && (fill_stack.is_some() || stroke_stack.is_some())
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_RUN_PAINT_STACK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_fill_stack)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_base_style)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_case)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_line_height_unit)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_indent)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_wrap_style)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_list_type)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_list_spacing)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_style_runs)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hanging_list)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_list_options)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_list_spacing)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_spacing)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_indent_run)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_line_height)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hanging_punctuation)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_paragraph_text_wrap_style)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_hyperlink)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_style)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_offset)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_thickness)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_color)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_skip_ink)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_leading_trim)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_non_linear_gradient)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION
+                && (node.blend_mode.requires_advanced_blend_semantics()
+                    || [fill_stack.as_ref(), stroke_stack.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|stack| &stack.layers)
+                        .any(|layer| layer.blend_mode.requires_advanced_blend_semantics()))
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_rotated_image)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION
+                && node.blend_mode.requires_pass_through_semantics()
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION
+                && (node.blend_mode.requires_linear_blend_semantics()
+                    || [fill_stack.as_ref(), stroke_stack.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(paint_stack_has_linear_blend))
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION
+                && node
+                    .extensions
+                    .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION)
+                    .is_some_and(|value| value.as_slice() == [1])
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION
+                && [fill_stack.as_ref(), stroke_stack.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(paint_stack_has_image_filters)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_truncation)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION
+                && node.kind == NodeKind::ShapeWithText
+                && text_properties.is_some()
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
             if page_id.0 != id(&reference.page_id)?
                 || node.id.0 != id(&reference.node_id)?
                 || node.position
@@ -272,6 +1229,9 @@ pub fn document_from_snapshot(
             document
                 .seed_auto_layout(node_id, auto_layout)
                 .map_err(|_| ServiceError::ReducerRejected)?;
+            document
+                .seed_paint_stacks(node_id, fill_stack, stroke_stack)
+                .map_err(|_| ServiceError::ReducerRejected)?;
         }
     }
     for retired_id in snapshot.retired_node_ids {
@@ -279,6 +1239,9 @@ pub fn document_from_snapshot(
             .seed_retired_id(NodeId(id(&retired_id)?))
             .map_err(|_| ServiceError::ReducerRejected)?;
     }
+    document
+        .validate_seeded_structure()
+        .map_err(|_| ServiceError::ReducerRejected)?;
     document.revision = snapshot.revision;
     if page_hashes
         .into_iter()
@@ -311,6 +1274,15 @@ fn asset_to_proto(asset: &AssetReference) -> v1::ResourceIndexEntry {
         byte_length: Some(asset.byte_length),
         pixel_width: asset.dimensions.map(|[width, _]| width),
         pixel_height: asset.dimensions.map(|[_, height]| height),
+        font_faces: asset
+            .font_faces
+            .iter()
+            .map(|face| v1::FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family.clone(),
+                style: face.style.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -329,6 +1301,15 @@ fn asset_from_proto(asset: v1::ResourceIndexEntry) -> Result<AssetReference, Ser
             (Some(width), Some(height)) => Some([width, height]),
             _ => return Err(ServiceError::ReducerRejected),
         },
+        font_faces: asset
+            .font_faces
+            .into_iter()
+            .map(|face| FontFaceMetadata {
+                face_index: face.face_index,
+                family: face.family,
+                style: face.style,
+            })
+            .collect(),
     })
 }
 
@@ -338,6 +1319,8 @@ fn node_to_proto(
     asset_id: Option<AssetId>,
     text_properties: Option<&TextProperties>,
     auto_layout: AutoLayout,
+    fill_stack: Option<&PaintStack>,
+    stroke_stack: Option<&PaintStack>,
 ) -> v1::SceneNode {
     v1::SceneNode {
         node_id: id_to_bytes(node.id.0),
@@ -444,6 +1427,8 @@ fn node_to_proto(
         auto_layout: Some(auto_layout_to_proto(&auto_layout)),
         reactions: Vec::new(),
         prototype_metadata: None,
+        fill_stack: fill_stack.map(paint_stack_to_proto),
+        stroke_stack: stroke_stack.map(paint_stack_to_proto),
     }
 }
 
@@ -456,6 +1441,8 @@ fn node_from_proto(
         Option<AssetId>,
         Option<TextProperties>,
         AutoLayout,
+        Option<PaintStack>,
+        Option<PaintStack>,
     ),
     ServiceError,
 > {
@@ -507,6 +1494,8 @@ fn node_from_proto(
             | NodeKind::Slot
             | NodeKind::ComponentSet
     ));
+    let fill_stack = node.fill_stack.map(paint_stack_from_proto).transpose()?;
+    let stroke_stack = node.stroke_stack.map(paint_stack_from_proto).transpose()?;
     Ok((
         page_id,
         Node {
@@ -585,6 +1574,8 @@ fn node_from_proto(
             .map(auto_layout_from_proto)
             .transpose()?
             .unwrap_or_default(),
+        fill_stack,
+        stroke_stack,
     ))
 }
 
@@ -893,6 +1884,19 @@ fn blend_mode_to_proto(mode: BlendMode) -> v1::BlendMode {
         BlendMode::Overlay => v1::BlendMode::Overlay,
         BlendMode::Darken => v1::BlendMode::Darken,
         BlendMode::Lighten => v1::BlendMode::Lighten,
+        BlendMode::ColorDodge => v1::BlendMode::ColorDodge,
+        BlendMode::ColorBurn => v1::BlendMode::ColorBurn,
+        BlendMode::HardLight => v1::BlendMode::HardLight,
+        BlendMode::SoftLight => v1::BlendMode::SoftLight,
+        BlendMode::Difference => v1::BlendMode::Difference,
+        BlendMode::Exclusion => v1::BlendMode::Exclusion,
+        BlendMode::Hue => v1::BlendMode::Hue,
+        BlendMode::Saturation => v1::BlendMode::Saturation,
+        BlendMode::Color => v1::BlendMode::Color,
+        BlendMode::Luminosity => v1::BlendMode::Luminosity,
+        BlendMode::PassThrough => v1::BlendMode::PassThrough,
+        BlendMode::LinearBurn => v1::BlendMode::LinearBurn,
+        BlendMode::LinearDodge => v1::BlendMode::LinearDodge,
     }
 }
 
@@ -904,6 +1908,19 @@ fn blend_mode_from_proto(value: i32) -> Result<BlendMode, ServiceError> {
         v1::BlendMode::Overlay => Ok(BlendMode::Overlay),
         v1::BlendMode::Darken => Ok(BlendMode::Darken),
         v1::BlendMode::Lighten => Ok(BlendMode::Lighten),
+        v1::BlendMode::ColorDodge => Ok(BlendMode::ColorDodge),
+        v1::BlendMode::ColorBurn => Ok(BlendMode::ColorBurn),
+        v1::BlendMode::HardLight => Ok(BlendMode::HardLight),
+        v1::BlendMode::SoftLight => Ok(BlendMode::SoftLight),
+        v1::BlendMode::Difference => Ok(BlendMode::Difference),
+        v1::BlendMode::Exclusion => Ok(BlendMode::Exclusion),
+        v1::BlendMode::Hue => Ok(BlendMode::Hue),
+        v1::BlendMode::Saturation => Ok(BlendMode::Saturation),
+        v1::BlendMode::Color => Ok(BlendMode::Color),
+        v1::BlendMode::Luminosity => Ok(BlendMode::Luminosity),
+        v1::BlendMode::PassThrough => Ok(BlendMode::PassThrough),
+        v1::BlendMode::LinearBurn => Ok(BlendMode::LinearBurn),
+        v1::BlendMode::LinearDodge => Ok(BlendMode::LinearDodge),
     }
 }
 
@@ -1113,6 +2130,24 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 italic: run.italic,
                 letter_spacing: run.letter_spacing,
                 color: run.color.map(color_to_proto),
+                fill_stack: run.fill_stack.as_ref().map(paint_stack_to_proto),
+                text_case: run.text_case.map(text_case_to_proto),
+                hyperlink: run.hyperlink.as_ref().map(hyperlink_to_proto),
+                text_decoration: run.text_decoration.map(text_decoration_to_proto),
+                text_decoration_style: run
+                    .text_decoration_style
+                    .map(text_decoration_style_to_proto),
+                text_decoration_offset: run
+                    .text_decoration_offset
+                    .map(text_decoration_offset_to_proto),
+                text_decoration_thickness: run
+                    .text_decoration_thickness
+                    .map(text_decoration_thickness_to_proto),
+                text_decoration_skip_ink: run.text_decoration_skip_ink,
+                leading_trim: run.leading_trim.map(leading_trim_to_proto),
+                text_decoration_color: run
+                    .text_decoration_color
+                    .map(text_decoration_color_to_proto),
             })
             .collect(),
         paragraph: Some(v1::ParagraphStyle {
@@ -1124,6 +2159,19 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
             } as i32,
             line_height: properties.paragraph.line_height,
             paragraph_spacing: properties.paragraph.paragraph_spacing,
+            line_height_unit: properties
+                .paragraph
+                .line_height_unit
+                .map(line_height_unit_to_proto),
+            paragraph_indent: properties.paragraph.paragraph_indent,
+            text_wrap_style: properties
+                .paragraph
+                .text_wrap_style
+                .map(text_wrap_style_to_proto),
+            list_type: properties.paragraph.list_type.map(text_list_type_to_proto),
+            list_spacing: properties.paragraph.list_spacing,
+            hanging_list: properties.paragraph.hanging_list.then_some(true),
+            hanging_punctuation: properties.paragraph.hanging_punctuation.then_some(true),
         }),
         auto_size: match properties.auto_size {
             TextAutoSize::Fixed => v1::TextAutoSize::Fixed,
@@ -1134,6 +2182,55 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
             .fallback_fonts
             .iter()
             .map(font_to_proto)
+            .collect(),
+        text_truncation: (properties.text_truncation == TextTruncation::Ending)
+            .then_some(v1::TextTruncation::Ending as i32),
+        max_lines: properties.max_lines,
+        base_style: properties
+            .base_style
+            .as_ref()
+            .map(|style| v1::TextStyleRun {
+                start: 0,
+                end: 0,
+                font: style.font.as_ref().map(font_to_proto),
+                font_size: style.font_size,
+                font_weight: u32::from(style.font_weight),
+                italic: style.italic,
+                letter_spacing: style.letter_spacing,
+                color: style.color.map(color_to_proto),
+                fill_stack: style.fill_stack.as_ref().map(paint_stack_to_proto),
+                text_case: style.text_case.map(text_case_to_proto),
+                hyperlink: style.hyperlink.as_ref().map(hyperlink_to_proto),
+                text_decoration: style.text_decoration.map(text_decoration_to_proto),
+                text_decoration_style: style
+                    .text_decoration_style
+                    .map(text_decoration_style_to_proto),
+                text_decoration_offset: style
+                    .text_decoration_offset
+                    .map(text_decoration_offset_to_proto),
+                text_decoration_thickness: style
+                    .text_decoration_thickness
+                    .map(text_decoration_thickness_to_proto),
+                text_decoration_skip_ink: style.text_decoration_skip_ink,
+                leading_trim: style.leading_trim.map(leading_trim_to_proto),
+                text_decoration_color: style
+                    .text_decoration_color
+                    .map(text_decoration_color_to_proto),
+            }),
+        paragraph_style_runs: properties
+            .paragraph_style_runs
+            .iter()
+            .map(|run| v1::ParagraphStyleRun {
+                start: run.start,
+                indentation: run.indentation,
+                list_type: run.list_type.map(paragraph_list_type_to_proto),
+                list_spacing: run.list_spacing,
+                paragraph_spacing: run.paragraph_spacing,
+                paragraph_indent: run.paragraph_indent,
+                line_height: run.line_height,
+                line_height_unit: run.line_height_unit.map(line_height_unit_to_proto),
+                text_wrap_style: run.text_wrap_style.map(text_wrap_style_to_proto),
+            })
             .collect(),
     }
 }
@@ -1172,21 +2269,725 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     italic: run.italic,
                     letter_spacing: run.letter_spacing,
                     color: run.color.map(color_from_proto).transpose()?,
+                    fill_stack: run.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: run
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: run.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: run
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: run
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: run
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: run
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: run.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: run
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: run
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
                 })
             })
             .collect::<Result<_, ServiceError>>()?,
         paragraph: ParagraphStyle {
             alignment,
             line_height: paragraph.line_height,
+            line_height_unit: paragraph
+                .line_height_unit
+                .map(line_height_unit_from_proto)
+                .transpose()?
+                .flatten(),
             paragraph_spacing: paragraph.paragraph_spacing,
+            paragraph_indent: paragraph.paragraph_indent,
+            text_wrap_style: paragraph
+                .text_wrap_style
+                .map(text_wrap_style_from_proto)
+                .transpose()?
+                .flatten(),
+            list_type: paragraph
+                .list_type
+                .map(text_list_type_from_proto)
+                .transpose()?
+                .flatten(),
+            list_spacing: paragraph.list_spacing.filter(|value| *value != 0.0),
+            hanging_list: paragraph.hanging_list.unwrap_or(false),
+            hanging_punctuation: paragraph.hanging_punctuation.unwrap_or(false),
         },
+        paragraph_style_runs: value
+            .paragraph_style_runs
+            .into_iter()
+            .map(|run| {
+                Ok(ParagraphStyleRun {
+                    start: run.start,
+                    indentation: run.indentation,
+                    list_type: run
+                        .list_type
+                        .map(paragraph_list_type_from_proto)
+                        .transpose()?,
+                    list_spacing: run.list_spacing,
+                    paragraph_spacing: run.paragraph_spacing,
+                    paragraph_indent: run.paragraph_indent,
+                    line_height: run.line_height,
+                    line_height_unit: run
+                        .line_height_unit
+                        .map(line_height_unit_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_wrap_style: run
+                        .text_wrap_style
+                        .map(paragraph_text_wrap_style_from_proto)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<_, ServiceError>>()?,
         auto_size,
+        text_truncation: match value.text_truncation {
+            None => TextTruncation::Disabled,
+            Some(raw) => match v1::TextTruncation::try_from(raw)
+                .map_err(|_| ServiceError::ReducerRejected)?
+            {
+                v1::TextTruncation::Disabled => TextTruncation::Disabled,
+                v1::TextTruncation::Ending => TextTruncation::Ending,
+                v1::TextTruncation::Unspecified => return Err(ServiceError::ReducerRejected),
+            },
+        },
+        max_lines: value.max_lines,
+        base_style: value
+            .base_style
+            .map(|style| {
+                Ok(TextStyleRun {
+                    start: style.start,
+                    end: style.end,
+                    font: style.font.map(font_from_proto).transpose()?,
+                    font_size: style.font_size,
+                    font_weight: u16::try_from(style.font_weight)
+                        .map_err(|_| ServiceError::ReducerRejected)?,
+                    italic: style.italic,
+                    letter_spacing: style.letter_spacing,
+                    color: style.color.map(color_from_proto).transpose()?,
+                    fill_stack: style.fill_stack.map(paint_stack_from_proto).transpose()?,
+                    text_case: style
+                        .text_case
+                        .map(text_case_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    hyperlink: style.hyperlink.map(hyperlink_from_proto).transpose()?,
+                    text_decoration: style
+                        .text_decoration
+                        .map(text_decoration_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_style: style
+                        .text_decoration_style
+                        .map(text_decoration_style_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_offset: style
+                        .text_decoration_offset
+                        .map(text_decoration_offset_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_thickness: style
+                        .text_decoration_thickness
+                        .map(text_decoration_thickness_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_skip_ink: style.text_decoration_skip_ink.filter(|value| *value),
+                    leading_trim: style
+                        .leading_trim
+                        .map(leading_trim_from_proto)
+                        .transpose()?
+                        .flatten(),
+                    text_decoration_color: style
+                        .text_decoration_color
+                        .map(text_decoration_color_from_proto)
+                        .transpose()?,
+                })
+            })
+            .transpose()?,
         fallback_fonts: value
             .fallback_fonts
             .into_iter()
             .map(font_from_proto)
             .collect::<Result<_, ServiceError>>()?,
     })
+}
+
+fn text_properties_has_truncation(properties: &TextProperties) -> bool {
+    properties.text_truncation == TextTruncation::Ending || properties.max_lines.is_some()
+}
+
+fn text_properties_has_text_case(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.text_case.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_case.is_some())
+}
+
+fn text_properties_has_line_height_unit(properties: &TextProperties) -> bool {
+    properties.paragraph.line_height_unit.is_some()
+}
+
+fn text_properties_has_paragraph_indent(properties: &TextProperties) -> bool {
+    properties.paragraph.paragraph_indent.is_some()
+}
+
+fn text_properties_has_text_wrap_style(properties: &TextProperties) -> bool {
+    properties.paragraph.text_wrap_style.is_some()
+}
+
+fn text_properties_has_list_type(properties: &TextProperties) -> bool {
+    properties.paragraph.list_type.is_some()
+}
+
+fn text_properties_has_list_spacing(properties: &TextProperties) -> bool {
+    properties.paragraph.list_spacing.is_some()
+}
+
+fn text_properties_has_paragraph_style_runs(properties: &TextProperties) -> bool {
+    !properties.paragraph_style_runs.is_empty()
+}
+
+fn text_properties_has_paragraph_list_options(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_type.is_some())
+}
+
+fn text_properties_has_paragraph_list_spacing(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.list_spacing.is_some())
+}
+
+fn text_properties_has_paragraph_spacing(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_spacing.is_some())
+}
+
+fn text_properties_has_paragraph_indent_run(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.paragraph_indent.is_some())
+}
+
+fn text_properties_has_paragraph_line_height(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.line_height.is_some() || run.line_height_unit.is_some())
+}
+
+fn text_properties_has_paragraph_text_wrap_style(properties: &TextProperties) -> bool {
+    properties
+        .paragraph_style_runs
+        .iter()
+        .any(|run| run.text_wrap_style.is_some())
+}
+
+fn text_properties_has_hanging_list(properties: &TextProperties) -> bool {
+    properties.paragraph.hanging_list
+}
+
+fn text_properties_has_hanging_punctuation(properties: &TextProperties) -> bool {
+    properties.paragraph.hanging_punctuation
+}
+
+fn text_properties_has_hyperlink(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.hyperlink.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.hyperlink.is_some())
+}
+
+fn text_properties_has_text_decoration(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration.is_some())
+}
+
+fn text_properties_has_text_decoration_style(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_style.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_style.is_some())
+}
+
+fn text_properties_has_text_decoration_offset(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_offset.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_offset.is_some())
+}
+
+fn text_properties_has_text_decoration_thickness(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_thickness.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_thickness.is_some())
+}
+
+fn text_properties_has_text_decoration_color(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_color.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_color.is_some())
+}
+
+fn text_properties_has_text_decoration_skip_ink(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| run.text_decoration_skip_ink == Some(true))
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.text_decoration_skip_ink == Some(true))
+}
+
+fn text_properties_has_leading_trim(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.leading_trim.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.leading_trim.is_some())
+}
+
+fn leading_trim_to_proto(value: LeadingTrim) -> i32 {
+    match value {
+        LeadingTrim::CapHeight => v1::LeadingTrim::CapHeight as i32,
+    }
+}
+
+fn leading_trim_from_proto(value: i32) -> Result<Option<LeadingTrim>, ServiceError> {
+    match v1::LeadingTrim::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::LeadingTrim::CapHeight => Ok(Some(LeadingTrim::CapHeight)),
+        v1::LeadingTrim::None | v1::LeadingTrim::Unspecified => Ok(None),
+    }
+}
+
+fn text_decoration_offset_to_proto(value: TextDecorationOffset) -> v1::TextDecorationOffset {
+    let (value, unit) = match value {
+        TextDecorationOffset::Pixels(value) => (value, v1::TextDecorationOffsetUnit::Pixels),
+        TextDecorationOffset::Percent(value) => (value, v1::TextDecorationOffsetUnit::Percent),
+    };
+    v1::TextDecorationOffset {
+        value,
+        unit: unit as i32,
+    }
+}
+
+fn text_decoration_offset_from_proto(
+    value: v1::TextDecorationOffset,
+) -> Result<Option<TextDecorationOffset>, ServiceError> {
+    match v1::TextDecorationOffsetUnit::try_from(value.unit)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::TextDecorationOffsetUnit::Pixels => Ok(Some(TextDecorationOffset::Pixels(value.value))),
+        v1::TextDecorationOffsetUnit::Percent => {
+            Ok(Some(TextDecorationOffset::Percent(value.value)))
+        }
+        v1::TextDecorationOffsetUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationOffsetUnit::Auto | v1::TextDecorationOffsetUnit::Unspecified => {
+            Err(ServiceError::ReducerRejected)
+        }
+    }
+}
+
+fn text_decoration_thickness_to_proto(
+    value: TextDecorationThickness,
+) -> v1::TextDecorationThickness {
+    let (value, unit) = match value {
+        TextDecorationThickness::Pixels(value) => (value, v1::TextDecorationThicknessUnit::Pixels),
+        TextDecorationThickness::Percent(value) => {
+            (value, v1::TextDecorationThicknessUnit::Percent)
+        }
+    };
+    v1::TextDecorationThickness {
+        value,
+        unit: unit as i32,
+    }
+}
+
+fn text_decoration_thickness_from_proto(
+    value: v1::TextDecorationThickness,
+) -> Result<Option<TextDecorationThickness>, ServiceError> {
+    match v1::TextDecorationThicknessUnit::try_from(value.unit)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::TextDecorationThicknessUnit::Pixels => {
+            Ok(Some(TextDecorationThickness::Pixels(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Percent => {
+            Ok(Some(TextDecorationThickness::Percent(value.value)))
+        }
+        v1::TextDecorationThicknessUnit::Auto if value.value == 0.0 => Ok(None),
+        v1::TextDecorationThicknessUnit::Auto | v1::TextDecorationThicknessUnit::Unspecified => {
+            Err(ServiceError::ReducerRejected)
+        }
+    }
+}
+
+fn text_decoration_color_to_proto(value: TextDecorationColor) -> v1::TextDecorationColor {
+    v1::TextDecorationColor {
+        color: Some(color_to_proto(value.color)),
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode: blend_mode_to_proto(value.blend_mode) as i32,
+    }
+}
+
+fn text_decoration_color_from_proto(
+    value: v1::TextDecorationColor,
+) -> Result<TextDecorationColor, ServiceError> {
+    let blend_mode = blend_mode_from_proto(value.blend_mode)?;
+    if matches!(blend_mode, BlendMode::PassThrough) {
+        return Err(ServiceError::ReducerRejected);
+    }
+    Ok(TextDecorationColor {
+        color: color_from_proto(value.color.ok_or(ServiceError::ReducerRejected)?)?,
+        visible: value.visible,
+        opacity: value.opacity,
+        blend_mode,
+    })
+}
+
+fn text_decoration_style_to_proto(value: TextDecorationStyle) -> i32 {
+    (match value {
+        TextDecorationStyle::Wavy => v1::TextDecorationStyle::Wavy,
+        TextDecorationStyle::Dotted => v1::TextDecorationStyle::Dotted,
+    }) as i32
+}
+
+fn text_decoration_style_from_proto(
+    value: i32,
+) -> Result<Option<TextDecorationStyle>, ServiceError> {
+    match v1::TextDecorationStyle::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextDecorationStyle::Wavy => Ok(Some(TextDecorationStyle::Wavy)),
+        v1::TextDecorationStyle::Dotted => Ok(Some(TextDecorationStyle::Dotted)),
+        v1::TextDecorationStyle::Unspecified | v1::TextDecorationStyle::Solid => Ok(None),
+    }
+}
+
+fn text_decoration_to_proto(value: TextDecoration) -> i32 {
+    (match value {
+        TextDecoration::Underline => v1::TextDecoration::Underline,
+        TextDecoration::Strikethrough => v1::TextDecoration::Strikethrough,
+    }) as i32
+}
+
+fn text_decoration_from_proto(value: i32) -> Result<Option<TextDecoration>, ServiceError> {
+    Ok(Some(
+        match v1::TextDecoration::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+            v1::TextDecoration::Underline => TextDecoration::Underline,
+            v1::TextDecoration::Strikethrough => TextDecoration::Strikethrough,
+            v1::TextDecoration::Unspecified => return Ok(None),
+        },
+    ))
+}
+
+fn hyperlink_to_proto(value: &HyperlinkTarget) -> v1::HyperlinkTarget {
+    v1::HyperlinkTarget {
+        r#type: match value.kind {
+            HyperlinkType::Url => v1::HyperlinkType::Url,
+            HyperlinkType::Node => v1::HyperlinkType::Node,
+        } as i32,
+        value: value.value.clone(),
+    }
+}
+
+fn hyperlink_from_proto(value: v1::HyperlinkTarget) -> Result<HyperlinkTarget, ServiceError> {
+    let kind = match v1::HyperlinkType::try_from(value.r#type)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::HyperlinkType::Url => HyperlinkType::Url,
+        v1::HyperlinkType::Node => HyperlinkType::Node,
+        v1::HyperlinkType::Unspecified => return Err(ServiceError::ReducerRejected),
+    };
+    Ok(HyperlinkTarget {
+        kind,
+        value: value.value,
+    })
+}
+
+fn text_wrap_style_to_proto(value: TextWrapStyle) -> i32 {
+    (match value {
+        TextWrapStyle::Auto => v1::TextWrapStyle::Auto,
+        TextWrapStyle::Balance => v1::TextWrapStyle::Balance,
+        TextWrapStyle::Pretty => v1::TextWrapStyle::Pretty,
+    }) as i32
+}
+
+fn paragraph_text_wrap_style_from_proto(value: i32) -> Result<TextWrapStyle, ServiceError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextWrapStyle::Auto => Ok(TextWrapStyle::Auto),
+        v1::TextWrapStyle::Balance => Ok(TextWrapStyle::Balance),
+        v1::TextWrapStyle::Pretty => Ok(TextWrapStyle::Pretty),
+        v1::TextWrapStyle::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn text_wrap_style_from_proto(value: i32) -> Result<Option<TextWrapStyle>, ServiceError> {
+    match v1::TextWrapStyle::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextWrapStyle::Auto => Ok(None),
+        v1::TextWrapStyle::Balance => Ok(Some(TextWrapStyle::Balance)),
+        v1::TextWrapStyle::Pretty => Ok(Some(TextWrapStyle::Pretty)),
+        v1::TextWrapStyle::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn text_list_type_to_proto(value: TextListType) -> i32 {
+    (match value {
+        TextListType::Ordered => v1::TextListType::Ordered,
+        TextListType::Unordered => v1::TextListType::Unordered,
+    }) as i32
+}
+
+fn text_list_type_from_proto(value: i32) -> Result<Option<TextListType>, ServiceError> {
+    match v1::TextListType::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextListType::None => Ok(None),
+        v1::TextListType::Ordered => Ok(Some(TextListType::Ordered)),
+        v1::TextListType::Unordered => Ok(Some(TextListType::Unordered)),
+        v1::TextListType::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn paragraph_list_type_to_proto(value: ParagraphListType) -> i32 {
+    (match value {
+        ParagraphListType::None => v1::TextListType::None,
+        ParagraphListType::Ordered => v1::TextListType::Ordered,
+        ParagraphListType::Unordered => v1::TextListType::Unordered,
+    }) as i32
+}
+
+fn paragraph_list_type_from_proto(value: i32) -> Result<ParagraphListType, ServiceError> {
+    match v1::TextListType::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextListType::None => Ok(ParagraphListType::None),
+        v1::TextListType::Ordered => Ok(ParagraphListType::Ordered),
+        v1::TextListType::Unordered => Ok(ParagraphListType::Unordered),
+        v1::TextListType::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn line_height_unit_to_proto(value: LineHeightUnit) -> i32 {
+    (match value {
+        LineHeightUnit::Percent => v1::LineHeightUnit::Percent,
+        LineHeightUnit::Auto => v1::LineHeightUnit::Auto,
+    }) as i32
+}
+
+fn line_height_unit_from_proto(value: i32) -> Result<Option<LineHeightUnit>, ServiceError> {
+    match v1::LineHeightUnit::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::LineHeightUnit::Pixels => Ok(None),
+        v1::LineHeightUnit::Percent => Ok(Some(LineHeightUnit::Percent)),
+        v1::LineHeightUnit::Auto => Ok(Some(LineHeightUnit::Auto)),
+        v1::LineHeightUnit::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn text_case_to_proto(value: TextCase) -> i32 {
+    (match value {
+        TextCase::Original => v1::TextCase::Original,
+        TextCase::Upper => v1::TextCase::Upper,
+        TextCase::Lower => v1::TextCase::Lower,
+        TextCase::Title => v1::TextCase::Title,
+        TextCase::SmallCaps => v1::TextCase::SmallCaps,
+        TextCase::SmallCapsForced => v1::TextCase::SmallCapsForced,
+    }) as i32
+}
+
+fn text_case_from_proto(value: i32) -> Result<Option<TextCase>, ServiceError> {
+    match v1::TextCase::try_from(value).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::TextCase::Original => Ok(None),
+        v1::TextCase::Upper => Ok(Some(TextCase::Upper)),
+        v1::TextCase::Lower => Ok(Some(TextCase::Lower)),
+        v1::TextCase::Title => Ok(Some(TextCase::Title)),
+        v1::TextCase::SmallCaps => Ok(Some(TextCase::SmallCaps)),
+        v1::TextCase::SmallCapsForced => Ok(Some(TextCase::SmallCapsForced)),
+        v1::TextCase::Unspecified => Err(ServiceError::ReducerRejected),
+    }
+}
+
+fn text_properties_has_fill_stack(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| run.fill_stack.is_some())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| style.fill_stack.is_some())
+}
+
+fn text_properties_has_base_style(properties: &TextProperties) -> bool {
+    properties.base_style.is_some()
+}
+
+fn command_has_text_run_paint_stack(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_fill_stack(properties))
+}
+
+fn command_has_text_base_style(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_base_style(properties))
+}
+
+fn command_has_text_case(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_case(properties))
+}
+
+fn command_has_line_height_unit(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_line_height_unit(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_line_height_unit(properties))
+}
+
+fn command_has_paragraph_indent(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_indent(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_indent(properties))
+}
+
+fn command_has_text_wrap_style(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_wrap_style(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_wrap_style(properties))
+}
+
+fn command_has_list_type(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_list_type(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_list_type(properties))
+}
+
+fn command_has_list_spacing(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_list_spacing(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_list_spacing(properties))
+}
+
+fn command_has_paragraph_style_runs(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_style_runs(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_style_runs(properties))
+}
+
+fn command_has_paragraph_list_options(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_list_options(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_list_options(properties))
+}
+
+fn command_has_paragraph_list_spacing(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_list_spacing(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_list_spacing(properties))
+}
+
+fn command_has_paragraph_spacing(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_spacing(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_spacing(properties))
+}
+
+fn command_has_paragraph_indent_run(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_indent_run(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_indent_run(properties))
+}
+
+fn command_has_paragraph_line_height(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_line_height(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_line_height(properties))
+}
+
+fn command_has_paragraph_text_wrap_style(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_paragraph_text_wrap_style(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_paragraph_text_wrap_style(properties))
+}
+
+fn command_has_hanging_list(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_hanging_list(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_hanging_list(properties))
+}
+
+fn command_has_hanging_punctuation(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_hanging_punctuation(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_hanging_punctuation(properties))
+}
+
+fn command_has_hyperlink(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_hyperlink(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_hyperlink(properties))
+}
+
+fn command_has_text_decoration(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration(properties))
+}
+
+fn command_has_text_decoration_style(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_style(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_style(properties))
+}
+
+fn command_has_text_decoration_offset(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_offset(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_offset(properties))
+}
+
+fn command_has_text_decoration_thickness(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_thickness(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_thickness(properties))
+}
+
+fn command_has_text_decoration_color(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_color(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_color(properties))
+}
+
+fn command_has_text_decoration_skip_ink(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_skip_ink(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_skip_ink(properties))
+}
+
+fn command_has_leading_trim(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_leading_trim(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_leading_trim(properties))
 }
 
 fn page_to_proto(page: &Page) -> v1::PageRef {
@@ -1258,6 +3059,197 @@ fn paint_from_proto(paint: v1::Paint) -> Result<Paint, ServiceError> {
         .map_err(|_| ServiceError::ReducerRejected),
     }
 }
+
+fn paint_stack_to_proto(stack: &PaintStack) -> v1::PaintStack {
+    v1::PaintStack {
+        layers: stack.layers.iter().map(paint_layer_to_proto).collect(),
+    }
+}
+
+fn paint_stack_has_non_linear_gradient(stack: &PaintStack) -> bool {
+    stack
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.paint, PaintLayerKind::Gradient(_)))
+}
+
+fn paint_stack_has_rotated_image(stack: &PaintStack) -> bool {
+    stack.layers.iter().any(
+        |layer| matches!(&layer.paint, PaintLayerKind::Image(image) if image.rotation_degrees != 0),
+    )
+}
+
+fn paint_stack_has_image_filters(stack: &PaintStack) -> bool {
+    stack.layers.iter().any(
+        |layer| matches!(&layer.paint, PaintLayerKind::Image(image) if image.filters.is_some()),
+    )
+}
+
+fn paint_stack_has_linear_blend(stack: &PaintStack) -> bool {
+    stack
+        .layers
+        .iter()
+        .any(|layer| layer.blend_mode.requires_linear_blend_semantics())
+}
+
+fn gradient_paint_to_proto(gradient: &GradientPaint) -> v1::GradientPaint {
+    v1::GradientPaint {
+        kind: match gradient.kind {
+            GradientPaintKind::Radial => v1::GradientPaintKind::Radial,
+            GradientPaintKind::Angular => v1::GradientPaintKind::Angular,
+            GradientPaintKind::Diamond => v1::GradientPaintKind::Diamond,
+        } as i32,
+        transform: Some(transform_to_proto(gradient.transform)),
+        stops: gradient
+            .stops
+            .iter()
+            .map(|stop| v1::GradientStop {
+                position: stop.position,
+                color: Some(color_to_proto(stop.color)),
+            })
+            .collect(),
+    }
+}
+
+fn gradient_paint_from_proto(gradient: v1::GradientPaint) -> Result<GradientPaint, ServiceError> {
+    let kind = match v1::GradientPaintKind::try_from(gradient.kind)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::GradientPaintKind::Radial => GradientPaintKind::Radial,
+        v1::GradientPaintKind::Angular => GradientPaintKind::Angular,
+        v1::GradientPaintKind::Diamond => GradientPaintKind::Diamond,
+        v1::GradientPaintKind::Unspecified => return Err(ServiceError::ReducerRejected),
+    };
+    GradientPaint::new(
+        kind,
+        transform_from_proto(gradient.transform.ok_or(ServiceError::ReducerRejected)?)?,
+        gradient
+            .stops
+            .into_iter()
+            .map(|stop| {
+                Ok(GradientStop {
+                    position: stop.position,
+                    color: color_from_proto(stop.color.ok_or(ServiceError::ReducerRejected)?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ServiceError>>()?,
+    )
+    .map_err(|_| ServiceError::ReducerRejected)
+}
+
+fn paint_layer_to_proto(layer: &PaintLayer) -> v1::PaintLayer {
+    use v1::paint_layer::Kind;
+    let kind = match &layer.paint {
+        PaintLayerKind::Solid(color) => Kind::Solid(color_to_proto(*color)),
+        PaintLayerKind::LinearGradient(gradient) => {
+            let Some(v1::paint::Kind::LinearGradient(gradient)) =
+                paint_to_proto(&Paint::LinearGradient(gradient.clone())).kind
+            else {
+                unreachable!("linear gradient conversion is stable")
+            };
+            Kind::LinearGradient(gradient)
+        }
+        PaintLayerKind::Image(image) => Kind::Image(v1::ImagePaint {
+            asset_id: id_to_bytes(image.asset_id.0),
+            scale_mode: match image.scale_mode {
+                ImageScaleMode::Fill => v1::ImageScaleMode::Fill,
+                ImageScaleMode::Fit => v1::ImageScaleMode::Fit,
+                ImageScaleMode::Crop => v1::ImageScaleMode::Crop,
+                ImageScaleMode::Tile => v1::ImageScaleMode::Tile,
+            } as i32,
+            transform: Some(transform_to_proto(image.transform)),
+            rotation_degrees: i32::from(image.rotation_degrees),
+            filters: image.filters.map(image_filters_to_proto),
+        }),
+        PaintLayerKind::Gradient(gradient) => Kind::Gradient(gradient_paint_to_proto(gradient)),
+    };
+    v1::PaintLayer {
+        kind: Some(kind),
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blend_mode: blend_mode_to_proto(layer.blend_mode) as i32,
+    }
+}
+
+fn paint_stack_from_proto(stack: v1::PaintStack) -> Result<PaintStack, ServiceError> {
+    let stack = PaintStack {
+        layers: stack
+            .layers
+            .into_iter()
+            .map(paint_layer_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    stack
+        .is_valid()
+        .then_some(stack)
+        .ok_or(ServiceError::ReducerRejected)
+}
+
+fn paint_layer_from_proto(layer: v1::PaintLayer) -> Result<PaintLayer, ServiceError> {
+    use v1::paint_layer::Kind;
+    let paint = match layer.kind.ok_or(ServiceError::ReducerRejected)? {
+        Kind::Solid(color) => PaintLayerKind::Solid(color_from_proto(color)?),
+        Kind::LinearGradient(gradient) => PaintLayerKind::LinearGradient(
+            match paint_from_proto(v1::Paint {
+                kind: Some(v1::paint::Kind::LinearGradient(gradient)),
+            })? {
+                Paint::LinearGradient(gradient) => gradient,
+                Paint::Solid(_) => unreachable!("linear gradient tag is stable"),
+            },
+        ),
+        Kind::Image(image) => PaintLayerKind::Image(ImagePaint {
+            asset_id: AssetId(id(&image.asset_id)?),
+            scale_mode: match v1::ImageScaleMode::try_from(image.scale_mode)
+                .map_err(|_| ServiceError::ReducerRejected)?
+            {
+                v1::ImageScaleMode::Fill => ImageScaleMode::Fill,
+                v1::ImageScaleMode::Fit => ImageScaleMode::Fit,
+                v1::ImageScaleMode::Crop => ImageScaleMode::Crop,
+                v1::ImageScaleMode::Tile => ImageScaleMode::Tile,
+                v1::ImageScaleMode::Unspecified => return Err(ServiceError::ReducerRejected),
+            },
+            transform: transform_from_proto(image.transform.ok_or(ServiceError::ReducerRejected)?)?,
+            rotation_degrees: i16::try_from(image.rotation_degrees)
+                .map_err(|_| ServiceError::ReducerRejected)?,
+            filters: image.filters.map(image_filters_from_proto),
+        }),
+        Kind::Gradient(gradient) => PaintLayerKind::Gradient(gradient_paint_from_proto(gradient)?),
+    };
+    let layer = PaintLayer {
+        paint,
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blend_mode: blend_mode_from_proto(layer.blend_mode)?,
+    };
+    layer
+        .is_valid()
+        .then_some(layer)
+        .ok_or(ServiceError::ReducerRejected)
+}
+
+fn image_filters_to_proto(filters: ImageFilters) -> v1::ImageFilters {
+    v1::ImageFilters {
+        exposure: filters.exposure,
+        contrast: filters.contrast,
+        saturation: filters.saturation,
+        temperature: filters.temperature,
+        tint: filters.tint,
+        highlights: filters.highlights,
+        shadows: filters.shadows,
+    }
+}
+
+fn image_filters_from_proto(filters: v1::ImageFilters) -> ImageFilters {
+    ImageFilters {
+        exposure: filters.exposure,
+        contrast: filters.contrast,
+        saturation: filters.saturation,
+        temperature: filters.temperature,
+        tint: filters.tint,
+        highlights: filters.highlights,
+        shadows: filters.shadows,
+    }
+}
 fn color_to_proto(color: Color) -> v1::Color {
     v1::Color {
         space: match color.space {
@@ -1313,8 +3305,8 @@ mod tests {
     use editor_core::{
         AssetId, AssetReference, AutoLayout, BooleanOperation, ConstraintType, Constraints,
         DEFAULT_PAGE_ID, Document, DocumentId, FontReference, LayoutAlignment, LayoutMode, Node,
-        NodeId, NodeKind, ParagraphStyle, PositionId, TextAlign, TextAutoSize, TextProperties,
-        TextStyleRun, WrapTrackAlignment, color::Color, geometry::AffineTransform,
+        NodeId, NodeKind, Page, PageId, ParagraphStyle, PositionId, TextAlign, TextAutoSize,
+        TextProperties, TextStyleRun, WrapTrackAlignment, color::Color, geometry::AffineTransform,
     };
     use sha2::Sha256;
 
@@ -1387,6 +3379,7 @@ mod tests {
                 media_type: "image/png".into(),
                 byte_length: 16,
                 dimensions: Some([2, 2]),
+                font_faces: Vec::new(),
             })
             .unwrap();
         let snapshot = snapshot_from_document(&document, 3).unwrap();
@@ -1474,6 +3467,7 @@ mod tests {
                     media_type: "font/woff2".into(),
                     byte_length: 16,
                     dimensions: None,
+                    font_faces: Vec::new(),
                 })
                 .unwrap();
         }
@@ -1500,6 +3494,17 @@ mod tests {
                     italic: false,
                     letter_spacing: 0.25,
                     color: None,
+                    fill_stack: None,
+
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
+                    text_decoration_color: None,
                 },
                 TextStyleRun {
                     start: 5,
@@ -1510,15 +3515,37 @@ mod tests {
                     italic: true,
                     letter_spacing: 0.0,
                     color: Some(Color::from_srgb_u8([20, 40, 60], 255)),
+                    fill_stack: None,
+
+                    text_case: None,
+                    hyperlink: None,
+                    text_decoration: None,
+                    text_decoration_style: None,
+                    text_decoration_offset: None,
+                    text_decoration_thickness: None,
+                    text_decoration_skip_ink: None,
+                    leading_trim: None,
+                    text_decoration_color: None,
                 },
             ],
             paragraph: ParagraphStyle {
                 alignment: TextAlign::Justify,
                 line_height: Some(27.0),
+                line_height_unit: None,
                 paragraph_spacing: 6.0,
+                paragraph_indent: None,
+                text_wrap_style: None,
+                list_type: None,
+                list_spacing: None,
+                hanging_list: false,
+                hanging_punctuation: false,
             },
+            paragraph_style_runs: Vec::new(),
             auto_size: TextAutoSize::Height,
             fallback_fonts: vec![fallback],
+            text_truncation: TextTruncation::Disabled,
+            max_lines: None,
+            base_style: None,
         };
         document
             .seed_text_properties(NodeId(3), properties.clone())
@@ -1707,6 +3734,533 @@ mod tests {
         );
     }
 
+    #[test]
+    fn service_semantics_four_replays_and_persists_an_image_paint_stack() {
+        let tenant_id = 2_u128.to_be_bytes();
+        let actor_id = 7_u128.to_be_bytes();
+        let mut document = Document::with_id(DocumentId(31));
+        let asset = AssetReference {
+            asset_id: AssetId(310),
+            content_hash: [31; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([8, 4]),
+            font_faces: Vec::new(),
+        };
+        document.seed_asset(asset.clone()).unwrap();
+        let mut node = leaf(NodeId(311), None, NodeKind::Rectangle);
+        node.name = "Paint target".into();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node.clone())
+            .unwrap();
+        let service = DocumentService::in_memory(CoreOperationReducer::new(
+            makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        ))
+        .unwrap();
+        service
+            .create_document(
+                initial_document_state(
+                    &document,
+                    tenant_id,
+                    makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+                )
+                .unwrap(),
+                &[actor_id],
+            )
+            .unwrap();
+
+        let stack = PaintStack {
+            layers: vec![
+                PaintLayer {
+                    paint: PaintLayerKind::Solid(Color::from_srgb_u8([255, 0, 0], 255)),
+                    visible: true,
+                    opacity: 0.5,
+                    blend_mode: BlendMode::Multiply,
+                },
+                PaintLayer {
+                    paint: PaintLayerKind::Image(ImagePaint {
+                        asset_id: asset.asset_id,
+                        scale_mode: ImageScaleMode::Fit,
+                        transform: AffineTransform::IDENTITY,
+                        rotation_degrees: 0,
+                        filters: None,
+                    }),
+                    visible: false,
+                    opacity: 0.25,
+                    blend_mode: BlendMode::Screen,
+                },
+            ],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAppearance(
+                    v1::AppearanceUpdate {
+                        node_id: node.id.0.to_be_bytes().to_vec(),
+                        fill: Some(paint_to_proto(&node.fill)),
+                        stroke: Some(paint_to_proto(&node.stroke)),
+                        stroke_width: node.stroke_width,
+                        opacity: node.opacity,
+                        corner_radius: 0.0,
+                        visible: node.visible,
+                        locked: node.locked,
+                        stroke_cap_start: v1::StrokeCap::None as i32,
+                        stroke_cap_end: v1::StrokeCap::None as i32,
+                        contents_hidden: node.contents_hidden,
+                        stroke_join: v1::StrokeJoin::Miter as i32,
+                        stroke_miter_limit: node.stroke_miter_limit,
+                        stroke_dash_pattern: vec![],
+                        stroke_weights: vec![],
+                        stroke_align: v1::StrokeAlign::Inside as i32,
+                        arc_data: None,
+                        relative_transform: None,
+                        clips_content: None,
+                        corner_radii: vec![],
+                        corner_smoothing: 0.0,
+                        fills: vec![],
+                        strokes: vec![],
+                        constraints: None,
+                        drop_shadow: None,
+                        polygon_parameters: None,
+                        star_parameters: None,
+                        effect_stack: vec![],
+                        auto_layout: None,
+                        blend_mode: v1::BlendMode::Normal as i32,
+                        fill_stack: Some(paint_stack_to_proto(&stack)),
+                        stroke_stack: Some(v1::PaintStack { layers: vec![] }),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        let envelope = v1::OperationEnvelope {
+            schema_version: 1,
+            document_id: 31_u128.to_be_bytes().to_vec(),
+            operation_id: 312_u128.to_be_bytes().to_vec(),
+            transaction_id: 312_u128.to_be_bytes().to_vec(),
+            actor_id: actor_id.to_vec(),
+            session_id: 9_u128.to_be_bytes().to_vec(),
+            client_sequence: 1,
+            base_revision: 0,
+            causal_parent_ids: vec![],
+            payload_hash: Sha256::digest(&payload).to_vec(),
+            payload,
+            engine_semantics_version: Some(
+                makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+            ),
+        }
+        .encode_to_vec();
+        let principal = TrustedPrincipal {
+            tenant_id,
+            actor_id,
+        };
+
+        let accepted = service.submit(principal, &envelope).unwrap();
+        assert_eq!(accepted.accepted_revision, 1);
+        assert!(!accepted.idempotent_replay);
+        assert!(
+            service
+                .submit(principal, &envelope)
+                .unwrap()
+                .idempotent_replay
+        );
+        let stored = service.load_document(31_u128.to_be_bytes()).unwrap();
+        let restored = makefigma_document_codec::document_from_snapshot_with_engine_semantics(
+            &stored.snapshot,
+            stored.document_id,
+            stored.document_hash,
+            makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored_node = restored.node(node.id).unwrap();
+        assert_eq!(restored_node.fill, node.fill);
+        assert_eq!(restored_node.stroke, node.stroke);
+        assert!(matches!(&restored_node.fill, Paint::Solid(color) if color.to_srgb_u8()[3] == 0));
+        assert!(matches!(&restored_node.stroke, Paint::Solid(color) if color.to_srgb_u8()[3] == 0));
+        assert_eq!(restored.fill_stack_for_node(node.id), Some(&stack));
+        assert_eq!(
+            restored.stroke_stack_for_node(node.id),
+            Some(&PaintStack::default())
+        );
+        assert_eq!(restored.canonical_hash(), stored.document_hash);
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_five_for_non_linear_gradients() {
+        let mut document = Document::with_id(DocumentId(41));
+        let mut node = leaf(NodeId(411), None, NodeKind::Rectangle);
+        node.name = "Angular target".into();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node.clone())
+            .unwrap();
+        let stack = PaintStack {
+            layers: vec![PaintLayer {
+                paint: PaintLayerKind::Gradient(
+                    GradientPaint::new(
+                        GradientPaintKind::Angular,
+                        AffineTransform {
+                            a: 0.75,
+                            b: 0.25,
+                            c: -0.125,
+                            d: 1.25,
+                            e: 0.1,
+                            f: -0.2,
+                        },
+                        vec![
+                            GradientStop {
+                                position: 0.0,
+                                color: Color::from_srgb_u8([255, 0, 0], 255),
+                            },
+                            GradientStop {
+                                position: 0.45,
+                                color: Color::from_srgb_u8([0, 255, 0], 192),
+                            },
+                            GradientStop {
+                                position: 1.0,
+                                color: Color::from_srgb_u8([0, 0, 255], 255),
+                            },
+                        ],
+                    )
+                    .unwrap(),
+                ),
+                visible: true,
+                opacity: 0.75,
+                blend_mode: BlendMode::Overlay,
+            }],
+        };
+        document
+            .seed_paint_stacks(node.id, Some(stack.clone()), None)
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+
+        assert_eq!(restored.fill_stack_for_node(node.id), Some(&stack));
+        assert_eq!(restored.stroke_stack_for_node(node.id), None);
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_six_for_advanced_blends() {
+        let mut document = Document::with_id(DocumentId(42));
+        let mut node = leaf(NodeId(421), None, NodeKind::Rectangle);
+        node.name = "Blend target".into();
+        node.blend_mode = BlendMode::Saturation;
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node.clone())
+            .unwrap();
+        let stack = PaintStack {
+            layers: vec![PaintLayer {
+                paint: PaintLayerKind::Solid(Color::from_srgb_u8([200, 40, 90], 255)),
+                visible: true,
+                opacity: 0.65,
+                blend_mode: BlendMode::HardLight,
+            }],
+        };
+        document
+            .seed_paint_stacks(node.id, Some(stack.clone()), None)
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::ADVANCED_BLEND_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            restored.node(node.id).unwrap().blend_mode,
+            BlendMode::Saturation
+        );
+        assert_eq!(restored.fill_stack_for_node(node.id), Some(&stack));
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_seven_for_image_rotation() {
+        let asset = AssetReference {
+            asset_id: AssetId(430),
+            content_hash: [43; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([8, 4]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::with_id(DocumentId(43));
+        document.seed_asset(asset.clone()).unwrap();
+        let mut node = leaf(NodeId(431), None, NodeKind::Rectangle);
+        node.name = "Rotated image".into();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node.clone())
+            .unwrap();
+        let stack = PaintStack {
+            layers: vec![PaintLayer {
+                paint: PaintLayerKind::Image(ImagePaint {
+                    asset_id: asset.asset_id,
+                    scale_mode: ImageScaleMode::Fit,
+                    transform: AffineTransform::IDENTITY,
+                    rotation_degrees: 270,
+                    filters: None,
+                }),
+                visible: true,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+            }],
+        };
+        document
+            .seed_paint_stacks(node.id, Some(stack.clone()), None)
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::IMAGE_PAINT_ROTATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.fill_stack_for_node(node.id), Some(&stack));
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_eleven_for_image_filters() {
+        let asset = AssetReference {
+            asset_id: AssetId(435),
+            content_hash: [45; 32],
+            media_type: "image/png".into(),
+            byte_length: 64,
+            dimensions: Some([8, 4]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::with_id(DocumentId(45));
+        document.seed_asset(asset.clone()).unwrap();
+        let mut node = leaf(NodeId(435), None, NodeKind::Rectangle);
+        node.name = "Filtered image".into();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, node.clone())
+            .unwrap();
+        let stack = PaintStack {
+            layers: vec![PaintLayer {
+                paint: PaintLayerKind::Image(ImagePaint {
+                    asset_id: asset.asset_id,
+                    scale_mode: ImageScaleMode::Fill,
+                    transform: AffineTransform::IDENTITY,
+                    rotation_degrees: 0,
+                    filters: Some(ImageFilters {
+                        temperature: Some(-0.4),
+                        highlights: Some(0.6),
+                        ..Default::default()
+                    }),
+                }),
+                visible: true,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+            }],
+        };
+        document
+            .seed_paint_stacks(node.id, Some(stack.clone()), None)
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::IMAGE_FILTERS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.fill_stack_for_node(node.id), Some(&stack));
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_eight_for_pass_through() {
+        let mut document = Document::with_id(DocumentId(44));
+        let mut frame = leaf(NodeId(441), None, NodeKind::Frame);
+        frame.name = "Pass through frame".into();
+        frame.blend_mode = BlendMode::PassThrough;
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::PASS_THROUGH_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.node(frame.id).unwrap().blend_mode,
+            BlendMode::PassThrough
+        );
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_nine_for_linear_blends() {
+        let mut document = Document::with_id(DocumentId(45));
+        let mut burn = leaf(NodeId(451), None, NodeKind::Rectangle);
+        burn.name = "Linear burn".into();
+        burn.blend_mode = BlendMode::LinearBurn;
+        let mut dodge = leaf(NodeId(452), None, NodeKind::Rectangle);
+        dodge.name = "Linear dodge".into();
+        dodge.blend_mode = BlendMode::LinearDodge;
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, burn.clone())
+            .unwrap();
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, dodge.clone())
+            .unwrap();
+        document
+            .seed_paint_stacks(
+                burn.id,
+                Some(PaintStack {
+                    layers: vec![PaintLayer {
+                        paint: PaintLayerKind::Solid(Color::from_srgb_u8([200, 40, 90], 255)),
+                        visible: true,
+                        opacity: 0.75,
+                        blend_mode: BlendMode::LinearBurn,
+                    }],
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::LINEAR_BLEND_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.node(burn.id).unwrap().blend_mode,
+            BlendMode::LinearBurn
+        );
+        assert_eq!(
+            restored.node(dodge.id).unwrap().blend_mode,
+            BlendMode::LinearDodge
+        );
+        assert_eq!(
+            restored.fill_stack_for_node(burn.id).unwrap().layers[0].blend_mode,
+            BlendMode::LinearBurn
+        );
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_ten_for_isolated_normal() {
+        let mut document = Document::with_id(DocumentId(46));
+        let mut group = leaf(NodeId(461), None, NodeKind::Frame);
+        group.name = "Isolated normal frame".into();
+        group.extensions.insert(
+            makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION.into(),
+            vec![1],
+        );
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, group.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::NORMAL_BLEND_ISOLATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .node(group.id)
+                .unwrap()
+                .extensions
+                .get(makefigma_document_codec::NORMAL_BLEND_ISOLATION_EXTENSION),
+            Some(&vec![1])
+        );
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
     fn container_with_child() -> Document {
         // A Frame (1) containing a Frame (2) containing a Rectangle (3): two levels
         // of nesting so a "forgot the deepest descendant" batch is testable. Nested
@@ -1778,10 +4332,18 @@ mod tests {
         slice.name = "Export area".into();
         slice.stroke_align = StrokeAlign::Inside;
         slice.rotation = 22.5;
-        let wire = node_to_proto(&slice, DEFAULT_PAGE_ID, None, None, AutoLayout::default());
+        let wire = node_to_proto(
+            &slice,
+            DEFAULT_PAGE_ID,
+            None,
+            None,
+            AutoLayout::default(),
+            None,
+            None,
+        );
         assert_eq!(wire.kind, v1::NodeKind::Slice as i32);
 
-        let (page_id, restored, asset_id, text_properties, auto_layout) =
+        let (page_id, restored, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
             node_from_proto(wire).unwrap();
         assert_eq!(page_id, DEFAULT_PAGE_ID);
         assert_eq!(restored.kind, NodeKind::Slice);
@@ -1789,6 +4351,8 @@ mod tests {
         assert_eq!(asset_id, None);
         assert_eq!(text_properties, None);
         assert_eq!(auto_layout, AutoLayout::default());
+        assert_eq!(fill_stack, None);
+        assert_eq!(stroke_stack, None);
     }
 
     #[test]
@@ -1899,6 +4463,7 @@ mod tests {
                         width: 200.0,
                         height: 160.0,
                         rotation: 0.0,
+                        ignore_constraints: false,
                     },
                 )),
             }],
@@ -1950,6 +4515,147 @@ mod tests {
             (child.x, child.y, child.width, child.height),
             (120.0, 10.0, 40.0, 80.0)
         );
+    }
+
+    #[test]
+    fn service_idempotently_replays_a_cross_page_component_import_and_restores_its_metadata() {
+        let semantics = makefigma_document_codec::CURRENT_ENGINE_SEMANTICS_VERSION;
+        let document_id = 30_u128.to_be_bytes();
+        let tenant_id = 2_u128.to_be_bytes();
+        let actor_id = 7_u128.to_be_bytes();
+        let service = DocumentService::in_memory(CoreOperationReducer::new(semantics)).unwrap();
+        let document = Document::with_id(DocumentId(30));
+        service
+            .create_document(
+                initial_document_state(&document, tenant_id, semantics).unwrap(),
+                &[actor_id],
+            )
+            .unwrap();
+
+        let pages = [
+            Page {
+                id: PageId(2),
+                name: "Instances".into(),
+                position: PositionId::for_node(NodeId(2)),
+            },
+            Page {
+                id: PageId(3),
+                name: "Library".into(),
+                position: PositionId::for_node(NodeId(3)),
+            },
+        ];
+        let mut instance = leaf(NodeId(101), None, NodeKind::Instance);
+        instance.name = "Card instance".into();
+        instance.extensions.insert(
+            "figma.instance.metadata.v1".into(),
+            br#"{"mainComponentId":"00000000-0000-0000-0000-000000000201","scaleFactor":1.25,"componentProperties":{"Enabled":true},"overrides":[{"id":"00000000-0000-0000-0000-000000000102","overriddenFields":["fill"]}],"isExposedInstance":false}"#.to_vec(),
+        );
+        let mut instance_child = leaf(NodeId(102), Some(instance.id), NodeKind::Rectangle);
+        instance_child.name = "Locked hidden override".into();
+        instance_child.visible = false;
+        instance_child.locked = true;
+        let mut component = leaf(NodeId(201), None, NodeKind::Component);
+        component.name = "Remote card".into();
+        component.extensions.insert(
+            "figma.component.metadata.v1".into(),
+            br#"{"key":"remote-card-key","remote":true,"description":"Cross-page component fixture","descriptionMarkdown":"","documentationLinks":[],"componentPropertyDefinitions":{"Enabled":{"type":"BOOLEAN","defaultValue":true}}}"#.to_vec(),
+        );
+        let mut source_slot = leaf(NodeId(202), Some(component.id), NodeKind::Slot);
+        source_slot.name = "Content slot".into();
+        source_slot.extensions.insert(
+            "figma.slot.metadata.v1".into(),
+            br#"{"propertyName":"Content"}"#.to_vec(),
+        );
+        let mut override_slot = leaf(NodeId(203), Some(component.id), NodeKind::Slot);
+        override_slot.name = "Content override slot".into();
+        override_slot.extensions.insert(
+            "figma.slot.metadata.v1".into(),
+            br#"{"propertyName":"Content override","sourceSlotId":"00000000-0000-0000-0000-000000000202"}"#.to_vec(),
+        );
+        let nodes = [
+            (PageId(2), instance),
+            (PageId(2), instance_child),
+            (PageId(3), component),
+            (PageId(3), source_slot),
+            (PageId(3), override_slot),
+        ];
+        let mut operations = pages
+            .iter()
+            .cloned()
+            .map(|page| v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::CreatePage(v1::CreatePage {
+                    page: Some(v1::PageRef {
+                        page_id: page.id.0.to_be_bytes().to_vec(),
+                        name: page.name,
+                        position_id: Some(position_to_proto(page.position)),
+                    }),
+                })),
+            })
+            .collect::<Vec<_>>();
+        operations.extend(nodes.iter().map(|(page_id, node)| v1::ResolvedOperation {
+            kind: Some(v1::resolved_operation::Kind::CreateNode(v1::CreateNode {
+                node: Some(node_to_proto(
+                    node,
+                    *page_id,
+                    None,
+                    None,
+                    AutoLayout::default(),
+                    None,
+                    None,
+                )),
+            })),
+        }));
+        let payload = v1::ResolvedOperationBatch { operations }.encode_to_vec();
+        let envelope = v1::OperationEnvelope {
+            schema_version: 1,
+            document_id: document_id.to_vec(),
+            operation_id: 31_u128.to_be_bytes().to_vec(),
+            transaction_id: 31_u128.to_be_bytes().to_vec(),
+            actor_id: actor_id.to_vec(),
+            session_id: 9_u128.to_be_bytes().to_vec(),
+            client_sequence: 31,
+            base_revision: 0,
+            causal_parent_ids: vec![],
+            payload_hash: Sha256::digest(&payload).to_vec(),
+            payload,
+            engine_semantics_version: Some(semantics),
+        }
+        .encode_to_vec();
+        let principal = TrustedPrincipal {
+            tenant_id,
+            actor_id,
+        };
+        let first = service.submit(principal, &envelope).unwrap();
+        let replay = service.submit(principal, &envelope).unwrap();
+        assert_eq!(first.accepted_revision, 1);
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.document_hash, first.document_hash);
+
+        let stored = service.load_document(document_id).unwrap();
+        let restored =
+            document_from_snapshot(&stored.snapshot, stored.document_id, stored.document_hash)
+                .unwrap();
+        assert_eq!(restored.pages().count(), 3);
+        assert_eq!(restored.nodes().count(), 5);
+        assert_eq!(restored.canonical_hash(), first.document_hash);
+        assert_eq!(
+            restored
+                .node(NodeId(101))
+                .unwrap()
+                .extensions
+                .get("figma.instance.metadata.v1"),
+            nodes[0].1.extensions.get("figma.instance.metadata.v1")
+        );
+        assert_eq!(
+            restored
+                .node(NodeId(203))
+                .unwrap()
+                .extensions
+                .get("figma.slot.metadata.v1"),
+            nodes[4].1.extensions.get("figma.slot.metadata.v1")
+        );
+        assert!(restored.node(NodeId(102)).unwrap().locked);
+        assert!(!restored.node(NodeId(102)).unwrap().visible);
     }
 
     #[test]
@@ -2036,5 +4742,715 @@ mod tests {
         assert!(restored.node(NodeId(1)).is_none());
         assert!(restored.node(NodeId(2)).is_none());
         assert!(restored.node(NodeId(3)).is_none());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_twelve_for_text_truncation() {
+        let mut document = Document::with_id(DocumentId(54));
+        let mut text = leaf(NodeId(54), None, NodeKind::Text);
+        text.name = "Truncated text".into();
+        text.text = "one two three".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            text_truncation: TextTruncation::Ending,
+            max_lines: Some(2),
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(54), properties.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::TEXT_TRUNCATION_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 54_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(54)),
+            Some(&properties)
+        );
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_thirteen_for_shape_text_styles() {
+        let mut document = Document::with_id(DocumentId(55));
+        let mut shape = leaf(NodeId(55), None, NodeKind::ShapeWithText);
+        shape.name = "Decision".into();
+        shape.text = "Approve".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, shape).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 7,
+                font: None,
+                font_size: 18.0,
+                font_weight: 650,
+                italic: false,
+                letter_spacing: 1.5,
+                color: None,
+                fill_stack: None,
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(55), properties.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::SHAPE_WITH_TEXT_TEXT_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 55_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(55)),
+            Some(&properties)
+        );
+    }
+
+    #[test]
+    fn service_snapshot_adapter_round_trips_empty_text_base_style_at_semantics_fifteen() {
+        let mut document = Document::with_id(DocumentId(56));
+        let mut text = leaf(NodeId(56), None, NodeKind::Text);
+        text.name = "Empty styled text".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            base_style: Some(TextStyleRun {
+                start: 0,
+                end: 0,
+                font: None,
+                font_size: 22.0,
+                font_weight: 650,
+                italic: true,
+                letter_spacing: 1.25,
+                color: Some(Color::from_srgb_u8([255, 0, 0], 255)),
+                fill_stack: None,
+
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }),
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(56), properties.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::TEXT_BASE_STYLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 56_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(56)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_round_trips_text_case_at_semantics_sixteen() {
+        let mut document = Document::with_id(DocumentId(57));
+        let mut text = leaf(NodeId(57), None, NodeKind::Text);
+        text.name = "Text case".into();
+        text.text = "Case".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 4,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: Some(TextCase::Title),
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                text_decoration_color: None,
+            }],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(57), properties.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::TEXT_CASE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 57_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(57)),
+            Some(&properties)
+        );
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn service_snapshot_adapter_round_trips_font_face_metadata_at_semantics_forty() {
+        let mut document = Document::with_id(DocumentId(75));
+        let asset = AssetReference {
+            asset_id: AssetId(75),
+            content_hash: [7; 32],
+            media_type: "font/ttf".into(),
+            byte_length: 512,
+            dimensions: None,
+            font_faces: vec![FontFaceMetadata {
+                face_index: 0,
+                family: "Acme Sans".into(),
+                style: "Regular".into(),
+            }],
+        };
+        document.seed_asset(asset.clone()).unwrap();
+        let required = makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION;
+
+        assert!(snapshot_from_document(&document, required - 1).is_err());
+        let snapshot = snapshot_from_document(&document, required).unwrap();
+        let restored = document_from_snapshot(
+            &snapshot,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.asset(asset.asset_id), Some(&asset));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = required - 1;
+        assert_eq!(
+            document_from_snapshot(
+                &mislabeled.encode_to_vec(),
+                document.id().0.to_be_bytes(),
+                document.canonical_hash(),
+            ),
+            Err(ServiceError::ReducerRejected),
+        );
+    }
+
+    #[test]
+    fn service_snapshot_reader_rejects_mislabeled_text_semantics_eighteen_through_thirty_nine() {
+        let cases = [
+            (
+                makefigma_document_codec::LINE_HEIGHT_UNIT_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        line_height: Some(125.0),
+                        line_height_unit: Some(LineHeightUnit::Percent),
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_INDENT_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        paragraph_indent: Some(12.0),
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        text_wrap_style: Some(TextWrapStyle::Pretty),
+                        list_type: None,
+                        list_spacing: None,
+                        hanging_list: false,
+                        hanging_punctuation: false,
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_HYPERLINK_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: Some(HyperlinkTarget {
+                            kind: HyperlinkType::Node,
+                            value: "1:2".into(),
+                        }),
+                        text_decoration: None,
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Strikethrough),
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_STYLE_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Underline),
+                        text_decoration_style: Some(TextDecorationStyle::Wavy),
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_OFFSET_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Underline),
+                        text_decoration_style: None,
+                        text_decoration_offset: Some(TextDecorationOffset::Pixels(2.5)),
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_THICKNESS_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Underline),
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: Some(TextDecorationThickness::Pixels(2.0)),
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Underline),
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: None,
+                        text_decoration_color: Some(TextDecorationColor {
+                            color: Color {
+                                space: ColorSpace::Srgb,
+                                components: [1.0, 0.25, 0.5],
+                                alpha: 1.0,
+                            },
+                            visible: true,
+                            opacity: 0.75,
+                            blend_mode: BlendMode::Multiply,
+                        }),
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: Some(TextDecoration::Underline),
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: Some(true),
+                        leading_trim: None,
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::LEADING_TRIM_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    runs: vec![TextStyleRun {
+                        start: 0,
+                        end: 1,
+                        font: None,
+                        font_size: 16.0,
+                        font_weight: 400,
+                        italic: false,
+                        letter_spacing: 0.0,
+                        color: None,
+                        fill_stack: None,
+                        text_case: None,
+                        hyperlink: None,
+                        text_decoration: None,
+                        text_decoration_style: None,
+                        text_decoration_offset: None,
+                        text_decoration_thickness: None,
+                        text_decoration_skip_ink: None,
+                        leading_trim: Some(LeadingTrim::CapHeight),
+                        text_decoration_color: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_LIST_TYPE_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        list_type: Some(TextListType::Unordered),
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        list_spacing: Some(8.0),
+                        hanging_list: false,
+                        hanging_punctuation: false,
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_STYLE_RUNS_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: Some(2),
+                        list_type: None,
+                        list_spacing: None,
+                        paragraph_spacing: None,
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_HANGING_LIST_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        list_type: Some(TextListType::Ordered),
+                        hanging_list: true,
+                        hanging_punctuation: false,
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_LIST_OPTIONS_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: Some(ParagraphListType::Ordered),
+                        list_spacing: None,
+                        paragraph_spacing: None,
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_LIST_SPACING_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        list_type: Some(TextListType::Ordered),
+                        list_spacing: Some(8.0),
+                        ..TextProperties::default().paragraph
+                    },
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: None,
+                        list_spacing: Some(0.0),
+                        paragraph_spacing: None,
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_SPACING_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        paragraph_spacing: 8.0,
+                        ..TextProperties::default().paragraph
+                    },
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: None,
+                        list_spacing: None,
+                        paragraph_spacing: Some(0.0),
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_INDENT_RUN_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        paragraph_indent: Some(8.0),
+                        ..TextProperties::default().paragraph
+                    },
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: None,
+                        list_spacing: None,
+                        paragraph_spacing: None,
+                        paragraph_indent: Some(0.0),
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_LINE_HEIGHT_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: None,
+                        list_spacing: None,
+                        paragraph_spacing: None,
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: Some(LineHeightUnit::Auto),
+                        text_wrap_style: None,
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::TEXT_HANGING_PUNCTUATION_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        hanging_punctuation: true,
+                        ..TextProperties::default().paragraph
+                    },
+                    ..TextProperties::default()
+                },
+            ),
+            (
+                makefigma_document_codec::PARAGRAPH_TEXT_WRAP_STYLE_ENGINE_SEMANTICS_VERSION,
+                TextProperties {
+                    paragraph: ParagraphStyle {
+                        text_wrap_style: Some(TextWrapStyle::Balance),
+                        ..TextProperties::default().paragraph
+                    },
+                    paragraph_style_runs: vec![ParagraphStyleRun {
+                        start: 0,
+                        indentation: None,
+                        list_type: None,
+                        list_spacing: None,
+                        paragraph_spacing: None,
+                        paragraph_indent: None,
+                        line_height: None,
+                        line_height_unit: None,
+                        text_wrap_style: Some(TextWrapStyle::Auto),
+                    }],
+                    ..TextProperties::default()
+                },
+            ),
+        ];
+
+        for (index, (required, properties)) in cases.into_iter().enumerate() {
+            let id = 70 + index as u128;
+            let mut document = Document::with_id(DocumentId(id));
+            let mut text = leaf(NodeId(id), None, NodeKind::Text);
+            text.name = format!("Text semantics {required}");
+            text.text = "A".into();
+            document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+            document
+                .seed_text_properties(NodeId(id), properties)
+                .unwrap();
+            let snapshot = snapshot_from_document(&document, required).unwrap();
+            let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+            mislabeled.engine_semantics_version = required - 1;
+            assert_eq!(
+                document_from_snapshot(
+                    &mislabeled.encode_to_vec(),
+                    id.to_be_bytes(),
+                    document.canonical_hash(),
+                ),
+                Err(ServiceError::ReducerRejected),
+                "semantics {required} must reject a lower declaration",
+            );
+        }
     }
 }

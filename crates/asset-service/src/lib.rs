@@ -58,6 +58,14 @@ pub struct AssetRecord {
     pub kind: AssetKind,
     pub media_type: String,
     pub byte_length: usize,
+    pub font_faces: Vec<FontFaceMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFaceMetadata {
+    pub face_index: u32,
+    pub family: String,
+    pub style: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +309,13 @@ impl AssetService {
                created_at_seconds INTEGER NOT NULL,
                UNIQUE (tenant_id, content_hash)
              );
+             CREATE TABLE IF NOT EXISTS asset_font_faces (
+               asset_id BLOB NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+               face_index INTEGER NOT NULL,
+               family TEXT NOT NULL,
+               style TEXT NOT NULL,
+               PRIMARY KEY (asset_id, face_index)
+             );
              CREATE TABLE IF NOT EXISTS document_readers (
                document_id BLOB NOT NULL CHECK(length(document_id) = 16),
                tenant_id BLOB NOT NULL CHECK(length(tenant_id) = 16),
@@ -512,12 +527,24 @@ impl AssetService {
             record_upload_rejection(&connection, principal.tenant_id, "mime_mismatch")?;
             return Err(AssetServiceError::MimeMismatch);
         }
-        if session.kind == AssetKind::Font && !valid_font(&session.staged_bytes) {
-            drop(transaction);
-            record_upload_rejection(&connection, principal.tenant_id, "font_invalid")?;
-            return Err(AssetServiceError::FontInvalid);
-        }
-        if let Some(asset) = load_asset_by_hash(&transaction, principal.tenant_id, actual_hash)? {
+        let font_faces = if session.kind == AssetKind::Font {
+            match extract_font_face_metadata(&session.staged_bytes) {
+                Some(faces) => faces,
+                None => {
+                    drop(transaction);
+                    record_upload_rejection(&connection, principal.tenant_id, "font_invalid")?;
+                    return Err(AssetServiceError::FontInvalid);
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if let Some(mut asset) = load_asset_by_hash(&transaction, principal.tenant_id, actual_hash)?
+        {
+            if asset.font_faces.is_empty() && !font_faces.is_empty() {
+                store_font_faces(&transaction, asset.asset_id, &font_faces)?;
+                asset.font_faces = font_faces;
+            }
             transaction
                 .execute(
                     "DELETE FROM upload_sessions WHERE session_id = ?1",
@@ -548,6 +575,7 @@ impl AssetService {
             kind: session.kind,
             media_type: detected_media_type.to_owned(),
             byte_length: session.staged_bytes.len(),
+            font_faces,
         };
         let object_key = AssetObjectKey {
             tenant_id: asset.tenant_id,
@@ -569,6 +597,11 @@ impl AssetService {
             // No AssetRecord can reference this key yet. Compensate before
             // returning so a metadata failure cannot turn a verified upload
             // into an untracked object-store orphan.
+            drop(transaction);
+            let _ = self.object_store.delete(object_key);
+            return Err(AssetServiceError::Storage);
+        }
+        if store_font_faces(&transaction, asset.asset_id, &asset.font_faces).is_err() {
             drop(transaction);
             let _ = self.object_store.delete(object_key);
             return Err(AssetServiceError::Storage);
@@ -1194,7 +1227,17 @@ fn load_asset(
     connection: &Connection,
     asset_id: Id,
 ) -> Result<Option<AssetRecord>, AssetServiceError> {
-    connection.query_row("SELECT tenant_id, content_hash, kind, media_type, byte_length FROM assets WHERE asset_id = ?1", params![asset_id.as_slice()], |row| Ok(AssetRecord { asset_id, tenant_id: id_from_vec(row.get(0)?)?, content_hash: hash_from_vec(row.get(1)?)?, kind: kind_from_db(row.get(2)?)?, media_type: row.get(3)?, byte_length: row.get(4)? })).optional().map_err(|_| AssetServiceError::Storage)
+    let asset = connection.query_row(
+        "SELECT tenant_id, content_hash, kind, media_type, byte_length FROM assets WHERE asset_id = ?1",
+        params![asset_id.as_slice()],
+        |row| Ok(AssetRecord { asset_id, tenant_id: id_from_vec(row.get(0)?)?, content_hash: hash_from_vec(row.get(1)?)?, kind: kind_from_db(row.get(2)?)?, media_type: row.get(3)?, byte_length: row.get(4)?, font_faces: Vec::new() }),
+    ).optional().map_err(|_| AssetServiceError::Storage)?;
+    asset
+        .map(|mut asset| {
+            asset.font_faces = load_font_faces(connection, asset.asset_id)?;
+            Ok(asset)
+        })
+        .transpose()
 }
 
 fn load_asset_by_hash(
@@ -1202,7 +1245,47 @@ fn load_asset_by_hash(
     tenant_id: Id,
     content_hash: ContentHash,
 ) -> Result<Option<AssetRecord>, AssetServiceError> {
-    connection.query_row("SELECT asset_id, kind, media_type, byte_length FROM assets WHERE tenant_id = ?1 AND content_hash = ?2", params![tenant_id.as_slice(), content_hash.as_slice()], |row| Ok(AssetRecord { asset_id: id_from_vec(row.get(0)?)?, tenant_id, content_hash, kind: kind_from_db(row.get(1)?)?, media_type: row.get(2)?, byte_length: row.get(3)? })).optional().map_err(|_| AssetServiceError::Storage)
+    let asset = connection.query_row(
+        "SELECT asset_id, kind, media_type, byte_length FROM assets WHERE tenant_id = ?1 AND content_hash = ?2",
+        params![tenant_id.as_slice(), content_hash.as_slice()],
+        |row| Ok(AssetRecord { asset_id: id_from_vec(row.get(0)?)?, tenant_id, content_hash, kind: kind_from_db(row.get(1)?)?, media_type: row.get(2)?, byte_length: row.get(3)?, font_faces: Vec::new() }),
+    ).optional().map_err(|_| AssetServiceError::Storage)?;
+    asset
+        .map(|mut asset| {
+            asset.font_faces = load_font_faces(connection, asset.asset_id)?;
+            Ok(asset)
+        })
+        .transpose()
+}
+
+fn load_font_faces(
+    connection: &Connection,
+    asset_id: Id,
+) -> Result<Vec<FontFaceMetadata>, AssetServiceError> {
+    connection.prepare(
+        "SELECT face_index, family, style FROM asset_font_faces WHERE asset_id = ?1 ORDER BY face_index",
+    ).map_err(|_| AssetServiceError::Storage)?
+        .query_map(params![asset_id.as_slice()], |row| Ok(FontFaceMetadata {
+            face_index: row.get(0)?,
+            family: row.get(1)?,
+            style: row.get(2)?,
+        })).map_err(|_| AssetServiceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AssetServiceError::Storage)
+}
+
+fn store_font_faces(
+    connection: &Connection,
+    asset_id: Id,
+    faces: &[FontFaceMetadata],
+) -> Result<(), AssetServiceError> {
+    for face in faces {
+        connection.execute(
+            "INSERT OR IGNORE INTO asset_font_faces (asset_id, face_index, family, style) VALUES (?1, ?2, ?3, ?4)",
+            params![asset_id.as_slice(), face.face_index, face.family, face.style],
+        ).map_err(|_| AssetServiceError::Storage)?;
+    }
+    Ok(())
 }
 
 fn migrate_legacy_asset_blobs(
@@ -1439,23 +1522,79 @@ fn detect_media_type(kind: AssetKind, bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// `ttf-parser` validates the container table directory and each selected face
-/// before any font reaches the browser. Bound collection and variation counts
-/// keep malformed TTC/variable fonts from becoming an unbounded later task.
-fn valid_font(bytes: &[u8]) -> bool {
+/// Validates every face and projects a bounded, deterministic public identity
+/// from its OpenType name table. Typographic/WWS names take precedence over
+/// the legacy family/subfamily records and English wins within each name ID.
+fn extract_font_face_metadata(bytes: &[u8]) -> Option<Vec<FontFaceMetadata>> {
     const MAX_FONT_FACES: u32 = 16;
     const MAX_FONT_VARIATION_AXES: usize = 32;
     let faces = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
     if faces == 0 || faces > MAX_FONT_FACES {
-        return false;
+        return None;
     }
-    (0..faces).all(|index| {
-        ttf_parser::Face::parse(bytes, index).is_ok_and(|face| {
-            face.number_of_glyphs() > 0
-                && face.units_per_em() > 0
-                && face.variation_axes().len() as usize <= MAX_FONT_VARIATION_AXES
+    (0..faces)
+        .map(|index| {
+            let face = ttf_parser::Face::parse(bytes, index).ok()?;
+            if face.number_of_glyphs() == 0
+                || face.units_per_em() == 0
+                || face.variation_axes().len() as usize > MAX_FONT_VARIATION_AXES
+            {
+                return None;
+            }
+            let family = preferred_font_name(
+                &face,
+                &[
+                    ttf_parser::name_id::TYPOGRAPHIC_FAMILY,
+                    ttf_parser::name_id::WWS_FAMILY,
+                    ttf_parser::name_id::FAMILY,
+                ],
+            )
+            .unwrap_or_else(|| "Untitled".into());
+            let style = preferred_font_name(
+                &face,
+                &[
+                    ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY,
+                    ttf_parser::name_id::WWS_SUBFAMILY,
+                    ttf_parser::name_id::SUBFAMILY,
+                ],
+            )
+            .unwrap_or_else(|| "Regular".into());
+            Some(FontFaceMetadata {
+                face_index: index,
+                family,
+                style,
+            })
         })
-    })
+        .collect()
+}
+
+fn preferred_font_name(face: &ttf_parser::Face<'_>, name_ids: &[u16]) -> Option<String> {
+    for name_id in name_ids {
+        let mut fallback = None;
+        for name in face
+            .names()
+            .into_iter()
+            .filter(|name| name.name_id == *name_id)
+        {
+            let Some(value) = name.to_string().and_then(bounded_font_name) else {
+                continue;
+            };
+            if name.language() == ttf_parser::Language::English_UnitedStates {
+                return Some(value);
+            }
+            fallback.get_or_insert(value);
+        }
+        if fallback.is_some() {
+            return fallback;
+        }
+    }
+    None
+}
+
+fn bounded_font_name(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
 }
 fn derived_asset_id(tenant_id: Id, content_hash: ContentHash) -> Id {
     let digest = Sha256::digest(
@@ -1770,14 +1909,25 @@ mod tests {
         service
             .append_chunk(principal(7), id(12), 0, valid)
             .unwrap();
+        let admitted = service.complete_upload(principal(7), id(12)).unwrap();
+        assert_eq!(admitted.asset.media_type, "font/ttf");
         assert_eq!(
-            service
-                .complete_upload(principal(7), id(12))
-                .unwrap()
-                .asset
-                .media_type,
-            "font/ttf"
+            admitted.asset.font_faces,
+            vec![FontFaceMetadata {
+                face_index: 0,
+                family: "Tofu".into(),
+                style: "Regular".into(),
+            }]
         );
+        service
+            .begin_upload(principal(7), font_request(14, valid))
+            .unwrap();
+        service
+            .append_chunk(principal(7), id(14), 0, valid)
+            .unwrap();
+        let deduplicated = service.complete_upload(principal(7), id(14)).unwrap();
+        assert!(deduplicated.deduplicated);
+        assert_eq!(deduplicated.asset.font_faces, admitted.asset.font_faces);
 
         let truncated = [0, 1, 0, 0];
         service

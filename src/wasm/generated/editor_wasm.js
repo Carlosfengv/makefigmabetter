@@ -312,6 +312,38 @@ export class DocumentEngine {
         return this;
     }
     /**
+     * Executes a resize-shaped Update batch against a structurally shared,
+     * disposable document and returns only the nodes changed by Core. The live
+     * document's revision, history and operation-dedupe state remain untouched.
+     * The Engine Worker uses this during pointer movement so the transient
+     * Frame/child geometry is produced by the same reducer as pointer-up.
+     * @param {string} transaction_id
+     * @param {string} commands_json
+     * @returns {string}
+     */
+    preview_resize_transaction_json(transaction_id, commands_json) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(commands_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.documentengine_preview_resize_transaction_json(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var ptr3 = ret[0];
+            var len3 = ret[1];
+            if (ret[3]) {
+                ptr3 = 0; len3 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred4_0 = ptr3;
+            deferred4_1 = len3;
+            return getStringFromWasm0(ptr3, len3);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        }
+    }
+    /**
      * @returns {bigint}
      */
     redo() {
@@ -332,9 +364,10 @@ export class DocumentEngine {
      * @param {bigint} byte_length
      * @param {number} pixel_width
      * @param {number} pixel_height
+     * @param {string} font_faces_json
      * @returns {bigint}
      */
-    register_asset(transaction_id, base_revision, asset_id, content_hash, media_type, byte_length, pixel_width, pixel_height) {
+    register_asset(transaction_id, base_revision, asset_id, content_hash, media_type, byte_length, pixel_width, pixel_height, font_faces_json) {
         const ptr0 = passStringToWasm0(transaction_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(asset_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -343,7 +376,9 @@ export class DocumentEngine {
         const len2 = WASM_VECTOR_LEN;
         const ptr3 = passStringToWasm0(media_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
-        const ret = wasm.documentengine_register_asset(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2, ptr3, len3, byte_length, pixel_width, pixel_height);
+        const ptr4 = passStringToWasm0(font_faces_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_register_asset(this.__wbg_ptr, ptr0, len0, base_revision, ptr1, len1, ptr2, len2, ptr3, len3, byte_length, pixel_width, pixel_height, ptr4, len4);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -457,6 +492,20 @@ export class DocumentEngine {
             throw takeFromExternrefTable0(ret[1]);
         }
         return BigInt.asUintN(64, ret[0]);
+    }
+    /**
+     * Sets the document identity before legacy projection hydration. The old
+     * browser path serialized and reparsed the entire hydrated document only
+     * to replace this field, doubling the live 100k-node state at peak.
+     * @param {string} document_id
+     */
+    seed_document_id(document_id) {
+        const ptr0 = passStringToWasm0(document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.documentengine_seed_document_id(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * Loads an existing local snapshot without turning document hydration into a user
@@ -803,6 +852,41 @@ export function layout_shaped_text_json(font_bytes, face_index, text, max_width_
 }
 
 /**
+ * Shapes metric-bearing Style Runs from one bounded concatenated font bundle.
+ * `runs_json` references byte windows in that bundle so callers do not encode
+ * large font files as JSON or persist them in the Canonical document.
+ * @param {Uint8Array} font_bundle
+ * @param {string} runs_json
+ * @param {string} text
+ * @param {number} max_width_px
+ * @returns {string}
+ */
+export function layout_shaped_text_runs_json(font_bundle, runs_json, text, max_width_px) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bundle, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(runs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_shaped_text_runs_json(ptr0, len0, ptr1, len1, ptr2, len2, max_width_px);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
  * Produces ICU4X line ranges at the same Variable Font coordinates used by
  * the shaping and glyph-raster stages.
  * @param {Uint8Array} font_bytes
@@ -985,6 +1069,41 @@ export function rasterize_glyph_json(font_bytes, face_index, glyph_id, pixel_siz
         return getStringFromWasm0(ptr2, len2);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Rasterizes one explicit glyph with the same variation coordinates and
+ * synthetic weight/style identity used by the owning metric Style Run.
+ * @param {Uint8Array} font_bytes
+ * @param {number} face_index
+ * @param {string} variation_axes_json
+ * @param {number} font_weight
+ * @param {boolean} italic
+ * @param {number} glyph_id
+ * @param {number} pixel_size
+ * @returns {string}
+ */
+export function rasterize_glyph_with_style_json(font_bytes, face_index, variation_axes_json, font_weight, italic, glyph_id, pixel_size) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(variation_axes_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rasterize_glyph_with_style_json(ptr0, len0, face_index, ptr1, len1, font_weight, italic, glyph_id, pixel_size);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
 }
 

@@ -23,7 +23,8 @@ use makefigma_document_service::{
 use makefigma_protocol::v1;
 use prost::Message;
 
-pub const ENGINE_SEMANTICS_VERSION: u32 = 3;
+pub const ENGINE_SEMANTICS_VERSION: u32 =
+    makefigma_document_codec::CURRENT_ENGINE_SEMANTICS_VERSION;
 pub const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 #[derive(Clone)]

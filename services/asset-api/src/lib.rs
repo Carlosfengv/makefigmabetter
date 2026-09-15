@@ -126,6 +126,15 @@ struct AssetBody {
     media_type: String,
     byte_length: usize,
     deduplicated: bool,
+    font_faces: Vec<FontFaceBody>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontFaceBody {
+    face_index: u32,
+    family: String,
+    style: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +280,16 @@ async fn complete_upload(
                 media_type: completed.asset.media_type,
                 byte_length: completed.asset.byte_length,
                 deduplicated: completed.deduplicated,
+                font_faces: completed
+                    .asset
+                    .font_faces
+                    .into_iter()
+                    .map(|face| FontFaceBody {
+                        face_index: face.face_index,
+                        family: face.family,
+                        style: face.style,
+                    })
+                    .collect(),
             },
         ),
         Err(error) => error_response(error),
@@ -760,6 +779,48 @@ mod tests {
                 .unwrap()
                 .as_ref(),
             bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_admitted_font_face_names_to_the_browser() {
+        let app = app();
+        let bytes = font_test_data::TOFU;
+        let content_hash = hex(&Sha256::digest(bytes));
+        let session = id_hex(11);
+        let begin = headers(Request::post(format!("/v1/assets/uploads/{session}")))
+            .header(header::CONTENT_TYPE, JSON)
+            .body(Body::from(format!(
+                "{{\"kind\":\"font\",\"contentHash\":\"{content_hash}\",\"mediaType\":\"font/ttf\",\"byteLength\":{}}}",
+                bytes.len()
+            )))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(begin).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let append = headers(Request::put(format!(
+            "/v1/assets/uploads/{session}/chunks/0"
+        )))
+        .body(Body::from(bytes))
+        .unwrap();
+        assert_eq!(
+            app.clone().oneshot(append).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let complete = headers(Request::post(format!(
+            "/v1/assets/uploads/{session}/complete"
+        )))
+        .body(Body::empty())
+        .unwrap();
+        let response = app.oneshot(complete).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            value["fontFaces"],
+            serde_json::json!([{"faceIndex": 0, "family": "Tofu", "style": "Regular"}])
         );
     }
 
