@@ -4,6 +4,9 @@ import {
   BlendMode as ProtoBlendMode,
   ColorSpace,
   FillRule,
+  GradientPaintKind as ProtoGradientPaintKind,
+  HyperlinkType as ProtoHyperlinkType,
+  ImageScaleMode as ProtoImageScaleMode,
   NodeKind,
   StrokeCap as ProtoStrokeCap,
   StrokeJoin as ProtoStrokeJoin,
@@ -13,17 +16,29 @@ import {
   WrapTrackAlignment as ProtoWrapTrackAlignment,
   LayoutMode as ProtoLayoutMode,
   LayoutSizing as ProtoLayoutSizing,
+  LineHeightUnit as ProtoLineHeightUnit,
+  LeadingTrim as ProtoLeadingTrim,
+  TextListType as ProtoTextListType,
   OperationEnvelope,
   ResolvedOperationBatch,
   TextAlignment,
   TextAutoSize,
+  TextCase as ProtoTextCase,
+  TextDecoration as ProtoTextDecoration,
+  TextDecorationStyle as ProtoTextDecorationStyle,
+  TextDecorationOffsetUnit as ProtoTextDecorationOffsetUnit,
+  TextDecorationThicknessUnit as ProtoTextDecorationThicknessUnit,
+  TextTruncation,
+  TextWrapStyle as ProtoTextWrapStyle,
   VectorPointType,
   type Paint,
+  type PaintStack as ProtoPaintStack,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentPaint, type DocumentParametricShape, type DocumentTextProperties, type DocumentVectorPath } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentParametricShape, type DocumentTextProperties, type DocumentVectorPath } from "./editor-protocol";
 import { sha256Bytes } from "./sha256";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
+import { clipsChildren } from "./node-capabilities";
 
 export type ResourceRegistration = {
   assetId: string;
@@ -32,6 +47,7 @@ export type ResourceRegistration = {
   byteLength: number;
   pixelWidth?: number;
   pixelHeight?: number;
+  fontFaces?: readonly DocumentFontFaceMetadata[];
 };
 
 export type EnvelopeIdentity = {
@@ -93,6 +109,7 @@ export function encodeRegisterResourcePayload(resource: ResourceRegistration): U
   return ResolvedOperationBatch.encode({ operations: [{ registerResource: { resource: {
     assetId: idBytes(resource.assetId), contentHash: hashBytes(resource.contentHash), mediaType: resource.mediaType,
     byteLength: resource.byteLength.toString(), pixelWidth: resource.pixelWidth, pixelHeight: resource.pixelHeight,
+    fontFaces: (resource.fontFaces ?? []).map((face) => ({ faceIndex: face.faceIndex, family: face.family, style: face.style })),
   } } }] }).finish();
 }
 
@@ -107,23 +124,35 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
     return [{ registerResource: { resource: {
       assetId: idBytes(asset.assetId), contentHash: hashBytes(asset.contentHash), mediaType: asset.mediaType,
       byteLength: asset.byteLength.toString(), pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight,
+      fontFaces: (asset.fontFaces ?? []).map((face) => ({ faceIndex: face.faceIndex, family: face.family, style: face.style })),
     } } }];
   }
   if (command.type === "create") {
     const operations: ResolvedOperation[] = [{ createNode: { node: nodeProto(command.node) } }];
     const layout = autoLayoutOperation(command.node);
     if (layout) operations.push(layout);
-    if (command.node.kind === "text" && command.node.textProperties) {
+    if ((command.node.kind === "text" || command.node.kind === "shapeWithText" || command.node.kind === "textPath") && command.node.textProperties) {
       operations.push({ setTextProperties: { nodeId: idBytes(command.node.id), properties: textPropertiesProto(command.node.textProperties) } });
     }
     return operations;
   }
   if (command.type === "restore") {
-    const operations: ResolvedOperation[] = [{ restoreNode: { node: nodeProto(command.node) } }];
+    const operations: ResolvedOperation[] = [{ restoreNode: { node: nodeProto(command.node, true) } }];
     if (command.node.isMask) operations.push({ setMask: { nodeId: idBytes(command.node.id), enabled: true } });
     const layout = autoLayoutOperation(command.node);
     if (layout) operations.push(layout);
     return operations;
+  }
+  if (command.type === "convertToTextPath") {
+    const node = command.node;
+    if (node.kind !== "textPath") throw new TypeError("TextPath conversion requires a TextPath target projection.");
+    return [
+      { convertToTextPath: { nodeId: idBytes(node.id), vectorPath: vectorPathProto(node.kind, node.vectorPath) } },
+      { renameNode: { nodeId: idBytes(node.id), name: node.name } },
+      { setText: { nodeId: idBytes(node.id), text: node.text } },
+      { setTextProperties: { nodeId: idBytes(node.id), properties: textPropertiesProto(node.textProperties) } },
+      { setNodeExtensions: { nodeId: idBytes(node.id), extensions: extensionsProto(node.extensions) } },
+    ];
   }
   if (command.type === "delete") return command.ids.map((nodeId) => ({ deleteNode: { nodeId: idBytes(nodeId) } }));
   if (command.type === "moveVectorPoint") return [{ moveVectorPoint: { nodeId: idBytes(command.id), pointId: idBytes(command.pointId), x: command.x, y: command.y } }];
@@ -144,15 +173,25 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
     return { setNodeParent: { nodeId: idBytes(id), parentId: parentId ? idBytes(parentId) : undefined, positionId: { key, actorId } } };
   });
   const node = command.node;
+  if (command.plainTextOnly) return [
+    { setText: { nodeId: idBytes(node.id), text: node.text } },
+    ...(node.kind === "textPath" && command.renameTextPath ? [{ renameNode: { nodeId: idBytes(node.id), name: node.name } }] : []),
+    ...((node.kind === "shapeWithText" || node.kind === "textPath") && node.textProperties
+      ? [{ setTextProperties: { nodeId: idBytes(node.id), properties: textPropertiesProto(node.textProperties) } }]
+      : []),
+  ];
   // An Inspector update is deliberately expanded into canonical leaf operations.
   // This avoids a second hand-written transport-only Node patch type. Commands
   // remain atomic because the enclosing ResolvedOperationBatch is one transaction.
   const operations: ResolvedOperation[] = [
-    { updateGeometry: { nodeId: idBytes(node.id), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation } },
+    { updateGeometry: { nodeId: idBytes(node.id), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, ignoreConstraints: command.ignoreConstraints === true } },
     { renameNode: { nodeId: idBytes(node.id), name: node.name } },
-    { setAppearance: { nodeId: idBytes(node.id), fill: paintProto(undefined, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(undefined, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), relativeTransform: relativeTransform(node.relativeTransform), opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined } },
+    { setAppearance: { nodeId: idBytes(node.id), fill: paintProto(undefined, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(undefined, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), fillStack: versionedPaintStack(node.fillStack), strokeStack: versionedPaintStack(node.strokeStack), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), relativeTransform: relativeTransform(node.relativeTransform), opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined } },
   ];
-  if (node.kind === "vector" || node.kind === "highlight" || node.kind === "textPath") operations.push({ setVectorPath: { nodeId: idBytes(node.id), vectorPath: vectorPathProto(node.kind, node.vectorPath) } });
+  // TextPath owns an immutable base path after creation, matching Figma's
+  // conversion contract. Ordinary text/alignment edits must not replay that
+  // path as a SetVectorPath mutation.
+  if (node.kind === "vector" || node.kind === "highlight") operations.push({ setVectorPath: { nodeId: idBytes(node.id), vectorPath: vectorPathProto(node.kind, node.vectorPath) } });
   if (node.kind === "booleanOperation") {
     const operation = booleanOperationProto(node.kind, node.booleanOperation);
     if (operation === undefined) throw new TypeError("BooleanOperation nodes require an operation selector.");
@@ -161,22 +200,24 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   const layout = autoLayoutOperation(node);
   if (layout) operations.push(layout);
   if (["frame", "rectangle", "ellipse", "image"].includes(node.kind)) operations.push({ setImageFill: { nodeId: idBytes(node.id), assetId: node.assetId ? idBytes(node.assetId) : undefined } });
-  if (node.kind === "text") {
+  if (node.kind === "text" || node.kind === "shapeWithText" || node.kind === "textPath") {
     operations.push(
       { setText: { nodeId: idBytes(node.id), text: node.text } },
       { setTextProperties: { nodeId: idBytes(node.id), properties: textPropertiesProto(node.textProperties) } },
     );
+  } else if (["codeBlock", "sticky", "tableCell"].includes(node.kind)) {
+    operations.push({ setText: { nodeId: idBytes(node.id), text: node.text } });
   }
   return operations;
 }
 
-function nodeProto(node: CoreProjectionNode) {
+function nodeProto(node: CoreProjectionNode, includeTextProperties = false) {
   const [key, actor] = positionBytes(node.positionId, node.id);
   return {
     nodeId: idBytes(node.id), parentId: node.parentId ? idBytes(node.parentId) : undefined, pageId: idBytes(node.pageId ?? "00000000-0000-0000-0000-000000000001"), positionId: { key, actorId: actor }, name: node.name,
     kind: nodeKind(node.kind), x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation,
     fill: paintProto(node.fillGradient, node.fillColor ?? colorFromCss(node.fill, OPAQUE_BLACK)), stroke: paintProto(node.strokeGradient, node.strokeColor ?? colorFromCss(node.stroke, TRANSPARENT_BLACK)), fills: paintStack(node.fills), strokes: paintStack(node.strokes), strokeWidth: node.strokeWidth, strokeCapStart: strokeCap(node.strokeCapStart), strokeCapEnd: strokeCap(node.strokeCapEnd), strokeJoin: strokeJoin(node.strokeJoin), strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: normalizedDashPattern(node.strokeDashPattern), strokeWeights: normalizedStrokeWeights(node.kind, node.strokeWeights), strokeAlign: strokeAlign(node.strokeAlign), arcData: arcData(node.kind, node.arcData), ...parametricShapeProto(node.kind, node.parametricShape), vectorPath: node.kind === "vector" || node.kind === "highlight" || node.kind === "textPath" ? vectorPathProto(node.kind, node.vectorPath) : undefined, booleanOperation: booleanOperationProto(node.kind, node.booleanOperation), relativeTransform: relativeTransform(node.relativeTransform),
-    opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), autoLayout: autoLayoutProto(node.autoLayout), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), text: node.text, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined, extensions: extensionsProto(node.extensions), reactions: [], prototypeMetadata: undefined,
+    opacity: node.opacity, blendMode: blendMode(node.blendMode), cornerRadius: node.cornerRadius, cornerRadii: cornerRadii(node.kind, node.cornerRadii), cornerSmoothing: cornerSmoothing(node.kind, node.cornerSmoothing), constraints: constraints(node.constraints), autoLayout: autoLayoutProto(node.autoLayout), dropShadow: dropShadowProto(compatibilityDropShadow(node)), effectStack: effectStackProto(node.effectStack), fillStack: versionedPaintStack(node.fillStack), strokeStack: versionedPaintStack(node.strokeStack), text: node.text, textProperties: includeTextProperties && (node.kind === "text" || node.kind === "shapeWithText" || node.kind === "textPath") && node.textProperties ? textPropertiesProto(node.textProperties) : undefined, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: isFrameLike(node.kind) ? node.clipsContent !== false : undefined, assetId: node.assetId ? idBytes(node.assetId) : undefined, extensions: extensionsProto(node.extensions), reactions: [], prototypeMetadata: undefined,
   };
 }
 
@@ -190,7 +231,28 @@ function autoLayoutOperation(node: CoreProjectionNode): ResolvedOperation | unde
 }
 
 function blendMode(value: CoreProjectionNode["blendMode"]): ProtoBlendMode {
-  return value === "multiply" ? ProtoBlendMode.BLEND_MODE_MULTIPLY : value === "screen" ? ProtoBlendMode.BLEND_MODE_SCREEN : value === "overlay" ? ProtoBlendMode.BLEND_MODE_OVERLAY : value === "darken" ? ProtoBlendMode.BLEND_MODE_DARKEN : value === "lighten" ? ProtoBlendMode.BLEND_MODE_LIGHTEN : ProtoBlendMode.BLEND_MODE_NORMAL;
+  const modes: Record<NonNullable<CoreProjectionNode["blendMode"]>, ProtoBlendMode> = {
+    normal: ProtoBlendMode.BLEND_MODE_NORMAL,
+    multiply: ProtoBlendMode.BLEND_MODE_MULTIPLY,
+    screen: ProtoBlendMode.BLEND_MODE_SCREEN,
+    overlay: ProtoBlendMode.BLEND_MODE_OVERLAY,
+    darken: ProtoBlendMode.BLEND_MODE_DARKEN,
+    lighten: ProtoBlendMode.BLEND_MODE_LIGHTEN,
+    "color-dodge": ProtoBlendMode.BLEND_MODE_COLOR_DODGE,
+    "color-burn": ProtoBlendMode.BLEND_MODE_COLOR_BURN,
+    "hard-light": ProtoBlendMode.BLEND_MODE_HARD_LIGHT,
+    "soft-light": ProtoBlendMode.BLEND_MODE_SOFT_LIGHT,
+    difference: ProtoBlendMode.BLEND_MODE_DIFFERENCE,
+    exclusion: ProtoBlendMode.BLEND_MODE_EXCLUSION,
+    hue: ProtoBlendMode.BLEND_MODE_HUE,
+    saturation: ProtoBlendMode.BLEND_MODE_SATURATION,
+    color: ProtoBlendMode.BLEND_MODE_COLOR,
+    luminosity: ProtoBlendMode.BLEND_MODE_LUMINOSITY,
+    "pass-through": ProtoBlendMode.BLEND_MODE_PASS_THROUGH,
+    "linear-burn": ProtoBlendMode.BLEND_MODE_LINEAR_BURN,
+    "linear-dodge": ProtoBlendMode.BLEND_MODE_LINEAR_DODGE,
+  };
+  return modes[value ?? "normal"];
 }
 
 function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
@@ -241,6 +303,68 @@ function paintStack(stack: readonly DocumentPaint[] | undefined): Paint[] {
   });
 }
 
+function versionedPaintStack(stack: DocumentPaintStack | undefined): ProtoPaintStack | undefined {
+  if (!stack) return undefined;
+  if (stack.layers.length > 16) throw new TypeError("Paint stacks support at most 16 layers.");
+  return {
+    layers: stack.layers.map((layer) => {
+      if (!Number.isFinite(layer.opacity) || layer.opacity < 0 || layer.opacity > 1) {
+        throw new TypeError("Paint layer opacity must be between 0 and 1.");
+      }
+      const common = {
+        visible: layer.visible,
+        opacity: layer.opacity,
+        blendMode: blendMode(layer.blendMode),
+      };
+      if (layer.image) {
+        return {
+          ...common,
+          image: {
+            assetId: idBytes(layer.image.assetId),
+            scaleMode: layer.image.scaleMode === "fit"
+              ? ProtoImageScaleMode.IMAGE_SCALE_MODE_FIT
+              : layer.image.scaleMode === "crop"
+                ? ProtoImageScaleMode.IMAGE_SCALE_MODE_CROP
+                : layer.image.scaleMode === "tile"
+                  ? ProtoImageScaleMode.IMAGE_SCALE_MODE_TILE
+                  : ProtoImageScaleMode.IMAGE_SCALE_MODE_FILL,
+            transform: relativeTransform(layer.image.transform),
+            rotationDegrees: layer.image.rotationDegrees ?? 0,
+            filters: layer.image.filters ? { ...layer.image.filters } : undefined,
+          },
+        };
+      }
+      const paint = layer.paint;
+      if (paint.gradientPaint) {
+        const gradient = paint.gradientPaint;
+        return {
+          ...common,
+          gradient: {
+            kind: gradient.kind === "radial"
+              ? ProtoGradientPaintKind.GRADIENT_PAINT_KIND_RADIAL
+              : gradient.kind === "angular"
+                ? ProtoGradientPaintKind.GRADIENT_PAINT_KIND_ANGULAR
+                : ProtoGradientPaintKind.GRADIENT_PAINT_KIND_DIAMOND,
+            transform: relativeTransform(gradient.transform),
+            stops: gradient.stops.map((stop) => ({
+              position: stop.position,
+              color: colorProto(stop.color),
+            })),
+          },
+        };
+      }
+      if (paint.gradient) {
+        const proto = paintProto(paint.gradient, paint.color ?? OPAQUE_BLACK);
+        return { ...common, linearGradient: proto.linearGradient };
+      }
+      return {
+        ...common,
+        solid: colorProto(paint.color ?? colorFromCss(paint.css, OPAQUE_BLACK)),
+      };
+    }),
+  };
+}
+
 function colorProto(color: DocumentColor) {
   return { space: color.space === "srgb" ? ColorSpace.COLOR_SPACE_SRGB : color.space === "display-p3" ? ColorSpace.COLOR_SPACE_DISPLAY_P3 : ColorSpace.COLOR_SPACE_LINEAR_SRGB, red: color.components[0], green: color.components[1], blue: color.components[2], alpha: color.alpha };
 }
@@ -274,6 +398,17 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       start: run.start, end: run.end,
       font: run.font ? fontProto(run.font) : undefined,
       fontSize: run.fontSize, fontWeight: run.fontWeight, italic: run.italic, letterSpacing: run.letterSpacing,
+      color: run.color ? colorProto(run.color) : undefined,
+      fillStack: versionedPaintStack(run.fillStack),
+      textCase: textCaseProto(run.textCase),
+      hyperlink: run.hyperlink ? hyperlinkProto(run.hyperlink) : undefined,
+      textDecoration: textDecorationProto(run.textDecoration),
+      textDecorationStyle: textDecorationStyleProto(run.textDecorationStyle),
+      textDecorationOffset: textDecorationOffsetProto(run.textDecorationOffset),
+      textDecorationThickness: textDecorationThicknessProto(run.textDecorationThickness),
+      textDecorationColor: textDecorationColorProto(run.textDecorationColor),
+      textDecorationSkipInk: run.textDecorationSkipInk === true ? true : undefined,
+      leadingTrim: run.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
     })),
     paragraph: {
       alignment: value.paragraph.alignment === "left" ? TextAlignment.TEXT_ALIGNMENT_LEFT : value.paragraph.alignment === "center" ? TextAlignment.TEXT_ALIGNMENT_CENTER : value.paragraph.alignment === "right" ? TextAlignment.TEXT_ALIGNMENT_RIGHT : TextAlignment.TEXT_ALIGNMENT_JUSTIFY,
@@ -281,10 +416,140 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       // preserve that absence rather than materializing an invalid zero height.
       lineHeight: typeof value.paragraph.lineHeight === "number" ? value.paragraph.lineHeight : undefined,
       paragraphSpacing: value.paragraph.paragraphSpacing,
+      lineHeightUnit: value.paragraph.lineHeightUnit === "percent"
+        ? ProtoLineHeightUnit.LINE_HEIGHT_UNIT_PERCENT
+        : value.paragraph.lineHeightUnit === "auto"
+          ? ProtoLineHeightUnit.LINE_HEIGHT_UNIT_AUTO
+          : undefined,
+      paragraphIndent: typeof value.paragraph.paragraphIndent === "number"
+        ? value.paragraph.paragraphIndent
+        : undefined,
+      textWrapStyle: value.paragraph.textWrapStyle === "balance"
+        ? ProtoTextWrapStyle.TEXT_WRAP_STYLE_BALANCE
+        : value.paragraph.textWrapStyle === "pretty"
+          ? ProtoTextWrapStyle.TEXT_WRAP_STYLE_PRETTY
+          : undefined,
+      listType: value.paragraph.listType === "ordered"
+        ? ProtoTextListType.TEXT_LIST_TYPE_ORDERED
+        : value.paragraph.listType === "unordered"
+          ? ProtoTextListType.TEXT_LIST_TYPE_UNORDERED
+          : undefined,
+      listSpacing: typeof value.paragraph.listSpacing === "number" && value.paragraph.listSpacing !== 0
+        ? value.paragraph.listSpacing
+        : undefined,
+      hangingList: value.paragraph.hangingList === true ? true : undefined,
+      hangingPunctuation: value.paragraph.hangingPunctuation === true ? true : undefined,
     },
     autoSize: value.autoSize === "fixed" ? TextAutoSize.TEXT_AUTO_SIZE_FIXED : value.autoSize === "height" ? TextAutoSize.TEXT_AUTO_SIZE_HEIGHT : TextAutoSize.TEXT_AUTO_SIZE_WIDTH_AND_HEIGHT,
     fallbackFonts: (value.fallbackFonts ?? []).map(fontProto),
+    textTruncation: value.textTruncation === "ending" ? TextTruncation.TEXT_TRUNCATION_ENDING : undefined,
+    // Rust's Option::None is `null` in a JSON snapshot. The generated
+    // protobuf writer treats any non-undefined value as a uint32 and rejects
+    // null as an object, so normalize the hydration boundary explicitly.
+    maxLines: typeof value.maxLines === "number" ? value.maxLines : undefined,
+    baseStyle: value.baseStyle ? {
+      start: 0,
+      end: 0,
+      font: value.baseStyle.font ? fontProto(value.baseStyle.font) : undefined,
+      fontSize: value.baseStyle.fontSize,
+      fontWeight: value.baseStyle.fontWeight,
+      italic: value.baseStyle.italic,
+      letterSpacing: value.baseStyle.letterSpacing,
+      color: value.baseStyle.color ? colorProto(value.baseStyle.color) : undefined,
+      fillStack: versionedPaintStack(value.baseStyle.fillStack),
+      textCase: textCaseProto(value.baseStyle.textCase),
+      hyperlink: value.baseStyle.hyperlink ? hyperlinkProto(value.baseStyle.hyperlink) : undefined,
+      textDecoration: textDecorationProto(value.baseStyle.textDecoration),
+      textDecorationStyle: textDecorationStyleProto(value.baseStyle.textDecorationStyle),
+      textDecorationOffset: textDecorationOffsetProto(value.baseStyle.textDecorationOffset),
+      textDecorationThickness: textDecorationThicknessProto(value.baseStyle.textDecorationThickness),
+      textDecorationColor: textDecorationColorProto(value.baseStyle.textDecorationColor),
+      textDecorationSkipInk: value.baseStyle.textDecorationSkipInk === true ? true : undefined,
+      leadingTrim: value.baseStyle.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
+    } : undefined,
+    paragraphStyleRuns: (value.paragraphStyleRuns ?? []).map((run) => ({
+      start: run.start,
+      indentation: run.indentation,
+      listType: run.listType === "none"
+        ? ProtoTextListType.TEXT_LIST_TYPE_NONE
+        : run.listType === "ordered"
+          ? ProtoTextListType.TEXT_LIST_TYPE_ORDERED
+          : run.listType === "unordered"
+            ? ProtoTextListType.TEXT_LIST_TYPE_UNORDERED
+            : undefined,
+      listSpacing: run.listSpacing,
+      paragraphSpacing: run.paragraphSpacing,
+      paragraphIndent: run.paragraphIndent,
+      lineHeight: run.lineHeight,
+      lineHeightUnit: run.lineHeightUnit === "percent"
+        ? ProtoLineHeightUnit.LINE_HEIGHT_UNIT_PERCENT
+        : run.lineHeightUnit === "auto"
+          ? ProtoLineHeightUnit.LINE_HEIGHT_UNIT_AUTO
+          : undefined,
+      textWrapStyle: run.textWrapStyle === "auto"
+        ? ProtoTextWrapStyle.TEXT_WRAP_STYLE_AUTO
+        : run.textWrapStyle === "balance"
+          ? ProtoTextWrapStyle.TEXT_WRAP_STYLE_BALANCE
+          : run.textWrapStyle === "pretty"
+            ? ProtoTextWrapStyle.TEXT_WRAP_STYLE_PRETTY
+            : undefined,
+    })),
   };
+}
+
+function hyperlinkProto(value: NonNullable<DocumentTextProperties["runs"][number]["hyperlink"]>) {
+  return {
+    type: value.type === "URL" ? ProtoHyperlinkType.HYPERLINK_TYPE_URL : ProtoHyperlinkType.HYPERLINK_TYPE_NODE,
+    value: value.value,
+  };
+}
+function textDecorationProto(value: DocumentTextProperties["runs"][number]["textDecoration"]): ProtoTextDecoration | undefined {
+  if (value === "underline") return ProtoTextDecoration.TEXT_DECORATION_UNDERLINE;
+  if (value === "strikethrough") return ProtoTextDecoration.TEXT_DECORATION_STRIKETHROUGH;
+  return undefined;
+}
+function textDecorationStyleProto(value: DocumentTextProperties["runs"][number]["textDecorationStyle"]): ProtoTextDecorationStyle | undefined {
+  if (value === "wavy") return ProtoTextDecorationStyle.TEXT_DECORATION_STYLE_WAVY;
+  if (value === "dotted") return ProtoTextDecorationStyle.TEXT_DECORATION_STYLE_DOTTED;
+  return undefined;
+}
+function textDecorationOffsetProto(value: DocumentTextProperties["runs"][number]["textDecorationOffset"]) {
+  if (!value) return undefined;
+  return {
+    value: value.value,
+    unit: value.unit === "pixels"
+      ? ProtoTextDecorationOffsetUnit.TEXT_DECORATION_OFFSET_UNIT_PIXELS
+      : ProtoTextDecorationOffsetUnit.TEXT_DECORATION_OFFSET_UNIT_PERCENT,
+  };
+}
+function textDecorationThicknessProto(value: DocumentTextProperties["runs"][number]["textDecorationThickness"]) {
+  if (!value) return undefined;
+  return {
+    value: value.value,
+    unit: value.unit === "pixels"
+      ? ProtoTextDecorationThicknessUnit.TEXT_DECORATION_THICKNESS_UNIT_PIXELS
+      : ProtoTextDecorationThicknessUnit.TEXT_DECORATION_THICKNESS_UNIT_PERCENT,
+  };
+}
+function textDecorationColorProto(value: DocumentTextProperties["runs"][number]["textDecorationColor"]) {
+  if (!value) return undefined;
+  return {
+    color: colorProto(value.color),
+    visible: value.visible,
+    opacity: value.opacity,
+    blendMode: blendMode(value.blendMode),
+  };
+}
+function textCaseProto(value: DocumentTextProperties["runs"][number]["textCase"]): ProtoTextCase | undefined {
+  switch (value) {
+    case "original": return ProtoTextCase.TEXT_CASE_ORIGINAL;
+    case "upper": return ProtoTextCase.TEXT_CASE_UPPER;
+    case "lower": return ProtoTextCase.TEXT_CASE_LOWER;
+    case "title": return ProtoTextCase.TEXT_CASE_TITLE;
+    case "smallCaps": return ProtoTextCase.TEXT_CASE_SMALL_CAPS;
+    case "smallCapsForced": return ProtoTextCase.TEXT_CASE_SMALL_CAPS_FORCED;
+    default: return undefined;
+  }
 }
 function fontProto(font: NonNullable<DocumentTextProperties["runs"][number]["font"]>) {
   return { assetId: idBytes(font.assetId), faceIndex: font.faceIndex, variationAxes: (font.variationAxes ?? []).map((axis) => ({ tag: axis.tag, value: axis.value })) };
@@ -299,7 +564,7 @@ function colorFromCss(value: string, fallback: DocumentColor) {
   return documentColorFromCssHex(value) ?? fallback;
 }
 function nodeKind(kind: CoreProjectionNode["kind"]) { return kind === "frame" ? NodeKind.NODE_KIND_FRAME : kind === "component" ? NodeKind.NODE_KIND_COMPONENT : kind === "componentSet" ? NodeKind.NODE_KIND_COMPONENT_SET : kind === "instance" ? NodeKind.NODE_KIND_INSTANCE : kind === "slot" ? NodeKind.NODE_KIND_SLOT : kind === "connector" ? NodeKind.NODE_KIND_CONNECTOR : kind === "embed" ? NodeKind.NODE_KIND_EMBED : kind === "highlight" ? NodeKind.NODE_KIND_HIGHLIGHT : kind === "interactiveSlideElement" ? NodeKind.NODE_KIND_INTERACTIVE_SLIDE_ELEMENT : kind === "linkUnfurl" ? NodeKind.NODE_KIND_LINK_UNFURL : kind === "media" ? NodeKind.NODE_KIND_MEDIA : kind === "shapeWithText" ? NodeKind.NODE_KIND_SHAPE_WITH_TEXT : kind === "slideGrid" ? NodeKind.NODE_KIND_SLIDE_GRID : kind === "slide" ? NodeKind.NODE_KIND_SLIDE : kind === "slideRow" ? NodeKind.NODE_KIND_SLIDE_ROW : kind === "stamp" ? NodeKind.NODE_KIND_STAMP : kind === "sticky" ? NodeKind.NODE_KIND_STICKY : kind === "table" ? NodeKind.NODE_KIND_TABLE : kind === "tableCell" ? NodeKind.NODE_KIND_TABLE_CELL : kind === "textPath" ? NodeKind.NODE_KIND_TEXT_PATH : kind === "transformGroup" ? NodeKind.NODE_KIND_TRANSFORM_GROUP : kind === "washiTape" ? NodeKind.NODE_KIND_WASHI_TAPE : kind === "widget" ? NodeKind.NODE_KIND_WIDGET : kind === "group" ? NodeKind.NODE_KIND_GROUP : kind === "section" ? NodeKind.NODE_KIND_SECTION : kind === "rectangle" ? NodeKind.NODE_KIND_RECTANGLE : kind === "ellipse" ? NodeKind.NODE_KIND_ELLIPSE : kind === "polygon" ? NodeKind.NODE_KIND_POLYGON : kind === "star" ? NodeKind.NODE_KIND_STAR : kind === "vector" ? NodeKind.NODE_KIND_VECTOR : kind === "booleanOperation" ? NodeKind.NODE_KIND_BOOLEAN_OPERATION : kind === "slice" ? NodeKind.NODE_KIND_SLICE : kind === "line" ? NodeKind.NODE_KIND_LINE : kind === "text" ? NodeKind.NODE_KIND_TEXT : kind === "codeBlock" ? NodeKind.NODE_KIND_CODE_BLOCK : NodeKind.NODE_KIND_IMAGE; }
-function isFrameLike(kind: CoreProjectionNode["kind"]) { return kind === "frame" || kind === "component" || kind === "componentSet" || kind === "instance" || kind === "slot"; }
+function isFrameLike(kind: CoreProjectionNode["kind"]) { return clipsChildren(kind); }
 function strokeCap(value: CoreProjectionNode["strokeCapStart"]) { return value === "round" ? ProtoStrokeCap.STROKE_CAP_ROUND : value === "square" ? ProtoStrokeCap.STROKE_CAP_SQUARE : value === "arrowLines" ? ProtoStrokeCap.STROKE_CAP_ARROW_LINES : value === "arrowEquilateral" ? ProtoStrokeCap.STROKE_CAP_ARROW_EQUILATERAL : value === "diamondFilled" ? ProtoStrokeCap.STROKE_CAP_DIAMOND_FILLED : value === "triangleFilled" ? ProtoStrokeCap.STROKE_CAP_TRIANGLE_FILLED : value === "circleFilled" ? ProtoStrokeCap.STROKE_CAP_CIRCLE_FILLED : ProtoStrokeCap.STROKE_CAP_NONE; }
 function strokeJoin(value: CoreProjectionNode["strokeJoin"]) { return value === "bevel" ? ProtoStrokeJoin.STROKE_JOIN_BEVEL : value === "round" ? ProtoStrokeJoin.STROKE_JOIN_ROUND : ProtoStrokeJoin.STROKE_JOIN_MITER; }
 function strokeAlign(value: CoreProjectionNode["strokeAlign"]) { return value === "center" ? ProtoStrokeAlign.STROKE_ALIGN_CENTER : value === "outside" ? ProtoStrokeAlign.STROKE_ALIGN_OUTSIDE : ProtoStrokeAlign.STROKE_ALIGN_INSIDE; }

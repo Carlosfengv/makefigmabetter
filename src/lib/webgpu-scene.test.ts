@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { admitWebGpuSceneResources, buildWebGpuInstances, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuEffectTexturePool, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
+import { admitWebGpuSceneResources, buildWebGpuInstances, buildWebGpuVertices, classifyWebGpuRendererFailure, GPU_SCENE_INSTANCE_BYTES_PER_NODE, GPU_CAMERA_UNIFORM_BYTES, GPU_TEXT_INSTANCE_BYTES_PER_NODE, GPU_TEXT_INSTANCE_FLOATS, GPU_GLYPH_ATLAS_BYTES, MAX_GPU_GLYPH_ATLAS_PAGES, imageInstance, MIN_GPU_SCENE_VERTEX_BUFFER_BYTES, WebGpuEffectTexturePool, WebGpuSceneRenderer, type WebGpuTextGlyph } from "./webgpu-scene";
 
 describe("WebGPU scene vertex projection", () => {
   it("keeps effect surfaces pinned for a frame, then reuses or evicts only idle textures", () => {
@@ -137,13 +137,15 @@ describe("WebGPU scene vertex projection", () => {
     expect(classifyWebGpuRendererFailure(new Error("opaque implementation failure"))).toBe("WEBGPU_SCENE_RENDER_FAILED");
   });
 
-  it("triangulates supported solid nodes in screen space and leaves text/gradients for the overlay", () => {
+  it("triangulates supported solid nodes in screen space and leaves text paths/gradients for dedicated passes", () => {
     const rectangle = { ...createNode("rectangle", 0, 0), width: 100, height: 50, rotation: 0, fill: "#ff000080", stroke: "#000000", strokeWidth: 2, opacity: 0.5, radius: 6 };
     const text = createNode("text", 0, 0);
+    const textPath = createNode("textPath", 0, 0);
     const gradient = { ...createNode("ellipse", 0, 0), fillGradient: { start: [0, 0] as [number, number], end: [1, 0] as [number, number], stops: [] } };
     const gradientStroke = { ...createNode("ellipse", 0, 0), strokeGradient: { start: [0, 0] as [number, number], end: [1, 0] as [number, number], stops: [] } };
-    const result = buildWebGpuVertices({ nodes: [rectangle, text, gradient, gradientStroke], viewport: { x: 100, y: 75, zoom: 1 }, width: 400, height: 300, dpr: 2 });
+    const result = buildWebGpuVertices({ nodes: [rectangle, text, textPath, gradient, gradientStroke], viewport: { x: 100, y: 75, zoom: 1 }, width: 400, height: 300, dpr: 2 });
     expect(result.renderedNodeIds).toEqual(new Set([rectangle.id]));
+    expect(buildWebGpuInstances([textPath]).renderedNodeIds).toEqual(new Set());
     expect(result.vertices).toHaveLength(6 * 16);
     expect(Array.from(result.vertices.slice(0, 16))).toEqual([0.5, -0.5, 0, 0, 1, 0, 0, 0.250980406999588, 0, 0, 0, 0.5, 0, 0.11999999731779099, 0.03999999910593033, 2]);
   });
@@ -196,11 +198,12 @@ describe("WebGPU scene vertex projection", () => {
     const textureSizes: Array<{ width: number; height: number }> = [];
     const destroyedTextures: number[] = [];
     const draws: number[] = [];
+    const bufferWrites: number[][] = [];
     const context = { configure: () => undefined, getCurrentTexture: () => ({ createView: () => ({}) }) };
     const device = {
       lost: new Promise<unknown>(() => undefined),
       queue: {
-        writeBuffer: () => undefined,
+        writeBuffer: (_buffer: unknown, _offset: number, data: Float32Array) => bufferWrites.push(Array.from(data)),
         writeTexture: (destination: { origin?: { x: number; y: number; z?: number } }, data: Uint8Array, layout: { bytesPerRow: number }) => textureWrites.push({ byteLength: data.byteLength, bytesPerRow: layout.bytesPerRow, origin: destination.origin }),
         copyExternalImageToTexture: () => undefined,
         submit: () => undefined,
@@ -226,11 +229,16 @@ describe("WebGPU scene vertex projection", () => {
     try {
       const navigatorLike: Parameters<typeof WebGpuSceneRenderer.create>[0] = { gpu: { requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "bgra8unorm" } };
       const renderer = await WebGpuSceneRenderer.create(navigatorLike);
-      const glyph: WebGpuTextGlyph = { textureKey: "font-a:1:16", nodeId: "text-a", x: 1, y: 2, width: 2, height: 2, rotation: 0, fill: "#102030", opacity: 1, maskWidth: 2, maskHeight: 2, alphaMask: Uint8Array.from([0, 255, 255, 0]) };
-      const secondGlyph: WebGpuTextGlyph = { ...glyph, textureKey: "font-a:2:16", x: 4, alphaMask: Uint8Array.from([255, 0, 0, 255]) };
+      const glyph: WebGpuTextGlyph = { textureKey: "font-a:1:16", nodeId: "text-a", x: 1, y: 2, width: 2, height: 2, rotation: 0, quadTransform: { a: -2, b: .5, c: 1, d: 3, e: 40, f: 50 }, fill: "#102030", opacity: 1, maskWidth: 2, maskHeight: 2, alphaMask: Uint8Array.from([0, 255, 255, 0]) };
+      const secondGlyph: WebGpuTextGlyph = { ...glyph, textureKey: "font-a:2:16", x: 4, quadTransform: undefined, alphaMask: Uint8Array.from([255, 0, 0, 255]) };
       const input = { nodes: [], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: "text", textGlyphs: [glyph, secondGlyph] };
       expect(renderer.render(input).renderedNodeIds).toEqual(new Set(["text-a"]));
       expect(renderer.render(input).gpuUploadBytes).toBe(GPU_CAMERA_UNIFORM_BYTES + GPU_TEXT_INSTANCE_BYTES_PER_NODE * 2);
+      const textPayload = bufferWrites.find((write) => write.length === GPU_TEXT_INSTANCE_FLOATS * 2);
+      expect(textPayload?.slice(0, 6)).toEqual([40, 50, -2, .5, 1, 3]);
+      [4, 2, 2, 0, 0, 2].forEach((value, index) => {
+        expect(textPayload?.[GPU_TEXT_INSTANCE_FLOATS + index]).toBeCloseTo(value);
+      });
       renderer.destroy();
       expect(textureSizes).toEqual([{ width: 1024, height: 1024, depthOrArrayLayers: 1 }]);
       expect(textureWrites).toEqual([
@@ -382,11 +390,15 @@ describe("WebGPU scene vertex projection", () => {
       expect(initial.imageTextures).toEqual({ textures: 1, bytes: 2_048, cacheHits: 1, uploads: 1, releases: 0 });
       expect(initial.effectTextures).toEqual({ textures: 0, bytes: 0, active: 0, cacheHits: 0, allocations: 0, evictions: 0, rejected: 0 });
       expect(renderer.render(input).gpuUploadBytes).toBe(GPU_CAMERA_UNIFORM_BYTES + 80);
+      const retainedBetweenIslands = renderer.render({ ...input, nodes: [], sceneKey: "canvas-island" });
+      expect(retainedBetweenIslands.imageTextures).toEqual({ textures: 1, bytes: 2_048, cacheHits: 0, uploads: 0, releases: 0 });
+      const laterImageIsland = renderer.render({ ...input, nodes: [first], sceneKey: "later-image-island" });
+      expect(laterImageIsland.imageTextures).toEqual({ textures: 1, bytes: 2_048, cacheHits: 1, uploads: 0, releases: 0 });
       const released = renderer.render({ ...input, nodes: [], imageBitmaps: new Map(), sceneKey: "images-removed" });
       expect(released.imageTextures).toEqual({ textures: 0, bytes: 0, cacheHits: 0, uploads: 0, releases: 1 });
       renderer.destroy();
       expect(textureWrites).toEqual([{ byteLength: 4_096, bytesPerRow: 256, width: 32, height: 16 }]);
-      expect(draws).toEqual([6, 6, 6, 6]);
+      expect(draws).toEqual([6, 6, 6, 6, 6]);
       expect(created).toContain(MIN_GPU_SCENE_VERTEX_BUFFER_BYTES);
       expect(destroyedTextures).toEqual([1]);
     } finally {

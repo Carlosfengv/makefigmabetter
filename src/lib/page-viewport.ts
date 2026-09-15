@@ -56,6 +56,24 @@ export function selectCoveringViewportFrame<T extends Readonly<{ viewport: Viewp
   return undefined;
 }
 
+/** During an active camera gesture, prefer a complete cached view but fall
+ * back to the widest available raster when zoom-out or pan exposes new space.
+ * The caller paints the uncovered area with the canvas backdrop, then replaces
+ * this preview with an exact render after input settles. */
+export function selectViewportFrameForInteraction<T extends Readonly<{ viewport: Viewport; width: number; height: number }>>(
+  frames: readonly T[],
+  viewport: Viewport,
+  surface: Readonly<{ width: number; height: number }>,
+): { frame: T; rect: ViewportReprojectionRect } | undefined {
+  const covering = selectCoveringViewportFrame(frames, viewport, surface);
+  if (covering) return covering;
+  const widest = frames.reduce<T | undefined>((selected, candidate) =>
+    !selected || candidate.viewport.zoom < selected.viewport.zoom ? candidate : selected, undefined);
+  return widest
+    ? { frame: widest, rect: viewportReprojectionRect(widest.viewport, viewport, widest, surface) }
+    : undefined;
+}
+
 /** Finds the visible top-level content on a page. Descendants are intentionally
  * excluded because a frame's world bounds already describe the canvas area that
  * should be revealed when the page is first opened. */

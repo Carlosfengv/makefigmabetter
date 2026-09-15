@@ -41,6 +41,22 @@ export function orderNewLayerAtFront(nodes: readonly CanvasNode[], nodeId: strin
   return allocatePosition(ordered.at(-1)?.positionId, undefined, 1)?.[0] ?? positionIdFromNodeId(nodeId);
 }
 
+/** Allocates the concrete Canonical key for inserting one node into an already
+ * ordered sibling list. Runtime uses this before the node joins that list, so
+ * callers never need to invent a temporary position for the moving node. */
+export function positionIdForLayerInsertion(
+  orderedSiblings: readonly Readonly<Record<string, unknown>>[],
+  destination: number,
+): string | undefined {
+  if (!Number.isSafeInteger(destination) || destination < 0 || destination > orderedSiblings.length) return undefined;
+  const leftValue = orderedSiblings[destination - 1]?.positionId;
+  const rightValue = orderedSiblings[destination]?.positionId;
+  const left = typeof leftValue === "string" ? leftValue : undefined;
+  const right = typeof rightValue === "string" ? rightValue : undefined;
+  return allocatePosition(left, right, 1)?.[0]
+    ?? evenlySpacedPositions(orderedSiblings.length + 1)[destination];
+}
+
 /** Resolves an order action without mutating document or presentation arrays. */
 export function resolveLayerOrder(nodes: readonly CanvasNode[], selectedIds: readonly string[], action: LayerOrderAction): LayerOrderResult | undefined {
   const selected = new Set(selectedIds);
@@ -68,7 +84,7 @@ export function resolveLayerOrder(nodes: readonly CanvasNode[], selectedIds: rea
 }
 
 /** Drops the selected sibling block directly before `beforeId`; omit it for front. */
-export function resolveLayerDrop(nodes: readonly CanvasNode[], selectedIds: readonly string[], beforeId?: string): LayerOrderResult | undefined {
+export function resolveLayerDrop<T extends Pick<CanvasNode, "id" | "positionId">>(nodes: readonly T[], selectedIds: readonly string[], beforeId?: string): LayerOrderResult | undefined {
   const selected = new Set(selectedIds);
   if (!selected.size || (beforeId !== undefined && (!nodes.some((node) => node.id === beforeId) || selected.has(beforeId)))) return undefined;
   const ordered = sortNodesByLayerOrder(nodes);
@@ -79,7 +95,7 @@ export function resolveLayerDrop(nodes: readonly CanvasNode[], selectedIds: read
   return insertAt(remaining, moving, destination < 0 ? remaining.length : destination);
 }
 
-function insertAt(remaining: CanvasNode[], moving: CanvasNode[], destination: number): LayerOrderResult | undefined {
+function insertAt<T extends Pick<CanvasNode, "id" | "positionId">>(remaining: T[], moving: T[], destination: number): LayerOrderResult | undefined {
   const next = [...remaining.slice(0, destination), ...moving, ...remaining.slice(destination)];
   const left = next[destination - 1]?.positionId;
   const right = next[destination + moving.length]?.positionId;

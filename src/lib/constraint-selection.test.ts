@@ -3,12 +3,12 @@ import { createNode } from "./editor-protocol";
 import { constraintSelection } from "./constraint-selection";
 
 describe("multi-selection constraints", () => {
-  it("keeps omitted constraints distinct from explicit Min", () => {
+  it("projects omitted legacy constraints as Figma's Min/Min default", () => {
     const legacy = createNode("rectangle", 0, 0);
     const explicit = { ...createNode("ellipse", 10, 0), constraints: { horizontal: "min" as const, vertical: "center" as const } };
 
     expect(constraintSelection([legacy, explicit])).toEqual({
-      horizontal: { kind: "mixed" }, vertical: { kind: "mixed" }, hasExplicitConstraints: true,
+      horizontal: { kind: "same", value: "min" }, vertical: { kind: "mixed" },
     });
   });
 
@@ -17,8 +17,9 @@ describe("multi-selection constraints", () => {
     const second = { ...createNode("text", 10, 0), constraints: { horizontal: "stretch" as const, vertical: "scale" as const } };
 
     expect(constraintSelection([first, second])).toEqual({
-      horizontal: { kind: "same", value: "stretch" }, vertical: { kind: "same", value: "scale" }, hasExplicitConstraints: true,
+      horizontal: { kind: "same", value: "stretch" }, vertical: { kind: "same", value: "scale" },
     });
     expect(constraintSelection([first, createNode("section", 0, 0)])).toBeUndefined();
+    expect(constraintSelection([first, createNode("booleanOperation", 0, 0)])).toBeUndefined();
   });
 });

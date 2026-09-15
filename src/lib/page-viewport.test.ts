@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { fitViewportToBounds, isSameRenderedViewport, pageContentBounds, selectCoveringViewportFrame, viewportReprojectionRect } from "./page-viewport";
+import { fitViewportToBounds, isSameRenderedViewport, pageContentBounds, selectCoveringViewportFrame, selectViewportFrameForInteraction, viewportReprojectionRect } from "./page-viewport";
 
 describe("page viewport", () => {
   const surface = { width: 800, height: 600 };
@@ -19,6 +19,13 @@ describe("page viewport", () => {
 
   it("requires a fresh complete paint when zooming out beyond every cached view", () => {
     expect(selectCoveringViewportFrame([detail, overview], { x: 0, y: 0, zoom: .9 }, surface)).toBeUndefined();
+  });
+
+  it("uses the widest cached raster as a temporary interaction preview", () => {
+    const result = selectViewportFrameForInteraction([detail, overview], { x: 0, y: 0, zoom: .5 }, surface);
+    expect(result?.frame).toBe(overview);
+    expect(result?.rect).toEqual({ x: 200, y: 150, width: 400, height: 300 });
+    expect(selectViewportFrameForInteraction([], { x: 0, y: 0, zoom: 1 }, surface)).toBeUndefined();
   });
 
   it("does not splice a partial panned frame over the overview", () => {

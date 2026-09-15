@@ -27,7 +27,13 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
       const node = structuredClone(command.node);
       const index = planned.findIndex((candidate) => candidate.id === node.id);
       if (index >= 0) planned[index] = { ...planned[index], ...canvasNode(node), id: planned[index].id, kind: planned[index].kind };
-      return { type: "update", node };
+      return { type: "update", node, ...(command.ignoreConstraints ? { ignoreConstraints: true as const } : {}), ...(command.plainTextOnly ? { plainTextOnly: true as const } : {}), ...(command.renameTextPath ? { renameTextPath: true as const } : {}) };
+    }
+    if (command.type === "convertToTextPath") {
+      const node = structuredClone(command.node);
+      const index = planned.findIndex((candidate) => candidate.id === node.id);
+      if (index >= 0) planned[index] = canvasNode(node);
+      return { type: "convertToTextPath", node };
     }
     if (command.type === "createPage" || command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles" || command.type === "setExtensions") {
       return { ...command };

@@ -1,0 +1,14 @@
+{
+  "format": "makefigma-remediation-normal-isolation-v1",
+  "name": "W12-P-NORMAL-ISOLATION",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000980", "name": "Normal isolation backdrop", "kind": "rectangle", "x": -300, "y": -110, "width": 600, "height": 220, "rotation": 0, "fill": "#cc3366", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000981", "name": "Isolated normal group", "kind": "group", "x": -250, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "normal", "visible": true, "extensions": { "makefigma.blend.normal-isolation.v1": [1] } },
+    { "id": "00000000-0000-4000-8000-000000000982", "parentId": "00000000-0000-4000-8000-000000000981", "name": "Isolated multiply child", "kind": "rectangle", "x": -250, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "multiply", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000983", "name": "Isolated normal reference", "kind": "rectangle", "x": -100, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000984", "name": "Pass through group", "kind": "group", "x": 50, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "pass-through", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000985", "parentId": "00000000-0000-4000-8000-000000000984", "name": "Pass through multiply child", "kind": "rectangle", "x": 50, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "multiply", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000986", "name": "Direct multiply reference", "kind": "rectangle", "x": 200, "y": -60, "width": 100, "height": 120, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "multiply", "visible": true }
+  ]
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { admitSliceRasterBatch, admitSliceRasterExport, MAX_SLICE_EXPORT_PIXELS, pdfExportBackgroundColor, pdfFromJpeg, pdfFromJpegs, pdfFromRgbaPages, sliceExportBackgroundColor, SliceExportError } from "./slice-export";
+import { admitSliceRasterBatch, admitSliceRasterExport, MAX_SLICE_EXPORT_PIXELS, pdfExportBackgroundColor, pdfFromJpeg, pdfFromJpegs, pdfFromRgbaPages, rasterizeSvgToPng, sliceExportBackgroundColor, SliceExportError } from "./slice-export";
 
 describe("Slice export budget", () => {
   it("admits bounded raster regions and reports exact backing-store cost", () => {
@@ -25,9 +25,28 @@ describe("Slice export budget", () => {
     expect(pdfExportBackgroundColor("#Aa11Ff")).toBe("#aa11ff");
     expect(pdfExportBackgroundColor("transparent")).toBeUndefined();
   });
+
+  it("rejects an already-cancelled raster export before allocating browser surfaces", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("cancelled", "AbortError");
+    controller.abort(reason);
+    await expect(rasterizeSvgToPng("<svg/>", 1, 1, 1, "transparent", controller.signal)).rejects.toBe(reason);
+  });
 });
 
 describe("Slice PDF encoding", () => {
+  it("rejects cancelled PDF assembly before compressing page buffers", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("cancelled", "AbortError");
+    controller.abort(reason);
+    await expect(pdfFromRgbaPages([{
+      rgba: Uint8ClampedArray.of(0, 0, 0, 0),
+      pageWidth: 1,
+      pageHeight: 1,
+      imageWidth: 1,
+      imageHeight: 1,
+    }], controller.signal)).rejects.toBe(reason);
+  });
   it("writes lossless RGBA PDF pages with a PDF 1.4 alpha soft mask", async () => {
     const source = new TextDecoder().decode(await (await pdfFromRgbaPages([{
       rgba: Uint8ClampedArray.from([255, 0, 0, 0, 0, 64, 255, 255]),

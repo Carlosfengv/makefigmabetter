@@ -1,0 +1,18 @@
+{
+  "format": "makefigma-remediation-advanced-blend-v1",
+  "name": "W12-P-ADVANCED-BLEND",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000940", "name": "Blend evidence background", "kind": "rectangle", "x": -300, "y": -130, "width": 600, "height": 260, "rotation": 0, "fill": "#d97706", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000941", "name": "Color dodge", "kind": "rectangle", "x": -255, "y": -100, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "blendMode": "color-dodge", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000942", "name": "Color burn", "kind": "rectangle", "x": -155, "y": -100, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "blendMode": "color-burn", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000943", "name": "Hard light", "kind": "rectangle", "x": -55, "y": -100, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "blendMode": "hard-light", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000944", "name": "Soft light", "kind": "rectangle", "x": 45, "y": -100, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "blendMode": "soft-light", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000945", "name": "Difference", "kind": "rectangle", "x": 145, "y": -100, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "blendMode": "difference", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000946", "name": "Exclusion", "kind": "ellipse", "x": -255, "y": 20, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "exclusion", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000947", "name": "Hue", "kind": "ellipse", "x": -155, "y": 20, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "hue", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000948", "name": "Saturation", "kind": "ellipse", "x": -55, "y": 20, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "saturation", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000949", "name": "Color", "kind": "ellipse", "x": 45, "y": 20, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "color", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000950", "name": "Luminosity", "kind": "ellipse", "x": 145, "y": 20, "width": 80, "height": 80, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "luminosity", "visible": true }
+  ]
+}

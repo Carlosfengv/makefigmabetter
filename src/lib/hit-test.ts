@@ -10,6 +10,8 @@ import { vectorPathContains } from "./vector-path";
 import { connectorPathContains, connectorPathForNode } from "./connector-path";
 import { connectorDecorationContains, connectorLabelContains } from "./connector-presentation";
 import { shapeWithTextContains } from "./shape-with-text-path";
+import { invertAffine, transformPoint, worldTransformsForNodes, type AffineMatrix } from "./scene-transform";
+import { hangingListLocalBounds } from "./world-visual-bounds";
 
 export type WorldPoint = Readonly<{ x: number; y: number }>;
 
@@ -18,11 +20,11 @@ export type WorldPoint = Readonly<{ x: number; y: number }>;
  * transformed into a node's local space, so rotation never falls back to the
  * axis-aligned bounds used as the broad phase.
  */
-export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boolean {
+export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint, nodes?: readonly CanvasNode[], worldTransformByNodeId?: ReadonlyMap<string, AffineMatrix>, nodeById?: ReadonlyMap<string, CanvasNode>, defaultPageId?: string): boolean {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height) || node.width <= 0) return false;
-  const local = toLocalPoint(node, point);
+  const local = toLocalPoint(node, point, worldTransformByNodeId?.get(node.id));
   if (node.kind === "connector") {
-    const path = connectorPathForNode(node);
+    const path = connectorPathForNode(node, nodes ? { nodes, defaultPageId, nodeById, worldTransformByNodeId } : undefined);
     if (path) return connectorPathContains(path, local, Math.max(4, node.strokeWidth / 2)) || connectorDecorationContains(node, path, local) || connectorLabelContains(node, path, local);
   }
   if (node.kind === "line" || node.kind === "connector") {
@@ -56,6 +58,12 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint): boo
     return strokeDashContains(local.x, node.strokeDashPattern);
   }
   if (node.height <= 0) return false;
+  const hangingListBounds = hangingListLocalBounds(node);
+  if (hangingListBounds
+    && local.x < 0
+    && local.x >= hangingListBounds.x
+    && local.y >= hangingListBounds.y
+    && local.y <= hangingListBounds.y + hangingListBounds.height) return true;
   const strokeAlign = node.strokeAlign ?? "inside";
   if ((node.kind === "frame" || node.kind === "rectangle") && strokeAlign !== "inside" && node.strokeWidth > 0) {
     const weights = node.strokeWeights ?? [node.strokeWidth, node.strokeWidth, node.strokeWidth, node.strokeWidth];
@@ -114,9 +122,10 @@ export function strokeDashContains(distance: number, pattern: readonly number[] 
   return true;
 }
 
-export function findTopmostHit(nodes: readonly CanvasNode[], point: WorldPoint): CanvasNode | undefined {
+export function findTopmostHit(nodes: readonly CanvasNode[], point: WorldPoint, defaultPageId?: string): CanvasNode | undefined {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const hits = [...nodes].reverse().filter((node) => node.visible !== false && !isEffectivelyLocked(nodesById, node.id) && nodeContainsWorldPoint(node, point));
+  const worldTransformByNodeId = worldTransformsForNodes(nodes);
+  const hits = [...nodes].reverse().filter((node) => node.visible !== false && !isEffectivelyLocked(nodesById, node.id) && nodeContainsWorldPoint(node, point, nodes, worldTransformByNodeId, nodesById, defaultPageId));
   return findTopmostCanvasSelectionCandidate(hits);
 }
 
@@ -134,7 +143,9 @@ export function findTopmostCanvasSelectionCandidate(candidates: readonly CanvasN
     ?? candidates.find((node) => node.kind !== "slice");
 }
 
-function toLocalPoint(node: CanvasNode, point: WorldPoint): WorldPoint {
+function toLocalPoint(node: CanvasNode, point: WorldPoint, worldTransform?: AffineMatrix): WorldPoint {
+  const inverse = worldTransform && invertAffine(worldTransform);
+  if (inverse) return transformPoint(inverse, point);
   const radians = (Number.isFinite(node.rotation) ? node.rotation : 0) * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -174,7 +185,7 @@ function ellipseArcContains(point: WorldPoint, width: number, height: number, ar
   return normalize(angle - start) <= sweep + 1e-9;
 }
 
-function roundedRectContains(point: WorldPoint, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"], cornerSmoothing?: number): boolean {
+export function roundedRectContains(point: WorldPoint, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"] | readonly [number, number, number, number], cornerSmoothing?: number): boolean {
   if (point.x < 0 || point.x > width || point.y < 0 || point.y > height) return false;
   const [topLeft, topRight, bottomRight, bottomLeft] = resolveCornerRadii(width, height, radius, cornerRadii);
   const topLeftCorner = point.x < topLeft && point.y < topLeft;

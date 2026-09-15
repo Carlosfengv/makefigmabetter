@@ -62,4 +62,79 @@ describe("resolveMultiResizeSelection", () => {
       requiresAffine: true,
     });
   });
+
+  it("treats a Repeat TransformGroup as one affine root and includes derived paint", () => {
+    const repeat = {
+      ...createNode("transformGroup", 20, 30),
+      id: "repeat",
+      width: 100,
+      height: 80,
+      transformModifiers: [{
+        type: "REPEAT" as const,
+        count: 2,
+        unitType: "RELATIVE" as const,
+        offset: 1.5,
+        repeatType: "LINEAR" as const,
+        axis: "HORIZONTAL" as const,
+      }],
+    };
+    const source = {
+      ...createNode("rectangle", 0, 0),
+      id: "source",
+      parentId: repeat.id,
+      width: 20,
+      height: 10,
+      relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    };
+    const sibling = { ...createNode("rectangle", 400, 40), id: "sibling", width: 20, height: 20 };
+
+    expect(resolveMultiResizeSelection([repeat, source, sibling], [repeat.id, sibling.id])).toMatchObject({
+      ids: [repeat.id, sibling.id],
+      bounds: { x: 20, y: 30, width: 400, height: 80 },
+      requiresAffine: true,
+    });
+    expect(resolveMultiResizeSelection([repeat, source, sibling], [repeat.id])).toMatchObject({
+      ids: [repeat.id],
+      bounds: { x: 20, y: 30, width: 320, height: 80 },
+      requiresAffine: true,
+    });
+    expect(resolveMultiResizeSelection(
+      [repeat, source, sibling],
+      [repeat.id, sibling.id],
+      { repeatBoundsForNode: () => undefined },
+    )).toBeUndefined();
+  });
+
+  it("retains a nested Repeat wrapper when expanding an ordinary Group", () => {
+    const group = { ...createNode("group", 0, 0), id: "group" };
+    const repeat = {
+      ...createNode("transformGroup", 0, 0),
+      id: "repeat",
+      parentId: group.id,
+      width: 40,
+      height: 20,
+      transformModifiers: [{
+        type: "REPEAT" as const,
+        count: 1,
+        unitType: "PIXELS" as const,
+        offset: 50,
+        repeatType: "LINEAR" as const,
+        axis: "HORIZONTAL" as const,
+      }],
+    };
+    const source = {
+      ...createNode("rectangle", 0, 0),
+      id: "source",
+      parentId: repeat.id,
+      width: 10,
+      height: 10,
+      relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    };
+
+    expect(resolveMultiResizeSelection([group, repeat, source], [group.id])).toMatchObject({
+      ids: [repeat.id],
+      bounds: { x: 0, y: 0, width: 60, height: 20 },
+      requiresAffine: true,
+    });
+  });
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { withPdfRasterizationFallback } from "./export-compatibility";
+import { extensionsForNodeBlendMode } from "./node-blend-semantics";
+import { replaceRuntimeTextRangeWithStyles } from "../runtime/runtime-text";
 import { exportPageToSvg } from "./svg-export";
 import { compileScene } from "../runtime/scene-compiler";
 
@@ -26,11 +28,119 @@ describe("SVG export", () => {
   });
 
   it("preserves a supported Blend Mode as SVG mix-blend-mode", () => {
-    const rectangle = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000099", pageId, blendMode: "multiply" as const };
+    const rectangle = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000099", pageId, blendMode: "luminosity" as const };
     const result = exportPageToSvg([rectangle], { pageId, defaultPageId: pageId, padding: 0 });
 
     expect(result.warnings).toEqual([]);
-    expect(result.svg).toContain('style="mix-blend-mode:multiply"');
+    expect(result.svg).toContain('style="mix-blend-mode:luminosity"');
+  });
+
+  it("lets a pass-through container expose descendant blending without emitting an invalid SVG mode", () => {
+    const group = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000091", pageId, blendMode: "pass-through" as const };
+    const child = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000092", pageId, parentId: group.id, blendMode: "multiply" as const };
+    const result = exportPageToSvg([group, child], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).not.toContain("mix-blend-mode:pass-through");
+    expect(result.svg).toContain("mix-blend-mode:multiply");
+  });
+
+  it("isolates an explicitly NORMAL container before descendant blending", () => {
+    const group = {
+      ...createNode("group", 0, 0),
+      id: "00000000-0000-4000-8000-000000000089",
+      pageId,
+      extensions: extensionsForNodeBlendMode(undefined, "normal"),
+    };
+    const child = {
+      ...createNode("rectangle", 0, 0),
+      id: "00000000-0000-4000-8000-000000000090",
+      pageId,
+      parentId: group.id,
+      blendMode: "multiply" as const,
+    };
+    const result = exportPageToSvg([group, child], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.warnings).toEqual([]);
+    expect(result.svg).toContain('style="isolation:isolate"');
+    expect(result.svg).toContain("mix-blend-mode:multiply");
+  });
+
+  it("reports node linear blends instead of emitting an invalid structural SVG alias", () => {
+    const burn = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000093", pageId, blendMode: "linear-burn" as const };
+    const dodge = { ...createNode("rectangle", 30, 0), id: "00000000-0000-4000-8000-000000000094", pageId, blendMode: "linear-dodge" as const };
+    const result = exportPageToSvg([burn, dodge], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).not.toContain("mix-blend-mode:linear-");
+    expect(result.compatibilityFallbacks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: burn.id, capability: "linear-blend", outcome: "fallback" }),
+      expect.objectContaining({ nodeId: dodge.id, capability: "linear-blend", outcome: "fallback" }),
+    ]));
+  });
+
+  it("reports paint-layer linear blends and exports them with Normal composition", () => {
+    const rectangle = {
+      ...createNode("rectangle", 0, 0),
+      id: "00000000-0000-4000-8000-000000000095",
+      pageId,
+      fillStack: { layers: [
+        { paint: { css: "#663344" }, visible: true, opacity: .75, blendMode: "linear-burn" as const },
+      ] },
+    };
+    const result = exportPageToSvg([rectangle], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).not.toContain("mix-blend-mode:linear-");
+    expect(result.svg).toContain('opacity="0.75"');
+    expect(result.compatibilityFallbacks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: rectangle.id, capability: "linear-blend", outcome: "fallback" }),
+    ]));
+  });
+
+  it("applies Group opacity once around the complete overlapping child subtree", () => {
+    const group = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000701", pageId, opacity: .5 };
+    const back = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000702", pageId, parentId: group.id, width: 40, height: 40, fills: [{ css: "#ff0000" }], strokeWidth: 0 };
+    const front = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000703", pageId, parentId: group.id, width: 40, height: 40, fills: [{ css: "#0000ff" }], strokeWidth: 0 };
+
+    const result = exportPageToSvg([group, back, front], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.warnings).toEqual([]);
+    expect(result.svg.match(/opacity="0\.5"/g)).toHaveLength(1);
+    const owner = result.svg.indexOf('opacity="0.5"');
+    expect(owner).toBeLessThan(result.svg.indexOf('fill="#ff0000"'));
+    expect(owner).toBeLessThan(result.svg.indexOf('fill="#0000ff"'));
+  });
+
+  it("retains multiplicative opacity at each nested Group boundary", () => {
+    const outer = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000711", pageId, opacity: .5 };
+    const inner = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000712", pageId, parentId: outer.id, opacity: .5 };
+    const child = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000713", pageId, parentId: inner.id, width: 40, height: 40, fills: [{ css: "#ff0000" }], strokeWidth: 0 };
+
+    const result = exportPageToSvg([outer, inner, child], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg.match(/opacity="0\.5"/g)).toHaveLength(2);
+    const outerOwner = result.svg.indexOf('opacity="0.5"');
+    const innerOwner = result.svg.indexOf('opacity="0.5"', outerOwner + 1);
+    expect(outerOwner).toBeLessThan(innerOwner);
+    expect(innerOwner).toBeLessThan(result.svg.indexOf('fill="#ff0000"'));
+  });
+
+  it("wraps a container effect around its own paint and clipped descendants", () => {
+    const frame = {
+      ...createNode("frame", 0, 0),
+      id: "00000000-0000-4000-8000-000000000721",
+      pageId,
+      width: 80,
+      height: 80,
+      clipsContent: true,
+      effectStack: [{ layerBlur: { visible: true, radius: 4 } }],
+    };
+    const child = { ...createNode("rectangle", 60, 0), id: "00000000-0000-4000-8000-000000000722", pageId, parentId: frame.id, width: 40, height: 40, fills: [{ css: "#ff0000" }], strokeWidth: 0 };
+
+    const result = exportPageToSvg([frame, child], { pageId, defaultPageId: pageId, padding: 0 });
+
+    const filterUse = result.svg.lastIndexOf('filter="url(#makefigma-layer-blur-');
+    expect(filterUse).toBeGreaterThan(result.svg.indexOf("</defs>"));
+    expect(filterUse).toBeLessThan(result.svg.indexOf('fill="#ff0000"'));
+    expect(result.svg).toContain('clip-path="url(#makefigma-clip-');
   });
 
   it("reports Display P3 conversion instead of silently presenting the SVG as wide-gamut", () => {
@@ -45,6 +155,39 @@ describe("SVG export", () => {
       expect.objectContaining({ nodeId: rectangle.id, capability: "display-p3", outcome: "fallback" }),
     ]);
     expect(result.warnings).toEqual([expect.stringContaining("converted to clipped sRGB")]);
+  });
+
+  it("exports radial, angular and diamond Paint Stack layers without a solid fallback", () => {
+    const gradient = (kind: "radial" | "angular" | "diamond") => ({
+      css: "#ff0000",
+      gradientPaint: {
+        kind,
+        transform: { a: 1.5, b: .2, c: -.1, d: 1.2, e: -.2, f: -.1 },
+        stops: [
+          { position: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+          { position: .5, color: { space: "linear-srgb" as const, components: [0, 1, 0] as [number, number, number], alpha: .5 } },
+          { position: 1, color: { space: "display-p3" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+        ],
+      },
+    });
+    const rectangle = {
+      ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000097", pageId, width: 120, height: 80, strokeWidth: 0,
+      fillStack: { layers: [
+        { visible: true, opacity: 1, blendMode: "normal" as const, paint: gradient("radial") },
+        { visible: true, opacity: .8, blendMode: "normal" as const, paint: gradient("angular") },
+        { visible: true, opacity: .6, blendMode: "normal" as const, paint: gradient("diamond") },
+      ] },
+    };
+
+    const result = exportPageToSvg([rectangle], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).toContain("<radialGradient");
+    expect(result.svg).toContain('data-makefigma-gradient="angular"');
+    expect(result.svg).toContain('data-makefigma-gradient="diamond"');
+    expect(result.svg.match(/fill="url\(#makefigma-gradient-/g)).toHaveLength(3);
+    expect(result.compatibilityFallbacks).toEqual([
+      expect.objectContaining({ nodeId: rectangle.id, capability: "display-p3", outcome: "fallback" }),
+    ]);
   });
 
   it("exports a selected Slice as a rotated world-space crop without painting the Slice", () => {
@@ -95,6 +238,47 @@ describe("SVG export", () => {
     // The mask's black fill appears only inside its definition, never as a
     // painted page sibling; the target remains the only rendered layer.
     expect(result.svg.match(/fill="#0048FF"/g)).toHaveLength(1);
+  });
+
+  it("renders a paint-owning Frame mask and its clipped descendants inside the mask definition", () => {
+    const mask = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-0000000000b1", pageId, width: 80, height: 80, fillStack: { layers: [] }, strokeWidth: 0, isMask: true };
+    const maskChild = { ...createNode("ellipse", 20, 20), id: "00000000-0000-4000-8000-0000000000b2", pageId, parentId: mask.id, width: 40, height: 40, fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#000000" } }] }, strokeWidth: 0 };
+    const target = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-0000000000b3", pageId, width: 80, height: 80, fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#0080ff" } }] }, strokeWidth: 0 };
+
+    const result = exportPageToSvg([mask, maskChild, target], { pageId, defaultPageId: pageId, padding: 0 });
+
+    const maskMarkup = result.svg.match(/<mask id="makefigma-alpha-mask-[\s\S]*?<\/mask>/u)?.[0];
+    expect(maskMarkup).toContain('<ellipse cx="20" cy="20" rx="20" ry="20" fill="#000000"');
+    expect(maskMarkup).not.toContain("#0080ff");
+    expect(result.svg.match(/fill="#0080ff"/g)).toHaveLength(1);
+    expect(result.compatibilityFallbacks).toEqual([]);
+  });
+
+  it("renders a structural Group mask from its descendant alpha", () => {
+    const mask = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-0000000000c1", pageId, width: 80, height: 80, isMask: true };
+    const maskChild = { ...createNode("ellipse", 20, 20), id: "00000000-0000-4000-8000-0000000000c2", pageId, parentId: mask.id, width: 40, height: 40, fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#000000" } }] }, strokeWidth: 0 };
+    const target = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-0000000000c3", pageId, width: 80, height: 80, fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#ff4080" } }] }, strokeWidth: 0 };
+
+    const result = exportPageToSvg([mask, maskChild, target], { pageId, defaultPageId: pageId, padding: 0 });
+
+    const maskMarkup = result.svg.match(/<mask id="makefigma-alpha-mask-[\s\S]*?<\/mask>/u)?.[0];
+    expect(maskMarkup).toContain('<ellipse cx="20" cy="20" rx="20" ry="20" fill="#000000"');
+    expect(maskMarkup).not.toContain("#ff4080");
+    expect(result.svg.match(/fill="#ff4080"/g)).toHaveLength(1);
+    expect(result.compatibilityFallbacks).toEqual([]);
+  });
+
+  it("wraps the entire contiguous sibling target run in one alpha mask", () => {
+    const mask = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-0000000000a1", pageId, width: 120, height: 80, isMask: true, opacity: .5 };
+    const first = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-0000000000a2", pageId, width: 80, height: 80, fills: [{ css: "#ff0000" }], strokeWidth: 0 };
+    const second = { ...createNode("rectangle", 40, 0), id: "00000000-0000-4000-8000-0000000000a3", pageId, width: 80, height: 80, fills: [{ css: "#0000ff" }], strokeWidth: 0 };
+
+    const result = exportPageToSvg([mask, first, second], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg.match(/<mask id="makefigma-alpha-mask-/g)).toHaveLength(1);
+    expect(result.svg.match(/<g mask="url\(#makefigma-alpha-mask-/g)).toHaveLength(1);
+    expect(result.svg.match(/fill="#ff0000"/g)).toHaveLength(1);
+    expect(result.svg.match(/fill="#0000ff"/g)).toHaveLength(1);
   });
 
   it("keeps an embedded image alpha source inside its SVG mask and PDF raster input", () => {
@@ -191,6 +375,29 @@ describe("SVG export", () => {
     expect(result.warnings).toEqual([]);
     expect(result.svg).toContain('d="M 0 0 L 100 0 L 100 60 L 0 60 L 0 0 Z"');
     expect(result.svg.match(/<path /g)).toHaveLength(1);
+  });
+
+  it("exports a live Boolean as the alpha source for its following sibling run", () => {
+    const boolean = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000021", pageId, width: 100, height: 60, isMask: true };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000022", pageId, parentId: boolean.id, fill: "#ffffff", strokeWidth: 0 };
+    const second = { ...createNode("vector", 40, 20), id: "00000000-0000-4000-8000-000000000023", pageId, parentId: boolean.id, strokeWidth: 0 };
+    const target = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000024", pageId, width: 100, height: 60, fill: "#cc3366", strokeWidth: 0 };
+    const path = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [
+      { id: "00000000-0000-4000-8000-000000000025", x: 0, y: 0, pointType: "corner" as const },
+      { id: "00000000-0000-4000-8000-000000000026", x: 100, y: 0, pointType: "corner" as const },
+      { id: "00000000-0000-4000-8000-000000000027", x: 100, y: 60, pointType: "corner" as const },
+      { id: "00000000-0000-4000-8000-000000000028", x: 0, y: 60, pointType: "corner" as const },
+    ] }] };
+    const result = exportPageToSvg([boolean, first, second, target], {
+      pageId, defaultPageId: pageId, padding: 0, booleanPaths: new Map([[boolean.id, path]]),
+    });
+
+    expect(result.warnings).toEqual([]);
+    expect(result.svg).toContain('<mask id="makefigma-alpha-mask-');
+    expect(result.svg).toContain('mask-type="alpha"');
+    expect(result.svg.match(/<path /g)).toHaveLength(2);
+    expect(result.svg.match(/d="M 0 0 L 100 0 L 100 60 L 0 60 L 0 0 Z"/g)).toHaveLength(1);
+    expect(result.svg).toContain('mask="url(#makefigma-alpha-mask-');
   });
 
   it("preserves a supported Boolean wrapper effect in the frozen SVG/PNG/PDF source", () => {
@@ -340,6 +547,24 @@ describe("SVG export", () => {
     expect(result.svg).toContain('fill="#654321"');
   });
 
+  it.each(["component", "instance", "slot", "componentSet"] as const)("exports %s own paint and clips its descendants", (kind) => {
+    const parent = {
+      ...createNode(kind, 0, 0), id: "00000000-0000-4000-8000-000000000901", pageId, width: 100, height: 100, clipsContent: true,
+      fill: "#123456", fills: [{ css: "#123456" }], stroke: "transparent", strokeWidth: 0,
+    };
+    const child = {
+      ...createNode(kind === "componentSet" ? "component" : "rectangle", 80, 0), id: "00000000-0000-4000-8000-000000000902", pageId, parentId: parent.id, width: 40, height: 40,
+      fill: "#abcdef", fills: [{ css: "#abcdef" }], stroke: "transparent", strokeWidth: 0,
+    };
+
+    const result = exportPageToSvg([parent, child], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).toContain('fill="#123456"');
+    expect(result.svg).toContain('fill="#abcdef"');
+    expect(result.svg).toContain('<clipPath id="makefigma-clip-');
+    expect(result.svg).toContain('clip-path="url(#makefigma-clip-');
+  });
+
   it("exports Core-resolved Wrap and absolute-child geometry without running Auto Layout again", () => {
     const frame = {
       ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000091", pageId, width: 300, height: 180, clipsContent: true,
@@ -398,6 +623,61 @@ describe("SVG export", () => {
     expect(result.svg).toContain('<clipPath id="makefigma-image-clip-');
   });
 
+  it("exports ordered Paint Stack image layers with fit, tile, transform and presentation", () => {
+    const assetId = "paint-stack-image";
+    const node = {
+      ...createNode("rectangle", 12, 24), id: "00000000-0000-4000-8000-000000000105", pageId, width: 80, height: 48,
+      fillStack: { layers: [
+        { paint: { css: "#ff0000" }, visible: true, opacity: 0.25, blendMode: "multiply" as const },
+        { image: { assetId, scaleMode: "fit" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 2, f: 3 }, rotationDegrees: 90 as const, filters: { exposure: .2 } }, visible: true, opacity: 0.5, blendMode: "screen" as const },
+        { image: { assetId, scaleMode: "tile" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } }, visible: true, opacity: 1, blendMode: "normal" as const },
+      ] },
+    };
+    const result = exportPageToSvg([node], {
+      pageId,
+      defaultPageId: pageId,
+      imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+    });
+    expect(result.compatibilityFallbacks).toContainEqual(expect.objectContaining({ nodeId: node.id, capability: "image-filters", outcome: "fallback" }));
+
+    expect(result.compatibilityFallbacks).toHaveLength(1);
+    expect(result.svg).toContain('preserveAspectRatio="xMidYMid meet"');
+    expect(result.svg).toContain('transform="matrix(0 1 -1 0 66 -13)"');
+    expect(result.svg).toContain('<image href="data:image/png;base64,AAAA" x="16" y="-16" width="48" height="80" preserveAspectRatio="xMidYMid meet"/>');
+    expect(result.svg).toContain('style="mix-blend-mode:screen"');
+    expect(result.svg).toContain('opacity="0.5"');
+    expect(result.svg).toContain('<pattern id="makefigma-image-pattern-');
+    expect(result.svg.match(/data:image\/png;base64,AAAA/g)).toHaveLength(2);
+  });
+
+  it("uses an image Paint Stack for SVG strokes and decorative Line endpoints", () => {
+    const assetId = "stroke-stack-image";
+    const line = {
+      ...createNode("line", 12, 24), id: "00000000-0000-4000-8000-000000000106", pageId, width: 80, height: 0,
+      strokeWidth: 8,
+      strokeCapStart: "diamondFilled" as const,
+      strokeCapEnd: "triangleFilled" as const,
+      strokeStack: { layers: [{
+        image: { assetId, scaleMode: "tile" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 2, f: 3 } },
+        visible: true,
+        opacity: 0.5,
+        blendMode: "multiply" as const,
+      }] },
+    };
+    const result = exportPageToSvg([line], {
+      pageId,
+      defaultPageId: pageId,
+      imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+    });
+
+    expect(result.compatibilityFallbacks).toEqual([]);
+    expect(result.svg).toContain('<pattern id="makefigma-stroke-image-pattern-');
+    expect(result.svg).toContain('patternTransform="matrix(1 0 0 1 2 3)"');
+    expect(result.svg).toContain('style="mix-blend-mode:multiply"');
+    expect(result.svg).toContain('opacity="0.5"');
+    expect(result.svg.match(/fill="url\(#makefigma-stroke-image-pattern-/g)).toHaveLength(2);
+  });
+
   it("refuses a supplied SVG data URI and reports the image fallback", () => {
     const image = { ...createNode("image", 12, 24), id: "00000000-0000-4000-8000-000000000006", pageId, assetId: "untrusted-image" };
     const result = exportPageToSvg([image], {
@@ -421,6 +701,221 @@ describe("SVG export", () => {
     expect(result.svg).toContain('<tspan x="60" y="20" text-anchor="middle" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="600" font-style="italic" letter-spacing="1.5">First</tspan></tspan><tspan x="60" y="50" text-anchor="middle" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="600" font-style="italic" letter-spacing="1.5">Second</tspan></tspan>');
   });
 
+  it("resolves PERCENT and AUTO line height through the shared SVG line box", () => {
+    const base = {
+      ...createNode("text", 0, 0),
+      id: "00000000-0000-4000-8000-000000000139",
+      pageId,
+      width: 120,
+      text: "First\nSecond",
+      textProperties: {
+        runs: [{ start: 0, end: 12, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 150, lineHeightUnit: "percent" as const, paragraphSpacing: 6 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const yValues = (svg: string) => Array.from(svg.matchAll(/<tspan x="0" y="([\d.]+)"/gu), (match) => Number(match[1]));
+    const percent = exportPageToSvg([base], { pageId, defaultPageId: pageId });
+    const percentY = yValues(percent.svg);
+    expect(percentY[1]! - percentY[0]!).toBe(36);
+
+    const auto = {
+      ...base,
+      textProperties: {
+        ...base.textProperties,
+        paragraph: { ...base.textProperties.paragraph, lineHeight: undefined, lineHeightUnit: "auto" as const },
+      },
+    };
+    const autoY = yValues(exportPageToSvg([auto], { pageId, defaultPageId: pageId }).svg);
+    expect(autoY[1]! - autoY[0]!).toBe(30);
+  });
+
+  it("renders a ShapeWithText insertion after materializing its empty base style", () => {
+    const baseStyle = {
+      fontSize: 22,
+      fontWeight: 650,
+      italic: true,
+      letterSpacing: 1.25,
+      color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 },
+    };
+    const emptyProperties = {
+      runs: [],
+      baseStyle,
+      paragraph: { alignment: "center" as const, lineHeight: 26, paragraphSpacing: 0 },
+      autoSize: "fixed" as const,
+    };
+    const inserted = replaceRuntimeTextRangeWithStyles("", emptyProperties, 0, 0, "Hi");
+    const shape = {
+      ...createNode("shapeWithText", 0, 0),
+      id: "00000000-0000-4000-8000-000000000138",
+      pageId,
+      width: 120,
+      height: 50,
+      text: inserted.characters,
+      textProperties: inserted.textProperties,
+    };
+    const result = exportPageToSvg([shape], { pageId, defaultPageId: pageId });
+
+    expect(result.svg).toContain("Hi");
+    expect(result.svg).toContain('font-size="22"');
+    expect(result.svg).toContain('font-weight="650"');
+    expect(result.svg).toContain('font-style="italic"');
+    expect(result.svg).toContain('letter-spacing="1.25"');
+    expect(result.svg).toContain('fill="#ff0000"');
+  });
+
+  it("wraps ShapeWithText with a paragraph-only first-line indent", () => {
+    const shape = {
+      ...createNode("shapeWithText", 0, 0),
+      id: "00000000-0000-4000-8000-00000000013a",
+      pageId,
+      width: 60,
+      height: 80,
+      text: "abcdef",
+      textProperties: {
+        runs: [{ start: 0, end: 6, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, paragraphIndent: 12 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const svg = exportPageToSvg([shape], { pageId, defaultPageId: pageId }).svg;
+    expect(svg).toContain('<tspan x="22"');
+    expect(svg).toContain('>abcd</tspan>');
+    expect(svg).toContain('<tspan x="10"');
+    expect(svg).toContain('>ef</tspan>');
+  });
+
+  it("balances ShapeWithText lines through the shared paragraph wrapper", () => {
+    const shape = {
+      ...createNode("shapeWithText", 0, 0),
+      id: "00000000-0000-4000-8000-00000000013b",
+      pageId,
+      width: 74,
+      height: 70,
+      text: "aa bb cc dd",
+      textProperties: {
+        runs: [{ start: 0, end: 11, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, textWrapStyle: "balance" as const },
+        autoSize: "fixed" as const,
+      },
+    };
+    const svg = exportPageToSvg([shape], { pageId, defaultPageId: pageId }).svg;
+    expect(svg).toContain(">aa bb</tspan>");
+    expect(svg).toContain(">cc dd</tspan>");
+    expect(svg).not.toContain(">aa bb cc</tspan>");
+  });
+
+  it("applies wrap style overrides independently to each paragraph", () => {
+    const text = {
+      ...createNode("text", 0, 0),
+      id: "00000000-0000-4000-8000-00000000013c",
+      pageId,
+      width: 54,
+      height: 90,
+      text: "aa bb cc dd\naa bb cc dd",
+      textProperties: {
+        runs: [{ start: 0, end: 23, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, textWrapStyle: "balance" as const },
+        paragraphStyleRuns: [{ start: 12, textWrapStyle: "auto" as const }],
+        autoSize: "fixed" as const,
+      },
+    };
+    const svg = exportPageToSvg([text], { pageId, defaultPageId: pageId }).svg;
+    expect(svg.match(/>aa bb<\/tspan>/g)).toHaveLength(1);
+    expect(svg).toContain(">aa bb cc</tspan>");
+  });
+
+  it("exports ordered and unordered markers outside Canonical source spans", () => {
+    const textNode = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000014b", pageId, width: 120, height: 60, text: "One\nTwo",
+      textProperties: {
+        runs: [{ start: 0, end: 7, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0, listType: "ordered" as const, listSpacing: 7 },
+        paragraphStyleRuns: [{ start: 4, indentation: 2 }],
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const shapeNode = {
+      ...createNode("shapeWithText", 0, 80), id: "00000000-0000-4000-8000-00000000014c", pageId, width: 120, height: 60, text: "Alpha\nBeta",
+      textProperties: {
+        runs: [{ start: 0, end: 10, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0, listType: "unordered" as const, listSpacing: 7 },
+        paragraphStyleRuns: [{ start: 6, indentation: 2 }],
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const svg = exportPageToSvg([textNode, shapeNode], { pageId, defaultPageId: pageId }).svg;
+
+    expect(svg.match(/data-makefigma-list-marker="ORDERED"/g)).toHaveLength(2);
+    expect(svg.match(/data-makefigma-list-marker="UNORDERED"/g)).toHaveLength(2);
+    expect(svg).toContain(">1.</tspan>");
+    expect(svg).toContain(">2.</tspan>");
+    expect(svg.match(/>•<\/tspan>/g)).toHaveLength(2);
+    expect(svg).toContain(">One</tspan>");
+    expect(svg).toContain(">Two</tspan>");
+    expect(svg).toContain(">Alpha</tspan>");
+    expect(svg).toContain(">Beta</tspan>");
+    expect(svg).toMatch(/x="57\.59\d*" y="43" text-anchor="start"/);
+    expect(svg).toContain('x="48.4" y="49.5" text-anchor="start"');
+    expect(svg).toContain('y="16" text-anchor="start" direction="ltr" unicode-bidi="plaintext"');
+    expect(svg).toContain('y="43" text-anchor="start" direction="ltr" unicode-bidi="plaintext"');
+    expect(svg).toContain('y="22.5" text-anchor="start"');
+    expect(svg).toContain('y="49.5" text-anchor="start"');
+  });
+
+  it("hangs the first list marker column outside the text box", () => {
+    const node = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000014d", pageId, width: 120, height: 60, text: "One",
+      textProperties: {
+        runs: [{ start: 0, end: 3, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0, listType: "ordered" as const, hangingList: true },
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const svg = exportPageToSvg([node], { pageId, defaultPageId: pageId }).svg;
+
+    expect(svg).toMatch(/x="-9\.6" y="16" text-anchor="end"[^>]*data-makefigma-list-marker="ORDERED">1\.<\/tspan>/);
+    expect(svg).toContain('x="0" y="16" text-anchor="start"');
+  });
+
+  it("hangs boundary punctuation while preserving one authored SVG line", () => {
+    const source = "“abcd。”";
+    const node = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000016d", pageId, width: 30, height: 30, text: source,
+      textProperties: {
+        runs: [{ start: 0, end: new TextEncoder().encode(source).length, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 14, paragraphSpacing: 0, hangingPunctuation: true },
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const svg = exportPageToSvg([node], { pageId, defaultPageId: pageId }).svg;
+
+    expect(svg).toContain('x="-6" y="10" text-anchor="start" direction="ltr"');
+    expect(svg).toContain("“abcd。”");
+  });
+
+  it("exports mixed paragraph list options without marking an explicit NONE paragraph", () => {
+    const node = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000015d", pageId, width: 160, height: 80, text: "One\nTwo\nThree",
+      textProperties: {
+        runs: [{ start: 0, end: 13, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0, listType: "ordered" as const },
+        paragraphStyleRuns: [
+          { start: 4, listType: "none" as const },
+          { start: 8, listType: "unordered" as const },
+        ],
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const svg = exportPageToSvg([node], { pageId, defaultPageId: pageId }).svg;
+
+    expect(svg.match(/data-makefigma-list-marker="ORDERED"/g)).toHaveLength(1);
+    expect(svg.match(/data-makefigma-list-marker="UNORDERED"/g)).toHaveLength(1);
+    expect(svg).toContain(">1.</tspan>");
+    expect(svg).toContain(">•</tspan>");
+    expect(svg).toContain(">Two</tspan>");
+  });
+
   it("uses frozen Rust text line ranges for soft wrapping without applying paragraph spacing", () => {
     const text = {
       ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-000000000090", pageId, width: 80, text: "abcdef",
@@ -432,6 +927,53 @@ describe("SVG export", () => {
     });
 
     expect(result.svg).toContain('<tspan x="0" y="20" text-anchor="start" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="400" font-style="normal" letter-spacing="0">abc</tspan></tspan><tspan x="0" y="44" text-anchor="start" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="400" font-style="normal" letter-spacing="0">def</tspan></tspan>');
+  });
+
+  it("advances SVG lines with the effective line height of each authored paragraph", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000009a", pageId, width: 80, text: "abcdef\nxy",
+      textProperties: {
+        runs: [{ start: 0, end: 9, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+        paragraphStyleRuns: [{ start: 0, lineHeight: 18 }, { start: 7, lineHeight: 30 }],
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const result = exportPageToSvg([text], {
+      pageId, defaultPageId: pageId,
+      textLayouts: new Map([[text.id, { lines: [
+        { start: 0, end: 3, direction: "ltr" as const },
+        { start: 3, end: 6, direction: "ltr" as const },
+        { start: 7, end: 9, direction: "ltr" as const },
+      ] }]]),
+    });
+    expect(result.svg).toContain('y="20"');
+    expect(result.svg).toContain('y="38"');
+    expect(result.svg).toContain('y="56"');
+  });
+
+  it("applies ENDING truncation and maxLines to frozen text lines", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-000000000091", pageId, width: 120, height: 100, text: "First\nSecond\nThird",
+      textProperties: {
+        runs: [{ start: 0, end: 18, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+        autoSize: "fixed" as const, fallbackFonts: [], textTruncation: "ending" as const, maxLines: 2,
+      },
+    };
+    const result = exportPageToSvg([text], {
+      pageId, defaultPageId: pageId,
+      textLayouts: new Map([[text.id, { lines: [
+        { start: 0, end: 5, direction: "ltr" as const },
+        { start: 6, end: 12, direction: "ltr" as const },
+        { start: 13, end: 18, direction: "ltr" as const },
+      ] }]]),
+    });
+
+    expect(result.svg).toContain("First");
+    expect(result.svg).toContain(">Second</tspan><tspan");
+    expect(result.svg).toContain(">…</tspan>");
+    expect(result.svg).not.toContain("Third");
   });
 
   it("uses the frozen Rust direction for an exported text line", () => {
@@ -522,6 +1064,115 @@ describe("SVG export", () => {
     const result = exportPageToSvg([text], { pageId, defaultPageId: pageId });
 
     expect(result.svg).toContain('<tspan font-size="10" font-weight="400" font-style="normal" letter-spacing="0">A</tspan><tspan font-size="20" font-weight="700" font-style="italic" letter-spacing="2" fill="#ff0000">中</tspan><tspan font-size="12" font-weight="500" font-style="normal" letter-spacing="1">B</tspan>');
+  });
+
+  it("exports TextCase presentation without mutating Canonical source text", () => {
+    const canonical = "straße test";
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-000000000139", pageId, text: canonical,
+      textProperties: { runs: [
+        { start: 0, end: 7, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "upper" as const },
+        { start: 7, end: 12, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "smallCapsForced" as const },
+      ], paragraph: { alignment: "left" as const, lineHeight: 22, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    const result = exportPageToSvg([text], { pageId, defaultPageId: pageId });
+
+    expect(result.svg).toContain(">STRASSE</tspan>");
+    expect(result.svg).toContain('font-variant-caps="small-caps"');
+    expect(result.svg).toContain("> test</tspan>");
+    expect(text.text).toBe(canonical);
+  });
+
+  it("exports inert escaped hyperlink metadata without creating executable SVG links", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000013a", pageId, text: "AB",
+      textProperties: { runs: [
+        { start: 0, end: 2, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, hyperlink: { type: "URL" as const, value: "javascript:alert(\"x\")&next" } },
+      ], paragraph: { alignment: "left" as const, lineHeight: 22, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    const result = exportPageToSvg([text], { pageId, defaultPageId: pageId });
+
+    expect(result.svg).toContain('data-makefigma-hyperlink-type="URL"');
+    expect(result.svg).toContain('data-makefigma-hyperlink-value="javascript:alert(&quot;x&quot;)&amp;next"');
+    expect(result.svg).not.toContain("<a ");
+    expect(result.svg).not.toContain('href="javascript:');
+  });
+
+  it("exports underline and strikethrough on their exact rich-text spans", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000013b", pageId, text: "AB", width: 100, height: 40,
+      textProperties: { runs: [
+        { start: 0, end: 1, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline" as const, textDecorationStyle: "wavy" as const, textDecorationOffset: { value: -15, unit: "percent" as const }, textDecorationThickness: { value: 12.5, unit: "percent" as const }, textDecorationColor: { color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 }, visible: true, opacity: .5, blendMode: "normal" as const }, textDecorationSkipInk: true },
+        { start: 1, end: 2, fontSize: 18, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "strikethrough" as const, textDecorationStyle: "dotted" as const, textDecorationOffset: { value: 2, unit: "pixels" as const }, textDecorationThickness: { value: 2, unit: "pixels" as const } },
+      ], paragraph: { alignment: "left" as const, lineHeight: 22, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    const result = exportPageToSvg([text], { pageId, defaultPageId: pageId });
+    expect(result.svg).toContain('text-decoration="underline"');
+    expect(result.svg).toContain('text-decoration="line-through"');
+    expect(result.svg.match(/text-decoration-style="wavy"/g)).toHaveLength(1);
+    expect(result.svg).not.toContain('text-decoration-style="dotted"');
+    expect(result.svg.match(/style="text-underline-offset:-15%;text-decoration-skip-ink:auto"/g)).toHaveLength(1);
+    expect(result.svg).not.toContain("text-underline-offset:2px");
+    expect(result.svg.match(/text-decoration-thickness="12.5%"/g)).toHaveLength(1);
+    expect(result.svg).not.toContain('text-decoration-thickness="2px"');
+    expect(result.svg.match(/text-decoration-color="#ff000080"/g)).toHaveLength(1);
+    const blended = {
+      ...text,
+      textProperties: {
+        ...text.textProperties,
+        runs: [
+          { ...text.textProperties.runs[0]!, textDecorationColor: { ...text.textProperties.runs[0]!.textDecorationColor!, blendMode: "multiply" as const } },
+          text.textProperties.runs[1]!,
+        ],
+      },
+    };
+    expect(exportPageToSvg([blended], { pageId, defaultPageId: pageId }).compatibilityFallbacks)
+      .toContainEqual(expect.objectContaining({ nodeId: text.id, capability: "text-decoration-color-blend", outcome: "fallback" }));
+  });
+
+  it("exports ordered per-run text PaintStacks as aligned SVG text layers", () => {
+    const assetId = "text-paint-image";
+    const text = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-000000000136", pageId, text: "AB", width: 100, height: 40,
+      textProperties: { runs: [
+        { start: 0, end: 1, fontSize: 20, fontWeight: 700, italic: false, letterSpacing: 0, fillStack: { layers: [
+          { paint: { css: "#ff0000" }, visible: true, opacity: .5, blendMode: "multiply" as const },
+          { paint: { css: "#0000ff", gradient: { start: [0, .5] as [number, number], end: [1, .5] as [number, number], stops: [
+            { position: 0, color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+            { position: 1, color: { space: "srgb" as const, components: [0, 1, 1] as [number, number, number], alpha: .5 } },
+          ] } }, visible: true, opacity: 1, blendMode: "normal" as const },
+        ] } },
+        { start: 1, end: 2, fontSize: 20, fontWeight: 700, italic: false, letterSpacing: 0, fillStack: { layers: [{
+          image: { assetId, scaleMode: "fit" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+          visible: true, opacity: .75, blendMode: "normal" as const,
+        }] } },
+      ], paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    const result = exportPageToSvg([text], {
+      pageId,
+      defaultPageId: pageId,
+      imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+    });
+
+    expect(result.compatibilityFallbacks).toEqual([]);
+    expect(result.svg.match(/<text /g)).toHaveLength(2);
+    expect(result.svg).toContain('fill="#ff0000" fill-opacity="0.5" style="mix-blend-mode:multiply"');
+    expect(result.svg).toContain('fill="url(#makefigma-gradient-');
+    expect(result.svg).toContain('<pattern id="makefigma-stroke-image-pattern-');
+    expect(result.svg).toContain('fill-opacity="0.75"');
+    expect(result.svg).toContain('fill="none">B</tspan>');
+  });
+
+  it("exports CAP_HEIGHT leading trim with a cap-height baseline", () => {
+    const cap = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000014a", pageId, text: "Cap", width: 100, height: 40,
+      textProperties: { runs: [
+        { start: 0, end: 3, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0, leadingTrim: "capHeight" as const },
+      ], paragraph: { alignment: "left" as const, lineHeight: 30, paragraphSpacing: 0 }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    const result = exportPageToSvg([cap], { pageId, defaultPageId: pageId });
+    expect(result.svg).toContain('data-makefigma-leading-trim="CAP_HEIGHT"');
+    expect(result.svg).toContain('y="14"');
   });
 
   it("exports a donut Arc as an even-odd path instead of flattening it to an ellipse", () => {
@@ -727,8 +1378,8 @@ describe("SVG export", () => {
     // an explicit per-corner radius grows identically across all three consumers
     // instead of each re-deriving the aligned expansion.
     expect(result.warnings).toEqual([]);
-    expect(result.svg).toContain('d="M 18 0 H 98 A 18 18 0 0 1 116 18 V 58 A 18 18 0 0 1 98 76 H 18 A 18 18 0 0 1 0 58 V 18 A 18 18 0 0 1 18 0 Z"');
-    expect(result.svg).toContain('transform="translate(-8 -8)"');
+    expect(result.svg).toContain('M 10 -8 H 90 A 18 18 0 0 1 108 10 V 50 A 18 18 0 0 1 90 68 H 10 A 18 18 0 0 1 -8 50 V 10 A 18 18 0 0 1 10 -8 Z');
+    expect(result.svg).toContain('fill-rule="evenodd"');
   });
 
   it("exports Frame/Rectangle inside and outside Stroke as paint rings", () => {    const inside = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000001", pageId, width: 100, height: 60, radius: 12, strokeWidth: 8, strokeAlign: "inside" as const };
@@ -737,9 +1388,12 @@ describe("SVG export", () => {
     const result = exportPageToSvg([inside, outside], { pageId, defaultPageId: pageId });
 
     expect(result.svg).not.toContain('stroke-width="8"');
-    expect(result.svg).toContain('transform="translate(8 8)"');
-    expect(result.svg).toContain('transform="translate(-8 -8)"');
-    expect(result.svg).toContain('M 20 0 H 96');
+    // Each aligned stroke is one even-odd compound ring. Baking the inset or
+    // outset into its second/first contour lets the same path be moved above a
+    // container's descendants without adding masks or repainting its fill.
+    expect(result.svg.match(/fill-rule="evenodd"/g)).toHaveLength(2);
+    expect(result.svg).toContain('M 12 8 H 88 A 4 4');
+    expect(result.svg).toContain('M 12 -8 H 88 A 20 20');
   });
 
   it("keeps Dash when exporting aligned Frame/Rectangle Stroke", () => {

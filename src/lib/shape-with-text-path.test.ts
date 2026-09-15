@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createNode } from "./editor-protocol";
+import { createNode, FIGMA_REST_SHAPE_WITH_TEXT_TYPES, SHAPE_WITH_TEXT_TYPES } from "./editor-protocol";
 import { nodeContainsWorldPoint } from "./hit-test";
 import { specialNodeFallback } from "./special-node-fallback";
 import { shapeWithTextContains, shapeWithTextDecorationPathD, shapeWithTextDecorations, shapeWithTextPath, shapeWithTextPathD, traceShapeWithTextDecorations } from "./shape-with-text-path";
@@ -9,7 +9,20 @@ const pageId = "00000000-0000-4000-8000-00000000d001";
 
 describe("M6 ShapeWithText geometry", () => {
   it("shares a native hexagon contour across Canvas hit testing and SVG", () => {
-    const node = { ...createNode("shapeWithText", 20, 30), id: "00000000-0000-4000-8000-00000000d002", pageId, width: 200, height: 120, shapeWithTextType: "HEXAGON" as const, text: "Decision" };
+    const node = {
+      ...createNode("shapeWithText", 20, 30),
+      id: "00000000-0000-4000-8000-00000000d002",
+      pageId,
+      width: 200,
+      height: 120,
+      shapeWithTextType: "HEXAGON" as const,
+      text: "Decision",
+      textProperties: {
+        runs: [{ start: 0, end: 8, fontSize: 18, fontWeight: 650, italic: true, letterSpacing: 1.5 }],
+        paragraph: { alignment: "center" as const, lineHeight: 24, paragraphSpacing: 4 },
+        autoSize: "fixed" as const,
+      },
+    };
     const path = shapeWithTextPath(node.shapeWithTextType, node.width, node.height)!;
     expect(shapeWithTextPathD(path, (value) => String(value))).toBe("M 36 0 L 164 0 L 200 60 L 164 120 L 36 120 L 0 60 Z");
     expect(shapeWithTextContains(node.shapeWithTextType, node.width, node.height, { x: 100, y: 60 })).toBe(true);
@@ -20,18 +33,46 @@ describe("M6 ShapeWithText geometry", () => {
 
     const exported = exportPageToSvg([node], { pageId, defaultPageId: pageId, padding: 0 });
     expect(exported.svg).toContain('d="M 36 0 L 164 0 L 200 60 L 164 120 L 36 120 L 0 60 Z"');
+    expect(exported.svg).toContain('font-size="18" font-weight="650" font-style="italic" letter-spacing="1.5"');
+    expect(exported.svg).toContain('text-anchor="middle"');
   });
 
   it("covers every Canonical ShapeWithText silhouette through the shared geometry boundary", () => {
+    expect(SHAPE_WITH_TEXT_TYPES).toHaveLength(30);
+    expect(FIGMA_REST_SHAPE_WITH_TEXT_TYPES).toHaveLength(29);
+    expect(FIGMA_REST_SHAPE_WITH_TEXT_TYPES).not.toContain("TRIANGLE_UP");
     expect(shapeWithTextContains("PLUS", 100, 100, { x: 50, y: 50 })).toBe(true);
     expect(shapeWithTextContains("PLUS", 100, 100, { x: 5, y: 5 })).toBe(false);
     expect(shapeWithTextPath("ARROW_RIGHT", 160, 80)?.kind).toBe("polygon");
     expect(shapeWithTextPath("STAR", 160, 80)?.kind).toBe("polygon");
     expect(shapeWithTextContains("SPEECH_BUBBLE", 160, 80, { x: 80, y: 30 })).toBe(true);
     expect(shapeWithTextContains("SPEECH_BUBBLE", 160, 80, { x: 150, y: 76 })).toBe(false);
-    const allTypes = ["SQUARE", "ELLIPSE", "ROUNDED_RECTANGLE", "DIAMOND", "TRIANGLE_UP", "TRIANGLE_DOWN", "PARALLELOGRAM_RIGHT", "PARALLELOGRAM_LEFT", "ENG_DATABASE", "ENG_QUEUE", "ENG_FILE", "ENG_FOLDER", "TRAPEZOID", "PREDEFINED_PROCESS", "SHIELD", "DOCUMENT_SINGLE", "DOCUMENT_MULTIPLE", "MANUAL_INPUT", "HEXAGON", "CHEVRON", "PENTAGON", "OCTAGON", "STAR", "PLUS", "ARROW_LEFT", "ARROW_RIGHT", "SUMMING_JUNCTION", "OR", "SPEECH_BUBBLE", "INTERNAL_STORAGE"] as const;
-    allTypes.forEach((type) => expect(specialNodeFallback({ ...createNode("shapeWithText", 0, 0), shapeWithTextType: type }, "canvas")).toBeUndefined());
+    SHAPE_WITH_TEXT_TYPES.forEach((type) => expect(specialNodeFallback({ ...createNode("shapeWithText", 0, 0), shapeWithTextType: type }, "canvas")).toBeUndefined());
     expect(specialNodeFallback({ ...createNode("shapeWithText", 0, 0), shapeWithTextType: "STAR" }, "canvas")).toBeUndefined();
+  });
+
+  it("keeps leading whitespace aligned with UTF-8 TextSublayer style runs in SVG", () => {
+    const node = {
+      ...createNode("shapeWithText", 0, 0),
+      id: "00000000-0000-4000-8000-00000000d004",
+      pageId,
+      width: 160,
+      height: 80,
+      text: " A中",
+      textProperties: {
+        runs: [
+          { start: 0, end: 1, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 },
+          { start: 1, end: 2, fontSize: 14, fontWeight: 500, italic: false, letterSpacing: 0 },
+          { start: 2, end: 5, fontSize: 20, fontWeight: 700, italic: false, letterSpacing: 1 },
+        ],
+        paragraph: { alignment: "center" as const, lineHeight: 24, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+      },
+    };
+
+    const exported = exportPageToSvg([node], { pageId, defaultPageId: pageId, padding: 0 });
+    expect(exported.svg).toContain('font-size="10" font-weight="400" font-style="normal" letter-spacing="0"> </tspan>');
+    expect(exported.svg).toContain('font-size="20" font-weight="700" font-style="normal" letter-spacing="1">中</tspan>');
   });
 
   it("shares standard process and engineering interior marks between Canvas geometry and SVG", () => {

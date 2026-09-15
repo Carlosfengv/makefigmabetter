@@ -1,0 +1,105 @@
+{
+  "format": "makefigma-remediation-paint-stack-v1",
+  "name": "W09-PAINT-STACK-PIXEL",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "assets": [
+    {
+      "assetId": "00000000-0000-4000-8000-000000000921",
+      "contentHash": "886b188cc3bfeab6653d0b47337756ca3a2389a4fd31719801f12b77357aba04",
+      "mediaType": "image/png",
+      "byteLength": 74,
+      "pixelWidth": 4,
+      "pixelHeight": 4,
+      "bytesBase64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAEUlEQVR42mNgYPj/HxWTLAAAHGAf4ct/c/kAAAAASUVORK5CYII="
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000920",
+      "name": "Evidence background",
+      "kind": "rectangle",
+      "x": -200,
+      "y": -140,
+      "width": 400,
+      "height": 280,
+      "rotation": 0,
+      "fill": "#ffffff",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000922",
+      "name": "Layered image fill",
+      "kind": "rectangle",
+      "x": -120,
+      "y": -80,
+      "width": 100,
+      "height": 100,
+      "rotation": 0,
+      "fill": "#ff0000",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [
+          {
+            "paint": {
+              "css": "#ff0000",
+              "color": { "space": "srgb", "components": [1, 0, 0], "alpha": 1 }
+            },
+            "visible": true,
+            "opacity": 1,
+            "blendMode": "normal"
+          },
+          {
+            "image": {
+              "assetId": "00000000-0000-4000-8000-000000000921",
+              "scaleMode": "fill",
+              "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 }
+            },
+            "visible": true,
+            "opacity": 0.5,
+            "blendMode": "normal"
+          }
+        ]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000923",
+      "name": "Image stroke endpoints",
+      "kind": "line",
+      "x": 20,
+      "y": 0,
+      "width": 120,
+      "height": 0,
+      "rotation": 0,
+      "fill": "transparent",
+      "stroke": "#0000ff",
+      "strokeWidth": 14,
+      "strokeCapStart": "diamondFilled",
+      "strokeCapEnd": "triangleFilled",
+      "radius": 0,
+      "opacity": 1,
+      "visible": true,
+      "strokeStack": {
+        "layers": [
+          {
+            "image": {
+              "assetId": "00000000-0000-4000-8000-000000000921",
+              "scaleMode": "tile",
+              "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 }
+            },
+            "visible": true,
+            "opacity": 1,
+            "blendMode": "normal"
+          }
+        ]
+      }
+    }
+  ]
+}

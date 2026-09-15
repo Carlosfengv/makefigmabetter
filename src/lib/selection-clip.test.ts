@@ -21,6 +21,12 @@ describe("structural marquee clipping", () => {
     expect(isFullyClippedForSelection([frame, partial], partial.id, bounds)).toBe(false);
   });
 
+  it.each(["component", "instance", "slot", "componentSet"] as const)("rejects a descendant outside an ancestor %s clip", (kind) => {
+    const parent = node("parent", { kind, width: 100, height: 100, clipsContent: true });
+    const outside = node("outside", { kind: kind === "componentSet" ? "component" : "rectangle", parentId: parent.id, x: 140, y: 10 });
+    expect(isFullyClippedForSelection([parent, outside], outside.id, bounds)).toBe(true);
+  });
+
   it("rejects a descendant when nested clips have no common visible region", () => {
     const outer = node("outer", { kind: "frame", x: 0, y: 0, width: 40, height: 40, clipsContent: true });
     const inner = node("inner", { kind: "frame", parentId: outer.id, x: 60, y: 0, width: 40, height: 40, clipsContent: true });

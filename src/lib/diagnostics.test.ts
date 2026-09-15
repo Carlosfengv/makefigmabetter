@@ -26,6 +26,15 @@ describe("diagnostic recorder", () => {
     });
   });
 
+  it("retains content-free affine glyph admission counts", () => {
+    const recorder = createDiagnosticRecorder();
+    recorder.record({ category: "renderer", code: "gpu text affine active", details: { nodes: 2, glyphs: 12 } });
+    expect(recorder.summary().recent[0]).toMatchObject({
+      code: "GPU_TEXT_AFFINE_ACTIVE",
+      details: { nodes: 2, glyphs: 12 },
+    });
+  });
+
   it("retains only the fixed renderer failure kind, never a browser error message", () => {
     const recorder = createDiagnosticRecorder();
     recorder.record({ category: "renderer", code: "webgpu upload failed", details: { errorKind: "WEBGPU_UPLOAD_FAILED", browserMessage: "untrusted browser detail" } });

@@ -1,9 +1,12 @@
-import { decorativeCapMesh, type DecorativeCapKind, type MeshPoint } from "./decorative-cap-mesh";
+import { decorativeCapMesh, decorativeCapSize, type DecorativeCapKind, type MeshPoint, type MeshTriangle } from "./decorative-cap-mesh";
 import type { CanvasNode } from "./editor-protocol";
 import { connectorPathEndpointPose, connectorPathLocalBounds, type ConnectorPath, type ConnectorPoint } from "./connector-path";
 
+export type ConnectorErdCapKind = "erdZeroOrOne" | "erdExactlyOne" | "erdZeroOrMore" | "erdOneOrMore" | "erdOne" | "erdMany";
+export type ConnectorDecorativeCapKind = DecorativeCapKind | ConnectorErdCapKind;
+
 export type ConnectorEndpointDecoration = Readonly<{
-  cap: DecorativeCapKind;
+  cap: ConnectorDecorativeCapKind;
   endpoint: "start" | "end";
   point: ConnectorPoint;
   direction: ConnectorPoint;
@@ -20,13 +23,19 @@ export type ConnectorLabelLayout = Readonly<{
 
 /** Maps Figma Connector's dedicated endpoint enum onto the one shared
  * decoration mesh used by Canvas, SVG, hit testing and bounds. */
-export function connectorDecorativeCap(value: string | undefined): DecorativeCapKind | undefined {
+export function connectorDecorativeCap(value: string | undefined): ConnectorDecorativeCapKind | undefined {
   switch (value) {
     case "ARROW_LINES": case "arrowLines": return "arrowLines";
     case "ARROW_EQUILATERAL": case "arrowEquilateral": return "arrowEquilateral";
     case "TRIANGLE_FILLED": case "triangleFilled": return "triangleFilled";
     case "DIAMOND_FILLED": case "diamondFilled": return "diamondFilled";
     case "CIRCLE_FILLED": case "circleFilled": return "circleFilled";
+    case "ERD_ZERO_OR_ONE": return "erdZeroOrOne";
+    case "ERD_EXACTLY_ONE": return "erdExactlyOne";
+    case "ERD_ZERO_OR_MORE": return "erdZeroOrMore";
+    case "ERD_ONE_OR_MORE": return "erdOneOrMore";
+    case "ERD_ONE": return "erdOne";
+    case "ERD_MANY": return "erdMany";
     default: return undefined;
   }
 }
@@ -73,7 +82,17 @@ export function connectorLabelContains(node: CanvasNode, path: ConnectorPath, po
  * without every target reimplementing endpoint orientation. */
 export function connectorDecorationTriangles(decoration: ConnectorEndpointDecoration, strokeWidth: number): readonly (readonly [MeshPoint, MeshPoint, MeshPoint])[] {
   const direction = decoration.endpoint === "start" ? -1 : 1;
-  return decorativeCapMesh(decoration.cap, 0, direction, strokeWidth).triangles.map((triangle) => triangle.map((point) => transformTangentPoint(point, decoration.point, decoration.direction)) as [MeshPoint, MeshPoint, MeshPoint]);
+  const triangles = isConnectorErdCap(decoration.cap)
+    ? connectorErdCapTriangles(decoration.cap, direction, strokeWidth)
+    : decorativeCapMesh(decoration.cap, 0, direction, strokeWidth).triangles;
+  return triangles.map((triangle) => triangle.map((point) => transformTangentPoint(point, decoration.point, decoration.direction)) as [MeshPoint, MeshPoint, MeshPoint]);
+}
+
+/** Produces device-scale triangle coordinates after endpoint orientation has
+ * already been applied exactly once by connectorDecorationTriangles(). */
+export function scaledConnectorDecorationTriangles(decoration: ConnectorEndpointDecoration, strokeWidth: number, scale: number): readonly MeshTriangle[] {
+  const scaled = (point: MeshPoint): MeshPoint => ({ x: point.x * scale, y: point.y * scale });
+  return connectorDecorationTriangles(decoration, strokeWidth).map(([a, b, c]) => [scaled(a), scaled(b), scaled(c)]);
 }
 
 export function connectorDecorationContains(node: CanvasNode, path: ConnectorPath, point: ConnectorPoint): boolean {
@@ -95,6 +114,64 @@ export function connectorPresentationBounds(node: CanvasNode, path: ConnectorPat
 
 function transformTangentPoint(point: MeshPoint, origin: ConnectorPoint, direction: ConnectorPoint): MeshPoint {
   return { x: origin.x + point.x * direction.x - point.y * direction.y, y: origin.y + point.x * direction.y + point.y * direction.x };
+}
+
+function isConnectorErdCap(cap: ConnectorDecorativeCapKind): cap is ConnectorErdCapKind {
+  return cap.startsWith("erd");
+}
+
+/** Deterministic crow's-foot primitives. A ring means zero, a perpendicular
+ * bar means one, and three thick rays mean many. The same filled triangle mesh
+ * drives Canvas, SVG, bounds and hit testing. */
+function connectorErdCapTriangles(cap: ConnectorErdCapKind, direction: -1 | 1, strokeWidth: number): readonly MeshTriangle[] {
+  const size = decorativeCapSize(strokeWidth);
+  const half = Math.max(.5, strokeWidth / 2);
+  const triangles: MeshTriangle[] = [];
+  const nearX = direction * size * .24;
+  const farX = direction * size * .72;
+  const zero = () => appendRing(triangles, { x: nearX, y: 0 }, size * .17, half);
+  const one = (x: number) => appendThickSegment(triangles, { x, y: -size * .3 }, { x, y: size * .3 }, half);
+  const many = () => {
+    const root = { x: direction * size * .42, y: 0 };
+    appendThickSegment(triangles, root, { x: direction * size * .9, y: -size * .34 }, half);
+    appendThickSegment(triangles, root, { x: direction * size * .9, y: 0 }, half);
+    appendThickSegment(triangles, root, { x: direction * size * .9, y: size * .34 }, half);
+  };
+  if (cap === "erdZeroOrOne" || cap === "erdZeroOrMore") zero();
+  if (cap === "erdExactlyOne") { one(nearX); one(farX); }
+  if (cap === "erdZeroOrOne") one(farX);
+  if (cap === "erdOneOrMore") { one(nearX); many(); }
+  if (cap === "erdOne") one(nearX);
+  if (cap === "erdZeroOrMore" || cap === "erdMany") many();
+  return triangles;
+}
+
+function appendRing(triangles: MeshTriangle[], center: MeshPoint, radius: number, thickness: number) {
+  const innerRadius = Math.max(radius * .35, radius - thickness);
+  const segments = 16;
+  for (let index = 0; index < segments; index += 1) {
+    const from = Math.PI * 2 * index / segments;
+    const to = Math.PI * 2 * (index + 1) / segments;
+    const outerFrom = { x: center.x + radius * Math.cos(from), y: center.y + radius * Math.sin(from) };
+    const outerTo = { x: center.x + radius * Math.cos(to), y: center.y + radius * Math.sin(to) };
+    const innerFrom = { x: center.x + innerRadius * Math.cos(from), y: center.y + innerRadius * Math.sin(from) };
+    const innerTo = { x: center.x + innerRadius * Math.cos(to), y: center.y + innerRadius * Math.sin(to) };
+    triangles.push([outerFrom, outerTo, innerTo], [outerFrom, innerTo, innerFrom]);
+  }
+}
+
+function appendThickSegment(triangles: MeshTriangle[], from: MeshPoint, to: MeshPoint, half: number) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (!Number.isFinite(length) || length <= 1e-12 || half <= 0) return;
+  const nx = -dy / length * half;
+  const ny = dx / length * half;
+  const a = { x: from.x + nx, y: from.y + ny };
+  const b = { x: to.x + nx, y: to.y + ny };
+  const c = { x: to.x - nx, y: to.y - ny };
+  const d = { x: from.x - nx, y: from.y - ny };
+  triangles.push([a, b, c], [a, c, d]);
 }
 
 function pointInTriangle(point: ConnectorPoint, [a, b, c]: readonly [MeshPoint, MeshPoint, MeshPoint]): boolean {

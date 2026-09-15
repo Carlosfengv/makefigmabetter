@@ -16,8 +16,31 @@ describe("M0 runtime capability matrix", () => {
 
   it("keeps Runtime-specific status separate from existing editor implementation", () => {
     expect(runtimeCapability("node.sync-write")).toMatchObject({ status: "partial" });
+    expect(runtimeCapability("node.sync-write")?.property).not.toMatch(/fills|strokes/);
+    expect(runtimeCapability("paint-stack.runtime")).toMatchObject({ property: "fills" });
+    expect(runtimeCapability("paint-stack.runtime")?.nodeTypes).toContain("TEXT");
+    expect(runtimeCapability("paint-stack.runtime")?.nodeTypes).not.toContain("LINE");
+    expect(runtimeCapability("paint-stack.runtime-strokes")).toMatchObject({ property: "strokes" });
+    expect(runtimeCapability("paint-stack.runtime-strokes")?.nodeTypes).toContain("LINE");
+    expect(runtimeCapability("paint-stack.runtime-strokes")?.nodeTypes).not.toContain("TEXT");
+    expect(runtimeCapability("geometry.parametric-runtime")).toMatchObject({
+      status: "partial",
+      nodeTypes: ["POLYGON", "STAR", "VECTOR", "LINE", "BOOLEAN_OPERATION"],
+    });
+    expect(runtimeCapability("layout.auto-layout-runtime")).toMatchObject({
+      status: "partial",
+      property: expect.stringContaining("layoutSizingHorizontal"),
+    });
+    expect(runtimeCapability("layout.auto-layout-runtime")?.property).toContain("counterAxisAlignContent");
+    expect(runtimeCapability("layout.auto-layout-runtime")?.property).toContain("layoutAlign");
+    expect(runtimeCapability("special-nodes.runtime-subset")).toMatchObject({
+      status: "partial",
+      nodeTypes: ["CONNECTOR", "SHAPE_WITH_TEXT", "TEXT_PATH", "TRANSFORM_GROUP"],
+      property: expect.stringContaining("createTextPath"),
+    });
     expect(runtimeCapability("document.find-all")).toMatchObject({ status: "supported" });
     expect(runtimeCapability("text.async-font-and-range")).toMatchObject({ errorCode: "FONT_NOT_LOADED" });
+    expect(runtimeCapability("text.async-font-and-range")?.property).toContain("textAutoResize");
     expect(runtimeCapability("image.async-resource")).toMatchObject({ errorCode: "RESOURCE_UNAVAILABLE" });
     expect(runtimeCapability("node.export-async")).toMatchObject({ status: "partial", surface: "export" });
     expect(runtimeCapability("runtime.commit-async")).toMatchObject({ status: "partial" });

@@ -16,5 +16,12 @@ describe("M6 special-node fallbacks", () => {
       expect(specialNodeFallback(createNode(kind, 0, 0), "svg")).toBeUndefined();
     }
     expect(specialNodeFallback({ ...createNode("shapeWithText", 0, 0), shapeWithTextType: "STAR" }, "svg")).toBeUndefined();
+    expect(specialNodeFallback({
+      ...createNode("transformGroup", 0, 0),
+      transformModifiers: [
+        { type: "REPEAT", count: 1, unitType: "PIXELS", offset: 100, repeatType: "LINEAR", axis: "HORIZONTAL" },
+        { type: "REPEAT", count: 1, unitType: "PIXELS", offset: 80, repeatType: "LINEAR", axis: "VERTICAL" },
+      ],
+    }, "svg")).toBeUndefined();
   });
 });

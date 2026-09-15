@@ -1,5 +1,11 @@
 import type { CanvasNode, DocumentConstraints, EllipseArcData, NodeKind, RelativeTransform } from "./editor-protocol";
+import { colorToSrgbComponents } from "./color-rendering";
+import { runtimeTextCase } from "./text-case";
 import { IDENTITY_AFFINE, invertAffine, multiplyAffine, worldBoundsForNode, worldTransformForNode } from "./scene-transform";
+import { clipsChildren, nodeCapabilities } from "./node-capabilities";
+import { effectiveConstraints } from "./constraint-selection";
+import { effectiveNodeBlendMode } from "./node-blend-semantics";
+import { isFigmaConnectorStrokeCap, projectFigmaConnectorEndpoint, type FigmaConnectorEndpoint, type FigmaConnectorStrokeCap } from "./connector-endpoint";
 
 /** The subset of Figma Plugin API SceneNode types represented by the Canonical
  * document. `image` deliberately does not appear here: Figma Plugin API
@@ -12,8 +18,49 @@ export const FIGMA_PLUGIN_NODE_TYPES = [
 export type FigmaPluginNodeType = (typeof FIGMA_PLUGIN_NODE_TYPES)[number];
 export type FigmaPluginTransform = [[number, number, number], [number, number, number]];
 export type FigmaPluginArcData = Readonly<{ startingAngle: number; endingAngle: number; innerRadius: number }>;
-export type FigmaPluginBlendMode = "NORMAL" | "MULTIPLY" | "SCREEN" | "OVERLAY" | "DARKEN" | "LIGHTEN";
+export type FigmaPluginTextSublayerProjection = Readonly<{
+  characters: string;
+  fontSize: number;
+  fontWeight: number;
+  letterSpacing: Readonly<{ value: number; unit: "PIXELS" }>;
+  textAlignHorizontal: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
+  lineHeight:
+    | Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>
+    | Readonly<{ unit: "AUTO" }>;
+  paragraphSpacing: number;
+  paragraphIndent: number;
+  textWrapStyle: "AUTO" | "BALANCE" | "PRETTY";
+  listSpacing: number;
+  hangingList: boolean;
+  hangingPunctuation: boolean;
+  textCase: ReturnType<typeof runtimeTextCase>;
+  hyperlink: Readonly<{ type: "URL" | "NODE"; value: string }> | null;
+  textDecoration: "NONE" | "UNDERLINE" | "STRIKETHROUGH";
+  textDecorationStyle: "SOLID" | "WAVY" | "DOTTED" | null;
+  textDecorationOffset:
+    | Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>
+    | Readonly<{ unit: "AUTO" }>
+    | null;
+  textDecorationThickness:
+    | Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>
+    | Readonly<{ unit: "AUTO" }>
+    | null;
+  textDecorationColor:
+    | Readonly<{ value: "AUTO" }>
+    | Readonly<{ value: Readonly<{
+        type: "SOLID";
+        color: Readonly<{ r: number; g: number; b: number }>;
+        visible: boolean;
+        opacity: number;
+        blendMode: Exclude<FigmaPluginBlendMode, "PASS_THROUGH">;
+      }> }>
+    | null;
+  textDecorationSkipInk: boolean | null;
+  leadingTrim: "CAP_HEIGHT" | "NONE";
+}>;
+export type FigmaPluginBlendMode = "PASS_THROUGH" | "NORMAL" | "MULTIPLY" | "SCREEN" | "OVERLAY" | "DARKEN" | "LIGHTEN" | "COLOR_DODGE" | "COLOR_BURN" | "HARD_LIGHT" | "SOFT_LIGHT" | "DIFFERENCE" | "EXCLUSION" | "HUE" | "SATURATION" | "COLOR" | "LUMINOSITY" | "LINEAR_BURN" | "LINEAR_DODGE";
 export type FigmaPluginConstraints = Readonly<{ horizontal: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE"; vertical: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE" }>;
+const CONSTRAINT_UNSUPPORTED_KINDS = new Set<CanvasNode["kind"]>(["group", "booleanOperation", "section", "slide"]);
 
 /**
  * Read-only Plugin API-shaped spatial projection. It intentionally contains
@@ -70,10 +117,10 @@ export type FigmaPluginNodeProjection = Readonly<{
   defaultVariantId?: string;
   variantGroupProperties?: Readonly<Record<string, { values: string[] }>>;
   connectorLineType?: "ELBOWED" | "STRAIGHT" | "CURVED";
-  connectorStart?: unknown;
-  connectorEnd?: unknown;
-  connectorStartStrokeCap?: string;
-  connectorEndStrokeCap?: string;
+  connectorStart?: FigmaConnectorEndpoint;
+  connectorEnd?: FigmaConnectorEndpoint;
+  connectorStartStrokeCap?: FigmaConnectorStrokeCap;
+  connectorEndStrokeCap?: FigmaConnectorStrokeCap;
   connectorText?: string;
   embedData?: Readonly<{ srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null }>;
   vectorPaths?: unknown;
@@ -82,7 +129,7 @@ export type FigmaPluginNodeProjection = Readonly<{
   linkUnfurlData?: Readonly<{ url: string; title: string | null; description: string | null; provider: string | null }>;
   mediaData?: Readonly<{ hash: string }>;
   shapeType?: import("./editor-protocol").ShapeWithTextType;
-  textSublayer?: Readonly<{ characters: string }>;
+  textSublayer?: FigmaPluginTextSublayerProjection;
   isSkippedSlide?: boolean;
   slideTransition?: NonNullable<CanvasNode["slideMetadata"]>["transition"];
   authorVisible?: boolean;
@@ -149,6 +196,19 @@ const BLEND_BY_CANONICAL: Record<NonNullable<CanvasNode["blendMode"]>, FigmaPlug
   overlay: "OVERLAY",
   darken: "DARKEN",
   lighten: "LIGHTEN",
+  "color-dodge": "COLOR_DODGE",
+  "color-burn": "COLOR_BURN",
+  "hard-light": "HARD_LIGHT",
+  "soft-light": "SOFT_LIGHT",
+  difference: "DIFFERENCE",
+  exclusion: "EXCLUSION",
+  hue: "HUE",
+  saturation: "SATURATION",
+  color: "COLOR",
+  luminosity: "LUMINOSITY",
+  "pass-through": "PASS_THROUGH",
+  "linear-burn": "LINEAR_BURN",
+  "linear-dodge": "LINEAR_DODGE",
 };
 
 const CONSTRAINT_BY_CANONICAL: Record<DocumentConstraints["horizontal"], FigmaPluginConstraints["horizontal"]> = {
@@ -269,7 +329,7 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     defaultVariantId?: string;
     variantGroupProperties?: Readonly<Record<string, { values: string[] }>>;
     connectorLineType?: "ELBOWED" | "STRAIGHT" | "CURVED";
-    connectorStart?: unknown; connectorEnd?: unknown; connectorStartStrokeCap?: string; connectorEndStrokeCap?: string; connectorText?: string;
+    connectorStart?: FigmaConnectorEndpoint; connectorEnd?: FigmaConnectorEndpoint; connectorStartStrokeCap?: FigmaConnectorStrokeCap; connectorEndStrokeCap?: FigmaConnectorStrokeCap; connectorText?: string;
     embedData?: Readonly<{ srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null }>;
     vectorPaths?: unknown;
     handleMirroring?: "NONE" | "ANGLE" | "ANGLE_AND_LENGTH";
@@ -277,7 +337,7 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     linkUnfurlData?: Readonly<{ url: string; title: string | null; description: string | null; provider: string | null }>;
     mediaData?: Readonly<{ hash: string }>;
     shapeType?: import("./editor-protocol").ShapeWithTextType;
-    textSublayer?: Readonly<{ characters: string }>;
+    textSublayer?: FigmaPluginTextSublayerProjection;
     isSkippedSlide?: boolean;
     slideTransition?: NonNullable<CanvasNode["slideMetadata"]>["transition"];
     authorVisible?: boolean;
@@ -303,18 +363,19 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     absoluteBoundingBox: { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top },
   };
 
-  if (node.constraints && node.kind !== "group" && node.kind !== "booleanOperation") {
-    projection.constraints = { horizontal: CONSTRAINT_BY_CANONICAL[node.constraints.horizontal], vertical: CONSTRAINT_BY_CANONICAL[node.constraints.vertical] };
+  if (!CONSTRAINT_UNSUPPORTED_KINDS.has(node.kind)) {
+    const constraints = effectiveConstraints(node);
+    projection.constraints = { horizontal: CONSTRAINT_BY_CANONICAL[constraints.horizontal], vertical: CONSTRAINT_BY_CANONICAL[constraints.vertical] };
   }
   if (node.kind !== "slice") {
     projection.opacity = node.opacity;
-    projection.blendMode = BLEND_BY_CANONICAL[node.blendMode ?? "normal"];
+    projection.blendMode = BLEND_BY_CANONICAL[effectiveNodeBlendMode(node)];
   }
-  if (!["group", "section", "slice"].includes(node.kind)) {
+  if (nodeCapabilities(node.kind).maskEligible) {
     projection.isMask = Boolean(node.isMask);
     projection.maskType = "ALPHA";
   }
-  if (["frame", "component", "componentSet", "instance", "slot"].includes(node.kind)) projection.clipsContent = node.clipsContent !== false;
+  if (clipsChildren(node.kind)) projection.clipsContent = node.clipsContent !== false;
   if (node.kind === "section") projection.sectionContentsHidden = Boolean(node.contentsHidden);
   if (["frame", "component", "componentSet", "instance", "slot", "rectangle", "section"].includes(node.kind)) {
     const radii = node.cornerRadii ?? [node.radius, node.radius, node.radius, node.radius];
@@ -357,10 +418,10 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
   if (node.kind === "slot" && node.slotMetadata) projection.slotPropertyName = node.slotMetadata.propertyName;
   if (node.kind === "connector" && node.connectorMetadata) {
     projection.connectorLineType = node.connectorMetadata.lineType;
-    projection.connectorStart = node.connectorMetadata.start;
-    projection.connectorEnd = node.connectorMetadata.end;
-    projection.connectorStartStrokeCap = node.connectorMetadata.startStrokeCap;
-    projection.connectorEndStrokeCap = node.connectorMetadata.endStrokeCap;
+    projection.connectorStart = projectFigmaConnectorEndpoint(node.connectorMetadata.start);
+    projection.connectorEnd = projectFigmaConnectorEndpoint(node.connectorMetadata.end);
+    projection.connectorStartStrokeCap = isFigmaConnectorStrokeCap(node.connectorMetadata.startStrokeCap) ? node.connectorMetadata.startStrokeCap : "NONE";
+    projection.connectorEndStrokeCap = isFigmaConnectorStrokeCap(node.connectorMetadata.endStrokeCap) ? node.connectorMetadata.endStrokeCap : "NONE";
     projection.connectorText = node.connectorMetadata.text;
     if (node.connectorMetadata.cornerRadius !== undefined) projection.cornerRadius = node.connectorMetadata.cornerRadius;
   }
@@ -369,7 +430,71 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
   if (node.kind === "interactiveSlideElement" && node.interactiveSlideElementType) projection.interactiveSlideElementType = node.interactiveSlideElementType;
   if (node.kind === "linkUnfurl" && node.linkUnfurlMetadata) projection.linkUnfurlData = node.linkUnfurlMetadata;
   if (node.kind === "media" && node.mediaMetadata) projection.mediaData = node.mediaMetadata;
-  if (node.kind === "shapeWithText" && node.shapeWithTextType) { projection.shapeType = node.shapeWithTextType; projection.textSublayer = { characters: node.text ?? "" }; projection.cornerRadius = node.radius; }
+  if (node.kind === "shapeWithText" && node.shapeWithTextType) {
+    const primary = node.textProperties?.runs[0]
+      ?? (node.text ? undefined : node.textProperties?.baseStyle);
+    const paragraph = node.textProperties?.paragraph;
+    projection.shapeType = node.shapeWithTextType;
+    projection.textSublayer = {
+      characters: node.text ?? "",
+      fontSize: primary?.fontSize ?? 14,
+      fontWeight: primary?.fontWeight ?? 400,
+      letterSpacing: { value: primary?.letterSpacing ?? 0, unit: "PIXELS" },
+      textAlignHorizontal: paragraph?.alignment === "center" ? "CENTER" : paragraph?.alignment === "right" ? "RIGHT" : paragraph?.alignment === "justify" ? "JUSTIFIED" : "LEFT",
+      lineHeight: paragraph?.lineHeightUnit === "auto"
+        ? { unit: "AUTO" }
+        : paragraph?.lineHeightUnit === "percent"
+          ? { value: paragraph.lineHeight ?? 100, unit: "PERCENT" }
+          : { value: paragraph?.lineHeight ?? 20, unit: "PIXELS" },
+      paragraphSpacing: paragraph?.paragraphSpacing ?? 0,
+      paragraphIndent: paragraph?.paragraphIndent ?? 0,
+      textWrapStyle: paragraph?.textWrapStyle === "balance"
+        ? "BALANCE"
+        : paragraph?.textWrapStyle === "pretty" ? "PRETTY" : "AUTO",
+      listSpacing: paragraph?.listSpacing ?? 0,
+      hangingList: paragraph?.hangingList ?? false,
+      hangingPunctuation: paragraph?.hangingPunctuation ?? false,
+      textCase: runtimeTextCase(primary?.textCase),
+      hyperlink: primary?.hyperlink ? structuredClone(primary.hyperlink) : null,
+      textDecoration: primary?.textDecoration === "underline" ? "UNDERLINE" : primary?.textDecoration === "strikethrough" ? "STRIKETHROUGH" : "NONE",
+      textDecorationStyle: primary?.textDecoration !== "underline"
+        ? null
+        : primary.textDecorationStyle === "wavy"
+          ? "WAVY"
+          : primary.textDecorationStyle === "dotted" ? "DOTTED" : "SOLID",
+      textDecorationOffset: primary?.textDecoration !== "underline"
+        ? null
+        : primary.textDecorationOffset
+          ? { value: primary.textDecorationOffset.value, unit: primary.textDecorationOffset.unit === "pixels" ? "PIXELS" : "PERCENT" }
+          : { unit: "AUTO" },
+      textDecorationThickness: primary?.textDecoration !== "underline"
+        ? null
+        : primary.textDecorationThickness
+          ? { value: primary.textDecorationThickness.value, unit: primary.textDecorationThickness.unit === "pixels" ? "PIXELS" : "PERCENT" }
+          : { unit: "AUTO" },
+      textDecorationColor: primary?.textDecoration !== "underline"
+        ? null
+        : primary.textDecorationColor
+          ? {
+              value: {
+                type: "SOLID",
+                color: (() => {
+                  const [r, g, b] = colorToSrgbComponents(primary.textDecorationColor!.color);
+                  return { r, g, b };
+                })(),
+                visible: primary.textDecorationColor.visible,
+                opacity: primary.textDecorationColor.opacity,
+                blendMode: BLEND_BY_CANONICAL[primary.textDecorationColor.blendMode] as Exclude<FigmaPluginBlendMode, "PASS_THROUGH">,
+              },
+            }
+          : { value: "AUTO" },
+      textDecorationSkipInk: primary?.textDecoration !== "underline"
+        ? null
+        : primary.textDecorationSkipInk === true,
+      leadingTrim: primary?.leadingTrim === "capHeight" ? "CAP_HEIGHT" : "NONE",
+    };
+    projection.cornerRadius = node.radius;
+  }
   if (node.kind === "slide" && node.slideMetadata) { projection.isSkippedSlide = node.slideMetadata.isSkippedSlide; projection.slideTransition = node.slideMetadata.transition; }
   if (node.kind === "sticky") { const metadata = node.stickyMetadata ?? { authorVisible: true, authorName: "", isWideWidth: false }; projection.authorVisible = metadata.authorVisible; projection.authorName = metadata.authorName; projection.isWideWidth = metadata.isWideWidth; projection.stickyTextSublayer = { characters: node.text ?? "" }; }
   if (node.kind === "textPath") { const metadata = node.textPathMetadata ?? { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT" as const, textAlignVertical: "TOP" as const }; projection.characters = node.text ?? ""; projection.vectorPaths = node.vectorPath; projection.textPathStartData = { segment: metadata.startSegment, position: metadata.startPosition }; projection.hasMissingFont = false; projection.textAlignHorizontal = metadata.textAlignHorizontal; projection.textAlignVertical = metadata.textAlignVertical; projection.autoRename = metadata.autoRename; }

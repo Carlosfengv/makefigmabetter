@@ -1,28 +1,41 @@
-import { colorToOpaqueSrgbCss, colorToSrgbCss } from "./color-rendering";
+import { colorToLinearSrgbComponents, colorToOpaqueSrgbCss, colorToSrgbCss, sampleLinearGradientForCanvas } from "./color-rendering";
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "./corner-smoothing";
 import { insetRoundedRectRadii, outsetRoundedRectRadii } from "./aligned-rounded-rect";
-import { DEFAULT_TEXT_LINE_HEIGHT, type CanvasNode, type DocumentPaint, type DocumentVectorPath } from "./editor-protocol";
+import { type CanvasNode, type DocumentGradientPaint, type DocumentPaint, type DocumentPaintLayer, type DocumentVectorPath, type RelativeTransform } from "./editor-protocol";
+import { resolvedTextLineHeight, resolvedTextLineHeightAt } from "./text-line-height";
 import { visibleNodesOnPage } from "./hierarchy-visibility";
 import { sortNodesByLayerOrder } from "./layer-order";
 import { solidLineStrokeOutlinePath } from "./line-stroke-outline";
 import { decorativeCapMeshPath, isDecorativeCap } from "./decorative-cap-mesh";
 import { perSideStrokeCenters } from "./per-side-stroke";
 import { styledTextSpans, type RenderTextStyle } from "./text-style-runs";
-import { transformPoint, worldTransformForNode } from "./scene-transform";
+import { usesSmallCaps } from "./text-case";
+import { endingEllipsis, textDisplayLines } from "./text-truncation";
+import { transformPoint, worldBoundsForTransform, worldTransformsForNodes, type AffineMatrix } from "./scene-transform";
 import { worldVisualBoundsForNode } from "./world-visual-bounds";
 import { ellipseStrokeRing } from "./ellipse-stroke-ring";
 import { nodeParametricShape, parametricShapePath, parametricShapePoints } from "./parametric-shape";
 import { vectorPathSvgD } from "./vector-path";
 import { fontVariationCss } from "./font-variation-axes";
-import { resolveTextDirection } from "./text-layout";
+import { layoutTextRanges, textAlignedLineLeft, textHangingPunctuationOffsets, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "./text-layout";
 import { sceneNodesInPaintOrder } from "../runtime/scene-compiler";
 import type { OrderedRenderScene } from "../runtime/ordered-render-ir";
 import { specialNodeFallback } from "./special-node-fallback";
 import { connectorPathForNode, connectorPathSvgD } from "./connector-path";
 import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "./connector-presentation";
 import { shapeWithTextDecorationPathD, shapeWithTextDecorations, shapeWithTextPath, shapeWithTextPathD } from "./shape-with-text-path";
-import { layoutTextPath } from "./text-path-layout";
-import { affineSvgMatrix, transformGroupRepeatMatrices } from "./transform-group-repeat";
+import { layoutTextPath, textPathGeometry, textPathTraversalVectorPath } from "./text-path-layout";
+import { affineSvgMatrix, transformGroupRepeatMatrices, transformGroupRepeatSubtree } from "./transform-group-repeat";
+import { clipsChildren } from "./node-capabilities";
+import { activeNodeEffects, requiresSubtreeComposition } from "./subtree-compositing";
+import { isLinearBlendMode } from "./linear-blend-composite";
+import { isolatesNormalBlend } from "./node-blend-semantics";
+import { imageFiltersAreNeutral } from "./image-filters";
+import { normalizedFillLayers, normalizedFillPaints, normalizedNodeEffects, normalizedStrokeLayers, normalizedStrokePaints } from "./normalized-node-view";
+import {
+  imagePaintLayoutBox,
+  resolvedImagePaintTransform,
+} from "./image-paint-transform";
 
 export type SvgExportResult = {
   svg: string;
@@ -41,7 +54,7 @@ export type SvgExportResult = {
 
 export type SvgCompatibilityFallback = {
   nodeId?: string;
-  capability: "layer-blur" | "inner-shadow" | "shadow-spread" | "background-blur" | "image-asset" | "font-asset" | "text-layout" | "display-p3" | "live-boolean" | "slice-selection" | "node-selection" | "scene-order" | "special-node" | "pdf-rasterization";
+  capability: "layer-blur" | "inner-shadow" | "shadow-spread" | "background-blur" | "image-asset" | "image-transform" | "image-filters" | "font-asset" | "text-layout" | "display-p3" | "live-boolean" | "slice-selection" | "node-selection" | "scene-order" | "special-node" | "pdf-rasterization" | "linear-blend" | "text-decoration-color-blend" | "transform-group-repeat";
   outcome: "fallback";
   reason: string;
 };
@@ -50,7 +63,8 @@ export type SvgCompatibilityFallback = {
  * from Canonical text: export needs the same frozen line boundaries Canvas
  * shaped from the selected font, but must never persist derived layout data. */
 export type SvgTextLayoutProjection = {
-  lines: ReadonlyArray<{ start: number; end: number; direction: "ltr" | "rtl" }>;
+  unitsPerEm?: number;
+  lines: ReadonlyArray<{ start: number; end: number; direction: "ltr" | "rtl"; advance?: number }>;
 };
 
 export type SvgExportOptions = {
@@ -94,7 +108,41 @@ type SvgPaint = Readonly<{ value: string; opacity?: number }>;
 
 function paintUsesDisplayP3(paint: DocumentPaint) {
   return paint.color?.space === "display-p3"
-    || Boolean(paint.gradient?.stops.some((stop) => stop.color.space === "display-p3"));
+    || Boolean(paint.gradient?.stops.some((stop) => stop.color.space === "display-p3"))
+    || Boolean(paint.gradientPaint?.stops.some((stop) => stop.color.space === "display-p3"));
+}
+
+function invertRelativeTransform(transform: RelativeTransform): RelativeTransform | undefined {
+  const determinant = transform.a * transform.d - transform.b * transform.c;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return undefined;
+  return {
+    a: transform.d / determinant,
+    b: -transform.b / determinant,
+    c: -transform.c / determinant,
+    d: transform.a / determinant,
+    e: (transform.c * transform.f - transform.d * transform.e) / determinant,
+    f: (transform.b * transform.e - transform.a * transform.f) / determinant,
+  };
+}
+
+function gradientPoint(transform: RelativeTransform, x: number, y: number) {
+  return { x: transform.a * x + transform.c * y + transform.e, y: transform.b * x + transform.d * y + transform.f };
+}
+
+function sampledGradientColor(gradient: DocumentGradientPaint, position: number) {
+  const bounded = Math.min(1, Math.max(0, position));
+  let rightIndex = gradient.stops.findIndex((stop) => stop.position >= bounded);
+  if (rightIndex < 0) rightIndex = gradient.stops.length - 1;
+  const right = gradient.stops[rightIndex]!;
+  const left = gradient.stops[Math.max(0, rightIndex - 1)]!;
+  const amount = right.position === left.position ? 1 : (bounded - left.position) / (right.position - left.position);
+  const leftLinear = colorToLinearSrgbComponents(left.color);
+  const rightLinear = colorToLinearSrgbComponents(right.color);
+  return colorToSrgbCss({
+    space: "linear-srgb",
+    components: leftLinear.map((component, index) => component + (rightLinear[index]! - component) * amount) as [number, number, number],
+    alpha: left.color.alpha + (right.color.alpha - left.color.alpha) * amount,
+  });
 }
 
 /** SVG is deliberately serialized in the same clipped sRGB form as Canvas
@@ -102,13 +150,12 @@ function paintUsesDisplayP3(paint: DocumentPaint) {
  * report instead of making a wide-gamut document appear lossless downstream. */
 function nodeUsesDisplayP3(node: CanvasNode) {
   const paints = [
-    ...(node.fills ?? [{ css: node.fill, color: node.fillColor, gradient: node.fillGradient }]),
-    ...(node.strokes ?? [{ css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient }]),
+    ...normalizedFillPaints(node),
+    ...normalizedStrokePaints(node),
   ];
   if (paints.some(paintUsesDisplayP3)) return true;
   if (node.textProperties?.runs.some((run) => run.color?.space === "display-p3")) return true;
-  if (node.dropShadow?.color.space === "display-p3") return true;
-  return node.effectStack?.some((effect) => effect.dropShadow?.color.space === "display-p3" || effect.innerShadow?.color.space === "display-p3") ?? false;
+  return normalizedNodeEffects(node).some((effect) => effect.dropShadow?.color.space === "display-p3" || effect.innerShadow?.color.space === "display-p3");
 }
 
 // Exported SVG must never become a transport for an untrusted SVG payload.
@@ -209,6 +256,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     ? nodes.find((node) => node.id === options.sliceId && node.kind === "slice" && (node.pageId ?? options.defaultPageId) === options.pageId)
     : undefined;
   const byId = new Map(pageNodes.map((node) => [node.id, node]));
+  const worldTransformByNodeId = worldTransformsForNodes(nodes);
   // A live BooleanOperation is rendered from Rust-derived path geometry in the
   // editor worker. The synchronous base exporter only receives a Boolean path
   // when its caller has derived one from this exact frozen snapshot.
@@ -227,9 +275,18 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   const exportableNodes = pageNodes.filter((node) => !selectionContextNodeIds.has(node.id) && !node.isMask && (node.kind !== "booleanOperation" || options.booleanPaths?.has(node.id)) && !isLiveBooleanOperand(node));
   const bounds = exportableNodes
     .filter((node) => node.kind !== "group" && node.kind !== "slice")
-    .map((node) => worldVisualBoundsForNode(nodes, node))
+    .map((node) => {
+      const transform = worldTransformByNodeId.get(node.id);
+      return transform ? worldVisualBoundsForNode(nodes, node, {
+        transform,
+        bounds: worldBoundsForTransform(node, transform),
+        defaultPageId: options.defaultPageId,
+        nodeById: byId,
+        worldTransformByNodeId,
+      }) : undefined;
+    })
     .filter((value): value is NonNullable<typeof value> => Boolean(value));
-  const sliceTransform = requestedSlice ? worldTransformForNode(nodes, requestedSlice.id) : undefined;
+  const sliceTransform = requestedSlice ? worldTransformByNodeId.get(requestedSlice.id) : undefined;
   const slicePoints = requestedSlice && sliceTransform
     ? [{ x: 0, y: 0 }, { x: requestedSlice.width, y: 0 }, { x: requestedSlice.width, y: requestedSlice.height }, { x: 0, y: requestedSlice.height }].map((point) => transformPoint(sliceTransform, point))
     : undefined;
@@ -271,12 +328,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const reason = `Effect fallback for ${nodeId}: SVG export does not yet preserve ${label}.`;
     reportFallback(capability, reason, nodeId);
   };
-  const activeEffects = (node: CanvasNode) => (node.effectStack?.length ? node.effectStack : node.dropShadow ? [{ dropShadow: node.dropShadow }] : []).filter((effect) => Boolean(
-    (effect.dropShadow?.visible && effect.dropShadow.color.alpha > 0)
-    || (effect.layerBlur?.visible && effect.layerBlur.radius > 0)
-    || (effect.innerShadow?.visible && effect.innerShadow.color.alpha > 0)
-    || (effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0),
-  ));
+  const activeEffects = activeNodeEffects;
   const hasStandaloneLayerBlur = (node: CanvasNode) => {
     const effects = activeEffects(node);
     return effects.length === 1 && Boolean(effects[0]?.layerBlur?.visible) && (effects[0]?.layerBlur?.radius ?? 0) > 0;
@@ -297,7 +349,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   };
   if (options.nodeIds?.length && !selectedNodeScope) reportFallback("node-selection", "Requested layer selection is unavailable on this page; exported the full page instead.");
   for (const node of exportableNodes) {
-    const referencedFonts = node.kind === "text"
+    const referencedFonts = node.kind === "text" || node.kind === "textPath"
       ? [...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []), ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? [])]
       : [];
     const hasUnembeddedFontAsset = referencedFonts.some((assetId) => !isSafeEmbeddedFontDataUri(options.fontDataUris?.get(assetId)));
@@ -308,11 +360,25 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     // document-owned font is different: if export did not receive the frozen
     // Rust line ranges, its SVG line breaking can diverge from Canvas and must
     // be visible in the delivery sidecar instead of silently looking supported.
-    if (node.kind === "text" && referencedFonts.length > 0 && !options.textLayouts?.has(node.id)) {
+    if ((node.kind === "text" || node.kind === "textPath") && referencedFonts.length > 0 && !options.textLayouts?.has(node.id)) {
       reportFallback("text-layout", `Text layout fallback for ${node.id}: SVG export did not receive frozen Rust text line ranges; browser line layout may differ from Canvas.`, node.id);
     }
     if (nodeUsesDisplayP3(node)) {
       reportFallback("display-p3", `Color fallback for ${node.id}: Display P3 colors are converted to clipped sRGB for SVG, PNG and PDF export.`, node.id);
+    }
+    if (isLinearBlendMode(node.blendMode)) {
+      reportFallback("linear-blend", `Blend fallback for ${node.id}: structural SVG cannot sample its backdrop for exact ${node.blendMode} compositing. Canvas is the verified path; SVG and its PNG/PDF raster derivatives use Normal compositing.`, node.id);
+    }
+    if ([...normalizedFillLayers(node), ...normalizedStrokeLayers(node)]
+      .some((layer) => isLinearBlendMode(layer.blendMode))) {
+      reportFallback("linear-blend", `Paint-layer blend fallback for ${node.id}: structural SVG cannot sample the bounded backdrop required for exact Linear Burn/Dodge compositing. Canvas is the verified path; SVG and its PNG/PDF raster derivatives use Normal compositing.`, node.id);
+    }
+    if (node.textProperties?.runs.some((run) => run.fillStack?.layers.some((layer) => isLinearBlendMode(layer.blendMode)))) {
+      reportFallback("linear-blend", `Text paint-layer blend fallback for ${node.id}: structural SVG cannot sample the bounded backdrop required for exact Linear Burn/Dodge compositing. Canvas is the verified path; SVG and its PNG/PDF raster derivatives use Normal compositing.`, node.id);
+    }
+    if ([...(node.textProperties?.runs ?? []), ...(node.textProperties?.baseStyle ? [node.textProperties.baseStyle] : [])]
+      .some((run) => run.textDecoration === "underline" && run.textDecorationColor?.blendMode !== undefined && run.textDecorationColor.blendMode !== "normal")) {
+      reportFallback("text-decoration-color-blend", `Text decoration color blend fallback for ${node.id}: structural SVG cannot isolate decoration compositing from glyph compositing. Canvas is the verified path; SVG and its PNG/PDF raster derivatives use Normal decoration compositing.`, node.id);
     }
   }
   // Masks are not ordinary painted export nodes, but Canvas still applies their
@@ -321,13 +387,13 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   // definition without a delivery-side warning.
   const effectNodes = [...new Map([...exportableNodes, ...pageNodes.filter((node) => node.isMask)].map((node) => [node.id, node])).values()];
   for (const node of effectNodes) {
-    for (const effect of node.effectStack ?? []) {
+    for (const effect of normalizedNodeEffects(node)) {
       if (effect.layerBlur?.visible && effect.layerBlur.radius > 0 && !hasStandaloneLayerBlur(node) && !hasComposedShadowBlurStack(node)) reportEffectFallback(node.id, "layer-blur", "Layer Blur");
       if (effect.innerShadow?.visible && effect.innerShadow.color.alpha > 0 && !hasStandaloneInnerShadow(node) && !hasComposedShadowBlurStack(node)) reportEffectFallback(node.id, "inner-shadow", "Inner Shadow");
       if (effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0) reportEffectFallback(node.id, "background-blur", "Background Blur");
     }
   }
-  const blendStyle = (node: CanvasNode) => node.blendMode && node.blendMode !== "normal" ? ` style="mix-blend-mode:${node.blendMode}"` : "";
+  const blendStyle = (node: CanvasNode) => node.blendMode && node.blendMode !== "normal" && node.blendMode !== "pass-through" && !isLinearBlendMode(node.blendMode) ? ` style="mix-blend-mode:${node.blendMode}"` : "";
   let nextDefinitionId = 0;
   const embeddedFontIds = [...new Set(exportableNodes.flatMap((node) => node.kind === "text" ? [
     ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),
@@ -337,28 +403,60 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     definitions.push(`<style>${embeddedFontIds.map((assetId) => `@font-face{font-family:'${svgFontFamily(assetId)}';src:url('${options.fontDataUris!.get(assetId)!}') format('${fontFormat(options.fontDataUris!.get(assetId)!)}');}`).join("")}</style>`);
   }
   const paintValue = (paint: DocumentPaint): SvgPaint => {
+    const layerOpacity = paint.layerOpacity ?? 1;
+    if (paint.gradientPaint) {
+      const id = `makefigma-gradient-${nextDefinitionId++}`;
+      const gradient = paint.gradientPaint;
+      const inverse = invertRelativeTransform(gradient.transform);
+      if (!inverse) return { value: paint.css, opacity: layerOpacity };
+      if (gradient.kind === "radial") {
+        const matrix = `matrix(${number(inverse.a)} ${number(inverse.b)} ${number(inverse.c)} ${number(inverse.d)} ${number(inverse.e)} ${number(inverse.f)})`;
+        const sampledStops = sampleLinearGradientForCanvas({ start: [0, 0], end: [1, 0], stops: gradient.stops });
+        definitions.push(`<radialGradient id="${id}" gradientUnits="objectBoundingBox" cx="0" cy="0.5" r="1" gradientTransform="${matrix}">${sampledStops.map((stop) => `<stop offset="${number(stop.position)}" stop-color="${attribute(stop.color)}"/>`).join("")}</radialGradient>`);
+      } else if (gradient.kind === "diamond") {
+        const steps = 128;
+        const polygons = [`<rect x="0" y="0" width="1" height="1" fill="${attribute(sampledGradientColor(gradient, 1))}"/>`];
+        for (let step = steps - 1; step >= 0; step -= 1) {
+          const position = step / steps;
+          const points = [[position, .5], [0, .5 + position / 2], [-position, .5], [0, .5 - position / 2]]
+            .map(([x, y]) => gradientPoint(inverse, x!, y!));
+          polygons.push(`<polygon points="${points.map((point) => `${number(point.x)},${number(point.y)}`).join(" ")}" fill="${attribute(sampledGradientColor(gradient, position))}"/>`);
+        }
+        definitions.push(`<pattern id="${id}" data-makefigma-gradient="diamond" patternUnits="objectBoundingBox" patternContentUnits="objectBoundingBox" width="1" height="1">${polygons.join("")}</pattern>`);
+      } else {
+        const steps = 256;
+        const center = gradientPoint(inverse, 0, .5);
+        const gradientCorners = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y]) => gradientPoint(gradient.transform, x!, y!));
+        const radius = Math.max(1, ...gradientCorners.map((point) => Math.hypot(point.x, (point.y - .5) * 2))) * 2;
+        const wedges: string[] = [];
+        for (let step = 0; step < steps; step += 1) {
+          const start = step / steps;
+          const end = (step + 1.01) / steps;
+          const first = gradientPoint(inverse, Math.cos(start * Math.PI * 2) * radius, .5 + Math.sin(start * Math.PI * 2) * radius / 2);
+          const second = gradientPoint(inverse, Math.cos(end * Math.PI * 2) * radius, .5 + Math.sin(end * Math.PI * 2) * radius / 2);
+          wedges.push(`<path d="M ${number(center.x)} ${number(center.y)} L ${number(first.x)} ${number(first.y)} L ${number(second.x)} ${number(second.y)} Z" fill="${attribute(sampledGradientColor(gradient, (step + .5) / steps))}"/>`);
+        }
+        definitions.push(`<pattern id="${id}" data-makefigma-gradient="angular" patternUnits="objectBoundingBox" patternContentUnits="objectBoundingBox" width="1" height="1">${wedges.join("")}</pattern>`);
+      }
+      return { value: `url(#${id})`, opacity: layerOpacity };
+    }
     if (!paint.gradient) return paint.color
-      ? { value: colorToOpaqueSrgbCss(paint.color), opacity: paint.color.alpha }
-      : { value: paint.css };
+      ? { value: colorToOpaqueSrgbCss(paint.color), opacity: paint.color.alpha * layerOpacity }
+      : { value: paint.css, opacity: layerOpacity };
     const id = `makefigma-gradient-${nextDefinitionId++}`;
     const gradient = paint.gradient;
     definitions.push(`<linearGradient id="${id}" x1="${number(gradient.start[0])}" y1="${number(gradient.start[1])}" x2="${number(gradient.end[0])}" y2="${number(gradient.end[1])}">${gradient.stops.map((stop) => `<stop offset="${number(stop.position)}" stop-color="${attribute(colorToOpaqueSrgbCss(stop.color))}" stop-opacity="${number(stop.color.alpha)}"/>`).join("")}</linearGradient>`);
-    return { value: `url(#${id})` };
+    return { value: `url(#${id})`, opacity: layerOpacity };
   };
   const activePaints = (node: CanvasNode, kind: "fill" | "stroke"): DocumentPaint[] => {
-    const stack = kind === "fill" ? node.fills : node.strokes;
-    if (stack?.length) return stack;
-    const legacy = kind === "fill"
-      ? { css: node.fill, color: node.fillColor, gradient: node.fillGradient }
-      : { css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient };
-    return [legacy];
+    return [...(kind === "fill" ? normalizedFillPaints(node) : normalizedStrokePaints(node))];
   };
   /** SVG's morphology primitive is the export-side spread contract: it alters
    * SourceAlpha before blur/offset, preserving both positive and negative
    * spread without changing the blur kernel. PNG/PDF rasterize this same frozen
    * SVG, so this path cannot silently diverge by target format. */
   const dropShadowFilter = (node: CanvasNode) => {
-    const shadows = (node.effectStack?.map((effect) => effect.dropShadow).filter((shadow): shadow is NonNullable<CanvasNode["dropShadow"]> => Boolean(shadow)) ?? (node.dropShadow ? [node.dropShadow] : []))
+    const shadows = normalizedNodeEffects(node).map((effect) => effect.dropShadow).filter((shadow): shadow is NonNullable<CanvasNode["dropShadow"]> => Boolean(shadow))
       .filter((shadow) => shadow.visible && shadow.color.alpha > 0);
     if (!shadows.length) return "";
     const id = `makefigma-drop-shadow-${nextDefinitionId++}`;
@@ -465,7 +563,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
   const shape = (node: CanvasNode, fill: SvgPaint, stroke: SvgPaint, fillRule = "nonzero") => {
     const common = `fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} stroke="${attribute(stroke.value)}"${paintOpacity("stroke", stroke)} fill-rule="${fillRule}" stroke-linecap="${svgStrokeCap(node)}" stroke-linejoin="${attribute(node.strokeJoin ?? "miter")}" stroke-miterlimit="${number(node.strokeMiterLimit ?? 10)}"${node.strokeDashPattern?.length ? ` stroke-dasharray="${node.strokeDashPattern.map(number).join(" ")}"` : ""}${stroke.value !== "none" ? ` stroke-width="${number(node.strokeWidth)}"` : ""}`;
     if (node.kind === "connector") {
-      const connectorPath = node.kind === "connector" ? connectorPathForNode(node) : undefined;
+      const connectorPath = node.kind === "connector" ? connectorPathForNode(node, { nodes, defaultPageId: options.defaultPageId, nodeById: byId, worldTransformByNodeId }) : undefined;
       if (connectorPath) return `<path d="${connectorPathSvgD(connectorPath, number)}" ${common}/>${stroke.value === "none" ? "" : connectorDecorativeCapPaint(node, connectorPath, stroke)}`;
     }
     if (node.kind === "line") {
@@ -515,18 +613,137 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const outline = strokes.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)).join("");
     return `${image}${outline}`;
   };
+  const paintLayerPresentation = (layer: DocumentPaintLayer) => `${layer.opacity < 1 ? ` opacity="${number(layer.opacity)}"` : ""}${layer.blendMode !== "normal" && !isLinearBlendMode(layer.blendMode) ? ` style="mix-blend-mode:${attribute(layer.blendMode)}"` : ""}`;
+  const versionedFillMarkup = (node: CanvasNode) => normalizedFillLayers(node).map((layer) => {
+    const presentation = paintLayerPresentation(layer);
+    if (layer.paint) {
+      return `<g${presentation}>${shape(node, paintValue(layer.paint), { value: "none" })}</g>`;
+    }
+    if (!layer.image) return "";
+    if (!imageFiltersAreNeutral(layer.image.filters)) {
+      reportFallback("image-filters", "Image adjustments are preserved in Canonical data but structural SVG export does not yet reproduce Figma's private filter shader.", node.id);
+    }
+    const supplied = options.imageDataUris?.get(layer.image.assetId);
+    const href = isSafeEmbeddedRasterDataUri(supplied) ? supplied : undefined;
+    if (!href) {
+      reportFallback("image-asset", "Paint Stack image bytes were unavailable or cannot be embedded for this SVG export.", node.id);
+      return "";
+    }
+    const transform = resolvedImagePaintTransform(layer.image, node.width, node.height);
+    const layout = imagePaintLayoutBox(layer.image, node.width, node.height);
+    if (!transform || !layout) {
+      reportFallback("image-transform", "Image Paint rotation or transform is invalid for this scale mode.", node.id);
+      return "";
+    }
+    const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
+    if (layer.image.scaleMode === "tile") {
+      const patternId = `makefigma-image-pattern-${nextDefinitionId++}`;
+      const tileWidth = Math.max(1, node.width / 4);
+      const tileHeight = Math.max(1, node.height / 4);
+      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(tileWidth)}" height="${number(tileHeight)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(tileWidth)}" height="${number(tileHeight)}" preserveAspectRatio="xMidYMid slice"/></pattern>`);
+      return `<g${presentation}>${shape(node, { value: `url(#${patternId})` }, { value: "none" })}</g>`;
+    }
+    const clip = imageClipMarkup(node) ?? shape(node, { value: "#ffffff" }, { value: "none" });
+    const clipId = `makefigma-stack-image-clip-${nextDefinitionId++}`;
+    definitions.push(`<clipPath id="${clipId}">${clip}</clipPath>`);
+    const preserveAspectRatio = layer.image.scaleMode === "fit" ? "xMidYMid meet" : "xMidYMid slice";
+    return `<g${presentation} clip-path="url(#${clipId})"><g transform="${matrix}"><image href="${attribute(href)}" x="${number(layout.x)}" y="${number(layout.y)}" width="${number(layout.width)}" height="${number(layout.height)}" preserveAspectRatio="${preserveAspectRatio}"/></g></g>`;
+  }).join("");
+  const imageStrokePaint = (node: CanvasNode, layer: DocumentPaintLayer): SvgPaint | undefined => {
+    if (!layer.image) return undefined;
+    if (!imageFiltersAreNeutral(layer.image.filters)) {
+      reportFallback("image-filters", "Image stroke adjustments are preserved in Canonical data but structural SVG export does not yet reproduce Figma's private filter shader.", node.id);
+    }
+    const supplied = options.imageDataUris?.get(layer.image.assetId);
+    const href = isSafeEmbeddedRasterDataUri(supplied) ? supplied : undefined;
+    if (!href) {
+      reportFallback("image-asset", "Paint Stack image bytes were unavailable or cannot be embedded for this SVG stroke export.", node.id);
+      return undefined;
+    }
+    const transform = resolvedImagePaintTransform(layer.image, node.width, node.height);
+    const layout = imagePaintLayoutBox(layer.image, node.width, node.height);
+    if (!transform || !layout) {
+      reportFallback("image-transform", "Image Paint rotation or transform is invalid for this scale mode.", node.id);
+      return undefined;
+    }
+    const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
+    const patternId = `makefigma-stroke-image-pattern-${nextDefinitionId++}`;
+    if (layer.image.scaleMode === "tile") {
+      const tileWidth = Math.max(1, node.width / 4);
+      const tileHeight = Math.max(1, Math.max(node.height, node.strokeWidth) / 4);
+      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(tileWidth)}" height="${number(tileHeight)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(tileWidth)}" height="${number(tileHeight)}" preserveAspectRatio="xMidYMid slice"/></pattern>`);
+    } else {
+      const height = Math.max(layout.height, node.strokeWidth, 1);
+      const preserveAspectRatio = layer.image.scaleMode === "fit" ? "xMidYMid meet" : "xMidYMid slice";
+      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" x="${number(layout.x)}" y="${number(layout.y)}" width="${number(Math.max(layout.width, 1))}" height="${number(height)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(Math.max(layout.width, 1))}" height="${number(height)}" preserveAspectRatio="${preserveAspectRatio}"/></pattern>`);
+    }
+    return { value: `url(#${patternId})` };
+  };
+  const versionedStrokeMarkup = (node: CanvasNode) => node.strokeWidth <= 0 ? "" : normalizedStrokeLayers(node).map((layer) => {
+    const paint = layer.paint ? paintValue(layer.paint) : imageStrokePaint(node, layer);
+    return paint ? `<g${paintLayerPresentation(layer)}>${shape(node, { value: "none" }, paint)}</g>` : "";
+  }).join("");
+  const textStylePaintAttributes = (node: CanvasNode, style: RenderTextStyle, layerIndex: number) => {
+    if (style.fillStack === undefined) {
+      if (layerIndex > 0) return ` fill="none"`;
+      return style.color ? ` fill="${attribute(colorToSrgbCss(style.color))}"` : "";
+    }
+    const layer = style.fillStack.layers[layerIndex];
+    if (!layer?.visible || layer.opacity <= 0) return ` fill="none"`;
+    const paint = layer.paint
+      ? paintValue({ ...layer.paint, layerOpacity: layer.opacity })
+      : imageStrokePaint(node, layer);
+    if (!paint) return ` fill="none"`;
+    const opacity = layer.paint ? paint.opacity : layer.opacity;
+    const blend = layer.blendMode !== "normal" && !isLinearBlendMode(layer.blendMode)
+      ? ` style="mix-blend-mode:${attribute(layer.blendMode)}"`
+      : "";
+    return ` fill="${attribute(paint.value)}"${opacity === undefined || opacity >= 1 ? "" : ` fill-opacity="${number(Math.max(0, opacity))}"`}${blend}`;
+  };
+  const richTextPathMarkup = (node: CanvasNode, fill: SvgPaint) => {
+    const layout = options.textLayouts?.get(node.id);
+    const line = layout?.lines.length === 1 ? layout.lines[0] : undefined;
+    const primary = node.textProperties?.runs[0];
+    const geometry = textPathGeometry(node.vectorPath, node.textPathMetadata);
+    const traversal = textPathTraversalVectorPath(node.vectorPath, node.textPathMetadata);
+    if (!line || !layout?.unitsPerEm || !primary || !geometry || !traversal || line.advance === undefined) return undefined;
+    const pathId = `makefigma-text-path-${nextDefinitionId++}`;
+    definitions.push(`<path id="${pathId}" d="${vectorPathSvgD(traversal, number)}"/>`);
+    const source = node.text ?? "";
+    const sourceLength = new TextEncoder().encode(source).byteLength;
+    const spans = styledTextSpans(source, 0, sourceLength, node.textProperties);
+    if (!spans.length && source) return undefined;
+    const baseStart = geometry.length * node.textPathMetadata!.startPosition;
+    const available = Math.max(0, geometry.length - baseStart);
+    const shapedWidth = line.advance * primary.fontSize / layout.unitsPerEm;
+    const justified = node.textPathMetadata!.textAlignHorizontal === "JUSTIFIED";
+    const anchor = node.textPathMetadata!.textAlignHorizontal === "CENTER" ? "middle" : node.textPathMetadata!.textAlignHorizontal === "RIGHT" ? "end" : "start";
+    const startOffset = node.textPathMetadata!.textAlignHorizontal === "CENTER"
+      ? baseStart + available / 2
+      : node.textPathMetadata!.textAlignHorizontal === "RIGHT"
+        ? geometry.length
+        : baseStart;
+    const textLength = justified ? available : shapedWidth;
+    const vertical = node.textPathMetadata!.textAlignVertical === "TOP" ? primary.fontSize * .4 : node.textPathMetadata!.textAlignVertical === "BOTTOM" ? -primary.fontSize * .4 : 0;
+    const fallbackFamilies = (node.textProperties?.fallbackFonts ?? [])
+      .filter((font) => isSafeEmbeddedFontDataUri(options.fontDataUris?.get(font.assetId)))
+      .map((font) => svgFontFamily(font.assetId));
+    const layerCount = Math.max(1, ...node.textProperties!.runs.map((run) => run.fillStack?.layers.length ?? 1));
+    const body = (layerIndex: number) => spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, options.fontDataUris, fallbackFamilies, false)}${svgHyperlinkDataAttributes(span.style)}${textStylePaintAttributes(node, span.style, layerIndex)}>${escapeSvgText(span.text)}</tspan>`).join("");
+    return Array.from({ length: layerCount }, (_, layerIndex) => `<text fill="${attribute(fill.value)}"${fill.opacity === undefined ? "" : ` fill-opacity="${number(fill.opacity)}"`} text-anchor="${anchor}" direction="${line.direction}" dominant-baseline="alphabetic"><textPath href="#${pathId}" startOffset="${number(startOffset)}" dy="${number(vertical)}" textLength="${number(Math.max(0, textLength))}" lengthAdjust="spacingAndGlyphs">${body(layerIndex)}</textPath></text>`).join("");
+  };
   const filledPath = (path: string, paint: SvgPaint, transform = "") => `<path d="${path}"${transform} fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} stroke="none"/>`;
   const filledEllipse = (cx: number, cy: number, rx: number, ry: number, paint: SvgPaint) => `<ellipse cx="${number(cx)}" cy="${number(cy)}" rx="${number(rx)}" ry="${number(ry)}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} stroke="none"/>`;
   /** `drawImage(Image(svg))` in Chromium does not reliably honor a transform
    * nested inside `clipPath`; PNG/PDF exports then keep the Frame itself but
    * clip all descendants. Bake the Frame boundary into world coordinates so
    * interactive SVG and raster delivery share the same transform source. */
-  const frameClipPath = (node: CanvasNode, transform: NonNullable<ReturnType<typeof worldTransformForNode>>) => {
+  const frameClipPath = (node: CanvasNode, transform: AffineMatrix) => {
     const points = roundedRectClipPoints(node.width, node.height, node.radius, node.cornerRadii).map((point) => transformPoint(transform, point));
     return `M ${points.map((point) => `${number(point.x)} ${number(point.y)}`).join(" L ")} Z`;
   };
   const alignedClosedShapeLayers = (node: CanvasNode, fills: SvgPaint[], strokes: SvgPaint[]) => {
-    if ((node.kind !== "frame" && node.kind !== "rectangle") || node.strokeWidth <= 0) return undefined;
+    if ((!clipsChildren(node.kind) && node.kind !== "rectangle") || node.strokeWidth <= 0) return undefined;
     if (node.strokeWeights?.length === 4) return undefined;
     if (node.strokeAlign === "center") return undefined;
     const path = roundedRectPath(node.width, node.height, node.radius, node.cornerRadii, node.cornerSmoothing);
@@ -536,7 +753,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       if (node.strokeAlign === "outside") {
         const outerRadii = outsetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, half);
         const outer = roundedRectPath(node.width + node.strokeWidth, node.height + node.strokeWidth, node.radius + half, outerRadii, node.cornerSmoothing);
-        return `${strokes.map((paint) => dashedStroke(outer, paint, ` transform="translate(${-number(half)} ${-number(half)})"`)).join("")}${fills.map((paint) => filledPath(path, paint)).join("")}`;
+        return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokes.map((paint) => dashedStroke(outer, paint, ` transform="translate(${-number(half)} ${-number(half)})"`)).join("")}`;
       }
       const innerWidth = Math.max(0, node.width - node.strokeWidth);
       const innerHeight = Math.max(0, node.height - node.strokeWidth);
@@ -548,18 +765,20 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     if (node.strokeAlign === "outside") {
       const outset = node.strokeWidth;
       const outerRadii = outsetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, outset);
-      const outer = roundedRectPath(node.width + outset * 2, node.height + outset * 2, node.radius + outset, outerRadii, node.cornerSmoothing);
-      return `${strokes.map((paint) => filledPath(outer, paint, ` transform="translate(${-number(outset)} ${-number(outset)})"`)).join("")}${fills.map((paint) => filledPath(path, paint)).join("")}`;
+      const outer = roundedRectPath(node.width + outset * 2, node.height + outset * 2, node.radius + outset, outerRadii, node.cornerSmoothing, -outset, -outset);
+      const strokeMarkup = strokes.map((paint) => `<path d="${outer} ${path}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} fill-rule="evenodd" stroke="none"/>`).join("");
+      return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokeMarkup}`;
     }
     const inset = Math.min(node.strokeWidth, shortestSide / 2);
     const innerWidth = Math.max(0, node.width - inset * 2);
     const innerHeight = Math.max(0, node.height - inset * 2);
     const innerRadii = insetRoundedRectRadii(node.width, node.height, node.radius, node.cornerRadii, inset);
-    const inner = roundedRectPath(innerWidth, innerHeight, Math.max(0, node.radius - inset), innerRadii, node.cornerSmoothing);
-    const innerPaints = innerWidth > 0 && innerHeight > 0
-      ? fills.map((paint) => filledPath(inner, paint, ` transform="translate(${number(inset)} ${number(inset)})"`)).join("")
-      : "";
-    return `${strokes.map((paint) => filledPath(path, paint)).join("")}${innerPaints}`;
+    const inner = roundedRectPath(innerWidth, innerHeight, Math.max(0, node.radius - inset), innerRadii, node.cornerSmoothing, inset, inset);
+    if (innerWidth <= 0 || innerHeight <= 0) {
+      return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokes.map((paint) => filledPath(path, paint)).join("")}`;
+    }
+    const strokeMarkup = strokes.map((paint) => `<path d="${path} ${inner}" fill="${attribute(paint.value)}"${paintOpacity("fill", paint)} fill-rule="evenodd" stroke="none"/>`).join("");
+    return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokeMarkup}`;
   };
   const alignedEllipseLayers = (node: CanvasNode, fills: SvgPaint[], strokes: SvgPaint[]) => {
     if (node.kind !== "ellipse" || node.arcData || node.strokeWidth <= 0 || node.strokeAlign === "center") return undefined;
@@ -573,7 +792,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     return `${strokes.map((paint) => filledEllipse(cx, cy, ring.outerRx, ring.outerRy, paint)).join("")}${inner}`;
   };
   const perSideStrokeLayers = (node: CanvasNode, fills: SvgPaint[], strokes: SvgPaint[]) => {
-    if ((node.kind !== "frame" && node.kind !== "rectangle") || node.strokeWeights?.length !== 4) return undefined;
+    if ((!clipsChildren(node.kind) && node.kind !== "rectangle") || node.strokeWeights?.length !== 4) return undefined;
     const path = roundedRectPath(node.width, node.height, node.radius, node.cornerRadii, node.cornerSmoothing);
     const [top, right, bottom, left] = node.strokeWeights.map((value) => Math.max(0, value));
     const align = node.strokeAlign ?? "inside";
@@ -596,7 +815,20 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       : rendered.join("");
     return `${fills.map((paint) => filledPath(path, paint)).join("")}${strokeMarkup}`;
   };
-  const nodeMarkup = (node: CanvasNode) => {
+  const ownerEffect = (node: CanvasNode) => composedShadowBlurFilter(node) || dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
+  const ownerPresentationAttributes = (node: CanvasNode) => ` opacity="${number(node.opacity)}"${isolatesNormalBlend(node) ? ' style="isolation:isolate"' : blendStyle(node)}${ownerEffect(node)}`;
+  const containerFillSourceNode = (node: CanvasNode): CanvasNode => ({
+    ...node,
+    strokeWidth: 0,
+    strokeWeights: undefined,
+    strokeStack: { layers: [] },
+  });
+  const containerStrokeSourceNode = (node: CanvasNode): CanvasNode => ({
+    ...node,
+    assetId: undefined,
+    fillStack: { layers: [] },
+  });
+  const nodeMarkup = (node: CanvasNode, applyOwnerPresentation = true) => {
     const specialFallback = specialNodeFallback(node, "svg");
     if (specialFallback) reportFallback("special-node", `${specialFallback.code}: ${specialFallback.reason}`, node.id);
     if (node.kind === "group" || node.kind === "slice" || node.kind === "slideGrid" || node.kind === "slideRow" || node.kind === "transformGroup") return "";
@@ -604,14 +836,16 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       const vectorPath = options.booleanPaths?.get(node.id);
       const source = children.get(node.id)?.find((candidate) => candidate.kind === "vector");
       if (!vectorPath || !source || source.kind !== "vector") return "";
-      const transform = worldTransformForNode(nodes, node.id);
+      const transform = worldTransformByNodeId.get(node.id);
       if (!transform) return "";
       const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
       // The Boolean wrapper is the rendered node: Canvas isolates this derived
       // result before it applies the wrapper's ordered effects. Retain that
       // ownership in SVG so its PNG/PDF raster consumers do not silently lose
       // a supported standalone effect.
-      const effect = composedShadowBlurFilter(node) || dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
+      const presentation = applyOwnerPresentation
+        ? ` opacity="${number(node.opacity * source.opacity)}"${blendStyle(node)}${ownerEffect(node)}`
+        : "";
       const derived = { ...source, vectorPath };
       const fillPaints = activePaints(source, "fill").map(paintValue);
       const strokePaints = activePaints(source, "stroke").map(paintValue);
@@ -619,50 +853,56 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
         ...fillPaints.map((paint) => shape(derived, paint, { value: "none" })),
         ...strokePaints.filter(() => source.strokeWidth > 0).map((paint) => shape(derived, { value: "none" }, paint)),
       ].join("");
-      return `<g transform="${matrix}" opacity="${number(node.opacity * source.opacity)}"${blendStyle(node)}${effect}>${layers}</g>`;
+      return `<g transform="${matrix}"${presentation}>${layers}</g>`;
     }
     const fills = activePaints(node, "fill");
     const strokes = activePaints(node, "stroke");
-    const transform = worldTransformForNode(nodes, node.id);
+    const transform = worldTransformByNodeId.get(node.id);
     if (!transform) return "";
     const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
-    const effect = composedShadowBlurFilter(node) || dropShadowFilter(node) || layerBlurFilter(node) || innerShadowFilter(node);
+    const presentation = applyOwnerPresentation ? ownerPresentationAttributes(node) : "";
     if (node.kind === "text") {
-      const fill = paintValue(fills[0]);
-      return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${svgTextMarkup(node, fill, options.fontDataUris, options.textLayouts?.get(node.id))}</g>`;
+      const fill = fills[0] ? paintValue(fills[0]) : { value: "none" };
+      return `<g transform="${matrix}"${presentation}>${svgTextMarkup(node, fill, options.fontDataUris, options.textLayouts?.get(node.id), (style, layerIndex) => textStylePaintAttributes(node, style, layerIndex))}</g>`;
     }
     if (node.kind === "textPath") {
-      const fill = paintValue(fills[0]);
-      const markup = svgTextPathMarkup(node, fill.value, fill.opacity, number);
-      if (markup) return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${markup}</g>`;
+      if (normalizedFillLayers(node).some((layer) => layer.image)) reportFallback("image-asset", "Image Paint on TextPath is not yet supported by the SVG glyph exporter.", node.id);
+      const fill = fills[0] ? paintValue(fills[0]) : { value: "none" };
+      const markup = richTextPathMarkup(node, fill) ?? svgTextPathMarkup(node, fill.value, fill.opacity, number);
+      if (markup) return `<g transform="${matrix}"${presentation}>${markup}</g>`;
     }
-    const fillPaints = fills.map(paintValue);
-    const strokePaints = strokes.map(paintValue);
+    // Versioned stacks serialize their own ordered layers below. Avoid
+    // allocating duplicate gradient definitions that no rendered element can
+    // reference.
+    const fillPaints = node.fillStack ? [] : fills.map(paintValue);
+    const strokePaints = node.strokeStack ? [] : strokes.map(paintValue);
     const suppliedAssetUri = node.assetId ? options.imageDataUris?.get(node.assetId) : undefined;
     const assetUri = isSafeEmbeddedRasterDataUri(suppliedAssetUri) ? suppliedAssetUri : undefined;
     if (node.assetId && assetUri) {
       const image = rasterImageMarkup(node, assetUri, strokePaints);
-      if (image) return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${image}</g>`;
+      if (image) return `<g transform="${matrix}"${presentation}>${image}</g>`;
     }
     if (node.assetId && !assetUri) reportFallback("image-asset", "Image asset bytes were unavailable or cannot be embedded for this SVG export.", node.id);
-    const layers = perSideStrokeLayers(node, fillPaints, strokePaints)
-      ?? alignedClosedShapeLayers(node, fillPaints, strokePaints)
-      ?? alignedEllipseLayers(node, fillPaints, strokePaints)
-      ?? [
-        ...fillPaints.map((paint) => shape(node, paint, { value: "none" })),
-        ...strokePaints.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)),
-      ].join("");
+    const layers = node.fillStack || node.strokeStack
+      ? `${node.fillStack ? versionedFillMarkup(node) : fillPaints.map((paint) => shape(node, paint, { value: "none" })).join("")}${node.strokeStack ? versionedStrokeMarkup(node) : strokePaints.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)).join("")}`
+      : perSideStrokeLayers(node, fillPaints, strokePaints)
+        ?? alignedClosedShapeLayers(node, fillPaints, strokePaints)
+        ?? alignedEllipseLayers(node, fillPaints, strokePaints)
+        ?? [
+          ...fillPaints.map((paint) => shape(node, paint, { value: "none" })),
+          ...strokePaints.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)),
+        ].join("");
     const connectorLabel = node.kind === "connector"
       ? (() => {
-        const path = connectorPathForNode(node); const label = path && connectorLabelLayout(node, path);
+        const path = connectorPathForNode(node, { nodes, defaultPageId: options.defaultPageId, nodeById: byId, worldTransformByNodeId }); const label = path && connectorLabelLayout(node, path);
         return label ? `<g><rect x="${number(label.x - label.width / 2)}" y="${number(label.y - label.height / 2)}" width="${number(label.width)}" height="${number(label.height)}" fill="#ffffff" fill-opacity=".94"/><text fill="#0f172a" font-family="sans-serif" font-size="12" text-anchor="middle" dominant-baseline="central">${label.lines.map((line, index) => `<tspan x="${number(label.x)}" y="${number(label.y - (label.lines.length - 1) * 8 + index * 16)}">${escapeSvgText(line)}</tspan>`).join("")}</text></g>` : "";
       })()
       : "";
     const shapeWithTextDecoration = node.kind === "shapeWithText" && node.strokeWidth > 0
       ? shapeWithTextDecorations(node.shapeWithTextType, node.width, node.height).flatMap((decoration) => strokePaints.filter((paint) => paint.value !== "none").map((paint) => `<path d="${shapeWithTextDecorationPathD(decoration, number)}" fill="none" stroke="${attribute(paint.value)}"${paintOpacity("stroke", paint)} stroke-width="${number(node.strokeWidth)}" stroke-linecap="${svgStrokeCap(node)}" stroke-linejoin="${attribute(node.strokeJoin ?? "miter")}"/>`)).join("")
       : "";
-    const specialComposition = svgSpecialNodeComposition(node, number);
-    return `<g transform="${matrix}" opacity="${number(node.opacity)}"${blendStyle(node)}${effect}>${layers}${connectorLabel}${shapeWithTextDecoration}${specialComposition}</g>`;
+    const specialComposition = svgSpecialNodeComposition(node, number, options.fontDataUris, (style, layerIndex) => textStylePaintAttributes(node, style, layerIndex));
+    return `<g transform="${matrix}"${presentation}>${layers}${connectorLabel}${shapeWithTextDecoration}${specialComposition}</g>`;
   };
   const renderSiblings = (siblings: readonly CanvasNode[], lineage: Set<string>): string => {
     let markup = "";
@@ -677,7 +917,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
           // `mask-type="alpha"` freezes G4 to source alpha rather than SVG's
           // luminance default. The mask source keeps its world transform, so
           // rotation and nested Frame clips match the Canvas composition path.
-          definitions.push(`<mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" mask-type="alpha">${nodeMarkup(node)}</mask>`);
+          definitions.push(`<mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" mask-type="alpha">${renderBranch(node, lineage)}</mask>`);
           markup += `<g mask="url(#${maskId})">${renderSiblings(targets, lineage)}</g>`;
         }
         index = end - 1;
@@ -699,22 +939,39 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const descendants = children.get(node.id) ?? [];
     const nextLineage = new Set(lineage).add(node.id);
     const descendantsMarkup = renderSiblings(descendants, nextLineage);
+    const isolatesSubtree = requiresSubtreeComposition(node, descendants.length > 0);
+    const wrapOwnerPresentation = (content: string) => isolatesSubtree && content
+      ? `<g${ownerPresentationAttributes(node)}>${content}</g>`
+      : content;
     if (node.kind === "transformGroup") {
       // Let the regular node path report an unsupported modifier, then keep
       // the one-time source subtree visible. Supported bounded linear Repeat
       // instances wrap that same subtree, preserving its sibling paint order.
-      const own = nodeMarkup(node);
-      const repeats = transformGroupRepeatMatrices(nodes, node);
+      const own = nodeMarkup(node, !isolatesSubtree);
+      const repeatSubtree = transformGroupRepeatSubtree(nodes, node, children);
+      const repeats = repeatSubtree ? transformGroupRepeatMatrices(nodes, node) : undefined;
+      if (node.transformModifiers?.length && !repeatSubtree) {
+        reportFallback(
+          "transform-group-repeat",
+          "Nested Repeat expansion exceeds the shared 64-derived-instance budget or contains a composition path that structural SVG cannot reproduce; exported the authored source subtree once.",
+          node.id,
+        );
+      }
       const derived = repeats?.map((matrix) => `<g transform="${affineSvgMatrix(matrix, number)}">${renderSiblings(descendants, nextLineage)}</g>`).join("") ?? "";
-      return `${own}${descendantsMarkup}${derived}`;
+      return wrapOwnerPresentation(`${own}${descendantsMarkup}${derived}`);
     }
-    const own = selectionContextNodeIds.has(node.id) ? "" : nodeMarkup(node);
-    if (node.kind !== "frame" || node.clipsContent === false || !descendantsMarkup) return `${own}${descendantsMarkup}`;
-    const transform = worldTransformForNode(nodes, node.id);
-    if (!transform) return `${own}${descendantsMarkup}`;
+    const includeOwn = !selectionContextNodeIds.has(node.id);
+    const splitContainerPaint = includeOwn && clipsChildren(node.kind) && Boolean(descendantsMarkup) && node.strokeWidth > 0;
+    const own = includeOwn
+      ? nodeMarkup(splitContainerPaint ? containerFillSourceNode(node) : node, !isolatesSubtree)
+      : "";
+    const ownerStroke = splitContainerPaint ? nodeMarkup(containerStrokeSourceNode(node), !isolatesSubtree) : "";
+    if (!clipsChildren(node.kind) || node.clipsContent === false || !descendantsMarkup) return wrapOwnerPresentation(`${own}${descendantsMarkup}${ownerStroke}`);
+    const transform = worldTransformByNodeId.get(node.id);
+    if (!transform) return wrapOwnerPresentation(`${own}${descendantsMarkup}`);
     const clipId = `makefigma-clip-${nextDefinitionId++}`;
     definitions.push(`<clipPath id="${clipId}" clipPathUnits="userSpaceOnUse"><path d="${frameClipPath(node, transform)}"/></clipPath>`);
-    return `${own}<g clip-path="url(#${clipId})">${descendantsMarkup}</g>`;
+    return wrapOwnerPresentation(`${own}<g clip-path="url(#${clipId})">${descendantsMarkup}</g>${ownerStroke}`);
   };
   const content = renderSiblings(roots, new Set());
   const croppedContent = requestedSlice && sliceTransform && slicePoints
@@ -749,19 +1006,25 @@ function escapeSvgText(value: string): string { return value.replace(/&/gu, "&am
 /** M6's plain-text card subset. It deliberately avoids pretending that a
  * generic SVG exporter performed rich-run shaping; Text and TextPath keep
  * their dedicated layout paths above. */
-function svgSpecialNodeComposition(node: CanvasNode, number: (value: number) => string): string {
+function svgSpecialNodeComposition(
+  node: CanvasNode,
+  number: (value: number) => string,
+  fontDataUris?: ReadonlyMap<string, string>,
+  textPaintAttributes?: (style: RenderTextStyle, layerIndex: number) => string,
+): string {
   const text = node.kind === "shapeWithText" || node.kind === "sticky" || node.kind === "tableCell" ? node.text?.trim() : undefined;
   const textMarkup = text
-    ? (() => {
-      const centered = node.kind === "shapeWithText";
-      const x = centered ? node.width / 2 : 10;
-      const y = centered ? node.height / 2 : 10;
-      const anchor = centered ? "middle" : "start";
+    ? node.kind === "shapeWithText"
+      ? svgShapeWithTextSublayerMarkup(node, number, fontDataUris, textPaintAttributes)
+      : (() => {
+      const x = 10;
+      const y = 10;
+      const anchor = "start";
       const lines = text.split(/\r\n|[\n\r\u2028\u2029]/u).slice(0, 8);
       const lineHeight = 16;
-      const startY = centered ? y - (lines.length - 1) * lineHeight / 2 : y;
+      const startY = y;
       return `<text x="${number(x)}" y="${number(startY)}" fill="#1f2937" font-family="sans-serif" font-size="14" text-anchor="${anchor}" dominant-baseline="central">${lines.map((line, index) => `<tspan x="${number(x)}" dy="${index ? number(lineHeight) : "0"}">${escapeSvgText(line)}</tspan>`).join("")}</text>`;
-    })()
+      })()
     : "";
   if (node.kind === "media") {
     const x = Math.max(12, node.width / 2 - 12); const y = Math.max(12, node.height / 2 - 14);
@@ -789,7 +1052,103 @@ function svgSpecialNodeComposition(node: CanvasNode, number: (value: number) => 
   return `${vertical}${horizontal}`;
 }
 
-function roundedRectPath(width: number, height: number, radius: number, radii: CanvasNode["cornerRadii"], cornerSmoothing?: number) {
+function svgShapeWithTextSublayerMarkup(
+  node: CanvasNode,
+  number: (value: number) => string,
+  fontDataUris?: ReadonlyMap<string, string>,
+  textPaintAttributes?: (style: RenderTextStyle, layerIndex: number) => string,
+): string {
+  // Style-run offsets are UTF-8 byte ranges into the exact Canonical string.
+  // Trimming here would shift every run after leading whitespace.
+  const source = node.text ?? "";
+  if (!source) return "";
+  const primary = node.textProperties?.runs[0];
+  const lineHeight = resolvedTextLineHeight(node.textProperties, primary?.fontSize ?? 14, 20);
+  const alignment = node.textProperties?.paragraph.alignment ?? "center";
+  const inset = 10;
+  const availableWidth = Math.max(0, node.width - inset * 2);
+  const approximateStyleMeasure = (value: string, style: RenderTextStyle) =>
+    Array.from(value).length * (style.fontSize * .6 + Math.max(0, style.letterSpacing));
+  const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, (value) =>
+    approximateStyleMeasure(value, primary ?? { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 }));
+  const listMarkerGap = listMarkerGutter > 0
+    ? approximateStyleMeasure(" ", primary ?? { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 })
+    : 0;
+  const lines = layoutTextRanges({
+    text: source,
+    maxWidth: Math.max(1, availableWidth),
+    firstLineIndent: (_index, start) => textParagraphIndentAt(node.textProperties, start) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, start),
+    paragraphIndent: (_index, start) => textListIndentationOffset(source, node.textProperties, start, listMarkerGutter),
+    wrapStyle: (_index, start) => textParagraphWrapStyleAt(node.textProperties, start),
+    hangingPunctuation: node.textProperties?.paragraph.hangingPunctuation ?? false,
+    measure: (value) => Array.from(value).length * ((primary?.fontSize ?? 14) * .6 + Math.max(0, primary?.letterSpacing ?? 0)),
+    measureRange: (start, end) => styledTextSpans(source, start, end, node.textProperties)
+      .reduce((total, span) => total + approximateStyleMeasure(span.text, span.style), 0),
+  }).slice(0, 8);
+  const sourceBytes = new TextEncoder().encode(source);
+  let previousEnd = 0;
+  const firstLineFlags = lines.map((line, index) => {
+    const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+    previousEnd = line.end;
+    return index === 0 || /\r\n|[\n\r\u2028\u2029]/u.test(skipped);
+  });
+  const paragraphStarts = lines.map((line) => textParagraphStartAtOffset(source, line.start));
+  let paragraphGapTotal = 0;
+  let previousParagraphStart = 0;
+  for (const [index, paragraphStart] of paragraphStarts.entries()) {
+    if (index > 0 && firstLineFlags[index]) {
+      paragraphGapTotal += textParagraphGap(node.textProperties, previousParagraphStart, paragraphStart);
+      previousParagraphStart = paragraphStart;
+    }
+  }
+  const lineHeights = paragraphStarts.map((start) => resolvedTextLineHeightAt(node.textProperties, start, primary?.fontSize ?? 14, 20));
+  const capHeight = (primary?.fontSize ?? 14) * .7;
+  const outerLeading = ((lineHeights[0] ?? lineHeight) + (lineHeights.at(-1) ?? lineHeight)) / 2 - capHeight;
+  const totalHeight = Math.max(0, lineHeights.reduce((sum, value) => sum + value, 0) + paragraphGapTotal
+    - (primary?.leadingTrim === "capHeight" ? outerLeading : 0));
+  const startY = Math.max(10, (node.height - totalHeight) / 2 + (primary?.leadingTrim === "capHeight" ? capHeight : (primary?.fontSize ?? 14)));
+  const fallbackFamilies = (node.textProperties?.fallbackFonts ?? [])
+    .filter((font) => isSafeEmbeddedFontDataUri(fontDataUris?.get(font.assetId)))
+    .map((font) => svgFontFamily(font.assetId));
+  const layerCount = Math.max(1, ...(node.textProperties?.runs.map((run) => run.fillStack?.layers.length ?? 1) ?? [1]));
+  const bodyForLayer = (layerIndex: number) => {
+    let lineTop = startY;
+    let paragraphIndex = 0;
+    let previousParagraphStart = 0;
+    return lines.map((line, index) => {
+    const paragraphStart = paragraphStarts[index] ?? 0;
+    if (index > 0 && firstLineFlags[index]) {
+      lineTop += textParagraphGap(node.textProperties, previousParagraphStart, paragraphStart);
+      previousParagraphStart = paragraphStart;
+    }
+    if (index > 0 && firstLineFlags[index]) paragraphIndex += 1;
+    const listType = textParagraphListTypeAt(node.textProperties, paragraphStart);
+    const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
+    const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, fontDataUris, fallbackFamilies, !textPaintAttributes)}${svgHyperlinkDataAttributes(span.style)}${textPaintAttributes?.(span.style, layerIndex) ?? ""}>${text(span.text)}</tspan>`).join("");
+    const nestingIndent = textListIndentationOffset(source, node.textProperties, line.start, listMarkerGutter);
+    const indent = nestingIndent + (firstLineFlags[index]
+      ? textParagraphIndentAt(node.textProperties, paragraphStart) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
+      : 0);
+    const lineBoxWidth = Math.max(0, availableWidth - indent);
+    const lineWidth = spans.reduce((total, span) => total + approximateStyleMeasure(span.text, span.style), 0);
+    const hanging = node.textProperties?.paragraph.hangingPunctuation
+      ? textHangingPunctuationOffsets(line.text, line.direction, (value) => approximateStyleMeasure(value, primary ?? { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 }))
+      : { left: 0, right: 0 };
+    const contentStart = textAlignedLineLeft(inset + indent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+    const anchor = alignment === "center" ? "middle" : alignment === "right" ? "end" : "start";
+    const x = contentStart + (anchor === "middle" ? lineWidth / 2 : anchor === "end" ? lineWidth : 0);
+    const marker = listType && firstLineFlags[index]
+      ? `<tspan x="${number(contentStart - listMarkerGap)}" y="${number(lineTop)}" text-anchor="end" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
+      : "";
+    const markup = `${marker}<tspan x="${number(x)}" y="${number(lineTop)}" text-anchor="${anchor}" direction="${line.direction}" unicode-bidi="plaintext">${content}</tspan>`;
+    lineTop += lineHeights[index] ?? lineHeight;
+    return markup;
+  }).join("");
+  };
+  return Array.from({ length: layerCount }, (_, layerIndex) => `<text fill="#1f2937" font-family="sans-serif">${bodyForLayer(layerIndex)}</text>`).join("");
+}
+
+function roundedRectPath(width: number, height: number, radius: number, radii: CanvasNode["cornerRadii"], cornerSmoothing?: number, x = 0, y = 0) {
   const [topLeft, topRight, bottomRight, bottomLeft] = resolvedRadii(width, height, radius, radii);
   const smoothing = resolveCornerSmoothing(cornerSmoothing);
   if (smoothing > 0) {
@@ -801,14 +1160,14 @@ function roundedRectPath(width: number, height: number, radius: number, radii: C
         const angle = start + (end - start) * (offset + 1) / segments;
         const cosine = Math.cos(angle);
         const sine = Math.sin(angle);
-        const x = centerX + Math.sign(cosine) * Math.abs(cosine) ** (2 / exponent) * cornerRadius;
-        const y = centerY + Math.sign(sine) * Math.abs(sine) ** (2 / exponent) * cornerRadius;
-        return ` L ${number(x)} ${number(y)}`;
+        const pointX = x + centerX + Math.sign(cosine) * Math.abs(cosine) ** (2 / exponent) * cornerRadius;
+        const pointY = y + centerY + Math.sign(sine) * Math.abs(sine) ** (2 / exponent) * cornerRadius;
+        return ` L ${number(pointX)} ${number(pointY)}`;
       }).join("");
     };
-    return `M ${number(topLeft)} 0 H ${number(width - topRight)}${corner(width - topRight, topRight, topRight, -Math.PI / 2, 0)} V ${number(height - bottomRight)}${corner(width - bottomRight, height - bottomRight, bottomRight, 0, Math.PI / 2)} H ${number(bottomLeft)}${corner(bottomLeft, height - bottomLeft, bottomLeft, Math.PI / 2, Math.PI)} V ${number(topLeft)}${corner(topLeft, topLeft, topLeft, Math.PI, Math.PI * 1.5)} Z`;
+    return `M ${number(x + topLeft)} ${number(y)} H ${number(x + width - topRight)}${corner(width - topRight, topRight, topRight, -Math.PI / 2, 0)} V ${number(y + height - bottomRight)}${corner(width - bottomRight, height - bottomRight, bottomRight, 0, Math.PI / 2)} H ${number(x + bottomLeft)}${corner(bottomLeft, height - bottomLeft, bottomLeft, Math.PI / 2, Math.PI)} V ${number(y + topLeft)}${corner(topLeft, topLeft, topLeft, Math.PI, Math.PI * 1.5)} Z`;
   }
-  return `M ${number(topLeft)} 0 H ${number(width - topRight)} A ${number(topRight)} ${number(topRight)} 0 0 1 ${number(width)} ${number(topRight)} V ${number(height - bottomRight)} A ${number(bottomRight)} ${number(bottomRight)} 0 0 1 ${number(width - bottomRight)} ${number(height)} H ${number(bottomLeft)} A ${number(bottomLeft)} ${number(bottomLeft)} 0 0 1 0 ${number(height - bottomLeft)} V ${number(topLeft)} A ${number(topLeft)} ${number(topLeft)} 0 0 1 ${number(topLeft)} 0 Z`;
+  return `M ${number(x + topLeft)} ${number(y)} H ${number(x + width - topRight)} A ${number(topRight)} ${number(topRight)} 0 0 1 ${number(x + width)} ${number(y + topRight)} V ${number(y + height - bottomRight)} A ${number(bottomRight)} ${number(bottomRight)} 0 0 1 ${number(x + width - bottomRight)} ${number(y + height)} H ${number(x + bottomLeft)} A ${number(bottomLeft)} ${number(bottomLeft)} 0 0 1 ${number(x)} ${number(y + height - bottomLeft)} V ${number(y + topLeft)} A ${number(topLeft)} ${number(topLeft)} 0 0 1 ${number(x + topLeft)} ${number(y)} Z`;
 }
 
 /** A transformed SVG clip cannot depend on a nested `transform` when that SVG
@@ -879,33 +1238,118 @@ function strokeCap(value: CanvasNode["strokeCapStart"]) {
 /** SVG needs explicit tspans to retain Canvas' newline semantics and its
  * Canonical UTF-8 Style Runs. Advanced shaping/kerning remains Partial, but
  * ordinary mixed size/weight/italic/tracking no longer flattens to run zero. */
-function svgTextMarkup(node: CanvasNode, fill: SvgPaint, fontDataUris?: ReadonlyMap<string, string>, layout?: SvgTextLayoutProjection) {
+function svgTextMarkup(
+  node: CanvasNode,
+  fill: SvgPaint,
+  fontDataUris?: ReadonlyMap<string, string>,
+  layout?: SvgTextLayoutProjection,
+  textPaintAttributes?: (style: RenderTextStyle, layerIndex: number) => string,
+) {
   const primary = node.textProperties?.runs[0];
   const size = primary?.fontSize ?? 31;
   const paragraph = node.textProperties?.paragraph;
   const alignment = paragraph?.alignment ?? "left";
   const anchor = alignment === "center" ? "middle" : alignment === "right" ? "end" : "start";
   const x = alignment === "center" ? node.width / 2 : alignment === "right" ? node.width : 0;
-  const lineHeight = paragraph?.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT;
-  const paragraphSpacing = paragraph?.paragraphSpacing ?? 0;
   const source = node.text ?? "";
   const sourceBytes = new TextEncoder().encode(source);
+  const approximateMeasure = (value: string) => Array.from(value).length * (size * .6 + Math.max(0, primary?.letterSpacing ?? 0));
+  const approximateStyleMeasure = (value: string, style: RenderTextStyle) =>
+    Array.from(value).length * (style.fontSize * .6 + Math.max(0, style.letterSpacing));
+  const approximateStyledRange = (start: number, end: number) =>
+    styledTextSpans(source, start, end, node.textProperties)
+      .reduce((total, span) => total + approximateStyleMeasure(span.text, span.style), 0);
+  const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, approximateMeasure);
+  const listMarkerGap = listMarkerGutter > 0 ? approximateMeasure(" ") : 0;
   const lines = layout?.lines.length
     ? layout.lines.map((line) => ({ ...line, text: new TextDecoder().decode(sourceBytes.slice(line.start, line.end)) }))
-    : svgTextLineRanges(source);
+    : layoutTextRanges({
+        text: source,
+        maxWidth: Math.max(1, node.width),
+        firstLineIndent: (_index, start) => textParagraphIndentAt(node.textProperties, start) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, start),
+        paragraphIndent: (_index, start) => textListIndentationOffset(source, node.textProperties, start, listMarkerGutter),
+        wrapStyle: (_index, start) => textParagraphWrapStyleAt(node.textProperties, start),
+        hangingPunctuation: paragraph?.hangingPunctuation ?? false,
+        measure: approximateMeasure,
+        measureRange: (start, end) => approximateStyledRange(start, end),
+      });
+  const displayLines = textDisplayLines(
+    source,
+    lines,
+    node.textProperties,
+    node.height,
+    (paragraphStart) => resolvedTextLineHeightAt(node.textProperties, paragraphStart, size),
+    (previousStart, nextStart) => textParagraphGap(node.textProperties, previousStart, nextStart),
+  );
   const fallbackFamilies = (node.textProperties?.fallbackFonts ?? [])
     .filter((font) => isSafeEmbeddedFontDataUri(fontDataUris?.get(font.assetId)))
     .map((font) => svgFontFamily(font.assetId));
   const attributes = `x="${number(x)}" fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} text-anchor="${anchor}" font-family="${[...fallbackFamilies, "sans-serif"].map(attribute).join(",")}"`;
-  let lineY = 0;
-  let previousEnd = 0;
-  const lineMarkup = lines.map((line) => {
-    // Paragraph spacing belongs only at an explicit paragraph separator, not
-    // between soft-wrapped lines. This mirrors Canvas's frozen byte ranges.
+  const layerCount = Math.max(1, ...(node.textProperties?.runs.map((run) => run.fillStack?.layers.length ?? 1) ?? [1]));
+  const lineMarkupForLayer = (layerIndex: number) => {
+    let previousEnd = 0;
+    let paragraphIndex = 0;
+    return displayLines.map((line, index) => {
     const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
-    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineY += paragraphSpacing;
-    const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
-    const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, fontDataUris, fallbackFamilies)}>${text(span.text)}</tspan>`).join("");
+    const first = index === 0 || /\r\n|[\n\r\u2028\u2029]/u.test(skipped);
+    if (index > 0 && first) paragraphIndex += 1;
+    previousEnd = line.end;
+    const paragraphStart = textParagraphStartAtOffset(source, line.start);
+    const listType = textParagraphListTypeAt(node.textProperties, paragraphStart);
+    const nestingIndent = textListIndentationOffset(source, node.textProperties, line.start, listMarkerGutter);
+    const indent = nestingIndent + (first
+      ? textParagraphIndentAt(node.textProperties, paragraphStart) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
+      : 0);
+    const lineBoxWidth = Math.max(0, node.width - indent);
+    const shouldEllipsize = line.truncateEnding
+      || (node.textProperties?.textTruncation === "ending" && approximateStyledRange(line.start, line.end) > lineBoxWidth);
+    const truncated = shouldEllipsize ? endingEllipsis(
+      line.text,
+      lineBoxWidth,
+      approximateMeasure,
+      (_retained, retainedUtf8Bytes) => {
+        const end = line.start + retainedUtf8Bytes;
+        const spans = styledTextSpans(source, line.start, end, node.textProperties);
+        const ellipsisStyle = spans.at(-1)?.style ?? {
+          font: primary?.font,
+          fontSize: size,
+          fontWeight: primary?.fontWeight ?? 500,
+          italic: primary?.italic ?? false,
+          letterSpacing: primary?.letterSpacing ?? 0,
+          color: primary?.color,
+          fillStack: primary?.fillStack,
+          textCase: primary?.textCase,
+          textDecoration: primary?.textDecoration,
+          textDecorationStyle: primary?.textDecorationStyle,
+          textDecorationOffset: primary?.textDecorationOffset,
+          textDecorationThickness: primary?.textDecorationThickness,
+          textDecorationColor: primary?.textDecorationColor,
+          textDecorationSkipInk: primary?.textDecorationSkipInk,
+          leadingTrim: primary?.leadingTrim,
+        };
+        return approximateStyledRange(line.start, end) + approximateStyleMeasure("…", ellipsisStyle);
+      },
+    ) : undefined;
+    const displayEnd = truncated ? line.start + truncated.retainedUtf8Bytes : line.end;
+    const spans = styledTextSpans(source, line.start, displayEnd, node.textProperties);
+    if (truncated?.text) spans.push({ text: "…", start: displayEnd, end: displayEnd, style: spans.at(-1)?.style ?? {
+      font: primary?.font,
+      fontSize: size,
+      fontWeight: primary?.fontWeight ?? 500,
+      italic: primary?.italic ?? false,
+      letterSpacing: primary?.letterSpacing ?? 0,
+      color: primary?.color,
+      fillStack: primary?.fillStack,
+      textCase: primary?.textCase,
+      textDecoration: primary?.textDecoration,
+      textDecorationStyle: primary?.textDecorationStyle,
+      textDecorationOffset: primary?.textDecorationOffset,
+      textDecorationThickness: primary?.textDecorationThickness,
+      textDecorationColor: primary?.textDecorationColor,
+      textDecorationSkipInk: primary?.textDecorationSkipInk,
+      leadingTrim: primary?.leadingTrim,
+    } });
+    const content = spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, fontDataUris, fallbackFamilies, !textPaintAttributes)}${svgHyperlinkDataAttributes(span.style)}${textPaintAttributes?.(span.style, layerIndex) ?? ""}>${text(span.text)}</tspan>`).join("");
     // Canvas resolves a paragraph base direction before choosing the visual
     // start edge. Preserve that same bidi contract in exported SVG instead of
     // letting a left-aligned Arabic/Hebrew line begin at x=0.
@@ -913,38 +1357,68 @@ function svgTextMarkup(node: CanvasNode, fill: SvgPaint, fontDataUris?: Readonly
     // direction. Re-deriving it from the sliced source here can disagree at
     // BiDi-neutral boundaries, which would make SVG/PNG/PDF pick a different
     // visual start edge from the Canvas snapshot.
-    const direction = "direction" in line ? line.direction : resolveTextDirection(line.text);
+    const direction = line.direction;
+    const baselineOffset = primary?.leadingTrim === "capHeight" ? size * .7 : size;
+    const lineWidth = approximateStyledRange(line.start, displayEnd) + (truncated?.text ? approximateMeasure("…") : 0);
+    const hanging = paragraph?.hangingPunctuation
+      ? textHangingPunctuationOffsets(truncated?.text ?? line.text, direction, approximateMeasure)
+      : { left: 0, right: 0 };
+    const contentStart = textAlignedLineLeft(indent, lineBoxWidth, lineWidth, alignment, direction, hanging);
     const lineAnchor = alignment === "center" ? "middle" : alignment === "right" || direction === "rtl" ? "end" : "start";
-    const lineX = lineAnchor === "middle" ? node.width / 2 : lineAnchor === "end" ? node.width : 0;
-    const markup = `<tspan x="${number(lineX)}" y="${number(size + lineY)}" text-anchor="${lineAnchor}" direction="${direction}" unicode-bidi="plaintext">${content}</tspan>`;
-    lineY += lineHeight;
-    previousEnd = line.end;
+    const lineX = contentStart + (lineAnchor === "middle" ? lineWidth / 2 : lineAnchor === "end" ? lineWidth : 0);
+    const marker = listType && first
+      ? `<tspan x="${number(contentStart - listMarkerGap)}" y="${number(baselineOffset + line.lineTop)}" text-anchor="end" direction="ltr" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
+      : "";
+    const markup = `${marker}<tspan x="${number(lineX)}" y="${number(baselineOffset + line.lineTop)}" text-anchor="${lineAnchor}" direction="${direction}" unicode-bidi="plaintext">${content}</tspan>`;
     return markup;
   }).join("");
-  return `<text ${attributes}>${lineMarkup}</text>`;
+  };
+  return Array.from({ length: layerCount }, (_, layerIndex) => `<text ${attributes}>${lineMarkupForLayer(layerIndex)}</text>`).join("");
 }
 
-function svgTextLineRanges(source: string) {
-  const ranges: Array<{ start: number; end: number; text: string }> = [];
-  const bytes = new TextEncoder();
-  const separator = /\r\n|[\n\r\u2028\u2029]/gu;
-  let utf16Start = 0;
-  for (const match of source.matchAll(separator)) {
-    const index = match.index ?? utf16Start;
-    ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source.slice(0, index)).byteLength, text: source.slice(utf16Start, index) });
-    utf16Start = index + match[0].length;
-  }
-  ranges.push({ start: bytes.encode(source.slice(0, utf16Start)).byteLength, end: bytes.encode(source).byteLength, text: source.slice(utf16Start) });
-  return ranges;
-}
-
-function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyMap<string, string>, fallbackFamilies: readonly string[] = []) {
-  const color = style.color ? ` fill="${attribute(colorToSrgbCss(style.color))}"` : "";
+function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyMap<string, string>, fallbackFamilies: readonly string[] = [], includeColor = true) {
+  const color = includeColor && style.color ? ` fill="${attribute(colorToSrgbCss(style.color))}"` : "";
   const family = style.font && isSafeEmbeddedFontDataUri(fontDataUris?.get(style.font.assetId))
     ? [svgFontFamily(style.font.assetId), ...fallbackFamilies, "sans-serif"]
     : fallbackFamilies.length ? [...fallbackFamilies, "sans-serif"] : undefined;
   const variations = style.font?.variationAxes?.length ? ` font-variation-settings="${attribute(fontVariationCss(style.font.variationAxes))}"` : "";
-  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${family ? ` font-family="${family.map(attribute).join(",")}"` : ""}${variations}${color}`;
+  const caps = usesSmallCaps(style.textCase) ? ` font-variant-caps="small-caps"` : "";
+  const decoration = style.textDecoration === "underline"
+    ? ` text-decoration="underline"`
+    : style.textDecoration === "strikethrough"
+      ? ` text-decoration="line-through"`
+      : "";
+  const decorationStyle = style.textDecoration === "underline" && style.textDecorationStyle
+    ? ` text-decoration-style="${style.textDecorationStyle}"`
+    : "";
+  const decorationCss = style.textDecoration === "underline"
+    ? [
+        style.textDecorationOffset
+          ? `text-underline-offset:${number(style.textDecorationOffset.value)}${style.textDecorationOffset.unit === "pixels" ? "px" : "%"}`
+          : undefined,
+        `text-decoration-skip-ink:${style.textDecorationSkipInk === true ? "auto" : "none"}`,
+      ].filter(Boolean).join(";")
+    : "";
+  const decorationInlineStyle = decorationCss ? ` style="${decorationCss}"` : "";
+  const decorationThickness = style.textDecoration === "underline" && style.textDecorationThickness
+    ? ` text-decoration-thickness="${number(style.textDecorationThickness.value)}${style.textDecorationThickness.unit === "pixels" ? "px" : "%"}"`
+    : "";
+  const decorationColor = style.textDecoration === "underline" && style.textDecorationColor
+    ? ` text-decoration-color="${attribute(colorToSrgbCss({
+        ...style.textDecorationColor.color,
+        alpha: style.textDecorationColor.visible
+          ? style.textDecorationColor.color.alpha * style.textDecorationColor.opacity
+          : 0,
+      }))}"`
+    : "";
+  const leadingTrim = style.leadingTrim === "capHeight" ? ` data-makefigma-leading-trim="CAP_HEIGHT"` : "";
+  return `font-size="${number(style.fontSize)}" font-weight="${number(style.fontWeight)}" font-style="${style.italic ? "italic" : "normal"}" letter-spacing="${number(style.letterSpacing)}"${caps}${decoration}${decorationStyle}${decorationInlineStyle}${decorationThickness}${decorationColor}${leadingTrim}${family ? ` font-family="${family.map(attribute).join(",")}"` : ""}${variations}${color}`;
+}
+
+function svgHyperlinkDataAttributes(style: RenderTextStyle) {
+  return style.hyperlink
+    ? ` data-makefigma-hyperlink-type="${style.hyperlink.type}" data-makefigma-hyperlink-value="${attribute(style.hyperlink.value)}"`
+    : "";
 }
 
 function fontFormat(dataUri: string) {

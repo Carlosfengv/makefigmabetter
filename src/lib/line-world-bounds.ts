@@ -4,14 +4,26 @@ import { transformPoint, worldTransformForNode, type AffineMatrix, type Transfor
 import { connectorPathForNode } from "./connector-path";
 import { connectorPresentationBounds } from "./connector-presentation";
 
+export type WorldLineVisualBoundsContext = Readonly<{
+  transform?: AffineMatrix;
+  defaultPageId?: string;
+  nodeById?: ReadonlyMap<string, CanvasNode>;
+  worldTransformByNodeId?: ReadonlyMap<string, AffineMatrix>;
+}>;
+
 /** World render bounds for a Line include its stroke/cap/marker envelope, not
  * only its zero-height path geometry. Canvas culling and selection must use
  * this exact envelope for Legacy and Relative-v1 transforms alike. */
-export function worldLineVisualBounds(nodes: readonly CanvasNode[], node: CanvasNode, precomputedTransform?: AffineMatrix): TransformBounds | undefined {
+export function worldLineVisualBounds(nodes: readonly CanvasNode[], node: CanvasNode, precomputed?: WorldLineVisualBoundsContext): TransformBounds | undefined {
   if (node.kind !== "line" && node.kind !== "connector") return undefined;
-  const transform = precomputedTransform ?? worldTransformForNode(nodes, node.id);
+  const transform = precomputed?.transform ?? worldTransformForNode(nodes, node.id);
   if (!transform) return undefined;
-  const path = node.kind === "connector" ? connectorPathForNode(node) : undefined;
+  const path = node.kind === "connector" ? connectorPathForNode(node, {
+    nodes,
+    defaultPageId: precomputed?.defaultPageId,
+    nodeById: precomputed?.nodeById,
+    worldTransformByNodeId: precomputed?.worldTransformByNodeId,
+  }) : undefined;
   const local = path
     ? (() => { const bounds = connectorPresentationBounds(node, path, Math.max(4, node.strokeWidth / 2)); return { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top }; })()
     : lineSelectionBounds(node);

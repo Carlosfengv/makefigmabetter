@@ -27,8 +27,14 @@ export function colorToOpaqueSrgbCss(color: DocumentColor): string {
 }
 
 export function colorToSrgbBytes(color: DocumentColor): [number, number, number] {
+  return colorToSrgbComponents(color).map(quantize) as [number, number, number];
+}
+
+/** Continuous encoded-sRGB projection for APIs whose RGB channels are floats. */
+export function colorToSrgbComponents(color: DocumentColor): [number, number, number] {
+  if (color.space === "srgb") return color.components.map(clamp) as [number, number, number];
   const linear = colorToLinearSrgbComponents(color);
-  return linear.map((component) => quantize(encodeSrgb(component))) as [number, number, number];
+  return linear.map((component) => clamp(encodeSrgb(component))) as [number, number, number];
 }
 
 /** Matches Rust Core's non-premultiplied Color::to_linear_srgb_components. */

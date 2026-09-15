@@ -1,8 +1,10 @@
 import { createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type EditorClipboard, type EditorCommand } from "./editor-protocol";
 import { validateClipboardCapture } from "./editor-clipboard";
-import { orderNewLayerAtFront, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
+import { orderNewLayerAtFront, positionIdForLayerInsertion, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
 import { encodePrototypeValue, PROTOTYPE_METADATA_EXTENSION, PROTOTYPE_REACTIONS_EXTENSION, validatePrototypeMetadata, validatePrototypeReactions } from "../runtime/prototype-contract";
+import { clipsChildren } from "./node-capabilities";
+import { TEXT_PATH_SOURCE_KINDS } from "./text-path-conversion";
 
 export type { CoreBatchCommand, CoreProjectionNode } from "./editor-protocol";
 export type ResolvedCoreBatch = {
@@ -14,6 +16,58 @@ export type ResolvedCoreBatch = {
   selectionIds: string[];
   affectedGroupIds: string[];
 };
+
+/**
+ * Runtime property setters commonly produce several consecutive updates for
+ * the same node. Collapse those updates before they reach Core, while treating
+ * every structural or constraint-bypassing command as an ordering barrier.
+ * This keeps Reparent/Reposition in the order emitted by the Runtime bridge
+ * and prevents one logical setter batch from triggering duplicate reflows.
+ */
+export function coalesceAdjacentNodeUpdates(commands: readonly EditorCommand[]): EditorCommand[] {
+  const result: EditorCommand[] = [];
+  const pending = new Map<string, Partial<CanvasNode>>();
+  const flush = () => {
+    pending.forEach((patch, id) => result.push({ type: "update", id, patch }));
+    pending.clear();
+  };
+
+  for (const command of commands) {
+    if (command.type === "update") {
+      pending.set(command.id, { ...(pending.get(command.id) ?? {}), ...command.patch });
+      continue;
+    }
+    flush();
+    result.push(command);
+  }
+  flush();
+  return result;
+}
+
+const EXTENSION_BACKED_PATCH_KEYS = new Set<keyof CanvasNode>([
+  "extensions",
+  "reactions",
+  "prototypeMetadata",
+  "codeLanguage",
+  "componentMetadata",
+  "instanceMetadata",
+  "slotMetadata",
+  "componentSetMetadata",
+  "connectorMetadata",
+  "embedMetadata",
+  "highlightHandleMirroring",
+  "interactiveSlideElementType",
+  "linkUnfurlMetadata",
+  "mediaMetadata",
+  "shapeWithTextType",
+  "slideMetadata",
+  "stickyMetadata",
+  "tableMetadata",
+  "tableCellMetadata",
+  "textPathMetadata",
+  "transformModifiers",
+  "widgetMetadata",
+]);
 
 export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
   const extensions = { ...node.extensions };
@@ -47,7 +101,7 @@ export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
       : node.effectStack
     : node.dropShadow ? [{ dropShadow: node.dropShadow }] : [];
   const dropShadow = effectStack[0]?.dropShadow ?? node.dropShadow;
-  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: node.autoLayout, relativeTransform: node.relativeTransform, opacity: node.opacity, blendMode: node.blendMode ?? "normal", dropShadow, effectStack, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: ["frame", "component", "instance", "slot", "componentSet"].includes(node.kind) ? node.clipsContent !== false : undefined, isMask: Boolean(node.isMask), assetId: node.assetId, extensions };
+  return { id: node.id, pageId: node.pageId, parentId: node.parentId, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height, rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, fillStack: node.fillStack, positionId: node.positionId, stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeStack: node.strokeStack, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart ?? "none", strokeCapEnd: node.strokeCapEnd ?? "none", strokeJoin: node.strokeJoin ?? "miter", strokeMiterLimit: node.strokeMiterLimit ?? 10, strokeDashPattern: node.strokeDashPattern ?? [], strokeWeights: node.strokeWeights, strokeAlign: node.strokeAlign ?? "inside", arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, cornerRadii: node.cornerRadii, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: node.autoLayout, relativeTransform: node.relativeTransform, opacity: node.opacity, blendMode: node.blendMode ?? "normal", dropShadow, effectStack, cornerRadius: node.radius ?? 0, text: node.text ?? "", textProperties: node.textProperties, visible: node.visible !== false, locked: Boolean(node.locked), contentsHidden: Boolean(node.contentsHidden), clipsContent: clipsChildren(node.kind) ? node.clipsContent !== false : undefined, isMask: Boolean(node.isMask), assetId: node.assetId, extensions };
 }
 
 function sameDropShadow(left: CanvasNode["dropShadow"], right: CanvasNode["dropShadow"]) {
@@ -90,25 +144,45 @@ export function resolveFlattenBooleanBatch(
   booleanId: string,
   path: FlattenedBooleanPath,
   createId: () => string = generateId,
+  replacementId?: string,
+  target?: Readonly<{ parentId?: string; pageId?: string; index?: number }>,
 ): ResolvedFlattenBooleanBatch | undefined {
   const boolean = nodes.find((node) => node.id === booleanId);
   const operands = boolean && sortNodesByLayerOrder(nodes.filter((node) => node.parentId === boolean.id));
   const source = operands?.[0];
   if (!boolean || boolean.kind !== "booleanOperation" || !source || operands.length < 2 || operands.some((node) => node.kind !== "vector" || !node.vectorPath)) return undefined;
-  const replacementId = createId();
+  if (target?.parentId !== undefined && target.pageId !== undefined) return undefined;
+  const hasExplicitTarget = target?.parentId !== undefined || target?.pageId !== undefined || target?.index !== undefined;
+  const targetParentId = target?.parentId !== undefined ? target.parentId : target?.pageId !== undefined ? undefined : boolean.parentId;
+  const targetParent = targetParentId ? nodes.find((node) => node.id === targetParentId) : undefined;
+  const targetPageId = target?.pageId ?? targetParent?.pageId ?? boolean.pageId;
+  if (targetPageId !== boolean.pageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(targetParent.kind)))) return undefined;
+  if (targetParentId && (targetParentId === boolean.id || hasAncestor(nodes, targetParentId, boolean.id))) return undefined;
+  const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
+    node.pageId === targetPageId && node.parentId === targetParentId && node.id !== boolean.id));
+  const currentIndex = sortNodesByLayerOrder(nodes.filter((node) => node.pageId === boolean.pageId && node.parentId === boolean.parentId)).findIndex((node) => node.id === boolean.id);
+  const destination = target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : currentIndex);
+  if (!Number.isSafeInteger(destination) || destination < 0 || destination > remainingTargetSiblings.length) return undefined;
+  const booleanWorld = worldTransformForNode(nodes, boolean.id);
+  const targetParentWorld = targetParentId ? worldTransformForNode(nodes, targetParentId) : undefined;
+  const replacementTransform = booleanWorld && nodePropsForWorldTransform(booleanWorld, targetParentWorld, boolean.width, boolean.height);
+  if (!replacementTransform) return undefined;
+  replacementId ??= createId();
+  if (!replacementId || nodes.some((node) => node.id === replacementId)) return undefined;
+  const desiredPositionId = targetParentId === boolean.parentId && destination === currentIndex
+    ? boolean.positionId ?? positionIdForLayerInsertion(remainingTargetSiblings.map((node) => ({ positionId: node.positionId })), destination)
+    : positionIdForLayerInsertion(remainingTargetSiblings.map((node) => ({ positionId: node.positionId })), destination);
+  if (!desiredPositionId) return undefined;
   const replacement: CanvasNode = {
     ...source,
     id: replacementId,
     kind: "vector",
     name: `${boolean.name} flattened`,
-    pageId: boolean.pageId,
-    parentId: boolean.parentId,
-    x: boolean.x,
-    y: boolean.y,
+    pageId: targetPageId,
+    parentId: targetParentId,
+    ...replacementTransform,
     width: boolean.width,
     height: boolean.height,
-    rotation: boolean.rotation,
-    relativeTransform: boolean.relativeTransform,
     // Flatten replaces the Boolean wrapper, not its first operand.  Its mask
     // identity must therefore follow the wrapper into the Vector result.
     isMask: Boolean(boolean.isMask),
@@ -128,9 +202,9 @@ export function resolveFlattenBooleanBatch(
     // this one atomic transaction so Undo restores the whole structure.
     { type: "delete", ids: operands.map((operand) => operand.id) },
     { type: "delete", ids: [boolean.id] },
-    { type: "reposition", positionIds: [{ id: replacementId, positionId: boolean.positionId ?? replacement.positionId! }] },
+    { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
   ];
-  const nextNodes = [...nodes.filter((node) => node.id !== boolean.id && !operands.some((operand) => operand.id === node.id)), { ...replacement, positionId: boolean.positionId ?? replacement.positionId }];
+  const nextNodes = [...nodes.filter((node) => node.id !== boolean.id && !operands.some((operand) => operand.id === node.id)), { ...replacement, positionId: desiredPositionId }];
   if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
   return { replacement, batch };
 }
@@ -276,23 +350,54 @@ export function resolveParametricShapeToVectorBatch(
  * untouched, matching Rust's all-or-nothing transaction boundary. */
 export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[], createId: () => string = generateId): ResolvedCoreBatch | undefined {
   const nextNodes = structuredClone(nodes);
+  const knownNodeIds = new Set(nextNodes.map((node) => node.id));
   const batch: CoreBatchCommand[] = [];
   const createdIds: string[] = [];
   let selectionIds: string[] = [];
   const affectedGroupIds = new Set<string>();
   for (const command of commands) {
+    if (command.type === "convertToTextPath") {
+      const index = nextNodes.findIndex((node) => node.id === command.id);
+      const node = nextNodes[index];
+      if (index === -1 || !TEXT_PATH_SOURCE_KINDS.includes(node.kind) || !command.vectorPath.subpaths.length) return undefined;
+      const replacement: CanvasNode = {
+        ...node,
+        kind: "textPath",
+        name: "Text path",
+        text: "",
+        vectorPath: structuredClone(command.vectorPath),
+        textPathMetadata: structuredClone(command.metadata),
+        arcData: undefined,
+        parametricShape: undefined,
+        booleanOperation: undefined,
+        radius: 0,
+        cornerRadii: undefined,
+        cornerSmoothing: 0,
+        strokeWeights: undefined,
+        contentsHidden: false,
+        clipsContent: undefined,
+      };
+      nextNodes[index] = replacement;
+      batch.push({ type: "convertToTextPath", node: coreProjectionNode(replacement) });
+      continue;
+    }
     if (command.type === "create") {
-      if (nextNodes.some((node) => node.id === command.node.id)) return undefined;
+      if (knownNodeIds.has(command.node.id)) return undefined;
       const node = structuredClone(command.node);
       nextNodes.push(node);
+      knownNodeIds.add(node.id);
       batch.push({ type: "create", node: coreProjectionNode(node) });
       createdIds.push(node.id);
       continue;
     }
-    if (command.type === "update") {
+    if (command.type === "update" || command.type === "resizeWithoutConstraints") {
       const index = nextNodes.findIndex((node) => node.id === command.id);
       if (index === -1) return undefined;
       const previous = nextNodes[index];
+      // Figma exposes the TextPath baseline as an immutable source path. It is
+      // installed by convertToTextPath and must not be replaced through the
+      // generic Inspector/Runtime update surface.
+      if (previous.kind === "textPath" && Object.hasOwn(command.patch, "vectorPath")) return undefined;
       // IDs and kinds are document identity, never Inspector-editable values.
       const node = { ...previous, ...command.patch, id: previous.id, kind: previous.kind };
       if ("fill" in command.patch) { node.fillColor = documentColorFromCssHex(node.fill); node.fillGradient = undefined; }
@@ -319,10 +424,22 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         groupAncestorIds(nextNodes, node.parentId).forEach((id) => affectedGroupIds.add(id));
       }
       const coreNode = coreProjectionNode(node);
-      batch.push({ type: "update", node: coreNode });
-      if ("reactions" in command.patch || "prototypeMetadata" in command.patch) {
+      if (Object.keys(command.patch).some((key) => EXTENSION_BACKED_PATCH_KEYS.has(key as keyof CanvasNode))) {
         batch.push({ type: "setExtensions", id: node.id, extensions: coreNode.extensions ?? {} });
       }
+      const patchKeys = Object.keys(command.patch);
+      const plainTextOnly = node.kind === "shapeWithText" || node.kind === "textPath"
+        ? patchKeys.length > 0 && patchKeys.every((key) => key === "text" || key === "textProperties" || (node.kind === "textPath" && key === "name"))
+        : patchKeys.length === 1
+          && Object.hasOwn(command.patch, "text")
+          && ["codeBlock", "sticky", "tableCell"].includes(node.kind);
+      batch.push({
+        type: "update",
+        node: coreNode,
+        ...(command.type === "resizeWithoutConstraints" ? { ignoreConstraints: true as const } : {}),
+        ...(plainTextOnly ? { plainTextOnly: true as const } : {}),
+        ...(plainTextOnly && node.kind === "textPath" && Object.hasOwn(command.patch, "name") ? { renameTextPath: true as const } : {}),
+      });
       if (isComponentSubtreeNode(nextNodes, node.id)) syncComponentChangeToInstances(nextNodes, node.id, command.patch, batch);
       continue;
     }
@@ -445,7 +562,13 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
     if (command.type === "setMask") {
       const index = nextNodes.findIndex((node) => node.id === command.id);
       const node = nextNodes[index];
-      if (index === -1 || ["group", "section"].includes(node.kind)) return undefined;
+      if (index === -1) return undefined;
+      if (command.enabled && ["section", "slice"].includes(node.kind)) return undefined;
+      if (command.enabled && ["group", "transformGroup"].includes(node.kind) && !nextNodes.some((candidate) => candidate.parentId === node.id)) return undefined;
+      if (command.enabled && node.kind === "booleanOperation") {
+        const operands = nextNodes.filter((candidate) => candidate.parentId === node.id);
+        if (operands.length < 2 || operands.some((operand) => operand.kind !== "vector" || !operand.vectorPath)) return undefined;
+      }
       nextNodes[index] = { ...node, isMask: command.enabled };
       batch.push({ ...command });
       continue;
@@ -535,6 +658,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const targetOwnsAutoLayout = isAutoLayoutFrame(target);
       const siblingNodes = nextNodes.filter((node) => node.pageId === pageId && node.parentId === command.parentId && !selectedIds.has(node.id));
       const reparented: CanvasNode[] = [];
+      const autoLayoutMatrixClears: CanvasNode[] = [];
       for (const node of sortNodesByLayerOrder(roots)) {
         const world = worldTransformForNode(nextNodes, node.id);
         const local = world && nodePropsForWorldTransform(world, parentWorld, node.width, node.height);
@@ -546,15 +670,25 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         // Do not carry the world-preserving Relative-v1 matrix into that scope:
         // it would make the child incompatible with Auto Layout before the
         // reflow transaction gets a chance to place it.
-        nextNodes[index] = { ...nextNodes[index], ...local, ...(targetOwnsAutoLayout ? { relativeTransform: undefined } : {}), parentId: command.parentId, positionId };
+        nextNodes[index] = targetOwnsAutoLayout
+          ? { ...nextNodes[index], relativeTransform: undefined, parentId: command.parentId, positionId }
+          : { ...nextNodes[index], ...local, parentId: command.parentId, positionId };
         reparented.push(nextNodes[index]);
+        if (targetOwnsAutoLayout && node.relativeTransform) autoLayoutMatrixClears.push(nextNodes[index]);
       }
-      // Core applies an Update against the node's current parent. Move the
-      // node first so its freshly derived local matrix is interpreted in the
-      // target container, rather than being rejected (or misread) in the
-      // source container.
-      batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: command.parentId, positionId: node.positionId! })) });
-      reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
+      if (targetOwnsAutoLayout) {
+        // A flow child's geometry belongs to the destination layout. Clear a
+        // legacy matrix while the child is still under its source parent, then
+        // let the reparent operation trigger the destination reflow. Ordinary
+        // children need no redundant full-geometry update after that reflow.
+        autoLayoutMatrixClears.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
+        batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: command.parentId, positionId: node.positionId! })) });
+      } else {
+        // Outside Auto Layout, reparent first so the world-preserving local
+        // matrix is interpreted in the destination container.
+        batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: command.parentId, positionId: node.positionId! })) });
+        reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
+      }
       continue;
     }
     if (command.type === "group" || command.type === "boolean" || command.type === "transformGroup") {
@@ -565,14 +699,45 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // Group and one of its children: that would create a cycle rather than a
       // nested Group. Independent selected Groups remain normal roots and can
       // be wrapped together with sibling shapes or other Groups.
-      const roots = sortNodesByLayerOrder(selected.filter((node) => !hasSelectedAncestor(nextNodes, node, selectedIds)));
+      const rootCandidates = selected.filter((node) => !hasSelectedAncestor(nextNodes, node, selectedIds));
+      const roots = command.type === "boolean"
+        ? sortNodesByDocumentOrder(nextNodes, rootCandidates)
+        : sortNodesByLayerOrder(rootCandidates);
       if (!roots.length || (command.type === "boolean" && roots.length < 2)) return undefined;
       const pageId = selected[0].pageId;
       if (roots.some((node) => node.pageId !== pageId)) return undefined;
-      const parentId = nearestCommonParentId(nextNodes, roots);
+      const commonParentId = nearestCommonParentId(nextNodes, roots);
+      let parentId = commonParentId;
+      if (command.type === "boolean" || command.type === "transformGroup") {
+        if (command.parentId !== undefined && command.pageId !== undefined) return undefined;
+        if (command.parentId !== undefined) {
+          const requestedParent = nextNodes.find((node) => node.id === command.parentId);
+          if (!requestedParent || requestedParent.pageId !== pageId) return undefined;
+          parentId = command.parentId;
+        } else if (command.pageId !== undefined) {
+          if (pageId !== command.pageId) return undefined;
+          parentId = undefined;
+        }
+        if (command.index !== undefined && (!Number.isSafeInteger(command.index) || command.index < 0)) return undefined;
+        const crossParentRoots = roots.filter((node) => node.parentId !== parentId);
+        if (crossParentRoots.some((node) => {
+          const sourceParent = node.parentId ? nextNodes.find((candidate) => candidate.id === node.parentId) : undefined;
+          return sourceParent && (sourceParent.kind === "group" || sourceParent.kind === "booleanOperation" || isAutoLayoutFrame(sourceParent));
+        })) return undefined;
+        for (const structuralParentId of new Set([...roots.map((node) => node.parentId), parentId])) {
+          if (!structuralParentId) continue;
+          const structuralParent = nextNodes.find((node) => node.id === structuralParentId);
+          if (!structuralParent || (structuralParent.kind !== "group" && structuralParent.kind !== "booleanOperation")) continue;
+          const selectedChildCount = roots.filter((node) => node.parentId === structuralParentId).length;
+          const currentChildCount = nextNodes.filter((node) => node.parentId === structuralParentId).length;
+          const childCountAfter = currentChildCount - selectedChildCount + (structuralParentId === parentId ? 1 : 0);
+          if ((structuralParent.kind === "group" && childCountAfter < 1) || (structuralParent.kind === "booleanOperation" && childCountAfter < 2)) return undefined;
+        }
+      }
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
       if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(parent.kind))) return undefined;
-      const id = command.type === "transformGroup" && command.id ? command.id : createId();
+      if ((command.type === "boolean" || command.type === "transformGroup") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
+      const id = (command.type === "transformGroup" || command.type === "boolean") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
       if (bounds.some((bound) => !bound)) return undefined;
@@ -591,8 +756,30 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // it its own unique Core fallback key for that short-lived shared-parent
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
-      const groupPositionId = `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`;
+      const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id));
+      const requestedIndex = command.type === "boolean" || command.type === "transformGroup" ? command.index : undefined;
+      if (requestedIndex !== undefined && requestedIndex > remainingSiblings.length) return undefined;
+      const groupPositionId = requestedIndex === undefined
+        ? `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`
+        : positionIdForLayerInsertion(
+            sortNodesByLayerOrder(remainingSiblings).map((node) => ({ positionId: node.positionId })),
+            requestedIndex,
+          );
+      if (!groupPositionId) return undefined;
+      // The requested final slot can equal a selected root's current slot
+      // because that root has deliberately been removed from the insertion
+      // plan. Core validates the Create before the following Reparent, so use
+      // a wrapper-owned temporary slot for that short interval and reposition
+      // the wrapper after the selected roots have vacated the parent.
+      const groupCreationPositionId = nextNodes.some((node) =>
+        node.parentId === parentId && node.positionId === groupPositionId)
+        ? `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`
+        : groupPositionId;
       const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.type === "transformGroup" ? "transformGroup" : command.autoLayout ? "frame" : "group";
+      const booleanPatch = command.type === "boolean" ? command.patch ?? {} : {};
+      if (command.type === "boolean" && Object.keys(booleanPatch).some((key) => !["name", "opacity", "visible", "booleanOperation", "blendMode", "locked", "contentsHidden"].includes(key))) return undefined;
+      const transformGroupPatch = command.type === "transformGroup" ? command.patch ?? {} : {};
+      if (command.type === "transformGroup" && Object.keys(transformGroupPatch).some((key) => !["name", "opacity", "visible", "blendMode", "locked", "contentsHidden"].includes(key))) return undefined;
       const group = {
         ...createNode(wrapperKind, left, top),
         ...groupTransform,
@@ -603,6 +790,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         height,
         positionId: groupPositionId,
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
+        ...booleanPatch,
+        ...transformGroupPatch,
         ...(command.type === "transformGroup" ? { transformModifiers: structuredClone(command.modifiers) } : {}),
         ...(command.type === "group" && command.autoLayout ? { autoLayout: structuredClone(command.autoLayout) } : {}),
         // Core deliberately keeps Auto Layout Frames on legacy local geometry:
@@ -637,8 +826,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // cleared below. Create the ordinary Frame first, move and normalize the
       // children atomically, then enable Auto Layout as the last command.
       const wrapperAtCreation = command.type === "group" && command.autoLayout
-        ? { ...group, autoLayout: undefined }
-        : group;
+        ? { ...group, autoLayout: undefined, positionId: groupCreationPositionId }
+        : { ...group, positionId: groupCreationPositionId };
       batch.push({ type: "create", node: coreProjectionNode(wrapperAtCreation) });
       batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: id, positionId: node.positionId! })) });
       // The child matrices above are local to the newly created Group. Their
@@ -647,9 +836,13 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (command.type === "group" && command.autoLayout) {
         batch.push({ type: "update", node: coreProjectionNode(group) });
       }
+      if (groupCreationPositionId !== groupPositionId) {
+        batch.push({ type: "reposition", positionIds: [{ id, positionId: groupPositionId }] });
+      }
       createdIds.push(id);
       selectionIds = [id];
       affectedGroupIds.add(id);
+      roots.forEach((root) => groupAncestorIds(nextNodes, root.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId)));
       groupAncestorIds(nextNodes, parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId));
       continue;
     }
@@ -799,19 +992,39 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
 function appendCreatedMaskCommands(batch: CoreBatchCommand[], nodes: readonly CanvasNode[]) {
   const createdIds = new Set(batch.flatMap((entry) => entry.type === "create" ? [entry.node.id] : []));
   if (!createdIds.size) return true;
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const createdMaskIds = new Set([...createdIds].filter((id) => nodeById.get(id)?.isMask));
+  // Most interactive create batches contain no masks. Avoid parsing/sorting
+  // unrelated fixture positions and avoid an O(n log n) pass on that hot path.
+  if (!createdMaskIds.size) return true;
   // A caller may have explicitly toggled a node it also created. Its final
   // Canvas projection is the source of truth, so replace any early toggle with
   // one post-structure command rather than replaying an invalid intermediate.
   for (let index = batch.length - 1; index >= 0; index -= 1) {
     const entry = batch[index];
-    if (entry?.type === "setMask" && createdIds.has(entry.id)) batch.splice(index, 1);
+    if (entry?.type === "setMask" && createdMaskIds.has(entry.id)) batch.splice(index, 1);
   }
-  for (const id of createdIds) {
-    const node = nodes.find((candidate) => candidate.id === id);
-    if (!node?.isMask) continue;
-    const siblings = sortNodesByLayerOrder(nodes.filter((candidate) => candidate.pageId === node.pageId && candidate.parentId === node.parentId));
-    const index = siblings.findIndex((candidate) => candidate.id === id);
-    if (index < 0 || index >= siblings.length - 1) return false;
+  const maskContainerKeys = new Set([...createdMaskIds].flatMap((id) => {
+    const node = nodeById.get(id);
+    return node ? [`${node.pageId ?? ""}\0${node.parentId ?? ""}`] : [];
+  }));
+  const siblingsByContainer = new Map<string, CanvasNode[]>();
+  for (const node of nodes) {
+    const key = `${node.pageId ?? ""}\0${node.parentId ?? ""}`;
+    if (!maskContainerKeys.has(key)) continue;
+    const siblings = siblingsByContainer.get(key) ?? [];
+    siblings.push(node);
+    siblingsByContainer.set(key, siblings);
+  }
+  const hasFollowingSibling = new Set<string>();
+  for (const siblings of siblingsByContainer.values()) {
+    const ordered = sortNodesByLayerOrder(siblings);
+    ordered.slice(0, -1).forEach((node) => hasFollowingSibling.add(node.id));
+  }
+  for (const id of createdMaskIds) {
+    const node = nodeById.get(id);
+    if (!node) continue;
+    if (!hasFollowingSibling.has(id)) return false;
     batch.push({ type: "setMask", id, enabled: true });
   }
   return true;
@@ -858,6 +1071,18 @@ function hasSelectedAncestor(nodes: readonly CanvasNode[], node: CanvasNode, sel
   return false;
 }
 
+function hasAncestor(nodes: readonly CanvasNode[], nodeId: string, ancestorId: string): boolean {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const visited = new Set<string>();
+  let current = byId.get(nodeId);
+  while (current?.parentId && !visited.has(current.parentId)) {
+    if (current.parentId === ancestorId) return true;
+    visited.add(current.parentId);
+    current = byId.get(current.parentId);
+  }
+  return false;
+}
+
 function groupAncestorIds(nodes: readonly CanvasNode[], parentId: string | undefined) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const result: string[] = [];
@@ -890,6 +1115,34 @@ function nearestCommonParentId(nodes: readonly CanvasNode[], roots: readonly Can
   };
   const [first, ...rest] = roots.map(ancestorChain);
   return first?.find((candidate) => rest.every((chain) => chain.includes(candidate)));
+}
+
+function sortNodesByDocumentOrder(nodes: readonly CanvasNode[], selected: readonly CanvasNode[]): CanvasNode[] {
+  const byParent = new Map<string, CanvasNode[]>();
+  nodes.forEach((node) => {
+    const key = `${node.pageId}:${node.parentId ?? "<page>"}`;
+    const siblings = byParent.get(key) ?? [];
+    siblings.push(node);
+    byParent.set(key, siblings);
+  });
+  byParent.forEach((siblings, key) => byParent.set(key, sortNodesByLayerOrder(siblings)));
+  const rank = new Map<string, number>();
+  let nextRank = 0;
+  const visit = (pageId: string, parentId: string | undefined, visited: Set<string>): void => {
+    const key = `${pageId}:${parentId ?? "<page>"}`;
+    if (visited.has(key)) return;
+    const nextVisited = new Set(visited).add(key);
+    for (const child of byParent.get(key) ?? []) {
+      rank.set(child.id, nextRank++);
+      visit(pageId, child.id, nextVisited);
+    }
+  };
+  const pageIds = [...new Set(selected.map((node) => node.pageId).filter((pageId): pageId is string => typeof pageId === "string"))];
+  pageIds.forEach((pageId) => visit(pageId, undefined, new Set()));
+  const inputOrder = new Map(selected.map((node, index) => [node.id, index]));
+  return [...selected].sort((left, right) =>
+    (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+    || (inputOrder.get(left.id) ?? 0) - (inputOrder.get(right.id) ?? 0));
 }
 
 /** Parent-first order lets a Core create a copied Group before its children. */
@@ -960,7 +1213,12 @@ export function captureClipboard(nodes: readonly CanvasNode[], ids: readonly str
 function referencedAssetIds(nodes: readonly CanvasNode[]) {
   return [...new Set(nodes.flatMap((node) => [
     ...(node.kind === "image" && node.assetId ? [node.assetId] : []),
+    ...(node.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+    ...(node.strokeStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),
+    ...(node.textProperties?.baseStyle?.font ? [node.textProperties.baseStyle.font.assetId] : []),
+    ...(node.textProperties?.runs.flatMap((run) => run.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []) ?? []),
+    ...(node.textProperties?.baseStyle?.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? []),
   ]))];
 }
@@ -1088,7 +1346,7 @@ function isValidPasteTarget(nodes: readonly CanvasNode[], target: { pageId?: str
 }
 
 function isFrameLike(node: CanvasNode | undefined) {
-  return node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet";
+  return Boolean(node && clipsChildren(node.kind));
 }
 
 function isAutoLayoutFrame(node: CanvasNode | undefined) {
@@ -1105,7 +1363,11 @@ function syncComponentChangeToInstances(nodes: CanvasNode[], sourceNodeId: strin
     if (instanceSourceNodeId(candidate) !== sourceNodeId) return;
     const root = instanceRootForNode(nodes, candidate);
     if (!root?.instanceMetadata) return;
-    const overridden = root.instanceMetadata.overrides.find((entry) => entry.id === sourceNodeId)?.overriddenFields ?? [];
+    // Figma's public `InstanceNode.overrides` identifies the overridden node in
+    // the instance subtree. Older MakeFigma-created instances stored the source
+    // Component node ID, so accept both while imported documents migrate through
+    // normal edits and snapshots.
+    const overridden = root.instanceMetadata.overrides.find((entry) => entry.id === candidate.id || entry.id === sourceNodeId)?.overriddenFields ?? [];
     const patchWithoutOverrides = Object.fromEntries(Object.entries(sourcePatch).filter(([key]) => !overridden.includes(key))) as Partial<CanvasNode>;
     if (!Object.keys(patchWithoutOverrides).length) return;
     const updated = { ...candidate, ...patchWithoutOverrides };

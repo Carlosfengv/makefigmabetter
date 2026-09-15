@@ -16,6 +16,15 @@ describe("Frame constraint scope", () => {
     expect(hasFrameConstraintScope(nodes, nested)).toBe(true);
   });
 
+  it("accepts descendants of every Frame-like container through structural wrappers", () => {
+    for (const kind of ["component", "instance", "slot", "componentSet"] as const) {
+      const frameLike = node(`owner-${kind}`, kind);
+      const wrapper = node(`wrapper-${kind}`, "booleanOperation", frameLike.id);
+      const child = node(`child-${kind}`, "rectangle", wrapper.id);
+      expect(hasFrameConstraintScope([frameLike, wrapper, child], child)).toBe(true);
+    }
+  });
+
   it("rejects root layers, Sections and malformed/cyclic ancestors", () => {
     const root = node("root", "ellipse");
     const section = node("section", "section");
@@ -40,5 +49,16 @@ describe("Frame constraint scope", () => {
 
     expect(hasActiveAutoLayoutConstraintOverride(nodes, nested)).toBe(true);
     expect(hasActiveAutoLayoutConstraintOverride(nodes, plainChild)).toBe(false);
+  });
+
+  it("keeps constraints editable for absolute Auto Layout children and their structural descendants", () => {
+    const autoFrame = { ...node("auto", "frame"), autoLayout: { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false } };
+    const absoluteGroup = { ...node("absolute-group", "group", autoFrame.id), autoLayout: { mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: true } };
+    const nested = node("nested-absolute", "rectangle", absoluteGroup.id);
+    const absoluteChild = { ...node("absolute-child", "rectangle", autoFrame.id), autoLayout: { ...absoluteGroup.autoLayout, absolute: true } };
+    const nodes = [autoFrame, absoluteGroup, nested, absoluteChild];
+
+    expect(hasActiveAutoLayoutConstraintOverride(nodes, absoluteChild)).toBe(false);
+    expect(hasActiveAutoLayoutConstraintOverride(nodes, nested)).toBe(false);
   });
 });

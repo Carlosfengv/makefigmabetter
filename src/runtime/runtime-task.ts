@@ -20,7 +20,25 @@ export class RuntimeTask<T> {
         if (this.cancellable) this.abort(runtimeError("TIMEOUT"));
       }, timeoutMs);
     }
-    this.promise = execute({ signal: this.controller.signal, seal: () => { this.cancellable = false; } })
+    let removeAbortListener: () => void = () => undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const onAbort = () => reject(abortReason(this.controller.signal.reason));
+      if (this.controller.signal.aborted) onAbort();
+      else {
+        this.controller.signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => this.controller.signal.removeEventListener("abort", onAbort);
+      }
+    });
+    let execution: Promise<T>;
+    try {
+      execution = execute({ signal: this.controller.signal, seal: () => { this.cancellable = false; } });
+    } catch (error) {
+      execution = Promise.reject(error);
+    }
+    // Cancellation settles the public task immediately even if an injected
+    // executor is slow to observe its AbortSignal. Executors must still use
+    // the signal to release their own underlying resources promptly.
+    this.promise = Promise.race([execution, aborted])
       .then((value) => {
         if (this.controller.signal.aborted) throw abortReason(this.controller.signal.reason);
         this.currentState = "ready";
@@ -31,7 +49,10 @@ export class RuntimeTask<T> {
         this.currentState = isCancellation(reason) ? "cancelled" : "failed";
         throw reason;
       })
-      .finally(() => { if (this.timeoutId !== undefined) clearTimeout(this.timeoutId); });
+      .finally(() => {
+        removeAbortListener();
+        if (this.timeoutId !== undefined) clearTimeout(this.timeoutId);
+      });
   }
 
   get state(): RuntimeTaskState { return this.currentState; }

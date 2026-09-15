@@ -63,4 +63,128 @@ describe("text style run replacement", () => {
     expect(result.runs[0].color).toEqual(color);
     expect(result.runs[1].color).toBeUndefined();
   });
+
+  it("keeps hyperlink boundaries and inherits the adjacent target on insertion", () => {
+    const result = rebaseTextStyleRuns("AB", "A!B", {
+      ...properties,
+      runs: [
+        { start: 0, end: 1, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, hyperlink: { type: "URL", value: "https://a.example" } as const },
+        { start: 1, end: 2, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, hyperlink: { type: "NODE", value: "1:2" } as const },
+      ],
+    });
+    expect(result.runs).toEqual([
+      { start: 0, end: 1, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, hyperlink: { type: "URL", value: "https://a.example" } },
+      { start: 1, end: 3, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, hyperlink: { type: "NODE", value: "1:2" } },
+    ]);
+  });
+
+  it("keeps text-decoration boundaries and inherits the adjacent decoration", () => {
+    const result = rebaseTextStyleRuns("AB", "A!B", {
+      ...properties,
+      runs: [
+        { start: 0, end: 1, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textDecorationStyle: "wavy", textDecorationOffset: { value: 2, unit: "pixels" }, textDecorationThickness: { value: 2, unit: "pixels" } },
+        { start: 1, end: 2, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "strikethrough", textDecorationStyle: "dotted", textDecorationOffset: { value: -20, unit: "percent" }, textDecorationThickness: { value: 10, unit: "percent" } },
+      ],
+    });
+    expect(result.runs).toEqual([
+      { start: 0, end: 1, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textDecorationStyle: "wavy", textDecorationOffset: { value: 2, unit: "pixels" }, textDecorationThickness: { value: 2, unit: "pixels" } },
+      { start: 1, end: 3, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "strikethrough", textDecorationStyle: "dotted", textDecorationOffset: { value: -20, unit: "percent" }, textDecorationThickness: { value: 10, unit: "percent" } },
+    ]);
+  });
+
+  it("rebases sparse paragraph indentation when list paragraphs split and merge", () => {
+    const listProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const },
+      paragraphStyleRuns: [{ start: 4, indentation: 2 }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", listProperties).paragraphStyleRuns).toEqual([
+      { start: 4, indentation: 2 },
+      { start: 6, indentation: 2 },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", listProperties).paragraphStyleRuns).toBeUndefined();
+  });
+
+  it("rebases an explicit per-paragraph list override at its UTF-8 paragraph boundary", () => {
+    const listProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const },
+      paragraphStyleRuns: [{ start: 4, listType: "none" as const }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One!\nTwo", listProperties).paragraphStyleRuns).toEqual([
+      { start: 5, listType: "none" },
+    ]);
+  });
+
+  it("rebases explicit per-paragraph list spacing when paragraphs split and merge", () => {
+    const listProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const, listSpacing: 8 },
+      paragraphStyleRuns: [{ start: 4, listSpacing: 0 }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", listProperties).paragraphStyleRuns).toEqual([
+      { start: 4, listSpacing: 0 },
+      { start: 6, listSpacing: 0 },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", listProperties).paragraphStyleRuns).toBeUndefined();
+  });
+
+  it("rebases explicit per-paragraph paragraph spacing when paragraphs split and merge", () => {
+    const properties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 8 },
+      paragraphStyleRuns: [{ start: 4, paragraphSpacing: 0 }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", properties).paragraphStyleRuns).toEqual([
+      { start: 4, paragraphSpacing: 0 },
+      { start: 6, paragraphSpacing: 0 },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", properties).paragraphStyleRuns).toBeUndefined();
+  });
+
+  it("rebases explicit per-paragraph first-line indentation when paragraphs split and merge", () => {
+    const properties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, paragraphIndent: 8 },
+      paragraphStyleRuns: [{ start: 4, paragraphIndent: 0 }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", properties).paragraphStyleRuns).toEqual([
+      { start: 4, paragraphIndent: 0 },
+      { start: 6, paragraphIndent: 0 },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", properties).paragraphStyleRuns).toBeUndefined();
+  });
+
+  it("rebases explicit per-paragraph line-height units when paragraphs split and merge", () => {
+    const properties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 },
+      paragraphStyleRuns: [{ start: 4, lineHeightUnit: "auto" as const }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", properties).paragraphStyleRuns).toEqual([
+      { start: 4, lineHeightUnit: "auto" },
+      { start: 6, lineHeightUnit: "auto" },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", properties).paragraphStyleRuns).toBeUndefined();
+  });
+
+  it("rebases explicit per-paragraph wrap styles when paragraphs split and merge", () => {
+    const properties = {
+      runs: [{ start: 0, end: 7, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, textWrapStyle: "balance" as const },
+      paragraphStyleRuns: [{ start: 4, textWrapStyle: "auto" as const }],
+      autoSize: "fixed" as const,
+    };
+    expect(rebaseTextStyleRuns("One\nTwo", "One\nT\nwo", properties).paragraphStyleRuns).toEqual([
+      { start: 4, textWrapStyle: "auto" },
+      { start: 6, textWrapStyle: "auto" },
+    ]);
+    expect(rebaseTextStyleRuns("One\nTwo", "OneTwo", properties).paragraphStyleRuns).toBeUndefined();
+  });
 });

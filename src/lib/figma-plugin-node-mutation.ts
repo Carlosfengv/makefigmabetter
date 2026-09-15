@@ -1,5 +1,9 @@
-import { createNode, type CanvasNode, type DocumentBooleanOperation, type DocumentConnectorMetadata, type DocumentConstraints, type DocumentSlideMetadata, type DocumentStickyMetadata, type DocumentTableMetadata, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type ShapeWithTextType } from "./editor-protocol";
+import { createNode, isShapeWithTextType, type CanvasNode, type DocumentBooleanOperation, type DocumentConnectorMetadata, type DocumentConstraints, type DocumentSlideMetadata, type DocumentStickyMetadata, type DocumentTableMetadata, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type ShapeWithTextType } from "./editor-protocol";
 import { fromFigmaPluginArcData, type FigmaPluginArcData, type FigmaPluginBlendMode, type FigmaPluginConstraints } from "./figma-plugin-node-projection";
+import { canContainChildren, nodeCapabilities } from "./node-capabilities";
+import { nodeBlendExtensionPatch } from "./node-blend-semantics";
+import { resolveTextPathVectorPath } from "./text-path-conversion";
+import { canonicalConnectorEndpoint, isFigmaConnectorStrokeCap, type FigmaConnectorEndpoint, type FigmaConnectorStrokeCap } from "./connector-endpoint";
 
 /**
  * The writable subset of the Figma Plugin API that Canonical can represent
@@ -35,10 +39,10 @@ export type FigmaPluginNodeWrite = Readonly<{
   descriptionMarkdown?: string;
   documentationLinks?: Array<{ uri: string; name?: string }>;
   connectorLineType?: DocumentConnectorMetadata["lineType"];
-  connectorStart?: DocumentConnectorMetadata["start"];
-  connectorEnd?: DocumentConnectorMetadata["end"];
-  connectorStartStrokeCap?: string;
-  connectorEndStrokeCap?: string;
+  connectorStart?: FigmaConnectorEndpoint;
+  connectorEnd?: FigmaConnectorEndpoint;
+  connectorStartStrokeCap?: FigmaConnectorStrokeCap;
+  connectorEndStrokeCap?: FigmaConnectorStrokeCap;
   handleMirroring?: "NONE" | "ANGLE" | "ANGLE_AND_LENGTH";
   shapeType?: ShapeWithTextType;
   isSkippedSlide?: boolean;
@@ -102,6 +106,19 @@ const BLEND_TO_CANONICAL: Partial<Record<FigmaPluginBlendMode, NonNullable<Canva
   OVERLAY: "overlay",
   DARKEN: "darken",
   LIGHTEN: "lighten",
+  COLOR_DODGE: "color-dodge",
+  COLOR_BURN: "color-burn",
+  HARD_LIGHT: "hard-light",
+  SOFT_LIGHT: "soft-light",
+  DIFFERENCE: "difference",
+  EXCLUSION: "exclusion",
+  HUE: "hue",
+  SATURATION: "saturation",
+  COLOR: "color",
+  LUMINOSITY: "luminosity",
+  PASS_THROUGH: "pass-through",
+  LINEAR_BURN: "linear-burn",
+  LINEAR_DODGE: "linear-dodge",
 };
 
 const CONSTRAINT_TO_CANONICAL: Record<FigmaPluginConstraints["horizontal"], DocumentConstraints["horizontal"]> = {
@@ -116,6 +133,9 @@ const CONSTRAINT_TO_CANONICAL: Record<FigmaPluginConstraints["horizontal"], Docu
  * one supported Plugin API SceneNode. Callers submit the returned commands to
  * the Editor Worker; this boundary never mutates a presentation snapshot. */
 export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWrite): FigmaPluginMutationResult {
+  if (Object.keys(write).length && (node.componentMetadata?.remote || node.componentSetMetadata?.remote)) {
+    return rejected(`remote ${node.kind === "componentSet" ? "COMPONENT_SET" : "COMPONENT"} nodes are read-only.`);
+  }
   if ((node.kind === "slideGrid" || node.kind === "slideRow") && Object.keys(write).length) return rejected(`${node.kind === "slideGrid" ? "SLIDE_GRID" : "SLIDE_ROW"} is read-only; manipulate its ${node.kind === "slideGrid" ? "SLIDE_ROW" : "SLIDE"} children instead.`);
   const patch: Partial<CanvasNode> = {};
   const has = (key: keyof FigmaPluginNodeWrite) => Object.hasOwn(write, key);
@@ -144,6 +164,8 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
     const blendMode = write.blendMode && BLEND_TO_CANONICAL[write.blendMode];
     if (!blendMode) return rejected(`${String(write.blendMode)} is not in the Canonical blend-mode subset.`);
     patch.blendMode = blendMode;
+    const extensions = nodeBlendExtensionPatch(node.extensions, blendMode, canContainChildren(node.kind));
+    if (extensions) patch.extensions = extensions;
   }
   if (has("constraints")) {
     if (["group", "booleanOperation"].includes(node.kind)) return rejected(`${node.kind} does not expose Plugin API constraints.`);
@@ -250,19 +272,21 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
       metadata.lineType = write.connectorLineType;
     }
     if (has("connectorStart")) {
-      if (!validConnectorEndpoint(write.connectorStart)) return rejected("connectorStart must be a finite endpoint with an optional valid magnet.");
-      metadata.start = write.connectorStart;
+      const endpoint = canonicalConnectorEndpoint(write.connectorStart, metadata.start);
+      if (!endpoint) return rejected("connectorStart must use Figma's position or endpointNodeId/magnet endpoint shape.");
+      metadata.start = endpoint;
     }
     if (has("connectorEnd")) {
-      if (!validConnectorEndpoint(write.connectorEnd)) return rejected("connectorEnd must be a finite endpoint with an optional valid magnet.");
-      metadata.end = write.connectorEnd;
+      const endpoint = canonicalConnectorEndpoint(write.connectorEnd, metadata.end);
+      if (!endpoint) return rejected("connectorEnd must use Figma's position or endpointNodeId/magnet endpoint shape.");
+      metadata.end = endpoint;
     }
     if (has("connectorStartStrokeCap")) {
-      if (!validConnectorStrokeCap(write.connectorStartStrokeCap)) return rejected("connectorStartStrokeCap must be a valid non-empty stroke-cap identifier.");
+      if (!validConnectorStrokeCap(write.connectorStartStrokeCap)) return rejected("connectorStartStrokeCap must be an official ConnectorStrokeCap value.");
       metadata.startStrokeCap = write.connectorStartStrokeCap;
     }
     if (has("connectorEndStrokeCap")) {
-      if (!validConnectorStrokeCap(write.connectorEndStrokeCap)) return rejected("connectorEndStrokeCap must be a valid non-empty stroke-cap identifier.");
+      if (!validConnectorStrokeCap(write.connectorEndStrokeCap)) return rejected("connectorEndStrokeCap must be an official ConnectorStrokeCap value.");
       metadata.endStrokeCap = write.connectorEndStrokeCap;
     }
     patch.connectorMetadata = metadata;
@@ -272,7 +296,7 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
     patch.highlightHandleMirroring = write.handleMirroring;
   }
   if (has("shapeType")) {
-    if (node.kind !== "shapeWithText" || !validShapeWithTextType(write.shapeType)) return rejected("shapeType is writable only on SHAPE_WITH_TEXT nodes and must be an official ShapeWithText type.");
+    if (node.kind !== "shapeWithText" || !isShapeWithTextType(write.shapeType)) return rejected("shapeType is writable only on SHAPE_WITH_TEXT nodes and must be an official ShapeWithText type.");
     patch.shapeWithTextType = write.shapeType;
   }
   if (has("isSkippedSlide")) {
@@ -308,19 +332,25 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
 
   const commands: EditorCommand[] = [];
   if (has("isMask")) {
-    if (["group", "section"].includes(node.kind) || typeof write.isMask !== "boolean") return rejected("isMask is not writable on this node type.");
+    if (!nodeCapabilities(node.kind).maskEligible || typeof write.isMask !== "boolean") return rejected("isMask is not writable on this node type.");
     commands.push({ type: "setMask", id: node.id, enabled: write.isMask });
   }
   if (Object.keys(patch).length) commands.unshift({ type: "update", id: node.id, patch });
   return { ok: true, commands };
 }
 
-/** Mirrors `resize` and `resizeWithoutConstraints`. Constraints are a Core
- * reflow concern, so both methods resolve to the same durable size mutation. */
 export function resizeFigmaPluginNode(node: CanvasNode, width: number, height: number): FigmaPluginMutationResult {
   if (node.kind === "slide") return rejected("SLIDE is fixed at 1920x1080 and cannot be resized.");
   if (!finite(width) || !finite(height) || width < 0 || height < 0) return rejected("resize dimensions must be finite and non-negative.");
   return { ok: true, commands: [{ type: "update", id: node.id, patch: { width, height } }] };
+}
+
+/** Figma Plugin API parity: resizes the container without propagating its
+ * Constraints to descendants. */
+export function resizeFigmaPluginNodeWithoutConstraints(node: CanvasNode, width: number, height: number): FigmaPluginMutationResult {
+  if (node.kind === "slide") return rejected("SLIDE is fixed at 1920x1080 and cannot be resized.");
+  if (!finite(width) || !finite(height) || width < 0 || height < 0) return rejected("resize dimensions must be finite and non-negative.");
+  return { ok: true, commands: [{ type: "resizeWithoutConstraints", id: node.id, patch: { width, height } }] };
 }
 
 /** Adapter for SlideNode.setSlideTransition(). `ON_CLICK` normalizes any
@@ -355,15 +385,16 @@ export function createFigmaPluginSticky(authorName: string, x: number, y: number
   return { ok: true, stickyId: sticky.id, commands: [{ type: "create", node: sticky }] };
 }
 
-/** Adapter for figma.createTextPath(vector, startSegment, startPosition).
- * Canonical node kinds are immutable identities, so the Figma in-place type
- * conversion is represented by an atomic replacement with a returned ID. */
+/** Adapter for figma.createTextPath(vectorLike, startSegment, startPosition).
+ * Figma changes the underlying node's type, so the canonical command retains
+ * the existing identity and resolves shape geometry before crossing Core. */
 export function createFigmaPluginTextPath(node: CanvasNode, startSegment: number, startPosition: number, createId: () => string): FigmaPluginTextPathCreationResult {
-  if (node.kind !== "vector" || !node.vectorPath) return rejectedTextPath("createTextPath currently requires a VECTOR with a Canonical vector path.");
-  const segmentCount = node.vectorPath.subpaths.reduce((total, subpath) => total + Math.max(0, subpath.points.length - 1) + (subpath.closed ? 1 : 0), 0);
+  const vectorPath = resolveTextPathVectorPath(node, createId);
+  if (!vectorPath) return rejectedTextPath("createTextPath requires a Vector, Rectangle, Ellipse, Polygon, Star, or Line with valid geometry.");
+  const segmentCount = vectorPath.subpaths.reduce((total, subpath) => total + Math.max(0, subpath.points.length - 1) + (subpath.closed ? 1 : 0), 0);
   if (!Number.isInteger(startSegment) || startSegment < 0 || startSegment >= segmentCount || !finite(startPosition) || startPosition < 0 || startPosition > 1) return rejectedTextPath("createTextPath requires an existing segment index and a startPosition from 0 through 1.");
-  const textPath = { ...node, id: createId(), kind: "textPath" as const, name: "Text path", text: "", textPathMetadata: { ...defaultTextPathMetadata(), startSegment, startPosition }, parametricShape: undefined, booleanOperation: undefined, codeLanguage: undefined, componentMetadata: undefined, componentSetMetadata: undefined, connectorMetadata: undefined, embedMetadata: undefined, highlightHandleMirroring: undefined, interactiveSlideElementType: undefined, linkUnfurlMetadata: undefined, mediaMetadata: undefined, shapeWithTextType: undefined, slideMetadata: undefined, stickyMetadata: undefined, tableMetadata: undefined, tableCellMetadata: undefined, positionId: undefined };
-  return { ok: true, textPathId: textPath.id, commands: [{ type: "delete", ids: [node.id] }, { type: "create", node: textPath }] };
+  const metadata = { ...defaultTextPathMetadata(), startSegment, startPosition };
+  return { ok: true, textPathId: node.id, commands: [{ type: "convertToTextPath", id: node.id, vectorPath, metadata }] };
 }
 
 /** Adapter for figma.transformGroup(). The existing atomic group resolver
@@ -618,7 +649,7 @@ export function removeFigmaPluginNode(node: CanvasNode): FigmaPluginMutationResu
 
 /** Implements ConnectorNode.reconnect(). Endpoint replacement follows the
  * same durable metadata path as individual Connector setters. */
-export function reconnectFigmaPluginConnector(node: CanvasNode, start: DocumentConnectorMetadata["start"], end: DocumentConnectorMetadata["end"]): FigmaPluginMutationResult {
+export function reconnectFigmaPluginConnector(node: CanvasNode, start: FigmaConnectorEndpoint, end: FigmaConnectorEndpoint): FigmaPluginMutationResult {
   return writeFigmaPluginNode(node, { connectorStart: start, connectorEnd: end });
 }
 
@@ -650,7 +681,7 @@ export function createFigmaPluginGif(assetId: string, hash: string, width: numbe
 /** Adapter for figma.createShapeWithText(). The text is carried in the
  * Canonical text field and exposed as a readonly text-sublayer projection. */
 export function createFigmaPluginShapeWithText(shapeType: ShapeWithTextType, x: number, y: number, createId: () => string): FigmaPluginShapeWithTextCreationResult {
-  if (!validShapeWithTextType(shapeType) || !finite(x) || !finite(y)) return rejectedShapeWithText("createShapeWithText requires an official shape type and finite coordinates.");
+  if (!isShapeWithTextType(shapeType) || !finite(x) || !finite(y)) return rejectedShapeWithText("createShapeWithText requires an official shape type and finite coordinates.");
   const node = { ...createNode("shapeWithText", x, y), id: createId(), shapeWithTextType: shapeType };
   return { ok: true, shapeWithTextId: node.id, commands: [{ type: "create", node }] };
 }
@@ -708,16 +739,8 @@ function defaultConnectorMetadata(node: CanvasNode): DocumentConnectorMetadata {
 }
 
 function validConnectorLineType(value: unknown): value is DocumentConnectorMetadata["lineType"] { return value === "ELBOWED" || value === "STRAIGHT" || value === "CURVED"; }
-function validConnectorEndpoint(value: unknown): value is DocumentConnectorMetadata["start"] {
-  if (!value || typeof value !== "object") return false;
-  const endpoint = value as Record<string, unknown>;
-  return finite(endpoint.x) && finite(endpoint.y)
-    && (endpoint.endpointNodeId === undefined || typeof endpoint.endpointNodeId === "string")
-    && (endpoint.magnet === undefined || endpoint.magnet === "TOP" || endpoint.magnet === "RIGHT" || endpoint.magnet === "BOTTOM" || endpoint.magnet === "LEFT" || endpoint.magnet === "AUTO");
-}
-function validConnectorStrokeCap(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 64 && /^[A-Z_]+$/u.test(value); }
+function validConnectorStrokeCap(value: unknown): value is FigmaConnectorStrokeCap { return isFigmaConnectorStrokeCap(value); }
 function validHandleMirroring(value: unknown): value is NonNullable<CanvasNode["highlightHandleMirroring"]> { return value === "NONE" || value === "ANGLE" || value === "ANGLE_AND_LENGTH"; }
-function validShapeWithTextType(value: unknown): value is ShapeWithTextType { return typeof value === "string" && shapeWithTextTypes.has(value as ShapeWithTextType); }
 function defaultSlideMetadata(): DocumentSlideMetadata { return { isSkippedSlide: false, transition: { style: "NONE", duration: .3, curve: "EASE_IN", timing: { type: "ON_CLICK" } } }; }
 function defaultStickyMetadata(): DocumentStickyMetadata { return { authorVisible: true, authorName: "", isWideWidth: false }; }
 function defaultTextPathMetadata(): DocumentTextPathMetadata { return { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "TOP" }; }
@@ -738,7 +761,6 @@ function validSlideTransition(value: unknown): value is DocumentSlideMetadata["t
 }
 const slideTransitionStyles = new Set<DocumentSlideMetadata["transition"]["style"]>(["NONE", "DISSOLVE", "SLIDE_FROM_LEFT", "SLIDE_FROM_RIGHT", "SLIDE_FROM_BOTTOM", "SLIDE_FROM_TOP", "PUSH_FROM_LEFT", "PUSH_FROM_RIGHT", "PUSH_FROM_BOTTOM", "PUSH_FROM_TOP", "MOVE_FROM_LEFT", "MOVE_FROM_RIGHT", "MOVE_FROM_TOP", "MOVE_FROM_BOTTOM", "SLIDE_OUT_TO_LEFT", "SLIDE_OUT_TO_RIGHT", "SLIDE_OUT_TO_TOP", "SLIDE_OUT_TO_BOTTOM", "MOVE_OUT_TO_LEFT", "MOVE_OUT_TO_RIGHT", "MOVE_OUT_TO_TOP", "MOVE_OUT_TO_BOTTOM", "SMART_ANIMATE"]);
 const slideTransitionCurves = new Set<DocumentSlideMetadata["transition"]["curve"]>(["EASE_IN", "EASE_OUT", "EASE_IN_AND_OUT", "LINEAR", "GENTLE", "QUICK", "BOUNCY", "SLOW"]);
-const shapeWithTextTypes = new Set<ShapeWithTextType>(["SQUARE", "ELLIPSE", "ROUNDED_RECTANGLE", "DIAMOND", "TRIANGLE_UP", "TRIANGLE_DOWN", "PARALLELOGRAM_RIGHT", "PARALLELOGRAM_LEFT", "ENG_DATABASE", "ENG_QUEUE", "ENG_FILE", "ENG_FOLDER", "TRAPEZOID", "PREDEFINED_PROCESS", "SHIELD", "DOCUMENT_SINGLE", "DOCUMENT_MULTIPLE", "MANUAL_INPUT", "HEXAGON", "CHEVRON", "PENTAGON", "OCTAGON", "STAR", "PLUS", "ARROW_LEFT", "ARROW_RIGHT", "SUMMING_JUNCTION", "OR", "SPEECH_BUBBLE", "INTERNAL_STORAGE"]);
 function validHighlightPath(path: unknown): path is DocumentVectorPath {
   return Boolean(path && typeof path === "object" && (path as DocumentVectorPath).subpaths?.length && (path as DocumentVectorPath).subpaths.length <= 64);
 }

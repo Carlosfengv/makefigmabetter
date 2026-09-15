@@ -8,12 +8,17 @@ import {
   useRef,
   useState,
 } from "react";
-import { ArrowLeft, Share2 } from "lucide-react";
+import { ArrowLeft, ChevronDown, Share2 } from "lucide-react";
 import { cn } from "cn";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { IconButton } from "@/components/ui/icon-button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   appendLocalJournalEntry,
   appendPendingRemoteOperation,
@@ -33,6 +38,7 @@ import {
   createNode,
   DEFAULT_TEXT_LINE_HEIGHT,
   documentColorFromCssHex,
+  type AutoLayoutPaddingSide,
   type CanvasNode,
   type ConstraintType,
   type CoreLocalSnapshot,
@@ -43,8 +49,11 @@ import {
   type DocumentDropShadow,
   type DocumentEffect,
   type DocumentFontReference,
+  type DocumentGradientPaint,
+  type DocumentImageFilters,
   type DocumentLinearGradient,
   type DocumentPaint,
+  type DocumentPaintLayer,
   type DocumentTextProperties,
   type DocumentVectorPath,
   type EditorCommand,
@@ -56,14 +65,29 @@ import {
   type ToolKind,
   type WorkerToMain,
 } from "@/lib/editor-protocol";
+import { resolvedTextLineHeight, resolvedTextLineHeightAt } from "@/lib/text-line-height";
+import { normalizeAutoLayout } from "@/lib/auto-layout-normalization";
+import { canContainChildren } from "@/lib/node-capabilities";
+import { effectiveNodeBlendMode, nodeBlendExtensionPatch } from "@/lib/node-blend-semantics";
 import { FontFaceRegistry, fontFamilyForAsset } from "@/lib/font-face-registry";
 import { canvasDesignTokens } from "@/lib/canvas-design-tokens";
 import {
   layoutTextRanges,
   segmentGraphemes,
+  textAlignedLineLeft,
+  textHangingPunctuationOffsets,
+  textLineStartsParagraph,
+  textListIndentationOffset,
+  textListMarkerBaseIndent,
+  textListMarkerGutterForProperties,
+  textParagraphGap,
+  textParagraphIndentAt,
+  textParagraphStartAtOffset,
   textParagraphRanges,
+  textParagraphWrapStyleAt,
 } from "@/lib/text-layout";
 import { styledTextSpans } from "@/lib/text-style-runs";
+import { hangingTextLocalBounds } from "@/lib/world-visual-bounds";
 import {
   patchTextStyleRuns,
   rebaseTextStyleRuns,
@@ -110,6 +134,10 @@ import {
 import { encodeInputBatch } from "@/lib/input-transfer";
 import { createEditorTransactionQueue } from "@/lib/editor-transaction-queue";
 import {
+  fixtureAssetNeedsRegistration,
+  fixtureAssetNodeCommands,
+} from "@/lib/fixture-asset-reconciliation";
+import {
   applyOptimisticUpdates,
   type OptimisticUpdate,
 } from "@/lib/optimistic-projection";
@@ -117,6 +145,7 @@ import { DocumentApiTransport } from "@/lib/document-api-transport";
 import { AssetApiTransport } from "@/lib/asset-api-transport";
 import {
   figmaRestImportReport,
+  pendingFigmaRestAssetRequests,
   planFigmaRestImport,
   type FigmaRestAssetRequest,
   type FigmaRestImportReport,
@@ -132,13 +161,17 @@ import {
 } from "@/lib/font-variation-axes";
 import { PendingOperationSynchronizer } from "@/lib/pending-operation-sync";
 import {
+  collapseUtf16SelectionPositionInRustLayout,
   deleteUtf16SelectionInRustLayout,
-  moveUtf16CaretInRustLayout,
+  reconcileNativeUtf16CaretMove,
   replaceUtf16SelectionInRustLayout,
+  rustTextCaretPositionAtPoint,
+  rustTextCaretPositionAtUtf16Index,
   snapUtf16CaretToRustLayout,
   utf16IndexAtUtf8Offset,
   utf8OffsetAtUtf16Index,
   type RustTextCaretLayout,
+  type RustTextCaretPointMetrics,
 } from "@/lib/rust-text-caret";
 import { LayerPanel } from "./layer-panel";
 import {
@@ -150,12 +183,44 @@ import phase0BasicCardFixture from "../../../fixtures/documents/phase0-basic-car
 import phase1TextMultilingualFixture from "../../../fixtures/documents/phase1-text-multilingual.fixture.json";
 import phase1Text10kFixture from "../../../fixtures/documents/phase1-text-10k.fixture.json";
 import phase1RenderCompositeFixture from "../../../fixtures/documents/phase1-render-composite.fixture.json";
+import remediationSubtreeOpacityFixture from "../../../fixtures/documents/remediation-subtree-opacity.fixture.json";
+import remediationEmptyPaintFixture from "../../../fixtures/documents/remediation-empty-paint.fixture.json";
+import remediationDirtyRegionFixture from "../../../fixtures/documents/remediation-dirty-region.fixture.json";
+import remediationDirtyRegionGridFixture from "../../../fixtures/documents/remediation-dirty-region-grid.fixture.json";
+import remediationAlphaMaskRunFixture from "../../../fixtures/documents/remediation-alpha-mask-run.fixture.json";
+import remediationGpuIslandsFixture from "../../../fixtures/documents/remediation-gpu-islands.fixture.json";
+import remediationImageAlphaMaskFixture from "../../../fixtures/documents/remediation-image-alpha-mask.fixture.json";
+import remediationPaintStackFixture from "../../../fixtures/documents/remediation-paint-stack.fixture.json";
+import remediationNonLinearGradientFixture from "../../../fixtures/documents/remediation-non-linear-gradient.fixture.json";
+import remediationAdvancedBlendFixture from "../../../fixtures/documents/remediation-advanced-blend.fixture.json";
+import remediationImageRotationFixture from "../../../fixtures/documents/remediation-image-rotation.fixture.json";
+import remediationImageFiltersFixture from "../../../fixtures/documents/remediation-image-filters.fixture.json";
+import remediationTextTruncationFixture from "../../../fixtures/documents/remediation-text-truncation.fixture.json";
+import remediationPassThroughFixture from "../../../fixtures/documents/remediation-pass-through.fixture.json";
+import remediationNormalIsolationFixture from "../../../fixtures/documents/remediation-normal-isolation.fixture.json";
+import remediationLinearBlendFixture from "../../../fixtures/documents/remediation-linear-blend.fixture.json";
 import phase2CommonNodesFixture from "../../../fixtures/documents/phase2-common-nodes.fixture.json";
 import { createPhase1Shape100kFixture } from "@/lib/phase1-shape-100k-fixture";
+import {
+  createRemediationPf02LayoutCascadeFixture,
+  createRemediationPf02StructureFixture,
+} from "@/lib/remediation-pf02-structure-fixture";
 import { createPhase2GpuDropShadowFixture } from "@/lib/phase2-gpu-drop-shadow-fixture";
 import { createPhase2GpuLayerBlurFixture } from "@/lib/phase2-gpu-layer-blur-fixture";
 import { createPhase2ProfessionalCompositeFixture } from "@/lib/phase2-professional-composite-fixture";
+import { createRemediationShapedCaretFixture } from "@/lib/remediation-shaped-caret-fixture";
+import { createRemediationMultiRunGpuTextFixture } from "@/lib/remediation-multi-run-gpu-text-fixture";
+import {
+  createRemediationTextPathGpuFixture,
+  createRemediationTextPathStructuredFixture,
+  createRemediationTextPathTransformFixture,
+} from "@/lib/remediation-text-path-gpu-fixture";
+import { createRemediationTrackingGpuTextFixture } from "@/lib/remediation-tracking-gpu-text-fixture";
+import { createRemediationRtlGpuTextFixture } from "@/lib/remediation-rtl-gpu-text-fixture";
+import { createRemediationSyntheticFontStyleFixture } from "@/lib/remediation-synthetic-font-style-fixture";
+import { createRemediationClipFixture } from "@/lib/remediation-clip-fixture";
 import { createTestOperationsDashboardFixture } from "@/lib/test-operations-dashboard-fixture";
+import { createConstraintParityFixture } from "@/lib/constraint-parity-fixture";
 import {
   resolveLayerDrop,
   resolveLayerOrder,
@@ -212,6 +277,14 @@ import {
   constraintSelection,
   type ConstraintSelectionValue,
 } from "@/lib/constraint-selection";
+import {
+  constraintAxisLabel,
+  constraintEdgeSelected,
+  constraintFromDiagramEdge,
+  constraintSummary,
+  type ConstraintAxis,
+  type ConstraintEdge,
+} from "@/lib/constraint-control";
 import { autoLayoutSizingKeyForAxis } from "@/lib/auto-layout-sizing";
 import {
   hasActiveAutoLayoutConstraintOverride,
@@ -232,6 +305,7 @@ import {
   type LayerNestingIntent,
 } from "@/lib/layer-keyboard-nesting";
 import { resolveMultiResizeSelection } from "@/lib/multi-selection";
+import type { ResizeGeometry } from "@/lib/canvas-resize";
 import { selectionGeometryPatches } from "@/lib/selection-geometry-edit";
 import { resolveCanvasObjectSelection } from "@/lib/canvas-selection";
 import { ellipseArcUpdatePatch } from "@/lib/ellipse-arc";
@@ -246,10 +320,11 @@ import {
 } from "@/lib/editor-clipboard";
 import { captureClipboard } from "@/lib/transaction-batch";
 import {
-  hasMissingRustTextGlyph,
-  parseRustTextLayout,
-} from "@/lib/rust-text-layout";
-import { textSvgLayoutInput } from "@/lib/text-svg-layout-input";
+  parseTextSvgLayoutProjection,
+  parseTextPathSvgLayoutProjection,
+  TEXT_PATH_SINGLE_LINE_WIDTH,
+  textSvgLayoutInput,
+} from "@/lib/text-svg-layout-input";
 import { FigmaCompatibleRuntime } from "@/runtime/figma-compatible-runtime";
 import { RuntimeSession } from "@/runtime/runtime-session";
 import {
@@ -382,6 +457,9 @@ type PendingFigmaAssetBinding = {
   transactionId: string;
   request: FigmaRestAssetRequest;
 };
+type PendingFigmaAssetCancellation = {
+  transactionId: string;
+};
 type CanvasTextEdit = {
   nodeId: string;
   draft: string;
@@ -389,6 +467,8 @@ type CanvasTextEdit = {
   properties: DocumentTextProperties;
   caret: number;
   selectionAnchor: number;
+  rustCaretVisualIndex?: number;
+  rustSelectionAnchorVisualIndex?: number;
   rustCaretReady: boolean;
   rustCaretLayout?: RustTextCaretLayout;
 };
@@ -410,7 +490,8 @@ function sameFigmaAssetRequest(
     left.sourceId === right.sourceId &&
     left.nodeId === right.nodeId &&
     left.imageRef === right.imageRef &&
-    left.usage === right.usage
+    left.usage === right.usage &&
+    left.paintIndex === right.paintIndex
   );
 }
 
@@ -615,10 +696,9 @@ async function deriveVectorSvgPaths(nodes: readonly CanvasNode[]) {
   return paths;
 }
 
-/** Freeze the same single-face ICU4X/Rustybuzz line ranges Canvas can use.
- * Contiguous paint-only Style Runs share the same advances and therefore can
- * use this projection too; metric-changing or missing-font runs deliberately
- * remain on their existing browser/system fallback path. */
+/** Freeze the same multi-run ICU4X/Rustybuzz line ranges Canvas can use.
+ * Every explicit face/size range is bundled from the same export snapshot;
+ * missing fonts and synthetic metric styles retain the system fallback. */
 async function deriveTextSvgLayouts(
   nodes: readonly CanvasNode[],
   fontBytes: ReadonlyMap<string, ArrayBuffer>,
@@ -627,26 +707,20 @@ async function deriveTextSvgLayouts(
   await wasm.default();
   const layouts = new Map<string, SvgTextLayoutProjection>();
   for (const node of nodes) {
-    if (node.kind !== "text") continue;
+    if (node.kind !== "text" && node.kind !== "textPath") continue;
     const input = textSvgLayoutInput(node, fontBytes);
     if (!input) continue;
     try {
-      const payload = wasm.layout_shaped_text_with_variations_json(
-        new Uint8Array(input.fontBytes),
-        input.faceIndex,
-        input.axes,
-        input.source,
-        node.width / input.fontSize,
+      const payload = wasm.layout_shaped_text_runs_json(
+        new Uint8Array(input.fontBundle),
+        input.runsJson,
+        input.shapingSource,
+        node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width,
       );
-      const layout = parseRustTextLayout(payload, input.source);
-      if (!layout || hasMissingRustTextGlyph(layout)) continue;
-      layouts.set(node.id, {
-        lines: layout.lines.map(({ start, end, direction }) => ({
-          start,
-          end,
-          direction,
-        })),
-      });
+      const layout = node.kind === "textPath"
+        ? parseTextPathSvgLayoutProjection(payload, input)
+        : parseTextSvgLayoutProjection(payload, input);
+      if (layout) layouts.set(node.id, layout);
     } catch {
       // Export retains its established system-font fallback without writing a
       // derived layout into the Canonical document.
@@ -767,8 +841,6 @@ function resolveTextAutoSizePatch(
   if (!properties || properties.autoSize === "fixed") return patch;
   const primary = properties.runs[0];
   const fontSize = primary?.fontSize ?? 31;
-  const lineHeight =
-    properties.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT;
   const letterSpacing = primary?.letterSpacing ?? 0;
   const measure = (value: string) => {
     if (typeof document === "undefined")
@@ -790,17 +862,49 @@ function resolveTextAutoSizePatch(
     properties.autoSize === "widthAndHeight"
       ? Number.POSITIVE_INFINITY
       : Math.max(1, nextWidth);
-  const lines = layoutTextRanges({ text, maxWidth, measure });
-  const paragraphBreaks = Math.max(
-    0,
-    (text.match(/\r\n|[\n\r\u2028\u2029]/gu) ?? []).length,
-  );
+  const listMarkerGutter = textListMarkerGutterForProperties(text, properties, measure);
+  const lines = layoutTextRanges({
+    text,
+    maxWidth,
+    firstLineIndent: (_index, start) => textParagraphIndentAt(properties, start) + textListMarkerBaseIndent(properties, listMarkerGutter, start),
+    paragraphIndent: (_index, start) => textListIndentationOffset(text, properties, start, listMarkerGutter),
+    wrapStyle: (_index, start) => textParagraphWrapStyleAt(properties, start),
+    hangingPunctuation: properties.paragraph.hangingPunctuation ?? false,
+    measure,
+  });
+  const bytes = new TextEncoder().encode(text);
+  let previousEnd = 0;
+  let previousParagraphStart = 0;
+  let paragraphGapTotal = 0;
+  let lineHeightTotal = 0;
+  for (const [index, line] of lines.entries()) {
+    const skipped = new TextDecoder().decode(bytes.slice(previousEnd, line.start));
+    const paragraphStart = textParagraphStartAtOffset(text, line.start);
+    if (index > 0 && textLineStartsParagraph(index, skipped)) {
+      paragraphGapTotal += textParagraphGap(properties, previousParagraphStart, paragraphStart);
+      previousParagraphStart = paragraphStart;
+    }
+    lineHeightTotal += resolvedTextLineHeightAt(properties, paragraphStart, fontSize);
+    previousEnd = line.end;
+  }
   const height = Math.max(
     1,
-    lines.length * lineHeight +
-      paragraphBreaks * properties.paragraph.paragraphSpacing,
+    lineHeightTotal + paragraphGapTotal,
   );
-  const width = Math.max(1, ...lines.map((line) => measure(line.text)));
+  previousEnd = 0;
+  const width = Math.max(1, ...lines.map((line, index) => {
+    const skipped = new TextDecoder().decode(bytes.slice(previousEnd, line.start));
+    const first = textLineStartsParagraph(index, skipped);
+    const paragraphStart = textParagraphStartAtOffset(text, line.start);
+    previousEnd = line.end;
+    const measured = measure(line.text);
+    const hanging = properties.paragraph.hangingPunctuation
+      ? textHangingPunctuationOffsets(line.text, line.direction, measure)
+      : { left: 0, right: 0 };
+    return measured - hanging.left - hanging.right
+      + textListIndentationOffset(text, properties, line.start, listMarkerGutter)
+      + (first ? textParagraphIndentAt(properties, paragraphStart) + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0);
+  }));
   return {
     ...patch,
     height,
@@ -822,9 +926,11 @@ function textNodeContainsPoint(
   const dy = point.y - centerY;
   const localX = dx * cosine - dy * sine + node.width / 2;
   const localY = dx * sine + dy * cosine + node.height / 2;
-  return (
-    localX >= 0 && localX <= node.width && localY >= 0 && localY <= node.height
-  );
+  const bounds = hangingTextLocalBounds(node) ?? { x: 0, y: 0, width: node.width, height: node.height };
+  return localX >= bounds.x
+    && localX <= bounds.x + bounds.width
+    && localY >= bounds.y
+    && localY <= bounds.y + bounds.height;
 }
 
 function textLocalPoint(node: CanvasNode, point: { x: number; y: number }) {
@@ -845,6 +951,32 @@ function textLocalPoint(node: CanvasNode, point: { x: number; y: number }) {
  * Canvas renderer follows ordinary CSS inline line boxes, so the editable DOM
  * layer must do the same. This puts a collapsed selection at a UTF-16 offset
  * without changing the document text or adding a visual wrapper. */
+function contentEditableParagraphs(editor: HTMLElement) {
+  const paragraphs = [
+    ...editor.querySelectorAll<HTMLElement>(":scope > .canvas-text-paragraph"),
+  ];
+  if (
+    !paragraphs.length ||
+    [...editor.childNodes].some(
+      (child) =>
+        !(child instanceof HTMLElement) ||
+        !child.classList.contains("canvas-text-paragraph"),
+    )
+  )
+    return [];
+  return paragraphs;
+}
+
+/** Direct paragraph blocks represent Canonical hard breaks structurally.
+ * Rebuild their text explicitly because innerText omits empty blocks and may
+ * include layout-created breaks that are not authored characters. */
+function contentEditableText(editor: HTMLElement) {
+  const paragraphs = contentEditableParagraphs(editor);
+  return paragraphs.length
+    ? paragraphs.map((paragraph) => paragraph.textContent ?? "").join("\n")
+    : editor.innerText;
+}
+
 function placeContentEditableCaret(editor: HTMLElement, targetOffset: number) {
   const selection = window.getSelection();
   if (!selection) return;
@@ -870,14 +1002,12 @@ function placeContentEditableCaret(editor: HTMLElement, targetOffset: number) {
     selection.removeAllRanges();
     selection.addRange(range);
   };
-  const paragraphs = [
-    ...editor.querySelectorAll<HTMLElement>(":scope > .canvas-text-paragraph"),
-  ];
+  const paragraphs = contentEditableParagraphs(editor);
   if (paragraphs.length) {
     let remaining = targetOffset;
     for (let index = 0; index < paragraphs.length; index += 1) {
       const paragraph = paragraphs[index];
-      const length = paragraph.innerText.length;
+      const length = paragraph.textContent?.length ?? 0;
       if (remaining <= length) {
         placeIn(paragraph, remaining);
         return;
@@ -932,14 +1062,12 @@ function contentEditablePointAtOffset(
     }
     return { node: container, offset: container.childNodes.length };
   };
-  const paragraphs = [
-    ...editor.querySelectorAll<HTMLElement>(":scope > .canvas-text-paragraph"),
-  ];
+  const paragraphs = contentEditableParagraphs(editor);
   if (!paragraphs.length) return pointIn(editor, targetOffset);
   let remaining = Math.max(0, targetOffset);
   for (let index = 0; index < paragraphs.length; index += 1) {
     const paragraph = paragraphs[index];
-    const length = paragraph.innerText.length;
+    const length = paragraph.textContent?.length ?? 0;
     if (remaining <= length) return pointIn(paragraph, remaining);
     remaining -= length;
     if (index < paragraphs.length - 1) {
@@ -997,13 +1125,15 @@ function replaceContentEditableRange(
  * durable truth. The Worker subsequently snaps it to Rust's legal UTF-8 map. */
 function contentEditableCaretOffset(editor: HTMLElement) {
   const selection = window.getSelection();
-  if (!selection?.rangeCount) return editor.innerText.length;
+  if (!selection?.rangeCount) return contentEditableText(editor).length;
   const range = selection.getRangeAt(0);
-  if (!editor.contains(range.endContainer)) return editor.innerText.length;
-  const before = range.cloneRange();
-  before.selectNodeContents(editor);
-  before.setEnd(range.endContainer, range.endOffset);
-  return before.toString().length;
+  if (!editor.contains(range.endContainer))
+    return contentEditableText(editor).length;
+  return contentEditableOffsetAtPoint(
+    editor,
+    range.endContainer,
+    range.endOffset,
+  );
 }
 
 function contentEditableOffsetAtPoint(
@@ -1011,7 +1141,44 @@ function contentEditableOffsetAtPoint(
   node: Node | null,
   offset: number,
 ) {
-  if (!node || !editor.contains(node)) return editor.innerText.length;
+  if (!node || !editor.contains(node)) return contentEditableText(editor).length;
+  const paragraphs = contentEditableParagraphs(editor);
+  if (paragraphs.length) {
+    if (node === editor) {
+      const boundary = Math.min(
+        Math.max(0, Math.trunc(offset)),
+        editor.childNodes.length,
+      );
+      let logicalOffset = 0;
+      for (let index = 0; index < boundary; index += 1) {
+        const child = editor.childNodes[index];
+        const paragraphIndex = paragraphs.findIndex(
+          (paragraph) => paragraph === child,
+        );
+        logicalOffset +=
+          paragraphIndex >= 0
+            ? (paragraphs[paragraphIndex].textContent?.length ?? 0) +
+              (paragraphIndex < paragraphs.length - 1 ? 1 : 0)
+            : (child.textContent?.length ?? 0);
+      }
+      return Math.min(logicalOffset, contentEditableText(editor).length);
+    }
+    const paragraphIndex = paragraphs.findIndex(
+      (paragraph) => paragraph === node || paragraph.contains(node),
+    );
+    if (paragraphIndex >= 0) {
+      let logicalOffset = 0;
+      for (let index = 0; index < paragraphIndex; index += 1)
+        logicalOffset += (paragraphs[index].textContent?.length ?? 0) + 1;
+      const before = document.createRange();
+      before.selectNodeContents(paragraphs[paragraphIndex]);
+      before.setEnd(node, offset);
+      return Math.min(
+        logicalOffset + before.toString().length,
+        contentEditableText(editor).length,
+      );
+    }
+  }
   const before = document.createRange();
   before.selectNodeContents(editor);
   before.setEnd(node, offset);
@@ -1040,7 +1207,7 @@ function contentEditableSelectionOffsets(editor: HTMLElement) {
  * Inspector and clipboard input. Every replacement is one UTF-16 code unit,
  * so the current DOM caret offset remains valid. */
 function normalizedContentEditableText(editor: HTMLElement) {
-  const source = editor.innerText;
+  const source = contentEditableText(editor);
   const normalized = unicodeScalarText(source);
   if (normalized !== source)
     replaceContentEditableRange(editor, 0, source.length, normalized);
@@ -1054,8 +1221,6 @@ function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
   const properties = node.textProperties;
   const primary = properties?.runs[0];
   const fontSize = primary?.fontSize ?? 31;
-  const lineHeight =
-    properties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT;
   const letterSpacing = primary?.letterSpacing ?? 0;
   const local = textLocalPoint(node, point);
   const ctx =
@@ -1071,30 +1236,42 @@ function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
     (ctx?.measureText(value).width ??
       Array.from(value).length * fontSize * 0.6) +
     Math.max(0, segmentGraphemes(value).length - 1) * letterSpacing;
+  const listMarkerGutter = textListMarkerGutterForProperties(text, properties, measure);
   const lines = layoutTextRanges({
     text,
     maxWidth: Math.max(1, node.width),
+    firstLineIndent: (_index, start) => textParagraphIndentAt(properties, start)
+      + textListMarkerBaseIndent(properties, listMarkerGutter, start),
+    paragraphIndent: (_index, start) => textListIndentationOffset(text, properties, start, listMarkerGutter),
+    wrapStyle: (_index, start) => textParagraphWrapStyleAt(properties, start),
+    hangingPunctuation: properties?.paragraph.hangingPunctuation ?? false,
     measure,
   });
   const bytes = new TextEncoder().encode(text);
   let lineTop = 0;
   let previousEnd = 0;
-  for (const line of lines) {
+  let previousParagraphStart = 0;
+  for (const [lineIndex, line] of lines.entries()) {
     const skipped = new TextDecoder().decode(
       bytes.slice(previousEnd, line.start),
     );
-    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped))
-      lineTop += properties?.paragraph.paragraphSpacing ?? 0;
-    const lineBottom = lineTop + lineHeight;
+    const first = textLineStartsParagraph(lineIndex, skipped);
+    const paragraphStart = textParagraphStartAtOffset(text, line.start);
+    if (lineIndex > 0 && first) {
+      lineTop += textParagraphGap(properties, previousParagraphStart, paragraphStart);
+      previousParagraphStart = paragraphStart;
+    }
+    const lineBottom = lineTop + resolvedTextLineHeightAt(properties, paragraphStart, fontSize);
     if (local.y <= lineBottom) {
       const lineWidth = measure(line.text);
+      const indent = textListIndentationOffset(text, properties, line.start, listMarkerGutter)
+        + (first ? textParagraphIndentAt(properties, paragraphStart) + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0);
+      const lineBoxWidth = Math.max(0, node.width - indent);
       const alignment = properties?.paragraph.alignment ?? "left";
-      let x =
-        alignment === "center"
-          ? (node.width - lineWidth) / 2
-          : alignment === "right"
-            ? node.width - lineWidth
-            : 0;
+      const hanging = properties?.paragraph.hangingPunctuation
+        ? textHangingPunctuationOffsets(line.text, line.direction, measure)
+        : { left: 0, right: 0 };
+      let x = textAlignedLineLeft(indent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
       let index = utf16IndexAtUtf8Offset(text, line.start);
       for (const grapheme of segmentGraphemes(line.text)) {
         const width = measure(grapheme);
@@ -1133,9 +1310,32 @@ function requestedFixtureSnapshot(
       viewport: performanceFixture.viewport,
     };
   }
+  if (fixture === "remediation-pf02-100k") {
+    const performanceFixture = createRemediationPf02StructureFixture();
+    return {
+      format: "benchmark-projection-v1",
+      nodes: performanceFixture.nodes,
+      viewport: performanceFixture.viewport,
+    };
+  }
+  if (fixture === "remediation-pf02-layout-100k") {
+    const performanceFixture = createRemediationPf02LayoutCascadeFixture();
+    return {
+      format: "benchmark-projection-v1",
+      nodes: performanceFixture.nodes,
+      viewport: performanceFixture.viewport,
+      benchmark: {
+        kind: "pf02-layout-cascade",
+        frameId: performanceFixture.frameId,
+        targetWidth: performanceFixture.targetWidth,
+      },
+    };
+  }
   const requestedDocumentFixture =
     fixture === "phase0-basic-card"
       ? phase0BasicCardFixture
+      : fixture === "constraint-parity"
+        ? createConstraintParityFixture()
       : fixture === "test-operations-dashboard"
         ? createTestOperationsDashboardFixture()
         : fixture === "phase1-text-multilingual"
@@ -1149,10 +1349,105 @@ function requestedFixtureSnapshot(
                     (node) => node.kind !== "image",
                   ),
                 }
+              : fixture === "remediation-subtree-opacity"
+                ? remediationSubtreeOpacityFixture
+              : fixture === "remediation-empty-paint"
+                ? remediationEmptyPaintFixture
+              : fixture === "remediation-dirty-region"
+                ? remediationDirtyRegionFixture
+              : fixture === "remediation-dirty-region-moved"
+                ? {
+                    ...remediationDirtyRegionFixture,
+                    nodes: remediationDirtyRegionFixture.nodes.map((node) =>
+                      node.name === "Dirty replay target"
+                        ? { ...node, x: node.x + 1 }
+                        : node,
+                      ),
+                  }
+              : fixture === "remediation-dirty-region-grid"
+                ? remediationDirtyRegionGridFixture
+              : fixture === "remediation-dirty-region-grid-moved"
+                ? {
+                    ...remediationDirtyRegionGridFixture,
+                    nodes: remediationDirtyRegionGridFixture.nodes.map((node) =>
+                      node.name === "Grid dirty replay target"
+                        ? { ...node, x: node.x + 1 }
+                        : node,
+                    ),
+                  }
+              : fixture === "remediation-alpha-mask-run"
+                ? {
+                    ...remediationAlphaMaskRunFixture,
+                    nodes: remediationAlphaMaskRunFixture.nodes.map((node) =>
+                      "fillStack" in node || "strokeStack" in node
+                        ? { ...node, fillStack: undefined, strokeStack: undefined }
+                        : node,
+                    ),
+                  }
+              : fixture === "remediation-gpu-islands"
+                ? remediationGpuIslandsFixture
+              : fixture === "remediation-image-alpha-mask"
+                ? {
+                    ...remediationImageAlphaMaskFixture,
+                    nodes: remediationImageAlphaMaskFixture.nodes.filter(
+                      (node) => node.kind !== "image",
+                    ),
+                  }
+              : fixture === "remediation-paint-stack"
+                ? {
+                    ...remediationPaintStackFixture,
+                    nodes: remediationPaintStackFixture.nodes.filter(
+                      (node) => !("fillStack" in node || "strokeStack" in node),
+                    ),
+                  }
+              : fixture === "remediation-non-linear-gradient"
+                ? remediationNonLinearGradientFixture
+              : fixture === "remediation-advanced-blend"
+                ? remediationAdvancedBlendFixture
+              : fixture === "remediation-pass-through"
+                ? remediationPassThroughFixture
+                : fixture === "remediation-normal-isolation"
+                  ? remediationNormalIsolationFixture
+                : fixture === "remediation-linear-blend"
+                  ? remediationLinearBlendFixture
+              : fixture === "remediation-image-rotation"
+                ? {
+                    ...remediationImageRotationFixture,
+                    nodes: remediationImageRotationFixture.nodes.filter(
+                      (node) => !("fillStack" in node || "strokeStack" in node),
+                    ),
+                  }
+              : fixture === "remediation-image-filters"
+                ? {
+                    ...remediationImageFiltersFixture,
+                    nodes: remediationImageFiltersFixture.nodes.filter(
+                      (node) => !("fillStack" in node || "strokeStack" in node),
+                    ),
+                  }
+              : fixture === "remediation-text-truncation"
+                ? remediationTextTruncationFixture
               : fixture === "phase2-common-nodes"
                 ? phase2CommonNodesFixture
+                : fixture === "remediation-container-clip"
+                  ? createRemediationClipFixture()
                 : fixture === "phase2-professional-composite"
                   ? createPhase2ProfessionalCompositeFixture()
+                  : fixture === "remediation-shaped-caret"
+                    ? createRemediationShapedCaretFixture()
+                  : fixture === "remediation-multi-run-gpu-text"
+                    ? createRemediationMultiRunGpuTextFixture()
+                  : fixture === "remediation-text-path-gpu"
+                    ? createRemediationTextPathGpuFixture()
+                  : fixture === "remediation-text-path-transform"
+                    ? createRemediationTextPathTransformFixture()
+                  : fixture === "remediation-text-path-structured"
+                    ? createRemediationTextPathStructuredFixture()
+                  : fixture === "remediation-tracking-gpu-text"
+                    ? createRemediationTrackingGpuTextFixture()
+                  : fixture === "remediation-rtl-gpu-text"
+                    ? createRemediationRtlGpuTextFixture()
+                  : fixture === "remediation-synthetic-font-style"
+                    ? createRemediationSyntheticFontStyleFixture()
                   : fixture === "phase2-gpu-drop-shadow"
                     ? createPhase2GpuDropShadowFixture()
                     : fixture === "phase2-gpu-layer-blur"
@@ -1163,10 +1458,26 @@ function requestedFixtureSnapshot(
     format: "legacy-projection-v0",
     nodes: structuredClone(requestedDocumentFixture.nodes) as CanvasNode[],
     viewport: structuredClone(requestedDocumentFixture.viewport),
-    ...(fixture === "phase2-professional-composite"
+    ...(fixture === "phase2-professional-composite" || fixture === "remediation-shaped-caret" || fixture === "remediation-multi-run-gpu-text" || fixture === "remediation-text-path-gpu" || fixture === "remediation-text-path-transform" || fixture === "remediation-text-path-structured" || fixture === "remediation-tracking-gpu-text" || fixture === "remediation-rtl-gpu-text" || fixture === "remediation-synthetic-font-style"
       ? {
           assets: structuredClone(
-            createPhase2ProfessionalCompositeFixture().assets,
+            (fixture === "remediation-shaped-caret"
+              ? createRemediationShapedCaretFixture()
+              : fixture === "remediation-multi-run-gpu-text"
+                ? createRemediationMultiRunGpuTextFixture()
+              : fixture === "remediation-text-path-gpu"
+                ? createRemediationTextPathGpuFixture()
+              : fixture === "remediation-text-path-transform"
+                ? createRemediationTextPathTransformFixture()
+              : fixture === "remediation-text-path-structured"
+                ? createRemediationTextPathStructuredFixture()
+              : fixture === "remediation-tracking-gpu-text"
+                ? createRemediationTrackingGpuTextFixture()
+              : fixture === "remediation-rtl-gpu-text"
+                ? createRemediationRtlGpuTextFixture()
+              : fixture === "remediation-synthetic-font-style"
+                ? createRemediationSyntheticFontStyleFixture()
+              : createPhase2ProfessionalCompositeFixture()).assets,
           ) as DocumentAsset[],
         }
       : {}),
@@ -1180,17 +1491,50 @@ function requestedFixtureAssetSeeds(
   const fixture =
     initialFixture ??
     new URLSearchParams(window.location.search).get("fixture");
-  if (fixture === "phase1-render-composite")
+  if (fixture === "phase1-render-composite") {
+    const assets = structuredClone(phase1RenderCompositeFixture.assets) as FixtureAssetSeed[];
+    const overrideId = requestedFixtureAssetOverrideId();
+    return overrideId ? assets.map((asset) => ({ ...asset, assetId: overrideId })) : assets;
+  }
+  if (fixture === "phase2-professional-composite" || fixture === "remediation-shaped-caret" || fixture === "remediation-multi-run-gpu-text" || fixture === "remediation-text-path-gpu" || fixture === "remediation-text-path-transform" || fixture === "remediation-text-path-structured" || fixture === "remediation-tracking-gpu-text" || fixture === "remediation-rtl-gpu-text" || fixture === "remediation-synthetic-font-style")
     return structuredClone(
-      phase1RenderCompositeFixture.assets,
-    ) as FixtureAssetSeed[];
-  if (fixture === "phase2-professional-composite")
-    return structuredClone(
-      createPhase2ProfessionalCompositeFixture().assets.filter(
+      (fixture === "remediation-shaped-caret"
+        ? createRemediationShapedCaretFixture()
+        : fixture === "remediation-multi-run-gpu-text"
+          ? createRemediationMultiRunGpuTextFixture()
+        : fixture === "remediation-text-path-gpu"
+          ? createRemediationTextPathGpuFixture()
+        : fixture === "remediation-text-path-transform"
+          ? createRemediationTextPathTransformFixture()
+        : fixture === "remediation-text-path-structured"
+          ? createRemediationTextPathStructuredFixture()
+        : fixture === "remediation-tracking-gpu-text"
+          ? createRemediationTrackingGpuTextFixture()
+        : fixture === "remediation-rtl-gpu-text"
+          ? createRemediationRtlGpuTextFixture()
+        : fixture === "remediation-synthetic-font-style"
+          ? createRemediationSyntheticFontStyleFixture()
+        : createPhase2ProfessionalCompositeFixture()).assets.filter(
         (asset): asset is FixtureAssetSeed =>
           typeof asset.bytesBase64 === "string",
       ),
     );
+  if (fixture === "remediation-paint-stack")
+    return structuredClone(
+      remediationPaintStackFixture.assets,
+    ) as FixtureAssetSeed[];
+  if (fixture === "remediation-image-alpha-mask")
+    return structuredClone(
+      remediationImageAlphaMaskFixture.assets,
+    ) as FixtureAssetSeed[];
+  if (fixture === "remediation-image-rotation")
+    return structuredClone(
+      remediationImageRotationFixture.assets,
+    ) as FixtureAssetSeed[];
+  if (fixture === "remediation-image-filters")
+    return structuredClone(
+      remediationImageFiltersFixture.assets,
+    ) as FixtureAssetSeed[];
   return [];
 }
 
@@ -1199,10 +1543,43 @@ function requestedFixtureAssetNodes(initialFixture?: string): CanvasNode[] {
   const fixture =
     initialFixture ??
     new URLSearchParams(window.location.search).get("fixture");
-  if (fixture === "phase1-render-composite")
-    return structuredClone(
+  if (fixture === "phase1-render-composite") {
+    const nodes = structuredClone(
       phase1RenderCompositeFixture.nodes.filter(
         (node) => node.kind === "image",
+      ),
+    ) as CanvasNode[];
+    const overrideId = requestedFixtureAssetOverrideId();
+    return overrideId ? nodes.map((node) => ({ ...node, assetId: overrideId })) : nodes;
+  }
+  if (fixture === "remediation-paint-stack")
+    return structuredClone(
+      remediationPaintStackFixture.nodes.filter(
+        (node) => "fillStack" in node || "strokeStack" in node,
+      ),
+    ) as CanvasNode[];
+  if (fixture === "remediation-alpha-mask-run")
+    return structuredClone(
+      remediationAlphaMaskRunFixture.nodes.filter(
+        (node) => "fillStack" in node || "strokeStack" in node,
+      ),
+    ) as CanvasNode[];
+  if (fixture === "remediation-image-alpha-mask")
+    return structuredClone(
+      remediationImageAlphaMaskFixture.nodes.filter(
+        (node) => node.kind === "image",
+      ),
+    ) as CanvasNode[];
+  if (fixture === "remediation-image-rotation")
+    return structuredClone(
+      remediationImageRotationFixture.nodes.filter(
+        (node) => "fillStack" in node || "strokeStack" in node,
+      ),
+    ) as CanvasNode[];
+  if (fixture === "remediation-image-filters")
+    return structuredClone(
+      remediationImageFiltersFixture.nodes.filter(
+        (node) => "fillStack" in node || "strokeStack" in node,
       ),
     ) as CanvasNode[];
   return [];
@@ -1227,16 +1604,74 @@ function requestedFixtureStatus(initialFixture?: string) {
     return "editable operations dashboard loaded";
   if (fixture === "phase1-shape-100k")
     return "generated Phase 1 F-SHAPE-100K fixture loaded";
+  if (fixture === "remediation-pf02-100k")
+    return "generated remediation PF-02 100K structure fixture loaded";
+  if (fixture === "remediation-pf02-layout-100k")
+    return "generated remediation PF-02 100K layout cascade fixture loaded";
   if (fixture === "phase1-text-10k")
     return "fixed Phase 1 F-TEXT-10K fixture loaded";
   if (fixture === "phase1-text-multilingual")
     return "fixed Phase 1 text fixture loaded";
   if (fixture === "phase1-render-composite")
     return "fixed Phase 1 render composite fixture loaded";
+  if (fixture === "remediation-subtree-opacity")
+    return "fixed RF-02 subtree opacity fixture loaded";
+  if (fixture === "remediation-empty-paint")
+    return "fixed W02 empty Paint pixel fixture loaded";
+  if (fixture === "remediation-dirty-region")
+    return "fixed W06 dirty-region replay fixture loaded";
+  if (fixture === "remediation-dirty-region-moved")
+    return "fixed W06 moved dirty-region reference loaded";
+  if (fixture === "remediation-dirty-region-grid")
+    return "fixed W06 visible-grid dirty-region replay fixture loaded";
+  if (fixture === "remediation-dirty-region-grid-moved")
+    return "fixed W06 moved visible-grid reference loaded";
+  if (fixture === "remediation-alpha-mask-run")
+    return "fixed RF-05 alpha-mask run fixture loaded";
+  if (fixture === "remediation-gpu-islands")
+    return "fixed W13 ordered GPU/Canvas islands fixture loaded";
+  if (fixture === "remediation-image-alpha-mask")
+    return "fixed RF-05 image alpha-mask fixture loaded";
+  if (fixture === "remediation-paint-stack")
+    return "fixed W09 Paint Stack pixel fixture loaded";
+  if (fixture === "remediation-non-linear-gradient")
+    return "fixed W12-P non-linear gradient fixture loaded";
+  if (fixture === "remediation-advanced-blend")
+    return "fixed W12-P advanced blend fixture loaded";
+  if (fixture === "remediation-pass-through")
+    return "fixed W12-P pass-through fixture loaded";
+  if (fixture === "remediation-normal-isolation")
+    return "fixed W12-P isolated NORMAL fixture loaded";
+  if (fixture === "remediation-linear-blend")
+    return "fixed W12-P linear blend fixture loaded";
+  if (fixture === "remediation-image-rotation")
+    return "fixed W12-P image rotation fixture loaded";
+  if (fixture === "remediation-image-filters")
+    return "fixed W12-P image filters fixture loaded";
+  if (fixture === "remediation-text-truncation")
+    return "fixed W12-T text truncation fixture loaded";
   if (fixture === "phase2-common-nodes")
     return "fixed Phase 2 common-nodes fixture loaded";
+  if (fixture === "remediation-container-clip")
+    return "fixed RF-03/RF-04 container clip fixture loaded";
   if (fixture === "phase2-professional-composite")
     return "fixed Phase 2 professional composite fixture loaded";
+  if (fixture === "remediation-shaped-caret")
+    return "fixed W12-T shaped caret fixture loaded";
+  if (fixture === "remediation-multi-run-gpu-text")
+    return "fixed W12-T per-glyph GPU font fixture loaded";
+  if (fixture === "remediation-text-path-gpu")
+    return "fixed W12-S shaped TextPath GPU fixture loaded";
+  if (fixture === "remediation-text-path-transform")
+    return "fixed W12-S transformed TextPath fixture loaded";
+  if (fixture === "remediation-text-path-structured")
+    return "fixed W12-S structured TextPath fixture loaded";
+  if (fixture === "remediation-tracking-gpu-text")
+    return "fixed W12-T GPU tracking fixture loaded";
+  if (fixture === "remediation-rtl-gpu-text")
+    return "fixed W12-T RTL GPU text fixture loaded";
+  if (fixture === "remediation-synthetic-font-style")
+    return "fixed W12-T synthetic font style fixture loaded";
   if (fixture === "phase2-gpu-drop-shadow")
     return "fixed Phase 2 GPU Drop Shadow fixture loaded";
   if (fixture === "phase2-gpu-layer-blur")
@@ -1277,6 +1712,78 @@ function requestedStabilityAssetReadDelayMs() {
   return Number.isInteger(requested)
     ? Math.min(15_000, Math.max(0, requested))
     : 0;
+}
+
+/** Development-only W06 evidence delays bytes for a bundled fixture asset
+ * after its Canonical metadata and Image node are committed. Readiness then
+ * changes presentation without changing the document revision. */
+function requestedFixtureAssetBytesDelayMs() {
+  if (!isStabilityEvidenceCapture()) return 0;
+  const requested = Number(
+    new URLSearchParams(window.location.search).get("simulateFixtureAssetBytesDelayMs"),
+  );
+  return Number.isInteger(requested)
+    ? Math.min(15_000, Math.max(0, requested))
+    : 0;
+}
+
+function requestedFixtureAssetDecodeFailureCount() {
+  if (!isStabilityEvidenceCapture()) return 0;
+  const requested = Number(
+    new URLSearchParams(window.location.search).get("simulateFixtureAssetDecodeFailures"),
+  );
+  return Number.isInteger(requested)
+    ? Math.min(3, Math.max(0, requested))
+    : 0;
+}
+
+function requestedFrameHashEvidence() {
+  if (!isStabilityEvidenceCapture()) return false;
+  return new URLSearchParams(window.location.search).get("captureFrameHash") === "1";
+}
+
+function requestedFrameSamples() {
+  if (!isStabilityEvidenceCapture() || typeof window === "undefined") return [];
+  const fixture = new URLSearchParams(window.location.search).get("fixture");
+  if (fixture === "remediation-normal-isolation") return [
+    { label: "isolated-normal", x: -200, y: 0 },
+    { label: "isolated-normal-reference", x: -50, y: 0 },
+    { label: "pass-through", x: 100, y: 0 },
+    { label: "direct-multiply-reference", x: 250, y: 0 },
+  ] as const;
+  if (fixture === "remediation-image-filters") return [
+    { label: "unfiltered-dark", x: -170, y: 0 },
+    { label: "unfiltered-light", x: -150, y: 0 },
+    { label: "seven-adjustment-dark", x: 70, y: 0 },
+    { label: "seven-adjustment-light", x: 90, y: 0 },
+  ] as const;
+  if (fixture === "remediation-gpu-islands") return [
+    { label: "gpu-red", x: -230, y: -90 },
+    { label: "canvas-over-gpu", x: -170, y: -50 },
+    { label: "gpu-over-canvas", x: -80, y: -20 },
+    { label: "canvas-mask", x: 70, y: -40 },
+    { label: "gpu-over-mask", x: 155, y: 5 },
+    { label: "masked-outside", x: 245, y: 55 },
+  ] as const;
+  if (fixture !== "remediation-linear-blend") return [];
+  return [
+    { label: "linear-burn", x: -170, y: 0 },
+    { label: "linear-dodge", x: -50, y: 0 },
+    { label: "linear-burn-reference", x: 80, y: 0 },
+    { label: "linear-dodge-reference", x: 200, y: 0 },
+    { label: "paint-linear-burn", x: -170, y: 70 },
+    { label: "paint-linear-dodge", x: -50, y: 70 },
+    { label: "paint-linear-burn-reference", x: 80, y: 70 },
+    { label: "paint-linear-dodge-reference", x: 200, y: 70 },
+  ] as const;
+}
+
+function requestedFixtureAssetOverrideId() {
+  if (!isStabilityEvidenceCapture()) return undefined;
+  const value = new URLSearchParams(window.location.search).get("fixtureAssetId");
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : undefined;
 }
 
 function waitForStabilityAssetReadDelay(signal: AbortSignal) {
@@ -1432,6 +1939,7 @@ export function EditorShell({
   const figmaImportInputRef = useRef<HTMLInputElement>(null);
   const figmaAssetInputRef = useRef<HTMLInputElement>(null);
   const assetUploadAbortRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
   /** The DOM editor needs the same document-scoped family the Worker uses. */
   const mainFontFacesRef = useRef(new FontFaceRegistry());
   const mainFontBytesRef = useRef(new Map<string, ArrayBuffer>());
@@ -1444,6 +1952,9 @@ export function EditorShell({
   );
   const pendingFigmaAssetBindingRef = useRef<
     PendingFigmaAssetBinding | undefined
+  >(undefined);
+  const pendingFigmaAssetCancellationRef = useRef<
+    PendingFigmaAssetCancellation | undefined
   >(undefined);
   const persistenceQueue = useRef(Promise.resolve());
   const remoteSyncQueue = useRef(Promise.resolve());
@@ -1476,6 +1987,7 @@ export function EditorShell({
   const [frameQuality, setFrameQuality] = useState<
     "pending" | "preview" | "sharp" | "settled"
   >("pending");
+  const [frameHashEvidence, setFrameHashEvidence] = useState<Extract<WorkerToMain, { type: "frame-hash" }> | undefined>();
   const [documentLoadingState, setDocumentLoadingState] = useState<{
     label: string;
     completed?: number;
@@ -1504,12 +2016,15 @@ export function EditorShell({
   const [pendingFigmaAssetRequests, setPendingFigmaAssetRequests] = useState<
     FigmaRestAssetRequest[]
   >([]);
+  const pendingFigmaAssetRequestsRef = useRef<FigmaRestAssetRequest[]>([]);
+  const figmaAssetHistoryReconciliationRef = useRef(true);
   const [figmaAssetBinding, setFigmaAssetBinding] = useState(false);
   const [sliceExportScale, setSliceExportScale] = useState(1);
   const [sliceExportBackground, setSliceExportBackground] =
     useState<SliceExportBackground>("transparent");
   const [pdfExportBackground, setPdfExportBackground] =
     useState<PdfExportBackground>("transparent");
+  const [exporting, setExporting] = useState(false);
   const [writerMode, setWriterMode] = useState<WriterLeaseMode>("acquiring");
   const [accessPreference, setAccessPreference] = useState<"edit" | "view">(
     "edit",
@@ -1557,9 +2072,23 @@ export function EditorShell({
   );
   const canvasTextCommitRef = useRef(false);
   const canvasTextIsComposingRef = useRef(false);
+  /** WebKit/mobile IMEs may blur the contentEditable host before dispatching
+   * compositionend. Preserve the user's commit intent until the final DOM
+   * candidate arrives instead of leaving an unfocused draft stranded. */
+  const canvasTextCommitAfterCompositionRef = useRef(false);
   const canvasTextEditorRef = useRef<HTMLDivElement>(null);
+  /** Arrow handling already moved the native Selection. Skipping the next
+   * layout-effect write preserves Chromium's otherwise opaque bidi affinity. */
+  const preserveCanvasNativeSelectionRef = useRef<
+    { anchor: number; caret: number } | undefined
+  >(undefined);
   const pendingCanvasCaretLayoutsRef = useRef(
-    new Map<string, { nodeId: string; text: string; targetUtf16: number }>(),
+    new Map<string, {
+      nodeId: string;
+      text: string;
+      targetUtf16: number;
+      pointMetrics?: RustTextCaretPointMetrics;
+    }>(),
   );
   /** A restarted Worker owns no prior layout response. Keep the DOM draft, but
    * never reuse its old caret map after that boundary. */
@@ -1597,6 +2126,8 @@ export function EditorShell({
     [],
   );
   const simulateGpuFault = useMemo(() => requestedGpuFaultSimulation(), []);
+  const captureFrameHash = useMemo(() => requestedFrameHashEvidence(), []);
+  const captureFrameSamples = useMemo(() => requestedFrameSamples(), []);
   const simulateWorkerCrashes = useMemo(
     () => requestedEngineCrashSimulationCount(),
     [],
@@ -1638,6 +2169,14 @@ export function EditorShell({
       return;
     const editor = canvasTextEditorRef.current;
     if (!editor) return;
+    if (preserveCanvasNativeSelectionRef.current) {
+      const preserved = preserveCanvasNativeSelectionRef.current;
+      preserveCanvasNativeSelectionRef.current = undefined;
+      if (
+        preserved.anchor === canvasTextSelectionAnchor &&
+        preserved.caret === canvasTextCaret
+      ) return;
+    }
     editor.focus({ preventScroll: true });
     if (canvasTextSelectionAnchor === canvasTextCaret)
       placeContentEditableCaret(editor, canvasTextCaret);
@@ -1662,13 +2201,24 @@ export function EditorShell({
       workerRef.current?.postMessage(message, transfer ?? []),
     [],
   );
+  const hoverAutoLayoutPadding = useCallback(
+    (nodeId: string | undefined, side?: AutoLayoutPaddingSide) =>
+      post({ type: "auto-layout-padding-hover", nodeId, side }),
+    [post],
+  );
   const requestCanvasCaretLayout = useCallback(
-    (nodeId: string, text: string, targetUtf16: number) => {
+    (
+      nodeId: string,
+      text: string,
+      targetUtf16: number,
+      pointMetrics?: RustTextCaretPointMetrics,
+    ) => {
       const requestId = createId();
       pendingCanvasCaretLayoutsRef.current.set(requestId, {
         nodeId,
         text,
         targetUtf16,
+        pointMetrics,
       });
       post({ type: "text-caret-layout", requestId, nodeId, text });
     },
@@ -1952,6 +2502,8 @@ export function EditorShell({
         remoteAdoptedRevisionRef.current = undefined;
         setStatus("Engine worker online · resetting demo");
       }
+      if (["undo", "redo", "reset"].includes(next.type))
+        figmaAssetHistoryReconciliationRef.current = true;
       // Selection is presentation state, not a document transaction. Sending it
       // directly prevents a queued remote/durable edit from delaying layer focus.
       if (!changesDocument(next)) {
@@ -2107,6 +2659,7 @@ export function EditorShell({
       optimisticUpdatesRef.current.clear();
       recoverySnapshotRef.current ??= snapshotRef.current.localSnapshot;
       canvasTextIsComposingRef.current = false;
+      canvasTextCommitAfterCompositionRef.current = false;
       pendingCanvasCaretLayoutsRef.current.clear();
       needsCanvasTextCaretRecoveryRef.current = true;
       workerRef.current?.terminate();
@@ -2137,11 +2690,18 @@ export function EditorShell({
     optimisticUpdatesRef.current.clear();
     recoverySnapshotRef.current ??= snapshotRef.current.localSnapshot;
     canvasTextIsComposingRef.current = false;
+    canvasTextCommitAfterCompositionRef.current = false;
     pendingCanvasCaretLayoutsRef.current.clear();
     needsCanvasTextCaretRecoveryRef.current = true;
     setCanvasTextEdit((current) =>
       current
-        ? { ...current, rustCaretReady: false, rustCaretLayout: undefined }
+        ? {
+            ...current,
+            rustCaretVisualIndex: undefined,
+            rustSelectionAnchorVisualIndex: undefined,
+            rustCaretReady: false,
+            rustCaretLayout: undefined,
+          }
         : current,
     );
     workerRef.current?.terminate();
@@ -2156,6 +2716,7 @@ export function EditorShell({
 
   useEffect(
     () => () => {
+      exportAbortRef.current?.abort();
       if (recoveryTimerRef.current) clearTimeout(recoveryTimerRef.current);
       if (recoveryStabilityTimerRef.current)
         clearTimeout(recoveryStabilityTimerRef.current);
@@ -2379,6 +2940,7 @@ export function EditorShell({
     setDocumentHydrated(false);
     setFirstFrameReady(false);
     setFrameQuality("pending");
+    setFrameHashEvidence(undefined);
     setDocumentLoadingState({ label: "正在读取设计文档…" });
     setDocumentAuthorityReady(false);
     setReconciliationProgress(undefined);
@@ -2390,6 +2952,9 @@ export function EditorShell({
       setError("此浏览器不支持 OffscreenCanvas，无法启动独立画布引擎。");
       return;
     }
+    const fixtureAssetDeliveryTimers = new Set<
+      ReturnType<typeof setTimeout>
+    >();
     fixtureAssetsSeededRef.current = false;
     fixtureAssetNodesCreatedRef.current = false;
     remoteBootstrapRequestedRef.current = false;
@@ -2691,6 +3256,16 @@ export function EditorShell({
             : current;
         });
       }
+      if (data.type === "frame-failed" && !disposed) {
+        setFrameQuality("pending");
+        setFirstFrameReady(data.retainedRevision !== undefined);
+        setStatus(
+          data.retainedRevision === undefined
+            ? "Engine worker online · frame unavailable · composite resource limit"
+            : `Engine worker online · showing revision ${data.retainedRevision} · revision ${data.revision} exceeded the composite resource limit`,
+        );
+      }
+      if (data.type === "frame-hash" && !disposed) setFrameHashEvidence(data);
       if (data.type === "remote-load-progress") {
         if (
           data.stage !== "render-nodes" &&
@@ -2868,15 +3443,27 @@ export function EditorShell({
               current.draft !== pending.text
             )
               return current;
-            const caret = snapUtf16CaretToRustLayout(
-              current.draft,
-              pending.targetUtf16,
-              layout,
-            );
+            const caretPosition = pending.pointMetrics
+              ? rustTextCaretPositionAtPoint(
+                  current.draft,
+                  layout,
+                  pending.pointMetrics,
+                ) ?? rustTextCaretPositionAtUtf16Index(
+                  current.draft,
+                  pending.targetUtf16,
+                  layout,
+                )
+              : rustTextCaretPositionAtUtf16Index(
+                  current.draft,
+                  pending.targetUtf16,
+                  layout,
+                );
             return {
               ...current,
-              caret,
-              selectionAnchor: caret,
+              caret: caretPosition.utf16Index,
+              selectionAnchor: caretPosition.utf16Index,
+              rustCaretVisualIndex: caretPosition.visualIndex,
+              rustSelectionAnchorVisualIndex: caretPosition.visualIndex,
               rustCaretReady: true,
               rustCaretLayout: layout,
             };
@@ -2972,7 +3559,7 @@ export function EditorShell({
                 pixelWidth: seed.pixelWidth,
                 pixelHeight: seed.pixelHeight,
               };
-              if (!seed.preRegistered)
+              if (fixtureAssetNeedsRegistration(data.snapshot.assets, seed))
                 post({
                   type: "register-asset",
                   transactionId: createId(),
@@ -2990,15 +3577,45 @@ export function EditorShell({
                   asset,
                   bytes.slice(0),
                 );
-              post(
-                {
-                  type: "asset-bytes",
-                  assetId: asset.assetId,
-                  mediaType: asset.mediaType,
-                  bytes,
-                },
-                [bytes],
-              );
+              const deliverBytes = () => {
+                const delivery = bytes.slice(0);
+                post(
+                  {
+                    type: "asset-bytes",
+                    assetId: asset.assetId,
+                    mediaType: asset.mediaType,
+                    bytes: delivery,
+                  },
+                  [delivery],
+                );
+              };
+              const fixtureAssetBytesDelayMs = requestedFixtureAssetBytesDelayMs();
+              if (fixtureAssetBytesDelayMs > 0) {
+                const timer = window.setTimeout(() => {
+                  fixtureAssetDeliveryTimers.delete(timer);
+                  try { deliverBytes(); } catch { /* evidence page navigated away before its delayed seed */ }
+                }, fixtureAssetBytesDelayMs);
+                fixtureAssetDeliveryTimers.add(timer);
+              }
+              else deliverBytes();
+              const decodeFailureCount = requestedFixtureAssetDecodeFailureCount();
+              if (decodeFailureCount > 0 && asset.mediaType.startsWith("image/")) {
+                for (let attempt = 0; attempt < decodeFailureCount; attempt += 1) {
+                  const timer = window.setTimeout(() => {
+                    fixtureAssetDeliveryTimers.delete(timer);
+                    const invalidBytes = new Uint8Array([0x4d, 0x46, attempt, 0xff]).buffer;
+                    try {
+                      post({
+                        type: "asset-bytes",
+                        assetId: asset.assetId,
+                        mediaType: asset.mediaType,
+                        bytes: invalidBytes,
+                      }, [invalidBytes]);
+                    } catch { /* evidence page navigated away before its failure seed */ }
+                  }, fixtureAssetBytesDelayMs + 1_200 + attempt * 250);
+                  fixtureAssetDeliveryTimers.add(timer);
+                }
+              }
             }
           } catch {
             setStatus("Engine worker online · fixture asset unavailable");
@@ -3006,7 +3623,8 @@ export function EditorShell({
         }
         if (
           fixtureAssetNodes.length &&
-          fixtureAssetsSeededRef.current &&
+          data.snapshot.documentCore === "Rust/WASM bridge ready" &&
+          (fixtureAssetSeeds.length === 0 || fixtureAssetsSeededRef.current) &&
           !fixtureAssetNodesCreatedRef.current &&
           fixtureAssetSeeds.every((asset) =>
             data.snapshot.assets?.some(
@@ -3015,17 +3633,19 @@ export function EditorShell({
           )
         ) {
           fixtureAssetNodesCreatedRef.current = true;
-          post({
-            type: "transaction",
-            transaction: {
-              id: createId(),
-              baseRevision: data.snapshot.revision,
-              commands: fixtureAssetNodes.map((node) => ({
-                type: "create" as const,
-                node,
-              })),
-            },
-          });
+          const commands = fixtureAssetNodeCommands(
+            data.snapshot.nodes,
+            fixtureAssetNodes,
+          );
+          if (commands.length)
+            post({
+              type: "transaction",
+              transaction: {
+                id: createId(),
+                baseRevision: data.snapshot.revision,
+                commands,
+              },
+            });
         }
         // Fixture hydration is intentionally expensive and excluded from the
         // interaction window. Begin main-thread evidence after the 50K projection
@@ -3040,6 +3660,41 @@ export function EditorShell({
         }
         revisionRef.current = data.snapshot.revision;
         confirmedSnapshotRef.current = data.snapshot;
+        if (
+          figmaAssetHistoryReconciliationRef.current ||
+          data.snapshot.hydrationRequestId !== undefined
+        ) {
+          figmaAssetHistoryReconciliationRef.current = false;
+          const durableFigmaAssetRequests = pendingFigmaRestAssetRequests(
+            data.snapshot.nodes,
+          );
+          const previousFigmaAssetRequests = pendingFigmaAssetRequestsRef.current;
+          if (
+            durableFigmaAssetRequests.length !==
+              previousFigmaAssetRequests.length ||
+            durableFigmaAssetRequests.some(
+              (request, index) =>
+                !sameFigmaAssetRequest(
+                  request,
+                  previousFigmaAssetRequests[index]!,
+                ),
+            )
+          ) {
+            pendingFigmaAssetRequestsRef.current = durableFigmaAssetRequests;
+            setPendingFigmaAssetRequests(durableFigmaAssetRequests);
+            if (
+              !pendingFigmaImportRef.current &&
+              !pendingFigmaAssetBindingRef.current &&
+              !pendingFigmaAssetCancellationRef.current
+            ) {
+              setFigmaImportStatus(
+                durableFigmaAssetRequests.length > 0
+                  ? `Figma image authorization restored from history · ${durableFigmaAssetRequests.length} image${durableFigmaAssetRequests.length === 1 ? "" : "s"} need authorization`
+                  : "Figma image authorization closed by history",
+              );
+            }
+          }
+        }
         const projectedSnapshot = applyOptimisticUpdates(
           data.snapshot,
           optimisticUpdatesRef.current.values(),
@@ -3253,9 +3908,11 @@ export function EditorShell({
             setFigmaImportStatus(
               `Import failed · ${data.errorCode.toLowerCase().replaceAll("_", " ")}`,
             );
+            pendingFigmaAssetRequestsRef.current = [];
             setPendingFigmaAssetRequests([]);
           } else {
             const { summary } = figmaImport.report;
+            pendingFigmaAssetRequestsRef.current = figmaImport.assetRequests;
             setPendingFigmaAssetRequests(figmaImport.assetRequests);
             setFigmaImportStatus(
               `Imported ${summary.pageCount} page${summary.pageCount === 1 ? "" : "s"} · ${summary.nodeCount} layer${summary.nodeCount === 1 ? "" : "s"}${summary.assetRequestCount ? ` · ${summary.assetRequestCount} image${summary.assetRequestCount === 1 ? "" : "s"} need authorization` : ""}${summary.rejectedCount || summary.omittedCount || summary.preservedExtensionCount ? " · report ready" : ""}`,
@@ -3272,12 +3929,26 @@ export function EditorShell({
             );
           else {
             const completed = figmaAssetBinding.request;
-            setPendingFigmaAssetRequests((current) =>
-              current.filter(
-                (request) => !sameFigmaAssetRequest(request, completed),
-              ),
+            const remaining = pendingFigmaAssetRequestsRef.current.filter(
+              (request) => !sameFigmaAssetRequest(request, completed),
             );
+            pendingFigmaAssetRequestsRef.current = remaining;
+            setPendingFigmaAssetRequests(remaining);
             setFigmaImportStatus("Figma image bound to its imported layer");
+          }
+        }
+        const figmaAssetCancellation = pendingFigmaAssetCancellationRef.current;
+        if (figmaAssetCancellation?.transactionId === data.transactionId) {
+          pendingFigmaAssetCancellationRef.current = undefined;
+          setFigmaAssetBinding(false);
+          if (data.errorCode)
+            setFigmaImportStatus(
+              `Image cancellation failed · ${data.errorCode.toLowerCase().replaceAll("_", " ")}`,
+            );
+          else {
+            pendingFigmaAssetRequestsRef.current = [];
+            setPendingFigmaAssetRequests([]);
+            setFigmaImportStatus("Figma image binding cancelled · source locks restored");
           }
         }
         const acknowledgement = transactionQueueRef.current?.acknowledge(data);
@@ -3330,12 +4001,16 @@ export function EditorShell({
         simulateGpuLosses,
         simulateGpuLossAfterImage,
         simulateGpuFault,
+        captureFrameHash,
+        captureFrameSamples,
       },
       [offscreen],
     );
     syncWorkerVisibility();
     return () => {
       disposed = true;
+      fixtureAssetDeliveryTimers.forEach((timer) => clearTimeout(timer));
+      fixtureAssetDeliveryTimers.clear();
       if (crashSimulationTimer) clearTimeout(crashSimulationTimer);
       if (remoteBootstrapRetryTimer) clearTimeout(remoteBootstrapRetryTimer);
       observer.disconnect();
@@ -3363,6 +4038,8 @@ export function EditorShell({
     rehydrateFromRemote,
     remoteSync,
     rendererPreference,
+    captureFrameHash,
+    captureFrameSamples,
     setStatusForRevision,
     simulateGpuFault,
     simulateGpuLossAfterImage,
@@ -3707,6 +4384,9 @@ export function EditorShell({
     return snapshot.nodes.filter((node) => ids.has(node.id));
   }, [snapshot.nodes, snapshot.selectedIds]);
   const selected = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
+  const selectedTransformGroupGeometry = selected?.kind === "transformGroup"
+    ? resolveMultiResizeSelection(snapshot.nodes, [selected.id])?.bounds
+    : undefined;
   const selectedBooleanFlattenable = Boolean(
     selected?.kind === "booleanOperation" &&
     snapshot.nodes.filter((node) => node.parentId === selected.id).length >=
@@ -3839,6 +4519,7 @@ export function EditorShell({
       button: event.button,
       occurredAt: Date.now(),
       ...(event.metaKey || event.ctrlKey ? { deepSelect: true } : {}),
+      ...(event.metaKey || event.ctrlKey ? { ignoreConstraints: true } : {}),
       ...(readOnly ? { readOnly: true } : {}),
     };
     if (type === "move") {
@@ -3865,6 +4546,7 @@ export function EditorShell({
       button: event.button,
       occurredAt: Date.now(),
       ...(event.metaKey || event.ctrlKey ? { deepSelect: true as const } : {}),
+      ...(event.metaKey || event.ctrlKey ? { ignoreConstraints: true as const } : {}),
       ...(readOnly ? { readOnly: true as const } : {}),
     };
     // PointerEvent does not reliably carry a click count. The browser's native
@@ -3893,7 +4575,10 @@ export function EditorShell({
       .reverse()
       .find((node) => textNodeContainsPoint(node, point));
     if (!target) return;
-    const fontAssetId = target.textProperties?.runs[0]?.font?.assetId;
+    const fontAssetId = (
+      target.textProperties?.runs[0]?.font
+      ?? (target.text ? undefined : target.textProperties?.baseStyle?.font)
+    )?.assetId;
     if (fontAssetId) {
       const fontAsset = snapshot.assets?.find(
         (asset) => asset.assetId === fontAssetId,
@@ -3908,6 +4593,7 @@ export function EditorShell({
     }
     command({ type: "select", ids: [target.id] });
     canvasTextCommitRef.current = false;
+    canvasTextCommitAfterCompositionRef.current = false;
     post({ type: "editing-text", nodeId: target.id });
     const text = target.text ?? "";
     const caret = textCaretAtPoint(target, point);
@@ -3920,7 +4606,18 @@ export function EditorShell({
       selectionAnchor: caret,
       rustCaretReady: false,
     });
-    requestCanvasCaretLayout(target.id, text, caret);
+    const local = textLocalPoint(target, point);
+    const primary = target.textProperties?.runs[0]
+      ?? (target.text ? undefined : target.textProperties?.baseStyle);
+    requestCanvasCaretLayout(target.id, text, caret, {
+      x: local.x,
+      y: local.y,
+      width: target.width,
+      fontSize: primary?.fontSize ?? 31,
+      lineHeight: resolvedTextLineHeight(target.textProperties, primary?.fontSize ?? 31),
+      paragraphSpacing: textParagraphGap(target.textProperties),
+      alignment: target.textProperties?.paragraph.alignment ?? "left",
+    });
   };
   const commitCanvasTextEdit = (domDraft?: string) => {
     if (
@@ -3955,6 +4652,7 @@ export function EditorShell({
   const cancelCanvasTextEdit = () => {
     canvasTextCommitRef.current = true;
     canvasTextIsComposingRef.current = false;
+    canvasTextCommitAfterCompositionRef.current = false;
     pendingCanvasCaretLayoutsRef.current.clear();
     post({ type: "editing-text" });
     setCanvasTextEdit(undefined);
@@ -4037,6 +4735,8 @@ export function EditorShell({
               draft: next.draft,
               caret: next.caret,
               selectionAnchor: next.selectionAnchor,
+              rustCaretVisualIndex: undefined,
+              rustSelectionAnchorVisualIndex: undefined,
               rustCaretReady: false,
               rustCaretLayout: undefined,
             }
@@ -4082,9 +4782,7 @@ export function EditorShell({
           ? `"${fontFamilyForAsset(primary.font.assetId)}", `
           : "";
         const fontSize = primary?.fontSize ?? 31;
-        const lineHeight =
-          canvasTextEdit?.properties.paragraph.lineHeight ??
-          DEFAULT_TEXT_LINE_HEIGHT;
+        const lineHeight = resolvedTextLineHeight(canvasTextEdit?.properties, fontSize);
         return {
           left: `calc(50% + ${(canvasTextNode.x + snapshot.viewport.x) * snapshot.viewport.zoom}px)`,
           top: `calc(50% + ${(canvasTextNode.y + snapshot.viewport.y) * snapshot.viewport.zoom}px)`,
@@ -4121,6 +4819,13 @@ export function EditorShell({
           ),
         }))
       : [];
+  const canvasTextEditListMarkerGutter = canvasTextEdit
+    ? textListMarkerGutterForProperties(
+        canvasTextEdit.draft,
+        canvasTextEdit.properties,
+        (value) => Array.from(value).length * 18 * snapshot.viewport.zoom,
+      )
+    : 0;
   const update = (patch: Partial<CanvasNode>) => {
     if (
       patch.strokeWidth !== undefined &&
@@ -4253,7 +4958,11 @@ export function EditorShell({
   const updateSelectionGeometry = (
     patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height">>,
   ) => {
-    if (safeMode || !writerRef.current || selectedNodes.length < 2) return;
+    if (
+      safeMode
+      || !writerRef.current
+      || (selectedNodes.length < 2 && selectedNodes[0]?.kind !== "transformGroup")
+    ) return;
     const current = snapshotRef.current;
     const resolved = selectionGeometryPatches(
       current.nodes,
@@ -4400,29 +5109,6 @@ export function EditorShell({
             [axis]: value,
           },
         },
-      })),
-    );
-  };
-  const removeSelectionConstraints = () => {
-    if (
-      safeMode ||
-      !writerRef.current ||
-      selectedNodes.length < 2 ||
-      !selectedNodes.every(
-        (node) =>
-          hasFrameConstraintScope(snapshotRef.current.nodes, node) &&
-          !hasActiveAutoLayoutConstraintOverride(
-            snapshotRef.current.nodes,
-            node,
-          ),
-      )
-    )
-      return;
-    transactionQueueRef.current?.enqueue(
-      selectedNodes.map((node) => ({
-        type: "update" as const,
-        id: node.id,
-        patch: { constraints: undefined },
       })),
     );
   };
@@ -4703,6 +5389,19 @@ export function EditorShell({
     },
     [canEdit, documentId, figmaAssetBinding, pendingFigmaAssetRequests, post],
   );
+  const cancelPendingFigmaImages = useCallback(() => {
+    if (!canEdit || figmaAssetBinding || !pendingFigmaAssetRequests.length) return;
+    const transactionId = createId();
+    pendingFigmaAssetCancellationRef.current = { transactionId };
+    setFigmaAssetBinding(true);
+    setFigmaImportStatus("Cancelling Figma image binding");
+    post({
+      type: "cancel-figma-rest-assets",
+      transactionId,
+      baseRevision: revisionRef.current,
+      pending: pendingFigmaAssetRequests,
+    });
+  }, [canEdit, figmaAssetBinding, pendingFigmaAssetRequests, post]);
   const selectPage = useCallback(
     (id: string) => {
       // A page switch cannot preserve a DOM host that is no longer on the active
@@ -4710,6 +5409,7 @@ export function EditorShell({
       // a stale selection to be committed into another page.
       canvasTextCommitRef.current = true;
       canvasTextIsComposingRef.current = false;
+      canvasTextCommitAfterCompositionRef.current = false;
       pendingCanvasCaretLayoutsRef.current.clear();
       needsCanvasTextCaretRecoveryRef.current = false;
       setCanvasTextEdit(undefined);
@@ -4738,8 +5438,25 @@ export function EditorShell({
         ...new Set(
           nodes.flatMap((node) => [
             ...(node.assetId ? [node.assetId] : []),
+            ...(node.fillStack?.layers.flatMap((layer) =>
+              layer.image ? [layer.image.assetId] : [],
+            ) ?? []),
+            ...(node.strokeStack?.layers.flatMap((layer) =>
+              layer.image ? [layer.image.assetId] : [],
+            ) ?? []),
             ...(node.textProperties?.runs.flatMap((run) =>
               run.font ? [run.font.assetId] : [],
+            ) ?? []),
+            ...(node.textProperties?.baseStyle?.font
+              ? [node.textProperties.baseStyle.font.assetId]
+              : []),
+            ...(node.textProperties?.runs.flatMap((run) =>
+              run.fillStack?.layers.flatMap((layer) =>
+                layer.image ? [layer.image.assetId] : [],
+              ) ?? [],
+            ) ?? []),
+            ...(node.textProperties?.baseStyle?.fillStack?.layers.flatMap(
+              (layer) => layer.image ? [layer.image.assetId] : [],
             ) ?? []),
             ...(node.textProperties?.fallbackFonts?.map(
               (font) => font.assetId,
@@ -4928,6 +5645,13 @@ export function EditorShell({
   }, [exportAssetDataUris]);
   const exportSelectedSliceRaster = useCallback(
     async (format: "png" | "pdf") => {
+      if (exportAbortRef.current) return;
+      const controller = new AbortController();
+      exportAbortRef.current = controller;
+      setExporting(true);
+      setStatus(`Preparing ${format.toUpperCase()} export`);
+      let targetLabel = "Page";
+      try {
       const current = snapshotRef.current;
       const selectedSlices = current.selectedIds
         .map((id) => current.nodes.find((node) => node.id === id))
@@ -5042,7 +5766,7 @@ export function EditorShell({
                 }),
               },
             ];
-      const targetLabel = slicesOnly
+      targetLabel = slicesOnly
         ? "Slice"
         : layersOnly
           ? "Selection"
@@ -5062,9 +5786,9 @@ export function EditorShell({
         );
         return;
       }
-      try {
         if (format === "png") {
           for (const { name, target, result } of exports) {
+            throwIfExportAborted(controller.signal);
             const stem = svgFileStem(name);
             const artifactStem = `${stem}${sliceExportScale === 1 ? "" : `@${sliceExportScale}x`}`;
             downloadBlob(
@@ -5074,6 +5798,7 @@ export function EditorShell({
                 result.height,
                 sliceExportScale,
                 sliceExportBackground,
+                controller.signal,
               ),
               `${artifactStem}.png`,
             );
@@ -5088,6 +5813,7 @@ export function EditorShell({
             Awaited<ReturnType<typeof rasterizeSvgToPdfPage>>
           >;
           for (const { result } of exports) {
+            throwIfExportAborted(controller.signal);
             pages.push(
               await rasterizeSvgToPdfPage(
                 result.svg,
@@ -5095,11 +5821,13 @@ export function EditorShell({
                 result.height,
                 sliceExportScale,
                 pdfExportBackground,
+                controller.signal,
               ),
             );
           }
+          throwIfExportAborted(controller.signal);
           downloadBlob(
-            await pdfFromRgbaPages(pages),
+            await pdfFromRgbaPages(pages, controller.signal),
             `${exports.length === 1 ? svgFileStem(exports[0].name) : "makefigma-slices"}.pdf`,
           );
           const pdfResults = exports.map(
@@ -5144,6 +5872,10 @@ export function EditorShell({
             : `${exports.length} ${targetLabel} ${label} export${exports.length === 1 ? "" : "s"}`,
         );
       } catch (error) {
+        if (controller.signal.aborted) {
+          setStatus(`${format.toUpperCase()} export cancelled`);
+          return;
+        }
         const code =
           error instanceof SliceExportError
             ? error.code
@@ -5153,6 +5885,11 @@ export function EditorShell({
             ? `${targetLabel} export exceeds the 64 MP / 256 MB raster budget`
             : `${targetLabel} ${format.toUpperCase()} export failed · ${code.toLowerCase().replaceAll("_", " ")}`,
         );
+      } finally {
+        if (exportAbortRef.current === controller) {
+          exportAbortRef.current = null;
+          setExporting(false);
+        }
       }
     },
     [
@@ -5163,6 +5900,12 @@ export function EditorShell({
     ],
   );
   const exportAllPagesAsPdf = useCallback(async () => {
+    if (exportAbortRef.current) return;
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    setExporting(true);
+    setStatus("Preparing all Pages PDF export");
+    try {
     const current = snapshotRef.current;
     const orderedPages = pagesInCanonicalExportOrder(current.pages);
     if (!orderedPages.length) {
@@ -5216,11 +5959,11 @@ export function EditorShell({
       );
       return;
     }
-    try {
       const pdfPages = [] as Array<
         Awaited<ReturnType<typeof rasterizeSvgToPdfPage>>
       >;
       for (const { result } of exports) {
+        throwIfExportAborted(controller.signal);
         pdfPages.push(
           await rasterizeSvgToPdfPage(
             result.svg,
@@ -5228,10 +5971,12 @@ export function EditorShell({
             result.height,
             sliceExportScale,
             pdfExportBackground,
+            controller.signal,
           ),
         );
       }
-      downloadBlob(await pdfFromRgbaPages(pdfPages), "makefigma-pages.pdf");
+      throwIfExportAborted(controller.signal);
+      downloadBlob(await pdfFromRgbaPages(pdfPages, controller.signal), "makefigma-pages.pdf");
       downloadCompatibilityReportSet(
         "makefigma-pages",
         exports.map(({ page, result }) => ({
@@ -5255,13 +6000,22 @@ export function EditorShell({
         `${exports.length} Page PDF export${exports.length === 1 ? "" : "s"} · ${warningCount} compatibility fallback${warningCount === 1 ? "" : "s"}`,
       );
     } catch (error) {
+      if (controller.signal.aborted) {
+        setStatus("All Pages PDF export cancelled");
+        return;
+      }
       const code =
         error instanceof SliceExportError ? error.code : "RASTERIZATION_FAILED";
       setStatus(
         code === "RESOURCE_LIMIT"
           ? "All Pages PDF exceeds the 64 MP / 256 MB raster budget"
-          : `All Pages PDF export failed · ${code.toLowerCase().replaceAll("_", " ")}`,
+        : `All Pages PDF export failed · ${code.toLowerCase().replaceAll("_", " ")}`,
       );
+    } finally {
+      if (exportAbortRef.current === controller) {
+        exportAbortRef.current = null;
+        setExporting(false);
+      }
     }
   }, [exportAssetDataUris, pdfExportBackground, sliceExportScale]);
   const importAsset = useCallback(
@@ -5397,6 +6151,7 @@ export function EditorShell({
           contentHash: uploaded.contentHash,
           mediaType: uploaded.mediaType,
           byteLength: uploaded.byteLength,
+          ...(uploaded.fontFaces?.length ? { fontFaces: uploaded.fontFaces } : {}),
           ...(probe.rasterDimensions
             ? {
                 pixelWidth: probe.rasterDimensions.width,
@@ -5712,21 +6467,33 @@ export function EditorShell({
             }}
           />
           {pendingFigmaAssetRequests.length > 0 && (
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={!canEdit || figmaAssetBinding}
-              title={`Attach local image for imported Figma layer ${pendingFigmaAssetRequests[0]!.sourceId}`}
-              onClick={openFigmaAssetPicker}
-            >
-              {figmaAssetBinding
-                ? "Binding image"
-                : `Attach Figma image (${pendingFigmaAssetRequests.length})`}
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!canEdit || figmaAssetBinding}
+                title={`Attach local image for imported Figma layer ${pendingFigmaAssetRequests[0]!.sourceId}`}
+                onClick={openFigmaAssetPicker}
+              >
+                {figmaAssetBinding
+                  ? "Updating image import"
+                  : `Attach Figma image (${pendingFigmaAssetRequests.length})`}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!canEdit || figmaAssetBinding}
+                title="Cancel remaining Figma image bindings and restore source locks"
+                onClick={cancelPendingFigmaImages}
+              >
+                Cancel image binding
+              </Button>
+            </>
           )}
           <Button
             variant="ghost"
             size="xs"
+            disabled={exporting}
             title={
               selectedNodes.length &&
               selectedNodes.every((node) => node.kind === "slice")
@@ -5841,6 +6608,7 @@ export function EditorShell({
           <Button
             variant="ghost"
             size="xs"
+            disabled={exporting}
             title={
               selectedNodes.length &&
               selectedNodes.every((node) => node.kind === "slice")
@@ -5857,6 +6625,7 @@ export function EditorShell({
           <Button
             variant="ghost"
             size="xs"
+            disabled={exporting}
             title={
               selectedNodes.length &&
               selectedNodes.every((node) => node.kind === "slice")
@@ -5873,11 +6642,27 @@ export function EditorShell({
           <Button
             variant="ghost"
             size="xs"
+            disabled={exporting}
             title="Export every Page as one PDF in Canonical page order"
             onClick={() => void exportAllPagesAsPdf()}
           >
             All Pages
           </Button>
+          {exporting && (
+            <Button
+              variant="ghost"
+              size="xs"
+              data-action="cancel-export"
+              title="Cancel the active raster export"
+              onClick={() =>
+                exportAbortRef.current?.abort(
+                  new DOMException("The export was cancelled.", "AbortError"),
+                )
+              }
+            >
+              Cancel export
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="xs"
@@ -6051,6 +6836,16 @@ export function EditorShell({
             data-rust-caret={
               canvasTextEdit.rustCaretReady ? "ready" : "pending"
             }
+            data-rust-caret-affinity={
+              canvasTextEdit.rustCaretVisualIndex ?? ""
+            }
+            data-rust-caret-positioned={
+              canvasTextEdit.rustCaretLayout?.lines?.every(
+                (line) => line.visualCarets?.length,
+              )
+                ? "ready"
+                : "fallback"
+            }
             autoFocus
             contentEditable
             suppressContentEditableWarning
@@ -6058,11 +6853,14 @@ export function EditorShell({
             style={canvasTextStyle}
             onCompositionStart={() => {
               canvasTextIsComposingRef.current = true;
+              canvasTextCommitAfterCompositionRef.current = false;
               pendingCanvasCaretLayoutsRef.current.clear();
               setCanvasTextEdit((current) =>
                 current
                   ? {
                       ...current,
+                      rustCaretVisualIndex: undefined,
+                      rustSelectionAnchorVisualIndex: undefined,
                       rustCaretReady: false,
                       rustCaretLayout: undefined,
                     }
@@ -6071,8 +6869,15 @@ export function EditorShell({
             }}
             onCompositionEnd={(event) => {
               canvasTextIsComposingRef.current = false;
-              const text = event.currentTarget.innerText;
+              const text = contentEditableText(event.currentTarget);
               const caret = contentEditableCaretOffset(event.currentTarget);
+              const commitAfterComposition =
+                canvasTextCommitAfterCompositionRef.current;
+              canvasTextCommitAfterCompositionRef.current = false;
+              if (commitAfterComposition) {
+                commitCanvasTextEdit(text);
+                return;
+              }
               setCanvasTextEdit((current) =>
                 current
                   ? {
@@ -6080,6 +6885,8 @@ export function EditorShell({
                       draft: text,
                       caret,
                       selectionAnchor: caret,
+                      rustCaretVisualIndex: undefined,
+                      rustSelectionAnchorVisualIndex: undefined,
                       rustCaretReady: false,
                       rustCaretLayout: undefined,
                     }
@@ -6088,7 +6895,7 @@ export function EditorShell({
               requestCanvasCaretLayout(canvasTextNode.id, text, caret);
             }}
             onInput={(event) => {
-              const text = event.currentTarget.innerText;
+              const text = contentEditableText(event.currentTarget);
               const caret = contentEditableCaretOffset(event.currentTarget);
               setCanvasTextEdit((current) =>
                 current
@@ -6097,6 +6904,8 @@ export function EditorShell({
                       draft: text,
                       caret,
                       selectionAnchor: caret,
+                      rustCaretVisualIndex: undefined,
+                      rustSelectionAnchorVisualIndex: undefined,
                       rustCaretReady: false,
                       rustCaretLayout: undefined,
                     }
@@ -6166,6 +6975,8 @@ export function EditorShell({
                       properties: nextProperties,
                       caret: start,
                       selectionAnchor: start,
+                      rustCaretVisualIndex: undefined,
+                      rustSelectionAnchorVisualIndex: undefined,
                       rustCaretReady: false,
                       rustCaretLayout: undefined,
                     }
@@ -6215,6 +7026,8 @@ export function EditorShell({
                       properties: nextProperties,
                       caret,
                       selectionAnchor: caret,
+                      rustCaretVisualIndex: undefined,
+                      rustSelectionAnchorVisualIndex: undefined,
                       rustCaretReady: false,
                       rustCaretLayout: undefined,
                     }
@@ -6222,9 +7035,13 @@ export function EditorShell({
               );
               requestCanvasCaretLayout(canvasTextEdit.nodeId, next, caret);
             }}
-            onBlur={(event) =>
-              commitCanvasTextEdit(event.currentTarget.innerText)
-            }
+            onBlur={(event) => {
+              if (canvasTextIsComposingRef.current) {
+                canvasTextCommitAfterCompositionRef.current = true;
+                return;
+              }
+              commitCanvasTextEdit(contentEditableText(event.currentTarget));
+            }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();
@@ -6259,29 +7076,70 @@ export function EditorShell({
                   selection.focus,
                   canvasTextEdit.rustCaretLayout,
                 );
-                const nextCaret =
+                const nativeSelection = window.getSelection();
+                const nativeAction =
+                  !event.shiftKey && anchor !== focus ? "move" :
+                    event.shiftKey ? "extend" : "move";
+                nativeSelection?.modify?.(
+                  nativeAction,
+                  direction < 0 ? "left" : "right",
+                  "character",
+                );
+                const nativeOffsets = contentEditableSelectionOffsets(
+                  event.currentTarget,
+                );
+                const nextPosition =
                   !event.shiftKey && anchor !== focus
-                    ? direction < 0
-                      ? Math.min(anchor, focus)
-                      : Math.max(anchor, focus)
-                    : moveUtf16CaretInRustLayout(
+                    ? collapseUtf16SelectionPositionInRustLayout(
                         canvasTextEdit.draft,
+                        anchor,
                         focus,
                         direction,
                         canvasTextEdit.rustCaretLayout,
+                      )
+                    : reconcileNativeUtf16CaretMove(
+                        canvasTextEdit.draft,
+                        focus,
+                        nativeOffsets?.focus ?? Number.NaN,
+                        direction,
+                        canvasTextEdit.rustCaretLayout,
+                        canvasTextEdit.rustCaretVisualIndex,
                       );
+                const nextCaret = nextPosition.utf16Index;
                 const nextAnchor = event.shiftKey ? anchor : nextCaret;
-                placeContentEditableSelection(
-                  event.currentTarget,
-                  nextAnchor,
-                  nextCaret,
-                );
+                const nativeAccepted =
+                  nativeOffsets?.focus === nextCaret &&
+                  nativeOffsets.anchor === nextAnchor &&
+                  ("nativeAccepted" in nextPosition
+                    ? nextPosition.nativeAccepted
+                    : true);
+                if (!nativeAccepted)
+                  placeContentEditableSelection(
+                    event.currentTarget,
+                    nextAnchor,
+                    nextCaret,
+                  );
+                preserveCanvasNativeSelectionRef.current = {
+                  anchor: nextAnchor,
+                  caret: nextCaret,
+                };
+                const nextAnchorPosition = event.shiftKey
+                  ? rustTextCaretPositionAtUtf16Index(
+                      canvasTextEdit.draft,
+                      anchor,
+                      canvasTextEdit.rustCaretLayout,
+                      canvasTextEdit.rustSelectionAnchorVisualIndex,
+                    )
+                  : nextPosition;
                 setCanvasTextEdit((current) =>
                   current
                     ? {
                         ...current,
                         caret: nextCaret,
                         selectionAnchor: nextAnchor,
+                        rustCaretVisualIndex: nextPosition.visualIndex,
+                        rustSelectionAnchorVisualIndex:
+                          nextAnchorPosition.visualIndex,
                       }
                     : current,
                 );
@@ -6291,12 +7149,16 @@ export function EditorShell({
             {canvasTextEditParagraphs.map((paragraph, index) => (
               <div
                 key={`${paragraph.start}-${paragraph.end}`}
-                className="block"
+                className="canvas-text-paragraph block"
                 dir={paragraph.direction}
                 style={{
                   marginBottom:
                     index < canvasTextEditParagraphs.length - 1
-                      ? `${(canvasTextEdit.properties.paragraph.paragraphSpacing ?? 0) * snapshot.viewport.zoom}px`
+                      ? `${textParagraphGap(
+                          canvasTextEdit.properties,
+                          paragraph.start,
+                          canvasTextEditParagraphs[index + 1]?.start ?? paragraph.start,
+                        ) * snapshot.viewport.zoom}px`
                       : 0,
                   textAlign:
                     paragraph.direction === "rtl"
@@ -6305,6 +7167,14 @@ export function EditorShell({
                           "justify"
                         ? "left"
                         : canvasTextEdit.properties.paragraph.alignment,
+                  lineHeight: `${resolvedTextLineHeightAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom}px`,
+                  minHeight: `${resolvedTextLineHeightAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom}px`,
+                  textIndent: `${textParagraphIndentAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom + textListMarkerBaseIndent(canvasTextEdit.properties, canvasTextEditListMarkerGutter, paragraph.start)}px`,
+                  paddingInlineStart: `${textListIndentationOffset(canvasTextEdit.draft, canvasTextEdit.properties, paragraph.start, canvasTextEditListMarkerGutter)}px`,
+                  textWrap: textParagraphWrapStyleAt(canvasTextEdit.properties, paragraph.start),
+                  hangingPunctuation: canvasTextEdit.properties.paragraph.hangingPunctuation
+                    ? "first last allow-end"
+                    : "none",
                 }}
               >
                 {paragraph.spans.length
@@ -6331,7 +7201,7 @@ export function EditorShell({
                         </span>
                       );
                     })
-                  : paragraph.text || "\u200b"}
+                  : paragraph.text}
               </div>
             ))}
           </div>
@@ -6346,6 +7216,12 @@ export function EditorShell({
             data-render-diagnostics={JSON.stringify(
               snapshot.diagnostics ?? { total: 0, byCategory: {}, recent: [] },
             )}
+            data-frame-hash-evidence={frameHashEvidence ? JSON.stringify(frameHashEvidence) : undefined}
+            data-benchmark-evidence={
+              snapshot.benchmark
+                ? JSON.stringify(snapshot.benchmark)
+                : undefined
+            }
             data-engine-recoveries={workerRecoveryCount}
           >
             {renderEvidence}
@@ -6420,6 +7296,9 @@ export function EditorShell({
             onSplitSegment={splitVectorSegment}
             onDeletePoint={deleteVectorPoint}
             onSetPointHandles={setVectorPointHandles}
+            onAutoLayoutPaddingHover={hoverAutoLayoutPadding}
+            geometry={selectedTransformGroupGeometry}
+            onUpdateGeometry={updateSelectionGeometry}
             readOnly={!canEdit}
           />
         ) : selectedNodes.length > 1 ? (
@@ -6433,7 +7312,6 @@ export function EditorShell({
             onUpdateCornerRadius={updateSelectionCornerRadius}
             onUseUniformCornerRadius={useSelectionUniformCornerRadius}
             onUpdateConstraint={updateSelectionConstraint}
-            onRemoveConstraints={removeSelectionConstraints}
             readOnly={!canEdit}
           />
         ) : (
@@ -6558,7 +7436,6 @@ function MultiInspector({
   onUpdateCornerRadius,
   onUseUniformCornerRadius,
   onUpdateConstraint,
-  onRemoveConstraints,
   readOnly,
 }: {
   nodes: readonly CanvasNode[];
@@ -6575,7 +7452,6 @@ function MultiInspector({
     axis: "horizontal" | "vertical",
     value: ConstraintType,
   ) => void;
-  onRemoveConstraints: () => void;
   readOnly: boolean;
 }) {
   const rotation = mixedSelectionValue(nodes.map((node) => node.rotation));
@@ -6929,30 +7805,13 @@ function MultiInspector({
         </section>
       )}
       {constraints && (
-        <section>
-          <h2>Constraints</h2>
-          <div className="grid grid-cols-2 gap-2">
-            <SelectionConstraintField
-              label="Selection horizontal constraint"
-              value={constraints.horizontal}
-              readOnly={readOnly}
-              onChange={(value) => onUpdateConstraint("horizontal", value)}
-            />
-            <SelectionConstraintField
-              label="Selection vertical constraint"
-              value={constraints.vertical}
-              readOnly={readOnly}
-              onChange={(value) => onUpdateConstraint("vertical", value)}
-            />
-          </div>
-          <button
-            type="button"
-            disabled={readOnly || !constraints.hasExplicitConstraints}
-            onClick={onRemoveConstraints}
-          >
-            Remove constraints
-          </button>
-        </section>
+        <ConstraintInspectorControl
+          horizontal={constraints.horizontal}
+          vertical={constraints.vertical}
+          readOnly={readOnly}
+          selectionLabel="Selection"
+          onChange={onUpdateConstraint}
+        />
       )}
       {constraintsOverriddenByAutoLayout && (
         <section>
@@ -7284,51 +8143,179 @@ function LineSelectionDashDraft({
   );
 }
 
-function SelectionConstraintField({
-  label,
+function constraintValue(
+  value: MixedSelectionValue<ConstraintSelectionValue>,
+): ConstraintType | undefined {
+  return value.kind === "same" ? value.value : undefined;
+}
+
+function ConstraintAxisField({
+  axis,
   value,
+  selectionLabel,
   readOnly,
   onChange,
 }: {
-  label: string;
+  axis: ConstraintAxis;
   value: MixedSelectionValue<ConstraintSelectionValue>;
+  selectionLabel: string;
   readOnly: boolean;
   onChange: (value: ConstraintType) => void;
 }) {
   return (
-    <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
-      <span>{label.replace("Selection ", "")}</span>
-      <div>
-        <select
-          aria-label={label}
-          disabled={readOnly}
-          value={value.kind === "same" ? value.value : ""}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (
-              next === "min" ||
-              next === "center" ||
-              next === "max" ||
-              next === "stretch" ||
-              next === "scale"
-            )
-              onChange(next);
-          }}
-        >
-          <option value="" disabled>
-            Mixed
+    <label className="block space-y-1 text-[11px] text-muted-foreground">
+      <span>{axis === "horizontal" ? "Horizontal" : "Vertical"}</span>
+      <select
+        className="h-8 w-full rounded-md border bg-background px-2 text-xs text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-50"
+        aria-label={`${selectionLabel} ${axis} constraint`}
+        disabled={readOnly}
+        value={constraintValue(value) ?? ""}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (
+            next === "min" ||
+            next === "center" ||
+            next === "max" ||
+            next === "stretch" ||
+            next === "scale"
+          )
+            onChange(next);
+        }}
+      >
+        <option value="" disabled>Mixed</option>
+        {(["min", "center", "max", "stretch", "scale"] as const).map((option) => (
+          <option key={option} value={option}>
+            {constraintAxisLabel(axis, option)}
           </option>
-          <option value="none" disabled>
-            No constraints
-          </option>
-          <option value="min">Left / Top</option>
-          <option value="center">Center</option>
-          <option value="max">Right / Bottom</option>
-          <option value="stretch">Left &amp; right / Top &amp; bottom</option>
-          <option value="scale">Scale</option>
-        </select>
-      </div>
+        ))}
+      </select>
     </label>
+  );
+}
+
+function ConstraintDiagram({
+  horizontal,
+  vertical,
+  readOnly,
+  onChange,
+}: {
+  horizontal: MixedSelectionValue<ConstraintSelectionValue>;
+  vertical: MixedSelectionValue<ConstraintSelectionValue>;
+  readOnly: boolean;
+  onChange: (axis: ConstraintAxis, value: ConstraintType) => void;
+}) {
+  const axisButton = (
+    axis: ConstraintAxis,
+    edge: ConstraintEdge,
+    className: string,
+  ) => {
+    const current = constraintValue(axis === "horizontal" ? horizontal : vertical);
+    const selected = current ? constraintEdgeSelected(current, edge) : false;
+    const edgeName = axis === "horizontal"
+      ? edge === "min" ? "left" : edge === "max" ? "right" : "horizontal center"
+      : edge === "min" ? "top" : edge === "max" ? "bottom" : "vertical center";
+    return (
+      <button
+        key={`${axis}-${edge}`}
+        type="button"
+        className={cn(
+          "absolute z-10 rounded-sm border-0 p-0 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40",
+          selected ? "bg-primary" : "bg-muted-foreground/35 hover:bg-muted-foreground/60",
+          className,
+        )}
+        aria-label={`Set ${edgeName} constraint${edge === "center" ? "" : "; hold Shift to combine edges"}`}
+        aria-pressed={selected}
+        disabled={readOnly}
+        onClick={(event) => onChange(
+          axis,
+          constraintFromDiagramEdge(current ?? "min", edge, event.shiftKey),
+        )}
+      />
+    );
+  };
+  return (
+    <div
+      className="relative mx-auto h-24 w-36 rounded-lg border bg-muted/15"
+      role="group"
+      aria-label="Interactive constraint diagram"
+    >
+      <div className="absolute inset-x-10 inset-y-7 rounded border border-primary/40 bg-primary/10" aria-hidden="true" />
+      {axisButton("horizontal", "min", "left-2 top-[47px] h-0.5 w-8")}
+      {axisButton("horizontal", "center", "left-[67px] top-[47px] h-0.5 w-2")}
+      {axisButton("horizontal", "max", "right-2 top-[47px] h-0.5 w-8")}
+      {axisButton("vertical", "min", "left-[71px] top-2 h-5 w-0.5")}
+      {axisButton("vertical", "center", "left-[71px] top-[44px] h-2 w-0.5")}
+      {axisButton("vertical", "max", "bottom-2 left-[71px] h-5 w-0.5")}
+    </div>
+  );
+}
+
+function ConstraintInspectorControl({
+  horizontal,
+  vertical,
+  selectionLabel,
+  readOnly,
+  onChange,
+}: {
+  horizontal: MixedSelectionValue<ConstraintSelectionValue>;
+  vertical: MixedSelectionValue<ConstraintSelectionValue>;
+  selectionLabel: string;
+  readOnly: boolean;
+  onChange: (axis: ConstraintAxis, value: ConstraintType) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const horizontalValue = constraintValue(horizontal);
+  const verticalValue = constraintValue(vertical);
+  const summary = horizontalValue && verticalValue
+    ? constraintSummary(horizontalValue, verticalValue)
+    : "Mixed";
+  return (
+    <section>
+      <h2>Position</h2>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger
+          className="flex w-full items-center justify-between gap-2 text-left"
+          aria-label={`${selectionLabel} constraints: ${summary}`}
+        >
+          <span>Constraints</span>
+          <span className="ml-auto truncate text-muted-foreground">{summary}</span>
+          <ChevronDown
+            className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-180")}
+            aria-hidden="true"
+          />
+        </CollapsibleTrigger>
+        <CollapsibleContent className="pt-3">
+          <ConstraintDiagram
+            horizontal={horizontal}
+            vertical={vertical}
+            readOnly={readOnly}
+            onChange={onChange}
+          />
+          <p className="my-2 text-[10px] leading-relaxed text-muted-foreground">
+            Click a line to pin that edge. Hold Shift to select both opposing edges.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <ConstraintAxisField
+              axis="horizontal"
+              value={horizontal}
+              selectionLabel={selectionLabel}
+              readOnly={readOnly}
+              onChange={(value) => onChange("horizontal", value)}
+            />
+            <ConstraintAxisField
+              axis="vertical"
+              value={vertical}
+              selectionLabel={selectionLabel}
+              readOnly={readOnly}
+              onChange={(value) => onChange("vertical", value)}
+            />
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+      <p className="sr-only" role="status" aria-live="polite">
+        Constraints: {summary}
+      </p>
+    </section>
   );
 }
 
@@ -7377,6 +8364,9 @@ function Inspector({
   onSplitSegment,
   onDeletePoint,
   onSetPointHandles,
+  onAutoLayoutPaddingHover,
+  geometry,
+  onUpdateGeometry,
   readOnly,
 }: {
   node: CanvasNode;
@@ -7416,6 +8406,14 @@ function Inspector({
       CanvasNode["vectorPath"]
     >["subpaths"][number]["points"][number]["pointType"],
   ) => void;
+  onAutoLayoutPaddingHover: (
+    nodeId: string | undefined,
+    side?: AutoLayoutPaddingSide,
+  ) => void;
+  geometry?: ResizeGeometry;
+  onUpdateGeometry?: (
+    patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height">>,
+  ) => void;
   readOnly: boolean;
 }) {
   const field = (
@@ -7423,6 +8421,7 @@ function Inspector({
     key: keyof CanvasNode,
     value: string | number,
     unit = "",
+    apply?: (value: number) => void,
   ) => (
     <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
       <span>{label}</span>
@@ -7446,6 +8445,10 @@ function Inspector({
             const raw = event.target.value.trim();
             const parsed = Number(raw);
             if (!raw || !Number.isFinite(parsed)) return;
+            if (apply) {
+              apply(parsed);
+              return;
+            }
             onUpdate({ [key]: parsed / (key === "opacity" ? 100 : 1) });
           }}
         />
@@ -7580,11 +8583,19 @@ function Inspector({
       <section>
         <h2>Geometry</h2>
         <div className="grid grid-cols-2 gap-2">
-          {field("X", "x", node.x)}
-          {field("Y", "y", node.y)}
-          {field("W", "width", Math.round(node.width))}
+          {field("X", "x", geometry?.x ?? node.x, "", geometry && onUpdateGeometry
+            ? (value) => onUpdateGeometry({ x: value })
+            : undefined)}
+          {field("Y", "y", geometry?.y ?? node.y, "", geometry && onUpdateGeometry
+            ? (value) => onUpdateGeometry({ y: value })
+            : undefined)}
+          {field("W", "width", Math.round(geometry?.width ?? node.width), "", geometry && onUpdateGeometry
+            ? (value) => onUpdateGeometry({ width: value })
+            : undefined)}
           {node.kind !== "line" &&
-            field("H", "height", Math.round(node.height))}
+            field("H", "height", Math.round(geometry?.height ?? node.height), "", geometry && onUpdateGeometry
+              ? (value) => onUpdateGeometry({ height: value })
+              : undefined)}
           {field("Rotation", "rotation", Math.round(node.rotation), "°")}
         </div>
       </section>
@@ -7871,6 +8882,7 @@ function Inspector({
           node={node}
           sceneNodes={sceneNodes}
           onUpdate={onUpdate}
+          onPaddingHover={onAutoLayoutPaddingHover}
           readOnly={readOnly}
         />
       )}
@@ -8002,14 +9014,14 @@ function Inspector({
       )}
       <section>
         <h2>Layer</h2>
-        {!["group", "slice"].includes(node.kind) && (
+        {node.kind !== "slice" && (
           <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
             <span>Blend mode</span>
             <div>
               <select
                 aria-label="Blend mode"
                 disabled={readOnly}
-                value={node.blendMode ?? "normal"}
+                value={effectiveNodeBlendMode(node)}
                 onChange={(event) => {
                   const value = event.target.value;
                   if (
@@ -8020,11 +9032,29 @@ function Inspector({
                       "overlay",
                       "darken",
                       "lighten",
+                      "color-dodge",
+                      "color-burn",
+                      "hard-light",
+                      "soft-light",
+                      "difference",
+                      "exclusion",
+                      "hue",
+                      "saturation",
+                      "color",
+                      "luminosity",
+                      "pass-through",
+                      "linear-burn",
+                      "linear-dodge",
                     ].includes(value)
                   )
-                    onUpdate({
-                      blendMode: value as NonNullable<CanvasNode["blendMode"]>,
-                    });
+                    {
+                      const blendMode = value as NonNullable<CanvasNode["blendMode"]>;
+                      const extensions = nodeBlendExtensionPatch(node.extensions, blendMode, canContainChildren(node.kind));
+                      onUpdate({
+                        blendMode,
+                        ...(extensions ? { extensions } : {}),
+                      });
+                    }
                 }}
               >
                 <option value="normal">Normal</option>
@@ -8033,6 +9063,19 @@ function Inspector({
                 <option value="overlay">Overlay</option>
                 <option value="darken">Darken</option>
                 <option value="lighten">Lighten</option>
+                <option value="color-dodge">Color dodge</option>
+                <option value="color-burn">Color burn</option>
+                <option value="hard-light">Hard light</option>
+                <option value="soft-light">Soft light</option>
+                <option value="difference">Difference</option>
+                <option value="exclusion">Exclusion</option>
+                <option value="hue">Hue</option>
+                <option value="saturation">Saturation</option>
+                <option value="color">Color</option>
+                <option value="luminosity">Luminosity</option>
+                <option value="pass-through">Pass through</option>
+                <option value="linear-burn">Linear burn</option>
+                <option value="linear-dodge">Linear dodge</option>
               </select>
             </div>
           </label>
@@ -8834,64 +9877,13 @@ function FrameConstraintsInspector({
     value: typeof constraints.horizontal,
   ) => onUpdate({ constraints: { ...constraints, [axis]: value } });
   return (
-    <section>
-      <h2>Constraints</h2>
-      <div className="grid grid-cols-2 gap-2">
-        <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
-          <span>Horizontal</span>
-          <div>
-            <select
-              aria-label="Horizontal constraint"
-              disabled={readOnly}
-              value={constraints.horizontal}
-              onChange={(event) =>
-                update(
-                  "horizontal",
-                  event.target.value as typeof constraints.horizontal,
-                )
-              }
-            >
-              <option value="min">Left</option>
-              <option value="center">Center</option>
-              <option value="max">Right</option>
-              <option value="stretch">Left &amp; right</option>
-              <option value="scale">Scale</option>
-            </select>
-          </div>
-        </label>
-        <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
-          <span>Vertical</span>
-          <div>
-            <select
-              aria-label="Vertical constraint"
-              disabled={readOnly}
-              value={constraints.vertical}
-              onChange={(event) =>
-                update(
-                  "vertical",
-                  event.target.value as typeof constraints.vertical,
-                )
-              }
-            >
-              <option value="min">Top</option>
-              <option value="center">Center</option>
-              <option value="max">Bottom</option>
-              <option value="stretch">Top &amp; bottom</option>
-              <option value="scale">Scale</option>
-            </select>
-          </div>
-        </label>
-      </div>
-      {node.constraints && (
-        <button
-          type="button"
-          disabled={readOnly}
-          onClick={() => onUpdate({ constraints: undefined })}
-        >
-          Remove constraints
-        </button>
-      )}
-    </section>
+    <ConstraintInspectorControl
+      horizontal={{ kind: "same", value: constraints.horizontal }}
+      vertical={{ kind: "same", value: constraints.vertical }}
+      selectionLabel={node.name}
+      readOnly={readOnly}
+      onChange={update}
+    />
   );
 }
 
@@ -8899,14 +9891,19 @@ function AutoLayoutInspector({
   node,
   sceneNodes,
   onUpdate,
+  onPaddingHover,
   readOnly,
 }: {
   node: CanvasNode;
   sceneNodes: readonly CanvasNode[];
   onUpdate: (patch: Partial<CanvasNode>) => void;
+  onPaddingHover: (
+    nodeId: string | undefined,
+    side?: AutoLayoutPaddingSide,
+  ) => void;
   readOnly: boolean;
 }) {
-  const layout: DocumentAutoLayout = node.autoLayout ?? {
+  const layout: DocumentAutoLayout = normalizeAutoLayout(node.autoLayout) ?? {
     ...defaultAutoLayout(),
     mode: "none",
   };
@@ -8939,8 +9936,13 @@ function AutoLayoutInspector({
     label: string,
     value: number,
     onChange: (value: number) => void,
+    paddingSide?: AutoLayoutPaddingSide,
   ) => (
-    <label className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground">
+    <label
+      className="mb-2 block space-y-1.5 text-xs [&>span]:block [&>span]:font-medium [&>span]:text-muted-foreground [&>div]:flex [&>div]:items-center [&>div]:rounded-lg [&>div]:border [&>div]:bg-background [&_input]:h-8 [&_input]:w-full [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-2 [&_input]:text-xs [&_input]:outline-none [&_input]:focus-visible:ring-0 [&_select]:h-8 [&_select]:w-full [&_select]:min-w-0 [&_select]:border-0 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-xs [&_em]:pr-2 [&_em]:text-xs [&_em]:not-italic [&_em]:text-muted-foreground"
+      onPointerEnter={() => paddingSide && onPaddingHover(node.id, paddingSide)}
+      onPointerLeave={() => paddingSide && onPaddingHover(undefined)}
+    >
       <span>{label}</span>
       <div>
         <input
@@ -9049,18 +10051,10 @@ function AutoLayoutInspector({
                 layout.trackSpacing ?? layout.itemSpacing,
                 (value) => update({ trackSpacing: value }),
               )}
-            {numeric("Top padding", layout.padding[0], (value) =>
-              padding(0, value),
-            )}
-            {numeric("Right padding", layout.padding[1], (value) =>
-              padding(1, value),
-            )}
-            {numeric("Bottom padding", layout.padding[2], (value) =>
-              padding(2, value),
-            )}
-            {numeric("Left padding", layout.padding[3], (value) =>
-              padding(3, value),
-            )}
+            {numeric("Top padding", layout.padding[0], (value) => padding(0, value), "top")}
+            {numeric("Right padding", layout.padding[1], (value) => padding(1, value), "right")}
+            {numeric("Bottom padding", layout.padding[2], (value) => padding(2, value), "bottom")}
+            {numeric("Left padding", layout.padding[3], (value) => padding(3, value), "left")}
           </div>
           <label className="my-2 flex items-center gap-2 text-xs text-muted-foreground [&_input]:size-4 [&_input]:accent-primary">
             <input
@@ -9345,6 +10339,16 @@ function AutoLayoutFrameSizingInspector({
   );
 }
 
+const IMAGE_FILTER_CONTROLS = [
+  ["exposure", "Exposure"],
+  ["contrast", "Contrast"],
+  ["saturation", "Saturation"],
+  ["temperature", "Temperature"],
+  ["tint", "Tint"],
+  ["highlights", "Highlights"],
+  ["shadows", "Shadows"],
+] as const satisfies readonly (readonly [keyof DocumentImageFilters, string])[];
+
 function PaintStackInspector({
   node,
   onUpdate,
@@ -9354,17 +10358,118 @@ function PaintStackInspector({
   onUpdate: (patch: Partial<CanvasNode>) => void;
   readOnly: boolean;
 }) {
-  const paintStack = (key: "fills" | "strokes") => node[key] ?? [];
+  const versionedPaintLayers = (key: "fills" | "strokes") => {
+    const stack = key === "fills" ? node.fillStack : node.strokeStack;
+    return stack?.layers.every((layer) => Boolean(layer.paint)) ? stack.layers : undefined;
+  };
+  const paintStack = (key: "fills" | "strokes") =>
+    versionedPaintLayers(key)?.map((layer) => layer.paint!) ?? node[key] ?? [];
   const updateStack = (
     key: "fills" | "strokes",
     paints: DocumentPaint[] | undefined,
-  ) => onUpdate({ [key]: paints } as Partial<CanvasNode>);
+  ) => {
+    const currentLayers = versionedPaintLayers(key);
+    const useVersionedStack = Boolean(currentLayers) || Boolean(paints?.some((paint) => paint.gradientPaint));
+    if (!useVersionedStack) {
+      onUpdate({ [key]: paints } as Partial<CanvasNode>);
+      return;
+    }
+    const stack = paints === undefined ? undefined : {
+      layers: paints.map((paint, index) => {
+        const identityMatch = currentLayers?.find((layer) => layer.paint === paint);
+        const source = identityMatch ?? currentLayers?.[Math.min(index, currentLayers.length - 1)];
+        return {
+          paint,
+          visible: source?.visible ?? true,
+          opacity: source?.opacity ?? 1,
+          blendMode: source?.blendMode ?? "normal" as const,
+        };
+      }),
+    };
+    onUpdate(key === "fills"
+      ? { fills: undefined, fillStack: stack }
+      : { strokes: undefined, strokeStack: stack });
+  };
   const renderStack = (kind: "fill" | "stroke") => {
     const key = kind === "fill" ? "fills" : "strokes";
+    const versionedStack = key === "fills" ? node.fillStack : node.strokeStack;
     const legacy = kind === "fill" ? node.fill : node.stroke;
     const paints = paintStack(key);
     const title = kind === "fill" ? "Fill layers" : "Stroke layers";
     const singular = kind === "fill" ? "fill" : "stroke";
+    const updateVersionedLayer = (index: number, next: DocumentPaintLayer) => {
+      const sourceLayers = versionedStack?.layers ?? paints.map((paint) => ({
+        paint,
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+      }));
+      const stack = {
+        layers: sourceLayers.map((layer, layerIndex) => layerIndex === index ? next : layer),
+      };
+      onUpdate(key === "fills"
+        ? { fills: undefined, fillStack: stack }
+        : { strokes: undefined, strokeStack: stack });
+    };
+    const layerPresentationControls = (index: number, layer: DocumentPaintLayer, layerLabel: string) => (
+      <div className="grid grid-cols-[auto_72px_minmax(0,1fr)] items-end gap-1.5 text-[10px] text-muted-foreground [&_input]:h-7 [&_input]:min-w-0 [&_input]:rounded-md [&_input]:border [&_input]:bg-background [&_input]:px-1 [&_select]:h-7 [&_select]:min-w-0 [&_select]:rounded-md [&_select]:border [&_select]:bg-background [&_select]:px-1 [&_select]:text-[10px]">
+        <label className="flex h-7 items-center gap-1">
+          <input
+            aria-label={`${layerLabel} visible`}
+            disabled={readOnly}
+            type="checkbox"
+            checked={layer.visible}
+            onChange={(event) => updateVersionedLayer(index, { ...layer, visible: event.target.checked })}
+          />
+          Visible
+        </label>
+        <label className="grid gap-0.5">
+          <span>Opacity</span>
+          <input
+            aria-label={`${layerLabel} opacity`}
+            disabled={readOnly}
+            inputMode="decimal"
+            value={layer.opacity}
+            onChange={(event) => {
+              const opacity = Number(event.target.value);
+              if (Number.isFinite(opacity) && opacity >= 0 && opacity <= 1)
+                updateVersionedLayer(index, { ...layer, opacity });
+            }}
+          />
+        </label>
+        <label className="grid gap-0.5">
+          <span>Blend</span>
+          <select
+            aria-label={`${layerLabel} blend mode`}
+            disabled={readOnly}
+            value={layer.blendMode}
+            onChange={(event) => updateVersionedLayer(index, {
+              ...layer,
+              blendMode: event.target.value as DocumentPaintLayer["blendMode"],
+            })}
+          >
+            <option value="normal">Normal</option>
+            <option value="multiply">Multiply</option>
+            <option value="screen">Screen</option>
+            <option value="overlay">Overlay</option>
+            <option value="darken">Darken</option>
+            <option value="lighten">Lighten</option>
+            <option value="color-dodge">Color dodge</option>
+            <option value="color-burn">Color burn</option>
+            <option value="hard-light">Hard light</option>
+            <option value="soft-light">Soft light</option>
+            <option value="difference">Difference</option>
+            <option value="exclusion">Exclusion</option>
+            <option value="hue">Hue</option>
+            <option value="saturation">Saturation</option>
+            <option value="color">Color</option>
+            <option value="luminosity">Luminosity</option>
+            <option value="linear-burn">Linear burn</option>
+            <option value="linear-dodge">Linear dodge</option>
+          </select>
+        </label>
+      </div>
+    );
     const updatePaint = (index: number, next: DocumentPaint) =>
       updateStack(
         key,
@@ -9382,7 +10487,7 @@ function PaintStackInspector({
     const updateSolid = (index: number, paint: DocumentPaint, css: string) => {
       const color = documentColorFromCssHex(css);
       if (!color) return;
-      updatePaint(index, { ...paint, css, color, gradient: undefined });
+      updatePaint(index, { ...paint, css, color, gradient: undefined, gradientPaint: undefined });
     };
     const updateGradient = (
       index: number,
@@ -9394,9 +10499,21 @@ function PaintStackInspector({
         css: colorCss(gradient.stops[0].color),
         color: gradient.stops[0].color,
         gradient,
+        gradientPaint: undefined,
       });
+    const updateNonLinearGradient = (
+      index: number,
+      paint: DocumentPaint,
+      gradientPaint: DocumentGradientPaint,
+    ) => updatePaint(index, {
+      ...paint,
+      css: colorCss(gradientPaint.stops[0].color),
+      color: gradientPaint.stops[0].color,
+      gradient: undefined,
+      gradientPaint,
+    });
     const addGradientStop = (index: number, paint: DocumentPaint) => {
-      const gradient = paint.gradient;
+      const gradient = paint.gradient ?? paint.gradientPaint;
       if (!gradient || gradient.stops.length >= 16) return;
       let insertion = 0;
       let largestGap = -1;
@@ -9419,15 +10536,159 @@ function PaintStackInspector({
         position: left.position + largestGap / 2,
         color: structuredClone(left.color),
       };
-      updateGradient(index, paint, {
-        ...gradient,
-        stops: [
-          ...gradient.stops.slice(0, insertion + 1),
-          nextStop,
-          ...gradient.stops.slice(insertion + 1),
-        ],
-      });
+      const next = { ...gradient, stops: [
+        ...gradient.stops.slice(0, insertion + 1),
+        nextStop,
+        ...gradient.stops.slice(insertion + 1),
+      ] };
+      if (paint.gradient) updateGradient(index, paint, next as DocumentLinearGradient);
+      else updateNonLinearGradient(index, paint, next as DocumentGradientPaint);
     };
+    if (versionedStack?.layers.some((layer) => Boolean(layer.image))) {
+      return (
+        <div
+          className="grid gap-1.5 rounded-lg border bg-muted/20 p-2 [&_button]:h-7 [&_button]:rounded-lg [&_button]:border [&_button]:bg-background [&_button]:px-2 [&_button]:text-[10px] [&_button]:font-medium [&_button]:hover:bg-muted [&_button:disabled]:opacity-50"
+          key={key}
+        >
+          <div className="flex items-center justify-between gap-2 text-xs font-medium [&_span]:text-[10px] [&_span]:text-muted-foreground">
+            <strong>{title}</strong>
+            <span>{versionedStack.layers.length} layers</span>
+          </div>
+          <div className="grid gap-1.5">
+            {versionedStack.layers.map((layer, index) => {
+              const layerLabel = `${title} ${index + 1}`;
+              return (
+                <div
+                  className="grid gap-1.5 rounded-lg border bg-background p-1.5 text-[10px]"
+                  key={`${index}-${layer.image?.assetId ?? layer.paint?.css ?? "paint"}`}
+                >
+                  <div className="grid grid-cols-[16px_minmax(0,1fr)_24px] items-center gap-1">
+                    <span className="text-center text-muted-foreground">{index + 1}</span>
+                    <strong>{layer.image ? "Image" : "Paint"}</strong>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${singular} layer ${index + 1}`}
+                      disabled={readOnly || versionedStack.layers.length <= 1}
+                      onClick={() => {
+                        const stack = {
+                          layers: versionedStack.layers.filter(
+                            (_, layerIndex) => layerIndex !== index,
+                          ),
+                        };
+                        onUpdate(
+                          key === "fills"
+                            ? { fills: undefined, fillStack: stack }
+                            : { strokes: undefined, strokeStack: stack },
+                        );
+                      }}
+                    >
+                      −
+                    </button>
+                  </div>
+                  {layer.image ? (
+                    <div className="grid grid-cols-2 gap-1.5 [&_label]:grid [&_label]:gap-1 [&_label]:text-muted-foreground [&_input]:h-7 [&_input]:min-w-0 [&_input]:rounded-md [&_input]:border [&_input]:bg-background [&_input]:px-1 [&_input]:text-[10px] [&_select]:h-7 [&_select]:min-w-0 [&_select]:rounded-md [&_select]:border [&_select]:bg-background [&_select]:px-1 [&_select]:text-[10px]">
+                      <label>
+                        <span>Scale</span>
+                        <select
+                          aria-label={`${layerLabel} image scale mode`}
+                          disabled={readOnly}
+                          value={layer.image.scaleMode}
+                          onChange={(event) => {
+                            const scaleMode = event.target.value as typeof layer.image.scaleMode;
+                            updateVersionedLayer(index, {
+                              ...layer,
+                              image: {
+                                ...layer.image,
+                                scaleMode,
+                                ...(scaleMode === "crop"
+                                  ? { rotationDegrees: undefined }
+                                  : {}),
+                              },
+                            });
+                          }}
+                        >
+                          <option value="fill">Fill</option>
+                          <option value="fit">Fit</option>
+                          <option value="crop">Crop</option>
+                          <option value="tile">Tile</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Rotation</span>
+                        <select
+                          aria-label={`${layerLabel} image rotation`}
+                          disabled={readOnly || layer.image.scaleMode === "crop"}
+                          value={layer.image.rotationDegrees ?? 0}
+                          onChange={(event) => {
+                            const rotationDegrees = Number(event.target.value) as 0 | 90 | 180 | 270;
+                            updateVersionedLayer(index, {
+                              ...layer,
+                              image: {
+                                ...layer.image,
+                                rotationDegrees:
+                                  rotationDegrees === 0 ? undefined : rotationDegrees,
+                              },
+                            });
+                          }}
+                        >
+                          <option value="0">0°</option>
+                          <option value="90">90°</option>
+                          <option value="180">180°</option>
+                          <option value="270">270°</option>
+                        </select>
+                      </label>
+                      {IMAGE_FILTER_CONTROLS.map(([field, label]) => (
+                        <label key={field}>
+                          <span>{label}</span>
+                          <input
+                            aria-label={`${layerLabel} image ${field}`}
+                            disabled={readOnly}
+                            type="number"
+                            min="-1"
+                            max="1"
+                            step="0.01"
+                            value={layer.image!.filters?.[field] ?? ""}
+                            placeholder="0"
+                            onChange={(event) => {
+                              const raw = event.currentTarget.value;
+                              const value = raw === "" ? undefined : Number(raw);
+                              if (value !== undefined && (!Number.isFinite(value) || value < -1 || value > 1)) return;
+                              const filters: DocumentImageFilters = { ...(layer.image!.filters ?? {}) };
+                              if (value === undefined) delete filters[field];
+                              else filters[field] = value;
+                              updateVersionedLayer(index, {
+                                ...layer,
+                                image: { ...layer.image!, filters },
+                              });
+                            }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      {layer.paint?.gradient
+                        ? "Linear gradient"
+                        : layer.paint?.gradientPaint?.kind
+                          ? `${layer.paint.gradientPaint.kind} gradient`
+                          : layer.paint?.css ?? "Solid"}
+                    </span>
+                  )}
+                  {layerPresentationControls(index, layer, layerLabel)}
+                </div>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={() => updateStack(key, undefined)}
+          >
+            Use single {singular}
+          </button>
+        </div>
+      );
+    }
     return (
       <div
         className="grid gap-1.5 rounded-lg border bg-muted/20 p-2 [&_button]:h-7 [&_button]:rounded-lg [&_button]:border [&_button]:bg-background [&_button]:px-2 [&_button]:text-[10px] [&_button]:font-medium [&_button]:hover:bg-muted [&_button:disabled]:opacity-50"
@@ -9442,7 +10703,20 @@ function PaintStackInspector({
         {paints.length > 0 && (
           <div className="grid gap-1.5">
             {paints.map((paint, index) => {
-              const gradient = paint.gradient;
+              const presentationLayer = versionedStack?.layers[index] ?? {
+                paint,
+                visible: true,
+                opacity: 1,
+                blendMode: "normal" as const,
+              };
+              const linearGradient = paint.gradient;
+              const nonLinearGradient = paint.gradientPaint;
+              const gradient = linearGradient ?? nonLinearGradient;
+              const gradientType = linearGradient ? "linear" : nonLinearGradient?.kind ?? "solid";
+              const updateCurrentGradient = (next: DocumentLinearGradient | DocumentGradientPaint) => {
+                if (linearGradient) updateGradient(index, paint, next as DocumentLinearGradient);
+                else updateNonLinearGradient(index, paint, next as DocumentGradientPaint);
+              };
               const layerLabel = `${title} ${index + 1}`;
               return (
                 <div
@@ -9454,15 +10728,22 @@ function PaintStackInspector({
                     <select
                       aria-label={`${layerLabel} type`}
                       disabled={readOnly}
-                      value={gradient ? "gradient" : "solid"}
+                      value={gradientType}
                       onChange={(event) => {
-                        if (event.target.value === "gradient") {
+                        if (event.target.value === "linear") {
                           const color = paintColor(paint);
                           updateGradient(
                             index,
                             paint,
                             createDefaultLinearGradient(color),
                           );
+                        } else if (["radial", "angular", "diamond"].includes(event.target.value)) {
+                          const stops = gradient?.stops ?? createDefaultLinearGradient(paintColor(paint)).stops;
+                          updateNonLinearGradient(index, paint, {
+                            kind: event.target.value as DocumentGradientPaint["kind"],
+                            transform: nonLinearGradient?.transform ?? { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+                            stops: structuredClone(stops),
+                          });
                         } else if (gradient) {
                           const color = gradient.stops[0].color;
                           updatePaint(index, {
@@ -9470,12 +10751,16 @@ function PaintStackInspector({
                             css: colorCss(color),
                             color,
                             gradient: undefined,
+                            gradientPaint: undefined,
                           });
                         }
                       }}
                     >
                       <option value="solid">Solid</option>
-                      <option value="gradient">Linear gradient</option>
+                      <option value="linear">Linear gradient</option>
+                      <option value="radial">Radial gradient</option>
+                      <option value="angular">Angular gradient</option>
+                      <option value="diamond">Diamond gradient</option>
                     </select>
                     <button
                       type="button"
@@ -9497,19 +10782,21 @@ function PaintStackInspector({
                     <div className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-1.5">
                       <div
                         className="mt-0.5 size-6 rounded-md border"
-                        style={{ background: gradientCss(gradient) }}
+                        style={{ background: linearGradient
+                          ? gradientCss(linearGradient)
+                          : `${nonLinearGradient?.kind === "angular" ? "conic" : "radial"}-gradient(${gradient.stops.map((stop) => `${colorCss(stop.color)} ${Math.round(stop.position * 100)}%`).join(", ")})` }}
                       />
-                      <div
+                      {linearGradient && <div
                         className="col-span-full grid grid-cols-3 gap-1 [&>button]:h-7 [&>button]:rounded-lg [&>button]:border [&>button]:bg-background [&>button]:px-1 [&>button]:text-[10px] [&>button]:font-medium [&>button]:hover:bg-muted [&>button][aria-pressed=true]:bg-accent [&>button][aria-pressed=true]:text-accent-foreground"
                         aria-label={`${layerLabel} direction`}
                       >
                         <button
                           type="button"
-                          aria-pressed={sameDirection(gradient, [0, 0], [1, 0])}
+                          aria-pressed={sameDirection(linearGradient, [0, 0], [1, 0])}
                           disabled={readOnly}
                           onClick={() =>
                             updateGradient(index, paint, {
-                              ...gradient,
+                              ...linearGradient,
                               start: [0, 0],
                               end: [1, 0],
                             })
@@ -9519,11 +10806,11 @@ function PaintStackInspector({
                         </button>
                         <button
                           type="button"
-                          aria-pressed={sameDirection(gradient, [0, 0], [0, 1])}
+                          aria-pressed={sameDirection(linearGradient, [0, 0], [0, 1])}
                           disabled={readOnly}
                           onClick={() =>
                             updateGradient(index, paint, {
-                              ...gradient,
+                              ...linearGradient,
                               start: [0, 0],
                               end: [0, 1],
                             })
@@ -9533,11 +10820,11 @@ function PaintStackInspector({
                         </button>
                         <button
                           type="button"
-                          aria-pressed={sameDirection(gradient, [0, 0], [1, 1])}
+                          aria-pressed={sameDirection(linearGradient, [0, 0], [1, 1])}
                           disabled={readOnly}
                           onClick={() =>
                             updateGradient(index, paint, {
-                              ...gradient,
+                              ...linearGradient,
                               start: [0, 0],
                               end: [1, 1],
                             })
@@ -9545,7 +10832,7 @@ function PaintStackInspector({
                         >
                           Diagonal
                         </button>
-                      </div>
+                      </div>}
                       <div className="col-span-full grid gap-1.5">
                         {gradient.stops.map((stop, stopIndex) => (
                           <label
@@ -9563,7 +10850,7 @@ function PaintStackInspector({
                                   event.target.value,
                                 );
                                 if (color)
-                                  updateGradient(index, paint, {
+                                  updateCurrentGradient({
                                     ...gradient,
                                     stops: gradient.stops.map(
                                       (current, currentIndex) =>
@@ -9609,7 +10896,7 @@ function PaintStackInspector({
                                   lower,
                                   Math.min(upper, Number(event.target.value)),
                                 );
-                                updateGradient(index, paint, {
+                                updateCurrentGradient({
                                   ...gradient,
                                   stops: gradient.stops.map(
                                     (current, currentIndex) =>
@@ -9626,7 +10913,7 @@ function PaintStackInspector({
                               aria-label={`Remove ${layerLabel} gradient stop ${stopIndex + 1}`}
                               disabled={readOnly || gradient.stops.length <= 2}
                               onClick={() =>
-                                updateGradient(index, paint, {
+                                updateCurrentGradient({
                                   ...gradient,
                                   stops: gradient.stops.filter(
                                     (_, currentIndex) =>
@@ -9672,6 +10959,7 @@ function PaintStackInspector({
                       />
                     </label>
                   )}
+                  {layerPresentationControls(index, presentationLayer, layerLabel)}
                 </div>
               );
             })}
@@ -10698,9 +11986,7 @@ function TextInspector({
               aria-label="Line height"
               disabled={readOnly}
               inputMode="decimal"
-              value={
-                properties.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT
-              }
+              value={resolvedTextLineHeight(properties)}
               onChange={(event) => {
                 const raw = event.target.value.trim();
                 if (!raw)
@@ -10709,6 +11995,7 @@ function TextInspector({
                     paragraph: {
                       ...properties.paragraph,
                       lineHeight: undefined,
+                      lineHeightUnit: undefined,
                     },
                   });
                 else
@@ -10716,7 +12003,7 @@ function TextInspector({
                     if (lineHeight > 0)
                       updateProperties({
                         ...properties,
-                        paragraph: { ...properties.paragraph, lineHeight },
+                        paragraph: { ...properties.paragraph, lineHeight, lineHeightUnit: undefined },
                       });
                   });
               }}
@@ -10771,6 +12058,28 @@ function TextInspector({
           </select>
         </label>
         <label>
+          Wrap{" "}
+          <select
+            aria-label="Text wrap style"
+            disabled={readOnly}
+            value={properties.paragraph.textWrapStyle ?? "auto"}
+            onChange={(event) => {
+              const textWrapStyle = event.target.value as "auto" | "balance" | "pretty";
+              updateProperties({
+                ...properties,
+                paragraph: {
+                  ...properties.paragraph,
+                  textWrapStyle: textWrapStyle === "auto" ? undefined : textWrapStyle,
+                },
+              });
+            }}
+          >
+            <option value="auto">Auto</option>
+            <option value="balance">Balance</option>
+            <option value="pretty">Pretty</option>
+          </select>
+        </label>
+        <label>
           Auto size{" "}
           <select
             aria-label="Text auto size"
@@ -10788,6 +12097,45 @@ function TextInspector({
             <option value="height">Auto height</option>
             <option value="widthAndHeight">Auto width &amp; height</option>
           </select>
+        </label>
+        <label>
+          Truncation{" "}
+          <select
+            aria-label="Text truncation"
+            disabled={readOnly}
+            value={properties.textTruncation ?? "disabled"}
+            onChange={(event) => {
+              const textTruncation = event.target.value as "disabled" | "ending";
+              updateProperties({
+                ...properties,
+                textTruncation,
+                ...(textTruncation === "disabled" ? { maxLines: undefined } : {}),
+              });
+            }}
+          >
+            <option value="disabled">Disabled</option>
+            <option value="ending">Ending ellipsis</option>
+          </select>
+        </label>
+        <label>
+          Max lines{" "}
+          <input
+            aria-label="Text maximum lines"
+            disabled={readOnly || properties.textTruncation !== "ending"}
+            inputMode="numeric"
+            min={1}
+            step={1}
+            value={properties.maxLines ?? ""}
+            onChange={(event) => {
+              const raw = event.target.value.trim();
+              if (!raw) updateProperties({ ...properties, maxLines: undefined });
+              else {
+                const maxLines = Number(raw);
+                if (Number.isSafeInteger(maxLines) && maxLines >= 1)
+                  updateProperties({ ...properties, maxLines });
+              }
+            }}
+          />
         </label>
         <label>
           Fallback{" "}
@@ -10926,6 +12274,14 @@ function svgFileStem(value: string) {
     .replace(/[^\p{L}\p{N}._-]+/gu, "-")
     .replace(/^-+|-+$/g, "");
   return stem || "makefigma-page";
+}
+
+function throwIfExportAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("The export was cancelled.", "AbortError");
+  }
 }
 
 function downloadBlob(blob: Blob, filename: string) {

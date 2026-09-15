@@ -1,0 +1,38 @@
+{
+  "format": "makefigma-remediation-image-alpha-mask-v1",
+  "name": "RF-05-IMAGE-ALPHA-MASK",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "assets": [{
+    "assetId": "00000000-0000-4000-8000-000000000951",
+    "contentHash": "0d62ae6b121c2713a9e94e308cc96c5ca0250f50e848038a4215d00cc7c25ef6",
+    "mediaType": "image/png",
+    "byteLength": 73,
+    "pixelWidth": 2,
+    "pixelHeight": 1,
+    "bytesBase64": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEElEQVR4nGP4//8/w38gAQAe6gb6A/VEhAAAAABJRU5ErkJggg=="
+  }],
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000952",
+      "positionId": "20000000000000000000000000000000:00000000000000000000000000000000",
+      "name": "Evidence background", "kind": "rectangle",
+      "x": -320, "y": -180, "width": 640, "height": 360, "rotation": 0,
+      "fill": "#ffffff", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000953",
+      "positionId": "40000000000000000000000000000000:00000000000000000000000000000000",
+      "name": "Half-transparent image mask", "kind": "image",
+      "x": -200, "y": -80, "width": 400, "height": 160, "rotation": 0,
+      "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true,
+      "isMask": true, "assetId": "00000000-0000-4000-8000-000000000951"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000954",
+      "positionId": "60000000000000000000000000000000:00000000000000000000000000000000",
+      "name": "Image alpha target", "kind": "rectangle",
+      "x": -200, "y": -80, "width": 400, "height": 160, "rotation": 0,
+      "fill": "#e11d48", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    }
+  ]
+}

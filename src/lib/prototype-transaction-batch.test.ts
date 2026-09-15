@@ -11,6 +11,7 @@ describe("M3 prototype transaction batch", () => {
       reactions: [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "BACK" }] }],
     }}]);
     expect(resolved?.batch).toHaveLength(2);
-    expect(resolved?.batch[1]).toMatchObject({ type: "setExtensions", id: "frame" });
+    expect(resolved?.batch.map((command) => command.type)).toEqual(["setExtensions", "update"]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "setExtensions", id: "frame" });
   });
 });

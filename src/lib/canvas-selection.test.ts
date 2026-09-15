@@ -14,6 +14,11 @@ const frameTree: CanvasNode[] = [
   { id: "frame-child", parentId: "nested-frame", name: "Frame child", kind: "rectangle", x: 20, y: 20, width: 20, height: 20, rotation: 0, fill: "#fff", stroke: "transparent", strokeWidth: 0, radius: 0, opacity: 1 },
 ];
 
+const transformGroupTree: CanvasNode[] = [
+  { ...groupTree[0]!, id: "repeat", kind: "transformGroup", transformModifiers: [{ type: "REPEAT", repeatType: "RADIAL", count: 3, unitType: "PIXELS", offset: 40 }] },
+  { ...groupTree[2]!, id: "repeat-child", parentId: "repeat" },
+];
+
 describe("canvas object selection", () => {
   it("keeps an existing multi-selection when pressing a selected object", () => {
     expect(resolveCanvasObjectSelection(["sun", "signal"], "sun", false)).toEqual(["sun", "signal"]);
@@ -41,6 +46,12 @@ describe("canvas object selection", () => {
     expect(resolveNestedSelectionTarget(frameTree, "frame-child", false)?.id).toBe("frame");
     expect(resolveNestedSelectionTarget(frameTree, "frame-child", true, ["frame"])?.id).toBe("nested-frame");
     expect(resolveNestedSelectionTarget(frameTree, "frame-child", false, [], true)?.id).toBe("frame-child");
+  });
+
+  it("treats a TransformGroup as the boundary for source and derived Repeat hits", () => {
+    expect(resolveNestedSelectionTarget(transformGroupTree, "repeat-child", false)?.id).toBe("repeat");
+    expect(resolveNestedSelectionTarget(transformGroupTree, "repeat-child", true, ["repeat"])?.id).toBe("repeat-child");
+    expect(resolveNestedKeyboardTarget(transformGroupTree, ["repeat"], "child")?.id).toBe("repeat-child");
   });
 
   it("moves a nested selection with Enter and Shift+Enter", () => {

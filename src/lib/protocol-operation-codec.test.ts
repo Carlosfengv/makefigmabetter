@@ -1,4 +1,4 @@
-import { BlendMode, ConstraintType, LayoutAlignment, LayoutMode, LayoutSizing, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -45,6 +45,334 @@ describe("protocol operation codec", () => {
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
     expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_TEXT_PATH, vectorPath: expect.anything() });
     expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.text-path.metadata.v1"])).toContain('"startSegment":1');
+  });
+
+  it("serializes identity-preserving TextPath conversion without create/delete churn", () => {
+    const source = {
+      ...createNode("rectangle", 10, 20),
+      id,
+      pageId: "00000000-0000-0000-0000-000000000001",
+      parentId: "00000000-0000-4000-8000-000000000010",
+      positionId: "00000000000000000000000000000001:00000000000000000000000000000000",
+    };
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: false, points: [
+      { id: "00000000-0000-4000-8000-000000000011", x: 0, y: 40, pointType: "corner" as const },
+      { id: "00000000-0000-4000-8000-000000000012", x: 320, y: 40, pointType: "corner" as const },
+    ] }] };
+    const resolved = resolveCoreBatch([source], [{
+      type: "convertToTextPath",
+      id,
+      vectorPath,
+      metadata: { startSegment: 0, startPosition: .25, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "CENTER" },
+    }]);
+    expect(resolved?.nextNodes).toContainEqual(expect.objectContaining({
+      id,
+      kind: "textPath",
+      parentId: source.parentId,
+      positionId: source.positionId,
+      x: source.x,
+      y: source.y,
+    }));
+
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+    const operationNames = batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined));
+    expect(operationNames).toEqual(["convertToTextPath", "renameNode", "setText", "setTextProperties", "setNodeExtensions"]);
+    expect(batch.operations[0]?.convertToTextPath).toMatchObject({ nodeId: idBytes(id), vectorPath: expect.anything() });
+    expect(operationNames).not.toContain("createNode");
+    expect(operationNames).not.toContain("deleteNode");
+  });
+
+  it.each(["shapeWithText", "textPath"] as const)("serializes confirmed %s plain-text edits without TextProperties", (kind) => {
+    const node = { ...createNode(kind, 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", text: "Before" };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { text: "After" } }]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "update", plainTextOnly: true });
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+    const operationNames = batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined));
+    expect(operationNames).toContain("setText");
+    expect(operationNames).not.toContain("setTextProperties");
+    expect(operationNames).toEqual(["setText"]);
+    expect(batch.operations.find((operation) => operation.setText)?.setText?.text).toBe("After");
+  });
+
+  it("serializes ShapeWithText TextSublayer styles without replaying geometry", () => {
+    const textProperties = {
+      runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 1.5 }],
+      paragraph: { alignment: "center" as const, lineHeight: 24, paragraphSpacing: 4 },
+      autoSize: "fixed" as const,
+    };
+    const node = { ...createNode("shapeWithText", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", text: "Review" };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    expect(resolved?.batch[0]).toMatchObject({ type: "update", plainTextOnly: true });
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+    expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["setText", "setTextProperties"]);
+    expect(batch.operations[1]?.setTextProperties?.properties?.runs[0]).toMatchObject({ fontSize: 18, fontWeight: 650, letterSpacing: 1.5 });
+  });
+
+  it("serializes PERCENT and AUTO line heights on the append-only paragraph unit tag", () => {
+    const node = { ...createNode("shapeWithText", 10, 20), id, text: "Review" };
+    const encoded = (paragraph: { lineHeight?: number; lineHeightUnit: "percent" | "auto" }) => {
+      const textProperties = {
+        runs: [{ start: 0, end: 6, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "center" as const, paragraphSpacing: 0, ...paragraph },
+        autoSize: "fixed" as const,
+      };
+      const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+      return ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+        .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph;
+    };
+    expect(encoded({ lineHeight: 150, lineHeightUnit: "percent" })).toMatchObject({
+      lineHeight: 150,
+      lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_PERCENT,
+    });
+    expect(encoded({ lineHeightUnit: "auto" })).toMatchObject({
+      lineHeight: undefined,
+      lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_AUTO,
+    });
+  });
+
+  it("serializes presence-bearing paragraph indentation on the append-only paragraph tag", () => {
+    const node = { ...createNode("shapeWithText", 10, 20), id, text: "Review" };
+    const textProperties = {
+      runs: [{ start: 0, end: 6, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, paragraphIndent: 18 },
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const paragraph = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph;
+    expect(paragraph?.paragraphIndent).toBe(18);
+  });
+
+  it("serializes non-default paragraph wrapping on the append-only paragraph tag", () => {
+    const node = { ...createNode("shapeWithText", 10, 20), id, text: "Review this now" };
+    const textProperties = {
+      runs: [{ start: 0, end: 15, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, textWrapStyle: "balance" as const },
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const paragraph = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph;
+    expect(paragraph?.textWrapStyle).toBe(TextWrapStyle.TEXT_WRAP_STYLE_BALANCE);
+  });
+
+  it("serializes explicit per-paragraph AUTO wrapping on ParagraphStyleRun tag 9", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo" };
+    const textProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, textWrapStyle: "balance" as const },
+      paragraphStyleRuns: [{ start: 4, textWrapStyle: "auto" as const }],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const run = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)
+      ?.setTextProperties?.properties?.paragraphStyleRuns[0];
+    expect(run?.start).toBe(4);
+    expect(run?.textWrapStyle).toBe(TextWrapStyle.TEXT_WRAP_STYLE_AUTO);
+  });
+
+  it("serializes ordered and unordered list options on the append-only paragraph tag", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo" };
+    const encoded = (listType: "ordered" | "unordered") => {
+      const textProperties = {
+        runs: [{ start: 0, end: 7, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType },
+        autoSize: "fixed" as const,
+      };
+      const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+      return ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+        .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph?.listType;
+    };
+    expect(encoded("ordered")).toBe(TextListType.TEXT_LIST_TYPE_ORDERED);
+    expect(encoded("unordered")).toBe(TextListType.TEXT_LIST_TYPE_UNORDERED);
+  });
+
+  it("serializes list spacing on append-only ParagraphStyle tag 8", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo" };
+    const textProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const, listSpacing: 8 },
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const paragraph = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph;
+    expect(paragraph?.listSpacing).toBe(8);
+  });
+
+  it("serializes hangingList only when enabled on ParagraphStyle tag 9", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo" };
+    const encoded = (hangingList?: boolean) => {
+      const textProperties = {
+        runs: [{ start: 0, end: 7, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const, hangingList },
+        autoSize: "fixed" as const,
+      };
+      const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+      return ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+        .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph?.hangingList;
+    };
+    expect(encoded(true)).toBe(true);
+    expect(encoded(false)).toBeUndefined();
+  });
+
+  it("serializes hangingPunctuation only when enabled on ParagraphStyle tag 10", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "“Text.”" };
+    const encoded = (hangingPunctuation?: boolean) => {
+      const textProperties = {
+        runs: [{ start: 0, end: 11, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, paragraphSpacing: 0, hangingPunctuation },
+        autoSize: "fixed" as const,
+      };
+      const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+      return ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+        .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraph?.hangingPunctuation;
+    };
+    expect(encoded(true)).toBe(true);
+    expect(encoded(false)).toBeUndefined();
+  });
+
+  it("serializes sparse paragraph indentation on TextProperties tag 8", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo" };
+    const textProperties = {
+      runs: [{ start: 0, end: 7, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const },
+      paragraphStyleRuns: [{ start: 4, indentation: 2 }],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const properties = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties;
+    expect(properties?.paragraphStyleRuns).toEqual([{ start: 4, indentation: 2 }]);
+  });
+
+  it("serializes per-paragraph list overrides on ParagraphStyleRun tag 3", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo\nThree" };
+    const textProperties = {
+      runs: [{ start: 0, end: 13, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const },
+      paragraphStyleRuns: [
+        { start: 4, listType: "none" as const },
+        { start: 8, listType: "unordered" as const },
+      ],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const runs = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraphStyleRuns;
+    expect(runs).toEqual([
+      { start: 4, listType: TextListType.TEXT_LIST_TYPE_NONE },
+      { start: 8, listType: TextListType.TEXT_LIST_TYPE_UNORDERED },
+    ]);
+  });
+
+  it("serializes explicit per-paragraph list spacing, including zero, on ParagraphStyleRun tag 4", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo\nThree" };
+    const textProperties = {
+      runs: [{ start: 0, end: 13, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const, listSpacing: 8 },
+      paragraphStyleRuns: [{ start: 4, listSpacing: 0 }, { start: 8, listSpacing: 12 }],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const runs = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraphStyleRuns;
+    expect(runs).toEqual([{ start: 4, listSpacing: 0 }, { start: 8, listSpacing: 12 }]);
+  });
+
+  it("serializes explicit per-paragraph paragraph spacing, including zero, on ParagraphStyleRun tag 5", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo\nThree" };
+    const textProperties = {
+      runs: [{ start: 0, end: 13, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 8 },
+      paragraphStyleRuns: [{ start: 4, paragraphSpacing: 0 }, { start: 8, paragraphSpacing: 12 }],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const runs = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraphStyleRuns;
+    expect(runs).toEqual([{ start: 4, paragraphSpacing: 0 }, { start: 8, paragraphSpacing: 12 }]);
+  });
+
+  it("serializes explicit per-paragraph indentation, including zero, on ParagraphStyleRun tag 6", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo\nThree" };
+    const textProperties = {
+      runs: [{ start: 0, end: 13, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0, paragraphIndent: 8 },
+      paragraphStyleRuns: [{ start: 4, paragraphIndent: 0 }, { start: 8, paragraphIndent: 12 }],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const runs = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraphStyleRuns;
+    expect(runs).toEqual([{ start: 4, paragraphIndent: 0 }, { start: 8, paragraphIndent: 12 }]);
+  });
+
+  it("serializes per-paragraph PIXELS, PERCENT and AUTO line heights on tags 7 and 8", () => {
+    const node = { ...createNode("text", 10, 20), id, text: "One\nTwo\nThree" };
+    const textProperties = {
+      runs: [{ start: 0, end: 13, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+      paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 },
+      paragraphStyleRuns: [
+        { start: 0, lineHeight: 24 },
+        { start: 4, lineHeight: 150, lineHeightUnit: "percent" as const },
+        { start: 8, lineHeightUnit: "auto" as const },
+      ],
+      autoSize: "fixed" as const,
+    };
+    const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { textProperties } }]);
+    const runs = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch))
+      .operations.find((operation) => operation.setTextProperties)?.setTextProperties?.properties?.paragraphStyleRuns;
+    expect(runs).toEqual([
+      { start: 0, lineHeight: 24 },
+      { start: 4, lineHeight: 150, lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_PERCENT },
+      { start: 8, lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_AUTO },
+    ]);
+  });
+
+  it("serializes legacy run colors and presence-bearing Text PaintStacks on their distinct protobuf tags", () => {
+    const textProperties = {
+      runs: [
+        { start: 0, end: 1, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: .5 } },
+        { start: 1, end: 2, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 0, fillStack: { layers: [] } },
+      ],
+      paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+      autoSize: "fixed" as const,
+    };
+    const node = { ...createNode("text", 10, 20), id, text: "AB", textProperties };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    const runs = batch.operations[1]?.setTextProperties?.properties?.runs;
+    expect(runs?.[0]?.color).toMatchObject({ red: 1, green: 0, blue: 0, alpha: .5 });
+    expect(runs?.[0]?.fillStack).toBeUndefined();
+    expect(runs?.[1]?.color).toBeUndefined();
+    expect(runs?.[1]?.fillStack).toEqual({ layers: [] });
+  });
+
+  it("serializes an empty-text base style on the append-only TextProperties field", () => {
+    const textProperties = {
+      runs: [],
+      baseStyle: {
+        fontSize: 22,
+        fontWeight: 600,
+        italic: true,
+        letterSpacing: 1.25,
+        fillStack: { layers: [] },
+      },
+      paragraph: { alignment: "left" as const, lineHeight: 26, paragraphSpacing: 0 },
+      autoSize: "fixed" as const,
+    };
+    const node = { ...createNode("shapeWithText", 10, 20), id, text: "", textProperties };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[1]?.setTextProperties?.properties?.baseStyle).toMatchObject({
+      start: 0,
+      end: 0,
+      fontSize: 22,
+      fontWeight: 600,
+      italic: true,
+      letterSpacing: 1.25,
+      fillStack: { layers: [] },
+    });
   });
 
   it("serializes beta TransformGroup with repeat metadata", () => {
@@ -190,12 +518,12 @@ describe("protocol operation codec", () => {
   });
 
   it("serializes Blend Mode for both a created node and an appearance update", () => {
-    const node = { ...createNode("rectangle", 10, 20), id, blendMode: "multiply" as const };
+    const node = { ...createNode("rectangle", 10, 20), id, blendMode: "color-dodge" as const };
     const created = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
-    const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { blendMode: "screen" } }])!.batch));
+    const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { blendMode: "linear-dodge" } }])!.batch));
 
-    expect(created.operations[0].createNode?.node?.blendMode).toBe(BlendMode.BLEND_MODE_MULTIPLY);
-    expect(updated.operations[2].setAppearance?.blendMode).toBe(BlendMode.BLEND_MODE_SCREEN);
+    expect(created.operations[0].createNode?.node?.blendMode).toBe(BlendMode.BLEND_MODE_COLOR_DODGE);
+    expect(updated.operations[2].setAppearance?.blendMode).toBe(BlendMode.BLEND_MODE_LINEAR_DODGE);
   });
 
   it("serializes a live BooleanOperation selector on the created structural node", () => {
@@ -306,6 +634,70 @@ describe("protocol operation codec", () => {
       fills: [{ solid: expect.anything() }, { solid: expect.anything() }],
       strokes: [{ solid: expect.anything() }, { solid: expect.anything() }],
     });
+  });
+
+  it("serializes presence-bearing empty and image paint stacks", () => {
+    const assetId = "00000000-0000-4000-8000-000000000077";
+    const node = {
+      ...createNode("rectangle", 10, 20),
+      id,
+      fillStack: { layers: [] },
+      strokeStack: {
+        layers: [{
+          image: { assetId, scaleMode: "fill" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 4, f: 8 }, rotationDegrees: 90 as const, filters: { exposure: .25, shadows: -.5 } },
+          visible: false,
+          opacity: 0.25,
+          blendMode: "color-burn" as const,
+        }],
+      },
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+
+    expect(batch.operations[0].createNode?.node?.fillStack).toEqual({ layers: [] });
+    expect(batch.operations[0].createNode?.node?.strokeStack?.layers[0]).toMatchObject({
+      image: { assetId: idBytes(assetId), scaleMode: ImageScaleMode.IMAGE_SCALE_MODE_FILL, transform: { a: 1, d: 1, e: 4, f: 8 }, rotationDegrees: 90, filters: { exposure: .25, shadows: -.5 } },
+      visible: false,
+      opacity: 0.25,
+      blendMode: BlendMode.BLEND_MODE_COLOR_BURN,
+    });
+  });
+
+  it("serializes a non-linear gradient kind, transform, and ordered stops", () => {
+    const node = {
+      ...createNode("rectangle", 10, 20),
+      id,
+      fillStack: {
+        layers: [{
+          paint: {
+            css: "#ff0000",
+            gradientPaint: {
+              kind: "diamond" as const,
+              transform: { a: .8, b: -.2, c: .15, d: 1.1, e: .1, f: .05 },
+              stops: [
+                { position: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+                { position: 1, color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: .5 } },
+              ],
+            },
+          },
+          visible: true,
+          opacity: .75,
+          blendMode: "overlay" as const,
+        }],
+      },
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    const layer = batch.operations[0].createNode?.node?.fillStack?.layers[0];
+
+    expect(layer).toMatchObject({
+      gradient: {
+        kind: 3,
+        transform: { a: .8, b: -.2, c: .15, d: 1.1, e: .1, f: .05 },
+      },
+      visible: true,
+      opacity: .75,
+      blendMode: BlendMode.BLEND_MODE_OVERLAY,
+    });
+    expect(layer?.gradient?.stops.map((stop) => stop.position)).toEqual([0, 1]);
   });
 
   it("preserves a linear-gradient paint layer with its ordered stops", () => {
@@ -431,6 +823,14 @@ describe("protocol operation codec", () => {
     expect(batch.operations[3].setText).toMatchObject({ nodeId: idBytes(id), text: "after" });
     expect(batch.operations[4].setTextProperties?.properties).toMatchObject({ autoSize: 1, paragraph: { alignment: 1 } });
     expect(batch.operations[4].setTextProperties?.properties?.paragraph?.lineHeight).toBe(20);
+  });
+
+  it("serializes the resizeWithoutConstraints intent on GeometryUpdate", () => {
+    const node = { ...createNode("frame", 10, 20), id };
+    const resolved = resolveCoreBatch([node], [{ type: "resizeWithoutConstraints", id, patch: { width: 480, height: 320 } }]);
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
+
+    expect(batch.operations[0].updateGeometry).toMatchObject({ width: 480, height: 320, ignoreConstraints: true });
   });
 
   it("serializes an image fill with the rest of a shape update", () => {
@@ -588,16 +988,18 @@ describe("protocol operation codec", () => {
     const node = {
       ...createNode("text", 10, 20), id, text: "A😀B",
       textProperties: {
-        runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700, italic: false, letterSpacing: 0 }],
+        runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700, italic: false, letterSpacing: 0, textCase: "smallCapsForced" as const, hyperlink: { type: "URL" as const, value: "https://example.com" }, textDecoration: "underline" as const, textDecorationStyle: "wavy" as const, textDecorationOffset: { value: 3, unit: "pixels" as const }, textDecorationThickness: { value: 10, unit: "percent" as const }, textDecorationColor: { color: { space: "srgb" as const, components: [1, .25, .5] as [number, number, number], alpha: 1 }, visible: true, opacity: .75, blendMode: "multiply" as const }, textDecorationSkipInk: true, leadingTrim: "capHeight" as const }],
         paragraph: { alignment: "center" as const, paragraphSpacing: 4 },
         autoSize: "height" as const,
+        textTruncation: "ending" as const,
+        maxLines: 2,
       },
     };
     const resolved = resolveCoreBatch([], [{ type: "create", node }]);
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
     expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["createNode", "setTextProperties"]);
     expect(batch.operations[0].createNode?.node?.textProperties).toBeUndefined();
-    expect(batch.operations[1].setTextProperties?.properties).toMatchObject({ autoSize: 2, paragraph: { alignment: 2 }, runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700 }] });
+    expect(batch.operations[1].setTextProperties?.properties).toMatchObject({ autoSize: 2, textTruncation: 2, maxLines: 2, paragraph: { alignment: 2 }, runs: [{ start: 0, end: 6, fontSize: 18, fontWeight: 700, textCase: TextCase.TEXT_CASE_SMALL_CAPS_FORCED, hyperlink: { type: HyperlinkType.HYPERLINK_TYPE_URL, value: "https://example.com" }, textDecoration: TextDecoration.TEXT_DECORATION_UNDERLINE, textDecorationStyle: TextDecorationStyle.TEXT_DECORATION_STYLE_WAVY, textDecorationOffset: { value: 3, unit: TextDecorationOffsetUnit.TEXT_DECORATION_OFFSET_UNIT_PIXELS }, textDecorationThickness: { value: 10, unit: TextDecorationThicknessUnit.TEXT_DECORATION_THICKNESS_UNIT_PERCENT }, textDecorationColor: { color: { space: ColorSpace.COLOR_SPACE_SRGB, red: 1, green: .25, blue: .5, alpha: 1 }, visible: true, opacity: .75, blendMode: BlendMode.BLEND_MODE_MULTIPLY }, textDecorationSkipInk: true, leadingTrim: LeadingTrim.LEADING_TRIM_CAP_HEIGHT }] });
   });
 
   it("passes an unknown-extension payload through the generated node encode byte-for-byte (P0-2)", () => {
@@ -628,7 +1030,21 @@ describe("protocol operation codec", () => {
     const assetId = "00000000-0000-0000-0000-00000000000b";
     const hash = "ab".repeat(32);
     const batch = ResolvedOperationBatch.decode(encodeRegisterResourcePayload({ assetId, contentHash: hash, mediaType: "image/png", byteLength: 128, pixelWidth: 16, pixelHeight: 8 }));
-    expect(batch.operations).toEqual([{ registerResource: { resource: { assetId: idBytes(assetId), contentHash: Uint8Array.from(Array(32).fill(0xab)), mediaType: "image/png", byteLength: "128", pixelWidth: 16, pixelHeight: 8 } } }]);
+    expect(batch.operations).toEqual([{ registerResource: { resource: { assetId: idBytes(assetId), contentHash: Uint8Array.from(Array(32).fill(0xab)), mediaType: "image/png", byteLength: "128", pixelWidth: 16, pixelHeight: 8, fontFaces: [] } } }]);
+  });
+
+  it("serializes admitted OpenType face identities without font bytes", () => {
+    const assetId = "00000000-0000-0000-0000-00000000000d";
+    const batch = ResolvedOperationBatch.decode(encodeRegisterResourcePayload({
+      assetId,
+      contentHash: "ef".repeat(32),
+      mediaType: "font/ttf",
+      byteLength: 512,
+      fontFaces: [{ faceIndex: 0, family: "Acme Sans", style: "Regular" }],
+    }));
+    expect(batch.operations[0].registerResource?.resource?.fontFaces).toEqual([
+      { faceIndex: 0, family: "Acme Sans", style: "Regular" },
+    ]);
   });
 
   it("keeps a resource registration ahead of its pasted image in one operation batch", () => {

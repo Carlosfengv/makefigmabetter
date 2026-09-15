@@ -1,4 +1,4 @@
-import type { CanvasNode, DocumentAsset } from "../lib/editor-protocol";
+import type { CanvasNode, DocumentAsset, DocumentVectorPath } from "../lib/editor-protocol";
 import { exportPageToSvg, type SvgExportResult } from "../lib/svg-export";
 import { rasterizeSvgToPng, SliceExportError } from "../lib/slice-export";
 import { compileScene } from "./scene-compiler";
@@ -14,7 +14,7 @@ export type RuntimePngExportSettings = Readonly<{
   constraint?: Readonly<{ type: "SCALE"; value: number }>;
 }>;
 export type RuntimeExportSettings = RuntimeSvgExportSettings | RuntimePngExportSettings;
-export type RuntimePngRasterizer = (input: Readonly<{ svg: string; width: number; height: number; scale: number }>) => Promise<Uint8Array>;
+export type RuntimePngRasterizer = (input: Readonly<{ svg: string; width: number; height: number; scale: number; signal: AbortSignal }>) => Promise<Uint8Array>;
 
 export function exportRuntimeNodeAsSvg(
   leasePool: RevisionLeasePool<RuntimeProjection, RevisionLeaseResource>,
@@ -30,6 +30,8 @@ export function exportRuntimeNodeSvgResult(
   projection: RuntimeProjection,
   pageId: string,
   nodeId: string,
+  booleanPaths?: ReadonlyMap<string, DocumentVectorPath>,
+  imageDataUris?: ReadonlyMap<string, string>,
 ): SvgExportResult {
   const lease = leasePool.acquire({ revision: projection.revision, projection, resources: exportResourcesFor(projection) });
   try {
@@ -47,6 +49,8 @@ export function exportRuntimeNodeSvgResult(
       sourceRevision: lease.revision,
       scene,
       nodeIds: [nodeId],
+      booleanPaths,
+      imageDataUris,
     });
   } catch (error) {
     if (isRuntimeError(error)) throw error;
@@ -66,11 +70,14 @@ export function runtimePngScale(settings: RuntimePngExportSettings): number {
 /** Browser-default PNG conversion. Session callers may inject an equivalent
  * raster boundary in workers/tests, but every implementation receives only a
  * frozen SVG payload plus its immutable physical dimensions. */
-export const rasterizeRuntimePng: RuntimePngRasterizer = async ({ svg, width, height, scale }) => {
+export const rasterizeRuntimePng: RuntimePngRasterizer = async ({ svg, width, height, scale, signal }) => {
   try {
-    const blob = await rasterizeSvgToPng(svg, width, height, scale);
-    return new Uint8Array(await blob.arrayBuffer());
+    const blob = await rasterizeSvgToPng(svg, width, height, scale, "transparent", signal);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (signal.aborted) throw signal.reason;
+    return bytes;
   } catch (error) {
+    if (isRuntimeError(error)) throw error;
     if (error instanceof SliceExportError && error.code === "RESOURCE_LIMIT") throw runtimeError("RESOURCE_LIMIT");
     throw runtimeError("EXPORT_FAILED");
   }

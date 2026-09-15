@@ -107,7 +107,10 @@ export function WorkspaceEditor({
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Button render={<a href={`/workspace/${workspaceKey}`} />}>
+            <Button
+              nativeButton={false}
+              render={<a href={`/workspace/${workspaceKey}`} />}
+            >
               返回工作区
             </Button>
           </EmptyContent>

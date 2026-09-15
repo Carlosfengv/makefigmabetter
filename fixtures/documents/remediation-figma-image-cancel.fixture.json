@@ -1,0 +1,28 @@
+{
+  "version": "remediation-figma-image-cancel-v1",
+  "document": {
+    "children": [
+      {
+        "id": "0:1",
+        "type": "CANVAS",
+        "name": "Image cancellation",
+        "children": [
+          {
+            "id": "1:1",
+            "type": "IMAGE",
+            "name": "Locked remote image",
+            "locked": true,
+            "imageRef": "remediation-locked-image-ref",
+            "relativeTransform": [[1, 0, 48], [0, 1, 48]],
+            "absoluteBoundingBox": {
+              "x": 48,
+              "y": 48,
+              "width": 240,
+              "height": 160
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

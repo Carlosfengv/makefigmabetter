@@ -1,4 +1,5 @@
 import type { DocumentTextProperties } from "./editor-protocol";
+import { applyDocumentTextCase, projectDocumentTextCaseRanges, sourceBoundaryToDisplay } from "./text-case";
 
 export type RenderTextStyle = {
   font?: DocumentTextProperties["runs"][number]["font"];
@@ -7,6 +8,16 @@ export type RenderTextStyle = {
   italic: boolean;
   letterSpacing: number;
   color?: DocumentTextProperties["runs"][number]["color"];
+  fillStack?: DocumentTextProperties["runs"][number]["fillStack"];
+  textCase?: DocumentTextProperties["runs"][number]["textCase"];
+  hyperlink?: DocumentTextProperties["runs"][number]["hyperlink"];
+  textDecoration?: DocumentTextProperties["runs"][number]["textDecoration"];
+  textDecorationStyle?: DocumentTextProperties["runs"][number]["textDecorationStyle"];
+  textDecorationOffset?: DocumentTextProperties["runs"][number]["textDecorationOffset"];
+  textDecorationThickness?: DocumentTextProperties["runs"][number]["textDecorationThickness"];
+  textDecorationColor?: DocumentTextProperties["runs"][number]["textDecorationColor"];
+  textDecorationSkipInk?: DocumentTextProperties["runs"][number]["textDecorationSkipInk"];
+  leadingTrim?: DocumentTextProperties["runs"][number]["leadingTrim"];
 };
 
 export type StyledTextSpan = { text: string; start: number; end: number; style: RenderTextStyle };
@@ -41,7 +52,7 @@ export function styledTextSpans(text: string, start: number, end: number, proper
     const spanEnd = ordered[index + 1];
     const run = runs.find((candidate) => candidate.start <= spanStart && candidate.end >= spanEnd);
     return {
-      text: new TextDecoder().decode(bytes.slice(spanStart, spanEnd)),
+      text: presentationTextSlice(bytes, spanStart, spanEnd, run),
       start: spanStart,
       end: spanEnd,
       style: run ? {
@@ -51,6 +62,16 @@ export function styledTextSpans(text: string, start: number, end: number, proper
         italic: run.italic,
         letterSpacing: run.letterSpacing,
         color: run.color,
+        fillStack: run.fillStack,
+        textCase: run.textCase,
+        hyperlink: run.hyperlink,
+        textDecoration: run.textDecoration,
+        textDecorationStyle: run.textDecorationStyle,
+        textDecorationOffset: run.textDecorationOffset,
+        textDecorationThickness: run.textDecorationThickness,
+        textDecorationColor: run.textDecorationColor,
+        textDecorationSkipInk: run.textDecorationSkipInk,
+        leadingTrim: run.leadingTrim,
       } : defaultStyle,
     };
   }).filter((span) => span.text.length > 0);
@@ -66,6 +87,7 @@ export function styledTextSpans(text: string, start: number, end: number, proper
  */
 export function styledTextVisualSpans(text: string, start: number, end: number, properties: DocumentTextProperties | undefined, visualRuns: readonly TextVisualRun[]): VisualStyledTextSpan[] {
   const bytes = new TextEncoder().encode(text);
+  const runs = properties?.runs ?? [];
   const logical = styledTextSpans(text, start, end, properties);
   const visual: VisualStyledTextSpan[] = [];
   for (const run of visualRuns) {
@@ -76,7 +98,8 @@ export function styledTextVisualSpans(text: string, start: number, end: number, 
       const pieceStart = Math.max(runStart, span.start);
       const pieceEnd = Math.min(runEnd, span.end);
       if (pieceStart >= pieceEnd) return [];
-      const piece = new TextDecoder().decode(bytes.slice(pieceStart, pieceEnd));
+      const sourceRun = runs.find((candidate) => candidate.start <= pieceStart && candidate.end >= pieceEnd);
+      const piece = presentationTextSlice(bytes, pieceStart, pieceEnd, sourceRun);
       return piece ? [{ text: piece, start: pieceStart, end: pieceEnd, style: span.style, direction: run.direction }] : [];
     });
     if (run.direction === "rtl") pieces.reverse();
@@ -84,3 +107,36 @@ export function styledTextVisualSpans(text: string, start: number, end: number, 
   }
   return visual;
 }
+
+/** Returns a presentation substring using the complete Style Run as the case
+ * context. In particular, TITLE does not restart at a wrapped line or UAX #9
+ * visual-run boundary. Generated display scalars remain sliced by the source
+ * boundary map rather than by coincidentally equal UTF-8 offsets. */
+function presentationTextSlice(
+  sourceBytes: Uint8Array,
+  start: number,
+  end: number,
+  run: DocumentTextProperties["runs"][number] | undefined,
+): string {
+  if (!run?.textCase) return decoder.decode(sourceBytes.slice(start, end));
+  const scopeStart = Math.max(0, run.start);
+  const scopeEnd = Math.min(sourceBytes.byteLength, run.end);
+  if (scopeStart > start || scopeEnd < end || scopeEnd <= scopeStart) {
+    return applyDocumentTextCase(decoder.decode(sourceBytes.slice(start, end)), run.textCase);
+  }
+  const source = decoder.decode(sourceBytes.slice(scopeStart, scopeEnd));
+  const projection = projectDocumentTextCaseRanges(source, [{
+    start: 0,
+    end: scopeEnd - scopeStart,
+    textCase: run.textCase,
+  }]);
+  const displayStart = projection && sourceBoundaryToDisplay(projection, start - scopeStart);
+  const displayEnd = projection && sourceBoundaryToDisplay(projection, end - scopeStart);
+  if (!projection || displayStart === undefined || displayEnd === undefined) {
+    return applyDocumentTextCase(decoder.decode(sourceBytes.slice(start, end)), run.textCase);
+  }
+  return decoder.decode(encoder.encode(projection.display).slice(displayStart, displayEnd));
+}
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();

@@ -1,5 +1,6 @@
 import type { CanvasNode } from "./editor-protocol";
 import { sortNodesByLayerOrder } from "./layer-order";
+import { clipsChildren } from "./node-capabilities";
 
 export type SelectionClipBounds = Readonly<{ x: number; y: number; width: number; height: number }>;
 
@@ -64,7 +65,7 @@ export function isFullyClippedForSelection(
     if (!current.parentId) return false;
     const parent = byId.get(current.parentId);
     if (!parent) return true;
-    if (parent.kind === "frame" && parent.clipsContent !== false) {
+    if (clipsChildren(parent.kind) && parent.clipsContent !== false) {
       const clipBounds = boundsFor(parent);
       if (!overlaps(visibleBounds, clipBounds)) return true;
       const overlap = intersection(visibleBounds, clipBounds);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
-import { addFigmaPluginComponentProperty, createFigmaPluginGif, createFigmaPluginInstance, createFigmaPluginLinkPreview, createFigmaPluginLinkUnfurl, createFigmaPluginShapeWithText, createFigmaPluginSlide, createFigmaPluginSlideRow, createFigmaPluginSticky, createFigmaPluginSlot, createFigmaPluginTable, createFigmaPluginTextPath, createFigmaPluginTransformGroup, deleteFigmaPluginComponentProperty, editFigmaPluginComponentProperty, getFigmaPluginData, reconnectFigmaPluginConnector, removeFigmaPluginInstanceOverrides, removeFigmaPluginNode, resizeFigmaPluginNode, resizeFigmaPluginTableTrack, setFigmaPluginData, setFigmaPluginHighlightVectorNetwork, setFigmaPluginInstanceProperties, setFigmaPluginSlideTransition, setFigmaPluginWidgetSyncedState, swapFigmaPluginComponent, tableCellAt, writeFigmaPluginNode } from "./figma-plugin-node-mutation";
+import { addFigmaPluginComponentProperty, createFigmaPluginGif, createFigmaPluginInstance, createFigmaPluginLinkPreview, createFigmaPluginLinkUnfurl, createFigmaPluginShapeWithText, createFigmaPluginSlide, createFigmaPluginSlideRow, createFigmaPluginSticky, createFigmaPluginSlot, createFigmaPluginTable, createFigmaPluginTextPath, createFigmaPluginTransformGroup, deleteFigmaPluginComponentProperty, editFigmaPluginComponentProperty, getFigmaPluginData, reconnectFigmaPluginConnector, removeFigmaPluginInstanceOverrides, removeFigmaPluginNode, resizeFigmaPluginNode, resizeFigmaPluginNodeWithoutConstraints, resizeFigmaPluginTableTrack, setFigmaPluginData, setFigmaPluginHighlightVectorNetwork, setFigmaPluginInstanceProperties, setFigmaPluginSlideTransition, setFigmaPluginWidgetSyncedState, swapFigmaPluginComponent, tableCellAt, writeFigmaPluginNode } from "./figma-plugin-node-mutation";
+import { NORMAL_BLEND_ISOLATION_EXTENSION } from "./node-blend-semantics";
 import { resolveCoreBatch } from "./transaction-batch";
 
 describe("Figma Plugin API node mutation adapter", () => {
@@ -15,6 +16,47 @@ describe("Figma Plugin API node mutation adapter", () => {
       { type: "setMask", id: node.id, enabled: true },
     ] });
     expect(result.ok && resolveCoreBatch([node], result.commands)?.nextNodes[0]).toMatchObject({ name: "Card", visible: false, locked: true, opacity: .4, blendMode: "multiply", isMask: true });
+  });
+
+  it("writes BlendMixin masks for descendant-owning Group and TransformGroup nodes", () => {
+    const target = { ...createNode("rectangle", 0, 0), id: "target", positionId: "30000000000000000000000000000000:00000000000000000000000000000000" };
+    for (const kind of ["group", "transformGroup"] as const) {
+      const mask = { ...createNode(kind, 0, 0), id: `${kind}-mask`, positionId: "10000000000000000000000000000000:00000000000000000000000000000000" };
+      const child = { ...createNode("ellipse", 0, 0), id: `${kind}-child`, parentId: mask.id };
+      const result = writeFigmaPluginNode(mask, { isMask: true });
+      expect(result).toEqual({ ok: true, commands: [{ type: "setMask", id: mask.id, enabled: true }] });
+      expect(result.ok && resolveCoreBatch([mask, child, target], result.commands)?.nextNodes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: mask.id, isMask: true }),
+      ]));
+    }
+    expect(writeFigmaPluginNode(createNode("slice", 0, 0), { isMask: true })).toEqual({ ok: false, reason: "isMask is not writable on this node type." });
+    expect(writeFigmaPluginNode(createNode("section", 0, 0), { isMask: true })).toEqual({ ok: false, reason: "isMask is not writable on this node type." });
+  });
+
+  it("writes and removes the isolated NORMAL marker without losing unrelated extensions", () => {
+    const legacy = {
+      ...createNode("group", 0, 0),
+      id: "group",
+      extensions: { "example.keep": [7] },
+    };
+    const normal = writeFigmaPluginNode(legacy, { blendMode: "NORMAL" });
+    expect(normal).toEqual({ ok: true, commands: [{
+      type: "update",
+      id: legacy.id,
+      patch: {
+        blendMode: "normal",
+        extensions: { "example.keep": [7], [NORMAL_BLEND_ISOLATION_EXTENSION]: [1] },
+      },
+    }] });
+    const isolated = normal.ok ? resolveCoreBatch([legacy], normal.commands)?.nextNodes[0] : undefined;
+    expect(isolated?.extensions).toEqual({ "example.keep": [7], [NORMAL_BLEND_ISOLATION_EXTENSION]: [1] });
+
+    const passThrough = writeFigmaPluginNode(isolated!, { blendMode: "PASS_THROUGH" });
+    expect(passThrough).toEqual({ ok: true, commands: [{
+      type: "update",
+      id: legacy.id,
+      patch: { blendMode: "pass-through", extensions: { "example.keep": [7] } },
+    }] });
   });
 
   it("uses Plugin API radians for ellipse arcs and type-gates node-specific setters", () => {
@@ -33,10 +75,11 @@ describe("Figma Plugin API node mutation adapter", () => {
 
   it("writes mutable Component publication metadata and protects remote Components", () => {
     const component = { ...createNode("component", 0, 0), id: "component" };
-    expect(writeFigmaPluginNode(component, {
+    const result = writeFigmaPluginNode(component, {
       description: "Reusable card", descriptionMarkdown: "**Reusable card**",
       documentationLinks: [{ uri: "https://design.example/card", name: "Card guide" }],
-    })).toEqual({ ok: true, commands: [{ type: "update", id: component.id, patch: {
+    });
+    expect(result).toEqual({ ok: true, commands: [{ type: "update", id: component.id, patch: {
       componentMetadata: {
         key: component.componentMetadata!.key, remote: false, description: "Reusable card", descriptionMarkdown: "**Reusable card**",
         documentationLinks: [{ uri: "https://design.example/card", name: "Card guide" }], componentPropertyDefinitions: {},
@@ -44,6 +87,8 @@ describe("Figma Plugin API node mutation adapter", () => {
     } }] });
     const remote = { ...component, componentMetadata: { key: "remote", remote: true, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } };
     expect(writeFigmaPluginNode(remote, { description: "Nope" })).toEqual({ ok: false, reason: "remote COMPONENT nodes are read-only." });
+    const resolved = resolveCoreBatch([component], result.ok ? result.commands : []);
+    expect(resolved?.batch.map((command) => command.type)).toEqual(["setExtensions", "update"]);
   });
 
   it("writes ComponentSet publication metadata with the same remote protection", () => {
@@ -57,15 +102,19 @@ describe("Figma Plugin API node mutation adapter", () => {
     const connector = { ...createNode("connector", 0, 0), id: "connector" };
     const result = writeFigmaPluginNode(connector, {
       connectorLineType: "ELBOWED",
-      connectorStart: { endpointNodeId: "a", magnet: "RIGHT", x: 0, y: 0 },
-      connectorEnd: { endpointNodeId: "b", magnet: "LEFT", x: 160, y: 0 },
+      connectorStart: { endpointNodeId: "a", magnet: "RIGHT" },
+      connectorEnd: { endpointNodeId: "b", position: { x: 160, y: 10 } },
       connectorStartStrokeCap: "NONE",
       connectorEndStrokeCap: "ARROW_EQUILATERAL",
     });
     expect(result).toMatchObject({ ok: true, commands: [{ type: "update", id: connector.id, patch: { connectorMetadata: {
-      lineType: "ELBOWED", start: { endpointNodeId: "a", magnet: "RIGHT" }, end: { endpointNodeId: "b", magnet: "LEFT" }, endStrokeCap: "ARROW_EQUILATERAL",
+      lineType: "ELBOWED", start: { endpointNodeId: "a", magnet: "RIGHT", x: 0, y: 0 }, end: { endpointNodeId: "b", x: 160, y: 10 }, endStrokeCap: "ARROW_EQUILATERAL",
     } } }] });
-    expect(reconnectFigmaPluginConnector(connector, { x: 4, y: 5 }, { x: 100, y: 20 })).toMatchObject({ ok: true, commands: [{ type: "update", patch: { connectorMetadata: { start: { x: 4, y: 5 }, end: { x: 100, y: 20 } } } }] });
+    expect(reconnectFigmaPluginConnector(connector, { position: { x: 4, y: 5 } }, { position: { x: 100, y: 20 } })).toMatchObject({ ok: true, commands: [{ type: "update", patch: { connectorMetadata: { start: { x: 4, y: 5 }, end: { x: 100, y: 20 } } } }] });
+    expect(writeFigmaPluginNode(connector, { connectorStart: { x: 4, y: 5 } as never })).toEqual({ ok: false, reason: "connectorStart must use Figma's position or endpointNodeId/magnet endpoint shape." });
+    expect(writeFigmaPluginNode(connector, { connectorStart: { endpointNodeId: "a", magnet: "CENTER" } })).toMatchObject({ ok: true, commands: [{ type: "update", patch: { connectorMetadata: { start: { endpointNodeId: "a", magnet: "CENTER", x: 0, y: 0 } } } }] });
+    expect(writeFigmaPluginNode(connector, { connectorEndStrokeCap: "ERD_ONE_OR_MORE" })).toMatchObject({ ok: true, commands: [{ type: "update", patch: { connectorMetadata: { endStrokeCap: "ERD_ONE_OR_MORE" } } }] });
+    expect(writeFigmaPluginNode(connector, { connectorEndStrokeCap: "FUTURE_CAP" as never })).toEqual({ ok: false, reason: "connectorEndStrokeCap must be an official ConnectorStrokeCap value." });
     expect(writeFigmaPluginNode(createNode("line", 0, 0), { connectorLineType: "CURVED" })).toEqual({ ok: false, reason: "connector properties are writable only on CONNECTOR nodes." });
   });
 
@@ -151,8 +200,11 @@ describe("Figma Plugin API node mutation adapter", () => {
 
   it("converts a Vector into a TextPath at its documented segment and position", () => {
     const vector = { ...createNode("vector", 0, 0), id: "vector" };
-    expect(createFigmaPluginTextPath(vector, 0, .5, () => "text-path")).toMatchObject({ ok: true, textPathId: "text-path", commands: [{ type: "delete", ids: ["vector"] }, { type: "create", node: { kind: "textPath", textPathMetadata: { startSegment: 0, startPosition: .5 } } }] });
-    expect(createFigmaPluginTextPath(createNode("rectangle", 0, 0), 0, .5, () => "text-path")).toEqual({ ok: false, reason: "createTextPath currently requires a VECTOR with a Canonical vector path." });
+    expect(createFigmaPluginTextPath(vector, 0, .5, () => "unused")).toMatchObject({ ok: true, textPathId: "vector", commands: [{ type: "convertToTextPath", id: "vector", metadata: { startSegment: 0, startPosition: .5 }, vectorPath: vector.vectorPath }] });
+    let point = 0;
+    const rectangle = { ...createNode("rectangle", 0, 0), id: "rectangle", width: 200, height: 100, radius: 12 };
+    const converted = createFigmaPluginTextPath(rectangle, 0, .25, () => `00000000-0000-4000-8000-${String(++point).padStart(12, "0")}`);
+    expect(converted).toMatchObject({ ok: true, textPathId: "rectangle", commands: [{ type: "convertToTextPath", id: "rectangle", vectorPath: { subpaths: [{ closed: true, points: expect.arrayContaining([expect.objectContaining({ x: 12, y: 0, handleIn: expect.any(Object) })]) }] } }] });
   });
 
   it("creates and writes a TransformGroup repeat modifier", () => {
@@ -182,10 +234,23 @@ describe("Figma Plugin API node mutation adapter", () => {
     expect(resolved?.nextNodes.find((node) => node.parentId === instance?.id)?.extensions?.["figma.instance.source-node.v1"]).toBeDefined();
     const synchronized = resolved && resolveCoreBatch(resolved.nextNodes, [{ type: "update", id: component.id, patch: { fill: "#123456" } }]);
     expect(synchronized?.nextNodes.find((node) => node.id === instance?.id)?.fill).toBe("#123456");
+    const instanceChild = resolved?.nextNodes.find((node) => node.parentId === instance.id);
+    if (!instanceChild) throw new Error("expected cloned instance child");
+    const withImportedOverride = resolved!.nextNodes.map((node) => node.id === instance.id
+      ? { ...node, instanceMetadata: { ...node.instanceMetadata!, overrides: [{ id: instanceChild.id, overriddenFields: ["fill"] }] } }
+      : node);
+    const preservedOverride = resolveCoreBatch(withImportedOverride, [{ type: "update", id: child.id, patch: { fill: "#abcdef" } }]);
+    expect(preservedOverride?.nextNodes.find((node) => node.id === instanceChild.id)?.fill).toBe(instanceChild.fill);
     expect(setFigmaPluginInstanceProperties(instance, { enabled: false })).toMatchObject({ ok: true });
     const overridden = { ...instance, instanceMetadata: { ...instance.instanceMetadata!, overrides: [{ id: "child", overriddenFields: ["characters"] }] } };
     expect(removeFigmaPluginInstanceOverrides(overridden)).toEqual({ ok: true, commands: [{ type: "update", id: instance.id, patch: { instanceMetadata: { ...overridden.instanceMetadata, overrides: [] } } }] });
     expect(swapFigmaPluginComponent([component, other, instance], instance.id, other.id)).toMatchObject({ ok: true, commands: [{ type: "update", id: instance.id, patch: { instanceMetadata: expect.objectContaining({ mainComponentId: other.id, componentProperties: { title: "New card" } }) } }] });
+  });
+
+  it("rejects every public mutation on a remote Component resource", () => {
+    const remote = { ...createNode("component", 0, 0), id: "remote", componentMetadata: { key: "library-key", remote: true, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } };
+    expect(writeFigmaPluginNode(remote, { name: "Edited" })).toEqual({ ok: false, reason: "remote COMPONENT nodes are read-only." });
+    expect(createFigmaPluginInstance([remote], remote.id, () => "instance")).toEqual({ ok: false, reason: "remote COMPONENT nodes cannot create a local instance." });
   });
 
   it("adds, edits, and deletes Component property definitions", () => {
@@ -218,12 +283,16 @@ describe("Figma Plugin API node mutation adapter", () => {
   it("preserves explicit no-loss limits instead of pretending to support unavailable values", () => {
     const star = { ...createNode("star", 0, 0), id: "star" };
     expect(writeFigmaPluginNode(star, { innerRadius: 0 })).toEqual({ ok: false, reason: "STAR innerRadius is currently supported from 0.05 through 0.95." });
-    expect(writeFigmaPluginNode(star, { blendMode: "COLOR" as never })).toEqual({ ok: false, reason: "COLOR is not in the Canonical blend-mode subset." });
+    expect(writeFigmaPluginNode(star, { blendMode: "COLOR" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "color" } }] });
+    expect(writeFigmaPluginNode(star, { blendMode: "PASS_THROUGH" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "pass-through" } }] });
+    expect(writeFigmaPluginNode(star, { blendMode: "LINEAR_BURN" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "linear-burn" } }] });
+    expect(writeFigmaPluginNode(star, { blendMode: "LINEAR_DODGE" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "linear-dodge" } }] });
   });
 
   it("models resize, remove, and namespaced plugin data as ordinary transactions", () => {
     const node = { ...createNode("text", 0, 0), id: "text" };
     expect(resizeFigmaPluginNode(node, 320, 40)).toEqual({ ok: true, commands: [{ type: "update", id: node.id, patch: { width: 320, height: 40 } }] });
+    expect(resizeFigmaPluginNodeWithoutConstraints(node, 320, 40)).toEqual({ ok: true, commands: [{ type: "resizeWithoutConstraints", id: node.id, patch: { width: 320, height: 40 } }] });
     expect(removeFigmaPluginNode(node)).toEqual({ ok: true, commands: [{ type: "delete", ids: [node.id] }] });
     const write = setFigmaPluginData(node, "com.example.plugin", "state", "ready");
     expect(write.ok).toBe(true);

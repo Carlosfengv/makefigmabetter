@@ -40,4 +40,21 @@ describe("render performance sampler", () => {
     [4, 8, 12, 16].forEach((duration) => sampler.recordInputToRender(duration));
     expect(sampler.summary()).toMatchObject({ inputToRenderSamples: 4, inputToRenderP95Ms: 16 });
   });
+
+  it("reports backend work, coverage, readback and effect-surface peaks independently", () => {
+    const sampler = createRenderPerformanceSampler(3);
+    sampler.start();
+    sampler.record({ totalMs: 4, gpuIslandMs: 1, canvasIslandMs: 2, gpuCoverageUpperBoundPixels: 100, canvasFallbackCoverageUpperBoundPixels: 50, gpuUploadBytes: 32, canvasReadbackBytes: 0, compositeSurfaceBytes: 4_096 });
+    sampler.record({ totalMs: 5, gpuIslandMs: 2, canvasIslandMs: 3, gpuCoverageUpperBoundPixels: 120, canvasFallbackCoverageUpperBoundPixels: 60, gpuUploadBytes: 64, canvasReadbackBytes: 2_048, compositeSurfaceBytes: 8_192 });
+
+    expect(sampler.summary()).toMatchObject({
+      gpuIslandP95Ms: 2,
+      canvasIslandP95Ms: 3,
+      gpuCoverageUpperBoundPixelsP95: 120,
+      canvasFallbackCoverageUpperBoundPixelsP95: 60,
+      gpuUploadBytesP95: 64,
+      canvasReadbackBytesP95: 2_048,
+      compositeSurfaceBytesP95: 8_192,
+    });
+  });
 });

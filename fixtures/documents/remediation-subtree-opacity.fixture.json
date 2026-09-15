@@ -1,0 +1,57 @@
+{
+  "format": "makefigma-remediation-subtree-opacity-v1",
+  "name": "RF-02-SUBTREE-OPACITY",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000801",
+      "name": "50 percent group",
+      "kind": "group",
+      "x": -40,
+      "y": -40,
+      "width": 80,
+      "height": 80,
+      "rotation": 0,
+      "fill": "transparent",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 0.5,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000802",
+      "parentId": "00000000-0000-4000-8000-000000000801",
+      "name": "Opaque red source",
+      "kind": "rectangle",
+      "x": -40,
+      "y": -40,
+      "width": 80,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#ff0000",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000803",
+      "parentId": "00000000-0000-4000-8000-000000000801",
+      "name": "Opaque blue source",
+      "kind": "rectangle",
+      "x": -40,
+      "y": -40,
+      "width": 80,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#0000ff",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true
+    }
+  ]
+}

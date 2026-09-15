@@ -1,7 +1,9 @@
 import type { DocumentTextProperties } from "./editor-protocol";
 
 type TextRun = DocumentTextProperties["runs"][number];
+type TextStyle = NonNullable<DocumentTextProperties["baseStyle"]>;
 export type TextRunStylePatch = Partial<Omit<TextRun, "start" | "end">>;
+export type TextInsertionStyle = "BEFORE" | "AFTER";
 
 /**
  * JavaScript strings can contain isolated UTF-16 surrogates, while Canonical
@@ -38,12 +40,46 @@ export function rebaseTextStyleRuns(
   after: string,
   properties: DocumentTextProperties,
 ): DocumentTextProperties {
-  const afterBytes = new TextEncoder().encode(after);
-  if (!properties.runs.length || !hasCompleteValidRunCoverage(before, properties.runs)) return { ...properties, runs: [] };
-
   const { beforeStart, beforeEnd, afterEnd } = replacementByteRange(before, after);
+  return rebaseTextStyleRunsAtByteRange(before, after, properties, beforeStart, beforeEnd, afterEnd);
+}
+
+/** Rebases style runs from an explicit editor replacement range. Repeated
+ * source text can make the same before/after pair compatible with several
+ * insertion points, so Runtime range APIs must not infer this position. */
+export function rebaseTextStyleRunsAtByteRange(
+  before: string,
+  after: string,
+  properties: DocumentTextProperties,
+  beforeStart: number,
+  beforeEnd: number,
+  afterEnd: number,
+  insertionStyle?: TextInsertionStyle,
+): DocumentTextProperties {
+  const afterBytes = new TextEncoder().encode(after);
+  const paragraphStyleRuns = rebaseParagraphStyleRunsAtByteRange(
+    before,
+    after,
+    properties,
+    beforeStart,
+    beforeEnd,
+    afterEnd,
+  );
+  if (!properties.runs.length) {
+    if (before.length === 0 && afterBytes.length > 0 && properties.baseStyle) {
+      return {
+        ...properties,
+        runs: [{ ...structuredClone(properties.baseStyle), start: 0, end: afterBytes.length }],
+        ...(paragraphStyleRuns.length ? { paragraphStyleRuns } : { paragraphStyleRuns: undefined }),
+      };
+    }
+    return { ...properties, runs: [], ...(paragraphStyleRuns.length ? { paragraphStyleRuns } : { paragraphStyleRuns: undefined }) };
+  }
+  if (!hasCompleteValidRunCoverage(before, properties.runs)) return { ...properties, runs: [] };
   if (beforeStart === beforeEnd && beforeStart === afterEnd) return properties;
-  const inherited = inheritedRun(properties.runs, beforeStart);
+  const inherited = beforeStart === beforeEnd && afterEnd > beforeStart && insertionStyle
+    ? insertionRun(properties.runs, beforeStart, insertionStyle)
+    : replacementRun(properties.runs, beforeStart);
   const delta = afterEnd - beforeEnd;
   const rebased: TextRun[] = [];
   for (const run of properties.runs) {
@@ -54,11 +90,160 @@ export function rebaseTextStyleRuns(
     if (run.end > beforeEnd) rebased.push({ ...run, start: Math.max(run.start, beforeEnd) + delta, end: run.end + delta });
   }
   const runs = mergeAdjacentRuns(rebased.filter((run) => run.start < run.end));
+  const baseStyle = afterBytes.length === 0 && inherited
+    ? textStyleFromRun(inherited)
+    : properties.baseStyle;
   // The only valid empty run set describes unstyled source. Rebased content
   // with styled input must remain fully covered for Core validation.
   return hasCompleteValidRunCoverage(after, runs) || afterBytes.length === 0
-    ? { ...properties, runs }
-    : { ...properties, runs: [] };
+    ? { ...properties, runs, ...(baseStyle ? { baseStyle } : {}), ...(paragraphStyleRuns.length ? { paragraphStyleRuns } : { paragraphStyleRuns: undefined }) }
+    : { ...properties, runs: [], ...(paragraphStyleRuns.length ? { paragraphStyleRuns } : { paragraphStyleRuns: undefined }) };
+}
+
+function rebaseParagraphStyleRunsAtByteRange(
+  before: string,
+  after: string,
+  properties: DocumentTextProperties,
+  beforeStart: number,
+  beforeEnd: number,
+  afterEnd: number,
+) {
+  if (!properties.paragraphStyleRuns?.length) return [];
+  const delta = afterEnd - beforeEnd;
+  return paragraphStartByteOffsets(after).flatMap((start) => {
+    const oldOffset = start < beforeStart
+      ? start
+      : start >= afterEnd
+        ? Math.max(beforeStart, start - delta)
+        : beforeStart;
+    const listType = paragraphListTypeAtByteOffset(before, properties, oldOffset);
+    const indentation = paragraphIndentationAtByteOffset(before, properties, oldOffset);
+    const listSpacing = paragraphListSpacingAtByteOffset(before, properties, oldOffset);
+    const inheritedListSpacing = properties.paragraph.listSpacing ?? 0;
+    const paragraphSpacing = paragraphSpacingAtByteOffset(before, properties, oldOffset);
+    const paragraphIndent = paragraphIndentAtByteOffset(before, properties, oldOffset);
+    const inheritedParagraphIndent = properties.paragraph.paragraphIndent ?? 0;
+    const lineHeight = paragraphLineHeightAtByteOffset(before, properties, oldOffset);
+    const inheritedLineHeight = {
+      lineHeight: properties.paragraph.lineHeight,
+      lineHeightUnit: properties.paragraph.lineHeightUnit,
+    };
+    const textWrapStyle = paragraphTextWrapStyleAtByteOffset(before, properties, oldOffset);
+    const inheritedTextWrapStyle = properties.paragraph.textWrapStyle ?? "auto";
+    const run = {
+      start,
+      ...(listType !== properties.paragraph.listType ? { listType: listType ?? "none" as const } : {}),
+      ...(indentation !== (listType ? 1 : 0) ? { indentation } : {}),
+      ...(listSpacing !== inheritedListSpacing ? { listSpacing } : {}),
+      ...(paragraphSpacing !== properties.paragraph.paragraphSpacing ? { paragraphSpacing } : {}),
+      ...(paragraphIndent !== inheritedParagraphIndent ? { paragraphIndent } : {}),
+      ...(!sameParagraphLineHeight(lineHeight, inheritedLineHeight) ? lineHeight : {}),
+      ...(textWrapStyle !== inheritedTextWrapStyle ? { textWrapStyle } : {}),
+    };
+    return run.listType === undefined && run.indentation === undefined && run.listSpacing === undefined && run.paragraphSpacing === undefined && run.paragraphIndent === undefined && run.lineHeight === undefined && run.lineHeightUnit === undefined && run.textWrapStyle === undefined ? [] : [run];
+  });
+}
+
+function paragraphTextWrapStyleAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  return properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.textWrapStyle
+    ?? properties.paragraph.textWrapStyle
+    ?? "auto";
+}
+
+function paragraphLineHeightAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  const run = properties.paragraphStyleRuns?.find((value) => value.start === paragraphStart);
+  if (run?.lineHeight !== undefined || run?.lineHeightUnit !== undefined) {
+    return { lineHeight: run.lineHeight, lineHeightUnit: run.lineHeightUnit };
+  }
+  return {
+    lineHeight: properties.paragraph.lineHeight,
+    lineHeightUnit: properties.paragraph.lineHeightUnit,
+  };
+}
+
+function sameParagraphLineHeight(
+  left: Readonly<{ lineHeight?: number; lineHeightUnit?: "percent" | "auto" }>,
+  right: Readonly<{ lineHeight?: number; lineHeightUnit?: "percent" | "auto" }>,
+): boolean {
+  return left.lineHeight === right.lineHeight && left.lineHeightUnit === right.lineHeightUnit;
+}
+
+function paragraphIndentAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  return properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.paragraphIndent
+    ?? properties.paragraph.paragraphIndent
+    ?? 0;
+}
+
+function paragraphSpacingAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  return properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.paragraphSpacing
+    ?? properties.paragraph.paragraphSpacing;
+}
+
+function paragraphListSpacingAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  return properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.listSpacing
+    ?? properties.paragraph.listSpacing
+    ?? 0;
+}
+
+function paragraphIndentationAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  return properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.indentation
+    ?? (paragraphListTypeAtByteOffset(text, properties, offset) ? 1 : 0);
+}
+
+function paragraphListTypeAtByteOffset(text: string, properties: DocumentTextProperties, offset: number) {
+  const starts = paragraphStartByteOffsets(text);
+  let paragraphStart = 0;
+  for (const start of starts) {
+    if (start > offset) break;
+    paragraphStart = start;
+  }
+  const override = properties.paragraphStyleRuns?.find((run) => run.start === paragraphStart)?.listType;
+  return override === "none" ? undefined : override ?? properties.paragraph.listType;
+}
+
+function paragraphStartByteOffsets(text: string): number[] {
+  const starts = [0];
+  for (const separator of text.matchAll(/\r\n|[\n\r\u2028\u2029]/gu)) {
+    const end = (separator.index ?? 0) + separator[0].length;
+    starts.push(new TextEncoder().encode(text.slice(0, end)).byteLength);
+  }
+  return starts;
 }
 
 export function replacementByteRange(before: string, after: string): Readonly<{ beforeStart: number; beforeEnd: number; afterEnd: number }> {
@@ -105,13 +290,31 @@ export function patchTextStyleRuns(
   return { ...properties, runs: mergeAdjacentRuns(runs.filter((run) => run.start < run.end)) };
 }
 
-function inheritedRun(runs: readonly TextRun[], offset: number): TextRun | undefined {
+function replacementRun(runs: readonly TextRun[], offset: number): TextRun | undefined {
   const containing = runs.find((run) => run.start <= offset && offset < run.end);
   if (containing) return containing;
   for (let index = runs.length - 1; index >= 0; index -= 1) {
     if (runs[index].end === offset) return runs[index];
   }
   return runs[0];
+}
+
+/** Figma insertCharacters copies from the preceding character for BEFORE and
+ * the following character for AFTER. At either string edge it falls back to
+ * the closest existing character. */
+function insertionRun(runs: readonly TextRun[], offset: number, useStyle: TextInsertionStyle): TextRun | undefined {
+  const preceding = [...runs].reverse().find((run) => run.start < offset && offset <= run.end);
+  const following = runs.find((run) => run.start <= offset && offset < run.end);
+  return useStyle === "AFTER"
+    ? following ?? preceding ?? runs[0]
+    : preceding ?? following ?? runs[0];
+}
+
+function textStyleFromRun(run: TextRun): TextStyle {
+  const style = structuredClone(run) as Partial<TextRun>;
+  delete style.start;
+  delete style.end;
+  return style as TextStyle;
 }
 
 function hasCompleteValidRunCoverage(text: string, runs: readonly TextRun[]) {
@@ -147,5 +350,15 @@ function sameStyle(left: TextRun, right: TextRun) {
     && left.italic === right.italic
     && left.letterSpacing === right.letterSpacing
     && JSON.stringify(left.font) === JSON.stringify(right.font)
-    && JSON.stringify(left.color) === JSON.stringify(right.color);
+    && JSON.stringify(left.color) === JSON.stringify(right.color)
+    && JSON.stringify(left.fillStack) === JSON.stringify(right.fillStack)
+    && left.textCase === right.textCase
+    && JSON.stringify(left.hyperlink) === JSON.stringify(right.hyperlink)
+    && left.textDecoration === right.textDecoration
+    && left.textDecorationStyle === right.textDecorationStyle
+    && JSON.stringify(left.textDecorationOffset) === JSON.stringify(right.textDecorationOffset)
+    && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness)
+    && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor)
+    && left.textDecorationSkipInk === right.textDecorationSkipInk
+    && left.leadingTrim === right.leadingTrim;
 }

@@ -7,6 +7,6 @@ import { redirect } from "next/navigation";
  * captured without creating or mutating a workspace document. */
 export default async function Home({ searchParams }: { searchParams: Promise<{ fixture?: string }> }) {
   const { fixture } = await searchParams;
-  if (fixture) return <EditorShell />;
+  if (fixture) return <EditorShell remoteSync={false} writerLock={false} />;
   redirect(`/workspace/${DEMO_WORKSPACE_KEY}`);
 }

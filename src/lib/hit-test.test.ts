@@ -10,6 +10,24 @@ describe("Canvas primitive hit testing", () => {
     expect(nodeContainsWorldPoint(node, { x: 95, y: 20 })).toBe(false);
   });
 
+  it("selects a hanging list marker outside Text geometry", () => {
+    const text = {
+      ...createNode("text", 0, 0), width: 100, height: 40, text: "One",
+      textProperties: {
+        runs: [{ start: 0, end: 3, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, paragraphSpacing: 0, listType: "ordered" as const, hangingList: true },
+        autoSize: "fixed" as const,
+      },
+    };
+
+    expect(nodeContainsWorldPoint(text, { x: -20, y: 15 })).toBe(true);
+    expect(nodeContainsWorldPoint({ ...text, textProperties: { ...text.textProperties, paragraph: { ...text.textProperties.paragraph, hangingList: false } } }, { x: -20, y: 15 })).toBe(false);
+
+    const shape = { ...text, kind: "shapeWithText" as const, shapeWithTextType: "DIAMOND" as const };
+    expect(nodeContainsWorldPoint(shape, { x: -20, y: 15 })).toBe(true);
+    expect(nodeContainsWorldPoint(shape, { x: 5, y: 5 })).toBe(false);
+  });
+
   it("does not select transparent corners of ellipses and rounded rectangles", () => {
     const ellipse = { ...createNode("ellipse", 0, 0), width: 100, height: 100 };
     const rounded = { ...createNode("rectangle", 120, 0), width: 100, height: 100, radius: 30 };

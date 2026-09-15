@@ -10,6 +10,16 @@ function rectangle(id: string): CanvasNode {
 }
 
 describe("Core transaction batch resolution", () => {
+  it("preserves resizeWithoutConstraints as a Core transport flag", () => {
+    const frame = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000091" };
+    const resolved = resolveCoreBatch([frame], [{ type: "resizeWithoutConstraints", id: frame.id, patch: { width: 320, height: 180 } }]);
+
+    expect(resolved?.nextNodes[0]).toMatchObject({ width: 320, height: 180 });
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "update", ignoreConstraints: true, node: expect.objectContaining({ id: frame.id, width: 320, height: 180 }) }),
+    ]);
+  });
+
   it("accepts a Core-derived direct split of a professional-fixture Vector segment", () => {
     const fixture = createPhase2ProfessionalCompositeFixture();
     const vector = fixture.nodes.find((node) => node.name === "Outline stroke result");
@@ -186,6 +196,23 @@ describe("Core transaction batch resolution", () => {
     ]);
   });
 
+  it("keeps TextPath geometry editable without exposing its immutable base path", () => {
+    const source = createPhase2ProfessionalCompositeFixture().nodes.find((node) => node.kind === "textPath");
+    const textPath = source ?? {
+      ...createNode("textPath", 10, 20),
+      id: "00000000-0000-4000-8000-000000000099",
+      vectorPath: { fillRule: "nonZero" as const, subpaths: [{ closed: false, points: [
+        { id: "00000000-0000-4000-8000-00000000009a", x: 0, y: 20, pointType: "corner" as const },
+        { id: "00000000-0000-4000-8000-00000000009b", x: 100, y: 20, pointType: "corner" as const },
+      ] }] },
+    };
+    const resolved = resolveCoreBatch([textPath], [{ type: "update", id: textPath.id, patch: { rotation: 28 } }]);
+
+    expect(resolved?.nextNodes[0]).toMatchObject({ kind: "textPath", rotation: 28, vectorPath: textPath.vectorPath });
+    expect(resolved?.batch).toEqual([expect.objectContaining({ type: "update", node: expect.objectContaining({ kind: "textPath", rotation: 28, vectorPath: textPath.vectorPath }) })]);
+    expect(resolveCoreBatch([textPath], [{ type: "update", id: textPath.id, patch: { vectorPath: structuredClone(textPath.vectorPath) } }])).toBeUndefined();
+  });
+
   it("keeps Line endpoint decorations in the concrete Core payload", () => {
     const line = { ...createNode("line", 0, 0), id: "00000000-0000-4000-8000-000000000001", width: 120, height: 0 };
     const resolved = resolveCoreBatch([line], [{ type: "update", id: line.id, patch: { strokeCapStart: "diamondFilled", strokeCapEnd: "arrowEquilateral" } }]);
@@ -262,9 +289,20 @@ describe("Core transaction batch resolution", () => {
     const child = { ...rectangle("00000000-0000-4000-8000-000000000002"), x: 120, y: 80 };
     const resolved = resolveCoreBatch([frame, child], [{ type: "reparent", ids: [child.id], parentId: frame.id }]);
 
-    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["reparent", "update"]);
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["reparent"]);
     expect(resolved?.nextNodes.find((node) => node.id === child.id)).toMatchObject({ parentId: frame.id, relativeTransform: undefined, rotation: 0 });
-    expect((resolved?.batch[1] as { type: "update"; node: { relativeTransform?: unknown } }).node.relativeTransform).toBeUndefined();
+  });
+
+  it("clears a legacy child matrix before reparenting into active Auto Layout", () => {
+    const frame = {
+      ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000011",
+      autoLayout: { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false },
+    };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000012"), width: 80, height: 40, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 120, f: 80 } };
+    const resolved = resolveCoreBatch([frame, child], [{ type: "reparent", ids: [child.id], parentId: frame.id }]);
+
+    expect(resolved?.batch.map((entry) => entry.type)).toEqual(["update", "reparent"]);
+    expect((resolved?.batch[0] as { type: "update"; node: { relativeTransform?: unknown; width: number; height: number } }).node).toMatchObject({ relativeTransform: undefined, width: 80, height: 40 });
   });
 
   it("rejects reparenting across pages or into a selected descendant", () => {
@@ -416,6 +454,72 @@ describe("Core transaction batch resolution", () => {
     expect(resolveCoreBatch([first], [{ type: "boolean", ids: [first.id], operation: "union" }], () => booleanId)).toBeUndefined();
   });
 
+  it("honors Runtime-forced Boolean identity, direct parent and insertion index", () => {
+    const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000101", pageId: "page", positionId: "10000000000000000000000000000000:00000000000040008000000000000101" };
+    const before = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000102", pageId: "page", parentId: frame.id, positionId: "10000000000000000000000000000000:00000000000040008000000000000102" };
+    const first = { ...createNode("vector", 20, 30), id: "00000000-0000-4000-8000-000000000103", pageId: "page", parentId: frame.id, positionId: "20000000000000000000000000000000:00000000000040008000000000000103" };
+    const second = { ...createNode("vector", 80, 30), id: "00000000-0000-4000-8000-000000000104", pageId: "page", parentId: frame.id, positionId: "30000000000000000000000000000000:00000000000040008000000000000104" };
+    const id = "00000000-0000-4000-8000-000000000105";
+    const resolved = resolveCoreBatch([frame, before, first, second], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id, parentId: frame.id, index: 0,
+    }], () => "unexpected");
+
+    expect(resolved?.createdIds).toEqual([id]);
+    expect(resolved?.nextNodes.find((node) => node.id === id)).toMatchObject({ kind: "booleanOperation", parentId: frame.id });
+    expect(resolved?.nextNodes.filter((node) => node.parentId === frame.id).sort((left, right) => left.positionId!.localeCompare(right.positionId))[0]?.id).toBe(id);
+    expect(resolveCoreBatch([frame, before, first, second], [{ type: "boolean", ids: [first.id, second.id], operation: "union", id, pageId: "other-page" }])).toBeUndefined();
+  });
+
+  it("rejects wrapping every operand inside the same Boolean parent", () => {
+    const outer = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000106", pageId: "page", booleanOperation: "union" as const };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000107", pageId: "page", parentId: outer.id };
+    const second = { ...createNode("vector", 40, 0), id: "00000000-0000-4000-8000-000000000108", pageId: "page", parentId: outer.id };
+
+    expect(resolveCoreBatch([outer, first, second], [{
+      type: "boolean",
+      ids: [first.id, second.id],
+      operation: "intersect",
+      parentId: outer.id,
+    }])).toBeUndefined();
+  });
+
+  it("wraps same-page Vector roots from different Frames at the requested parent without world drift", () => {
+    const firstFrame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000111", pageId: "page", width: 200, height: 180, positionId: "10000000000000000000000000000000:00000000000040008000000000000111" };
+    const secondFrame = { ...createNode("frame", 360, 80), id: "00000000-0000-4000-8000-000000000112", pageId: "page", width: 200, height: 180, positionId: "20000000000000000000000000000000:00000000000040008000000000000112" };
+    const first = { ...createNode("vector", 20, 30), id: "00000000-0000-4000-8000-000000000113", pageId: "page", parentId: firstFrame.id, positionId: "10000000000000000000000000000000:00000000000040008000000000000113" };
+    const firstSibling = { ...createNode("vector", 80, 90), id: "00000000-0000-4000-8000-000000000114", pageId: "page", parentId: firstFrame.id, positionId: "20000000000000000000000000000000:00000000000040008000000000000114" };
+    const second = { ...createNode("vector", 10, 20), id: "00000000-0000-4000-8000-000000000115", pageId: "page", parentId: secondFrame.id, positionId: "10000000000000000000000000000000:00000000000040008000000000000115" };
+    const secondSibling = { ...createNode("vector", 70, 60), id: "00000000-0000-4000-8000-000000000116", pageId: "page", parentId: secondFrame.id, positionId: "20000000000000000000000000000000:00000000000040008000000000000116" };
+    const booleanId = "00000000-0000-4000-8000-000000000117";
+    const source = [firstFrame, secondFrame, first, firstSibling, second, secondSibling];
+    const before = [first, second].map((node) => worldTransformForNode(source, node.id)!);
+
+    const resolved = resolveCoreBatch(source, [{
+      type: "boolean",
+      ids: [second.id, first.id],
+      operation: "subtract",
+      id: booleanId,
+      pageId: "page",
+      index: 1,
+    }])!;
+
+    expect(resolved.nextNodes.find((node) => node.id === booleanId)).toMatchObject({ parentId: undefined, booleanOperation: "subtract" });
+    expect(resolved.batch.find((entry) => entry.type === "reparent")).toEqual({
+      type: "reparent",
+      parentIds: [
+        expect.objectContaining({ id: first.id, parentId: booleanId }),
+        expect.objectContaining({ id: second.id, parentId: booleanId }),
+      ],
+    });
+    expect(resolved.nextNodes.filter((node) => node.parentId === firstFrame.id)).toEqual([expect.objectContaining({ id: firstSibling.id })]);
+    expect(resolved.nextNodes.filter((node) => node.parentId === secondFrame.id)).toEqual([expect.objectContaining({ id: secondSibling.id })]);
+    [first, second].forEach((node, index) => {
+      const after = worldTransformForNode(resolved.nextNodes, node.id)!;
+      expect(transformPoint(after, { x: 0, y: 0 }).x).toBeCloseTo(transformPoint(before[index]!, { x: 0, y: 0 }).x, 10);
+      expect(transformPoint(after, { x: 0, y: 0 }).y).toBeCloseTo(transformPoint(before[index]!, { x: 0, y: 0 }).y, 10);
+    });
+  });
+
   it("flattens a live Vector Boolean in one create-delete-reposition Core batch", () => {
     const boolean = { ...createNode("booleanOperation", 10, 20), id: "00000000-0000-4000-8000-000000000041", name: "Cutout", width: 90, height: 50, positionId: "00000000000000000000000000000041:00000000000000000000000000000000" };
     const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000042", parentId: boolean.id, positionId: "00000000000000000000000000000042:00000000000000000000000000000000", fill: "#cc3366" };
@@ -432,6 +536,38 @@ describe("Core transaction batch resolution", () => {
       { type: "delete", ids: [boolean.id] },
       { type: "reposition", positionIds: [{ id: "00000000-0000-4000-8000-000000000044", positionId: boolean.positionId }] },
     ]);
+  });
+
+  it("flattens a live Boolean into an alternate same-page parent and index without world drift", () => {
+    const target = { ...createNode("frame", 300, 200), id: "00000000-0000-4000-8000-000000000121", width: 240, height: 180, positionId: "10000000000000000000000000000000:00000000000040008000000000000121" };
+    const targetChild = { ...createNode("vector", 20, 20), id: "00000000-0000-4000-8000-000000000122", parentId: target.id, positionId: "20000000000000000000000000000000:00000000000040008000000000000122" };
+    const boolean = { ...createNode("booleanOperation", 100, 80), id: "00000000-0000-4000-8000-000000000123", width: 90, height: 50, positionId: "30000000000000000000000000000000:00000000000040008000000000000123" };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000124", parentId: boolean.id, positionId: "10000000000000000000000000000000:00000000000040008000000000000124" };
+    const second = { ...createNode("vector", 10, 0), id: "00000000-0000-4000-8000-000000000125", parentId: boolean.id, positionId: "20000000000000000000000000000000:00000000000040008000000000000125" };
+    const replacementId = "00000000-0000-4000-8000-000000000126";
+    const source = [target, targetChild, boolean, first, second];
+    const before = transformPoint(worldTransformForNode(source, boolean.id)!, { x: 0, y: 0 });
+    const resolved = resolveFlattenBooleanBatch(source, boolean.id, {
+      subpaths: [{ closed: true, points: [{ x: 0, y: 0 }, { x: 90, y: 0 }, { x: 90, y: 50 }] }],
+    }, () => "00000000-0000-4000-8000-000000000127", replacementId, { parentId: target.id, index: 0 })!;
+
+    expect(resolved.replacement).toMatchObject({ id: replacementId, parentId: target.id, x: -200, y: -120 });
+    expect(resolved.batch.at(-1)).toMatchObject({ type: "reposition", positionIds: [{ id: replacementId, positionId: expect.any(String) }] });
+    const projected = [...source.filter((node) => ![boolean.id, first.id, second.id].includes(node.id)), { ...resolved.replacement, positionId: (resolved.batch.at(-1) as { positionIds: [{ positionId: string }] }).positionIds[0].positionId }];
+    const after = transformPoint(worldTransformForNode(projected, replacementId)!, { x: 0, y: 0 });
+    expect(after.x).toBeCloseTo(before.x, 10);
+    expect(after.y).toBeCloseTo(before.y, 10);
+  });
+
+  it("keeps a forced Runtime flatten ID for an empty Rust Boolean result", () => {
+    const boolean = { ...createNode("booleanOperation", 10, 20), id: "00000000-0000-4000-8000-000000000111", width: 90, height: 50 };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000112", parentId: boolean.id };
+    const second = { ...createNode("vector", 10, 0), id: "00000000-0000-4000-8000-000000000113", parentId: boolean.id };
+    const forcedId = "00000000-0000-4000-8000-000000000114";
+    const resolved = resolveFlattenBooleanBatch([boolean, first, second], boolean.id, { subpaths: [] }, () => "00000000-0000-4000-8000-000000000115", forcedId);
+
+    expect(resolved?.replacement).toMatchObject({ id: forcedId, vectorPath: { subpaths: [] } });
+    expect(resolved?.batch[0]).toEqual(expect.objectContaining({ type: "create", node: expect.objectContaining({ id: forcedId }) }));
   });
 
   it("outlines a Vector Stroke as one same-ID Vector update", () => {
@@ -495,6 +631,47 @@ describe("Core transaction batch resolution", () => {
     const polygon = { ...createNode("polygon", 0, 0), id: "00000000-0000-4000-8000-000000000095", isMask: true, positionId: "00000000000000000000000000000065:00000000000000000000000000000000", parametricShape: { kind: "polygon" as const, pointCount: 3 } };
     const vector = resolveParametricShapeToVectorBatch([polygon, target], polygon.id, [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 2 }], (() => { let id = 96; return () => `00000000-0000-4000-8000-${(id++).toString().padStart(12, "0")}`; })());
     expect(vector?.batch.at(-1)).toEqual({ type: "setMask", id: vector?.replacement.id, enabled: true });
+  });
+
+  it("admits a Group mask only when its descendant subtree can provide alpha", () => {
+    const mask = { ...createNode("group", 0, 0), id: "00000000-0000-4000-8000-000000000101", positionId: "00000000000000000000000000000101:00000000000000000000000000000000" };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000102"), parentId: mask.id };
+    const target = { ...rectangle("00000000-0000-4000-8000-000000000103"), positionId: "00000000000000000000000000000103:00000000000000000000000000000000" };
+
+    expect(resolveCoreBatch([mask, target], [{ type: "setMask", id: mask.id, enabled: true }])).toBeUndefined();
+    expect(resolveCoreBatch([mask, child, target], [{ type: "setMask", id: mask.id, enabled: true }])).toMatchObject({
+      nextNodes: expect.arrayContaining([expect.objectContaining({ id: mask.id, isMask: true })]),
+      batch: [{ type: "setMask", id: mask.id, enabled: true }],
+    });
+  });
+
+  it("admits a TransformGroup mask only when it owns a source subtree", () => {
+    const modifier = [{ type: "REPEAT" as const, repeatType: "LINEAR" as const, count: 1, unitType: "PIXELS" as const, offset: 40, axis: "VERTICAL" as const }];
+    const mask = { ...createNode("transformGroup", 0, 0), id: "00000000-0000-4000-8000-000000000105", transformModifiers: modifier, positionId: "00000000000000000000000000000105:00000000000000000000000000000000" };
+    const child = { ...rectangle("00000000-0000-4000-8000-000000000106"), parentId: mask.id };
+    const target = { ...rectangle("00000000-0000-4000-8000-000000000107"), positionId: "00000000000000000000000000000107:00000000000000000000000000000000" };
+
+    expect(resolveCoreBatch([mask, target], [{ type: "setMask", id: mask.id, enabled: true }])).toBeUndefined();
+    expect(resolveCoreBatch([mask, child, target], [{ type: "setMask", id: mask.id, enabled: true }])).toMatchObject({
+      nextNodes: expect.arrayContaining([expect.objectContaining({ id: mask.id, isMask: true })]),
+      batch: [{ type: "setMask", id: mask.id, enabled: true }],
+    });
+  });
+
+  it("admits a live Vector Boolean mask and rejects operands without canonical paths", () => {
+    const boolean = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000111", positionId: "00000000000000000000000000000111:00000000000000000000000000000000" };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000112", parentId: boolean.id };
+    const second = { ...createNode("vector", 10, 10), id: "00000000-0000-4000-8000-000000000113", parentId: boolean.id };
+    const target = { ...rectangle("00000000-0000-4000-8000-000000000114"), positionId: "00000000000000000000000000000114:00000000000000000000000000000000" };
+
+    expect(resolveCoreBatch([boolean, first, second, target], [{ type: "setMask", id: boolean.id, enabled: true }])).toMatchObject({
+      nextNodes: expect.arrayContaining([expect.objectContaining({ id: boolean.id, isMask: true })]),
+      batch: [{ type: "setMask", id: boolean.id, enabled: true }],
+    });
+    expect(resolveCoreBatch([boolean, first, { ...second, vectorPath: undefined }, target], [{ type: "setMask", id: boolean.id, enabled: true }])).toBeUndefined();
+    expect(resolveCoreBatch([{ ...boolean, isMask: true }, first, { ...second, vectorPath: undefined }, target], [{ type: "setMask", id: boolean.id, enabled: false }])).toMatchObject({
+      nextNodes: expect.arrayContaining([expect.objectContaining({ id: boolean.id, isMask: false })]),
+    });
   });
 
   it("wraps a single selected layer and makes the wrapper the resolved selection", () => {

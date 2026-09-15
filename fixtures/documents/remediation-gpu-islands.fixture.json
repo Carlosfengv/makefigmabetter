@@ -1,0 +1,84 @@
+{
+  "format": "makefigma-remediation-gpu-islands-v1",
+  "name": "W13-ORDERED-GPU-CANVAS-ISLANDS",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000004100",
+      "name": "Island background",
+      "kind": "rectangle",
+      "x": -320, "y": -180, "width": 640, "height": 360, "rotation": 0,
+      "fill": "#ffffff", "fillColor": { "space": "srgb", "components": [1, 1, 1], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004101",
+      "name": "GPU red base",
+      "kind": "rectangle",
+      "x": -250, "y": -100, "width": 210, "height": 150, "rotation": 0,
+      "fill": "#ef4444", "fillColor": { "space": "srgb", "components": [0.9333333, 0.2666667, 0.2666667], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004102",
+      "name": "Canvas polygon middle",
+      "kind": "polygon",
+      "x": -190, "y": -70, "width": 190, "height": 150, "rotation": 0,
+      "fill": "#38bdf8", "fillColor": { "space": "srgb", "components": [0.2196078, 0.7411765, 0.972549], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 0.9, "visible": true,
+      "parametricShape": { "kind": "polygon", "pointCount": 5 }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004103",
+      "name": "GPU green foreground",
+      "kind": "rectangle",
+      "x": -110, "y": -40, "width": 170, "height": 120, "rotation": 0,
+      "fill": "#22c55e", "fillColor": { "space": "srgb", "components": [0.1333333, 0.772549, 0.3686275], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004104",
+      "name": "Canvas mask root",
+      "kind": "group",
+      "x": 45, "y": -90, "width": 210, "height": 160, "rotation": 0,
+      "fill": "transparent", "fillColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004105",
+      "parentId": "00000000-0000-4000-8000-000000004104",
+      "name": "Canvas ellipse mask",
+      "kind": "ellipse",
+      "x": 0, "y": 0, "width": 170, "height": 140, "rotation": 0,
+      "relativeTransform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 },
+      "fill": "#ffffff", "fillColor": { "space": "srgb", "components": [1, 1, 1], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 0.72, "visible": true, "isMask": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004106",
+      "parentId": "00000000-0000-4000-8000-000000004104",
+      "name": "Canvas masked target",
+      "kind": "rectangle",
+      "x": 0, "y": 0, "width": 210, "height": 160, "rotation": 0,
+      "relativeTransform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 },
+      "fill": "#6366f1", "fillColor": { "space": "srgb", "components": [0.3882353, 0.4, 0.945098], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000004107",
+      "name": "GPU orange top",
+      "kind": "rectangle",
+      "x": 115, "y": -25, "width": 150, "height": 120, "rotation": 0,
+      "fill": "#f97316", "fillColor": { "space": "srgb", "components": [0.9764706, 0.4509804, 0.0862745], "alpha": 1 },
+      "stroke": "transparent", "strokeColor": { "space": "srgb", "components": [0, 0, 0], "alpha": 0 },
+      "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true
+    }
+  ]
+}

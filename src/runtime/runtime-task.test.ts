@@ -13,6 +13,21 @@ describe("RuntimeTask", () => {
     expect(task.state).toBe("cancelled");
   });
 
+  it("settles cancellation even when an injected executor has not observed its signal yet", async () => {
+    let finish!: (value: string) => void;
+    const task = new RuntimeTask(async () => await new Promise<string>((resolve) => { finish = resolve; }));
+    const outcome = task.promise.catch((error: unknown) => error);
+
+    task.cancel();
+    expect(isRuntimeError(await outcome, "TASK_CANCELLED")).toBe(true);
+    expect(task.state).toBe("cancelled");
+
+    // A late executor completion cannot republish the cancelled result.
+    finish("late");
+    await Promise.resolve();
+    expect(task.state).toBe("cancelled");
+  });
+
   it("fails a still-cancellable task on timeout", async () => {
     vi.useFakeTimers();
     const task = new RuntimeTask(async ({ signal }) => await new Promise<string>((_resolve, reject) => {

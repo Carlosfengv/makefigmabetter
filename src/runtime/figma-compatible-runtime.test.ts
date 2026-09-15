@@ -26,6 +26,34 @@ describe("FigmaCompatibleRuntime", () => {
     expect(await runtime.commitAsync()).toBe(1);
     expect((await runtime.getNodeByIdAsync("rectangle"))?.x).toBe(18);
   });
+
+  it("exposes one stable Figma mixed sentinel for asymmetric endpoint caps", async () => {
+    const runtime = new FigmaCompatibleRuntime(new RuntimeSession({
+      sessionId: "mixed-stroke-cap",
+      projection: {
+        revision: 0,
+        nodes: [
+          { id: "document", type: "DOCUMENT", name: "Document" },
+          { id: "page", type: "PAGE", name: "Page", parentId: "document" },
+          {
+            id: "line",
+            type: "LINE",
+            name: "Asymmetric line",
+            parentId: "page",
+            siblingIndex: 0,
+            strokeCapStart: "round",
+            strokeCapEnd: "triangleFilled",
+          },
+        ],
+      },
+      transport: new NoopTransport(),
+      scheduleMicrotask: () => {},
+    }));
+
+    const line = await runtime.getNodeByIdAsync("line");
+    expect(line?.strokeCap).toBe(runtime.mixed);
+    expect(runtime.mixed).toBe(runtime.mixed);
+  });
 });
 
 class NoopTransport implements RuntimeTransactionTransport {

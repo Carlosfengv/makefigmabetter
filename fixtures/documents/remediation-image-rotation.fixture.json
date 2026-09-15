@@ -1,0 +1,149 @@
+{
+  "format": "makefigma-remediation-image-rotation-v1",
+  "name": "W12-P-IMAGE-ROTATION",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "assets": [
+    {
+      "assetId": "00000000-0000-4000-8000-000000000971",
+      "contentHash": "5c3f547ebaae2249a17369d58d53a2ea5ce9ea2dcec9db58a1de882eb6c72b24",
+      "mediaType": "image/png",
+      "byteLength": 79,
+      "pixelWidth": 4,
+      "pixelHeight": 2,
+      "bytesBase64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAFklEQVR42mP4z8DwH4ThEMoHAgYwBgATHRHvPhTFigAAAABJRU5ErkJggg=="
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000970",
+      "name": "Image rotation evidence background",
+      "kind": "rectangle",
+      "x": -300,
+      "y": -130,
+      "width": 600,
+      "height": 260,
+      "rotation": 0,
+      "fill": "#f8fafc",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000972",
+      "name": "Image rotation 0",
+      "kind": "rectangle",
+      "x": -270,
+      "y": -40,
+      "width": 120,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#e2e8f0",
+      "stroke": "#0f172a",
+      "strokeWidth": 2,
+      "radius": 8,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "image": {
+            "assetId": "00000000-0000-4000-8000-000000000971",
+            "scaleMode": "fill",
+            "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 }
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000973",
+      "name": "Image rotation 90",
+      "kind": "rectangle",
+      "x": -135,
+      "y": -40,
+      "width": 120,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#e2e8f0",
+      "stroke": "#0f172a",
+      "strokeWidth": 2,
+      "radius": 8,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "image": {
+            "assetId": "00000000-0000-4000-8000-000000000971",
+            "scaleMode": "fill",
+            "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 },
+            "rotationDegrees": 90
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000974",
+      "name": "Image rotation 180",
+      "kind": "rectangle",
+      "x": 0,
+      "y": -40,
+      "width": 120,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#e2e8f0",
+      "stroke": "#0f172a",
+      "strokeWidth": 2,
+      "radius": 8,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "image": {
+            "assetId": "00000000-0000-4000-8000-000000000971",
+            "scaleMode": "fill",
+            "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 },
+            "rotationDegrees": 180
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000975",
+      "name": "Image rotation 270",
+      "kind": "rectangle",
+      "x": 135,
+      "y": -40,
+      "width": 120,
+      "height": 80,
+      "rotation": 0,
+      "fill": "#e2e8f0",
+      "stroke": "#0f172a",
+      "strokeWidth": 2,
+      "radius": 8,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "image": {
+            "assetId": "00000000-0000-4000-8000-000000000971",
+            "scaleMode": "fill",
+            "transform": { "a": 1, "b": 0, "c": 0, "d": 1, "e": 0, "f": 0 },
+            "rotationDegrees": 270
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    }
+  ]
+}

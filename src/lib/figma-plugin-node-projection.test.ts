@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { figmaPluginNodeType, figmaPluginRelativeTransform, fromFigmaPluginArcData, fromFigmaPluginTransform, projectFigmaPluginNode, toFigmaPluginArcData, toFigmaPluginTransform } from "./figma-plugin-node-projection";
+import { extensionsForNodeBlendMode } from "./node-blend-semantics";
 
 describe("Figma Plugin API node projection", () => {
   it("maps each completed Canonical Figma-compatible node kind and deliberately excludes the local Image node", () => {
@@ -17,6 +18,39 @@ describe("Figma Plugin API node projection", () => {
   it("projects CodeBlock's documented source and language fields", () => {
     const codeBlock = { ...createNode("codeBlock", 0, 0), id: "code", text: "const ready = true", codeLanguage: "TYPESCRIPT" };
     expect(projectFigmaPluginNode([codeBlock], codeBlock)).toMatchObject({ type: "CODE_BLOCK", code: "const ready = true", codeLanguage: "TYPESCRIPT" });
+  });
+
+  it("projects omitted legacy constraints as the Figma MIN/MIN default", () => {
+    const frame = { ...createNode("frame", 0, 0), id: "frame" };
+    const child = { ...createNode("rectangle", 20, 10), id: "child", parentId: frame.id };
+    expect(child.constraints).toBeUndefined();
+    expect(projectFigmaPluginNode([frame, child], child)).toMatchObject({
+      constraints: { horizontal: "MIN", vertical: "MIN" },
+    });
+  });
+
+  it("projects the node-only pass-through blend mode", () => {
+    const group = { ...createNode("group", 0, 0), id: "group", blendMode: "pass-through" as const };
+    expect(projectFigmaPluginNode([group], group)).toMatchObject({ type: "GROUP", blendMode: "PASS_THROUGH" });
+  });
+
+  it("reports legacy NORMAL containers as pass-through and marked containers as isolated NORMAL", () => {
+    const legacy = { ...createNode("group", 0, 0), id: "legacy" };
+    const isolated = {
+      ...createNode("group", 0, 0),
+      id: "isolated",
+      extensions: extensionsForNodeBlendMode(undefined, "normal"),
+    };
+
+    expect(projectFigmaPluginNode([legacy], legacy)).toMatchObject({ blendMode: "PASS_THROUGH" });
+    expect(projectFigmaPluginNode([isolated], isolated)).toMatchObject({ blendMode: "NORMAL" });
+  });
+
+  it("projects the node-only linear blend modes", () => {
+    const burn = { ...createNode("rectangle", 0, 0), id: "burn", blendMode: "linear-burn" as const };
+    const dodge = { ...createNode("rectangle", 0, 0), id: "dodge", blendMode: "linear-dodge" as const };
+    expect(projectFigmaPluginNode([burn], burn)).toMatchObject({ blendMode: "LINEAR_BURN" });
+    expect(projectFigmaPluginNode([dodge], dodge)).toMatchObject({ blendMode: "LINEAR_DODGE" });
   });
 
   it("projects Component's reusable-container and publication metadata", () => {
@@ -54,8 +88,13 @@ describe("Figma Plugin API node projection", () => {
   });
 
   it("projects Connector endpoints, routing, caps, label, and corner radius", () => {
-    const connector = { ...createNode("connector", 0, 0), id: "connector", connectorMetadata: { lineType: "ELBOWED" as const, start: { endpointNodeId: "a", magnet: "RIGHT" as const, x: 0, y: 0 }, end: { endpointNodeId: "b", magnet: "LEFT" as const, x: 160, y: 0 }, startStrokeCap: "NONE", endStrokeCap: "ARROW_EQUILATERAL", text: "relates to", cornerRadius: 8 } };
-    expect(projectFigmaPluginNode([connector], connector)).toMatchObject({ type: "CONNECTOR", connectorLineType: "ELBOWED", connectorStart: { endpointNodeId: "a" }, connectorEnd: { endpointNodeId: "b" }, connectorStartStrokeCap: "NONE", connectorEndStrokeCap: "ARROW_EQUILATERAL", connectorText: "relates to", cornerRadius: 8 });
+    const connector = { ...createNode("connector", 0, 0), id: "connector", connectorMetadata: { lineType: "ELBOWED" as const, start: { endpointNodeId: "a", magnet: "RIGHT" as const, x: 0, y: 0 }, end: { endpointNodeId: "b", x: 160, y: 20 }, startStrokeCap: "NONE", endStrokeCap: "ARROW_EQUILATERAL", text: "relates to", cornerRadius: 8 } };
+    const projection = projectFigmaPluginNode([connector], connector);
+    expect(projection).toMatchObject({ type: "CONNECTOR", connectorLineType: "ELBOWED", connectorStartStrokeCap: "NONE", connectorEndStrokeCap: "ARROW_EQUILATERAL", connectorText: "relates to", cornerRadius: 8 });
+    expect(projection.connectorStart).toEqual({ endpointNodeId: "a", magnet: "RIGHT" });
+    expect(projection.connectorEnd).toEqual({ endpointNodeId: "b", position: { x: 160, y: 20 } });
+    const positioned = { ...connector, connectorMetadata: { ...connector.connectorMetadata, start: { x: 4, y: 5 } } };
+    expect(projectFigmaPluginNode([positioned], positioned).connectorStart).toEqual({ position: { x: 4, y: 5 } });
   });
 
   it("projects Embed's readonly resolved preview metadata", () => {
@@ -84,8 +123,60 @@ describe("Figma Plugin API node projection", () => {
   });
 
   it("projects ShapeWithText's shape selector and text sublayer", () => {
-    const shape = { ...createNode("shapeWithText", 0, 0), id: "shape", shapeWithTextType: "DIAMOND" as const, text: "Decision" };
-    expect(projectFigmaPluginNode([shape], shape)).toMatchObject({ type: "SHAPE_WITH_TEXT", shapeType: "DIAMOND", textSublayer: { characters: "Decision" } });
+    const shape = {
+      ...createNode("shapeWithText", 0, 0),
+      id: "shape",
+      shapeWithTextType: "DIAMOND" as const,
+      text: "Decision",
+      textProperties: {
+        runs: [{ start: 0, end: 8, fontSize: 18, fontWeight: 650, italic: false, letterSpacing: 1.5, textCase: "smallCapsForced" as const, hyperlink: { type: "URL" as const, value: "https://example.com/decision" }, textDecoration: "underline" as const, textDecorationStyle: "wavy" as const, textDecorationOffset: { value: -15, unit: "percent" as const }, textDecorationThickness: { value: 12.5, unit: "percent" as const }, textDecorationColor: { color: { space: "srgb" as const, components: [1, .25, .5] as [number, number, number], alpha: 1 }, visible: true, opacity: .75, blendMode: "multiply" as const }, textDecorationSkipInk: true, leadingTrim: "capHeight" as const }],
+        paragraph: { alignment: "center" as const, lineHeight: 24, paragraphSpacing: 4, paragraphIndent: 12, textWrapStyle: "balance" as const, listType: "unordered" as const, listSpacing: 8, hangingList: true, hangingPunctuation: true },
+        autoSize: "fixed" as const,
+      },
+    };
+    expect(projectFigmaPluginNode([shape], shape)).toMatchObject({
+      type: "SHAPE_WITH_TEXT",
+      shapeType: "DIAMOND",
+      textSublayer: {
+        characters: "Decision",
+        fontSize: 18,
+        fontWeight: 650,
+        letterSpacing: { value: 1.5, unit: "PIXELS" },
+        textCase: "SMALL_CAPS_FORCED",
+        textAlignHorizontal: "CENTER",
+        lineHeight: { value: 24, unit: "PIXELS" },
+        paragraphSpacing: 4,
+        paragraphIndent: 12,
+        listSpacing: 8,
+        hangingList: true,
+        hangingPunctuation: true,
+        textWrapStyle: "BALANCE",
+        hyperlink: { type: "URL", value: "https://example.com/decision" },
+        textDecoration: "UNDERLINE",
+        textDecorationStyle: "WAVY",
+        textDecorationOffset: { value: -15, unit: "PERCENT" },
+        textDecorationThickness: { value: 12.5, unit: "PERCENT" },
+        textDecorationColor: { value: { type: "SOLID", color: { r: 1, g: .25, b: .5 }, visible: true, opacity: .75, blendMode: "MULTIPLY" } },
+        textDecorationSkipInk: true,
+        leadingTrim: "CAP_HEIGHT",
+      },
+    });
+    const percent = {
+      ...shape,
+      textProperties: {
+        ...shape.textProperties,
+        paragraph: { ...shape.textProperties.paragraph, lineHeight: 150, lineHeightUnit: "percent" as const },
+      },
+    };
+    expect(projectFigmaPluginNode([percent], percent)?.textSublayer?.lineHeight).toEqual({ value: 150, unit: "PERCENT" });
+    const auto = {
+      ...shape,
+      textProperties: {
+        ...shape.textProperties,
+        paragraph: { ...shape.textProperties.paragraph, lineHeight: undefined, lineHeightUnit: "auto" as const },
+      },
+    };
+    expect(projectFigmaPluginNode([auto], auto)?.textSublayer?.lineHeight).toEqual({ unit: "AUTO" });
   });
 
   it("projects an imported SlideGrid as its distinct read-only Slides root type", () => {
@@ -126,8 +217,17 @@ describe("Figma Plugin API node projection", () => {
   });
 
   it("projects TransformGroup's repeat modifiers", () => {
-    const group = { ...createNode("transformGroup", 0, 0), id: "transform-group", transformModifiers: [{ type: "REPEAT" as const, count: 4, unitType: "PIXELS" as const, offset: 24, repeatType: "LINEAR" as const, axis: "HORIZONTAL" as const }] };
-    expect(projectFigmaPluginNode([group], group)).toMatchObject({ type: "TRANSFORM_GROUP", transformModifiers: group.transformModifiers });
+    const group = { ...createNode("transformGroup", 0, 0), id: "transform-group", isMask: true, transformModifiers: [{ type: "REPEAT" as const, count: 4, unitType: "PIXELS" as const, offset: 24, repeatType: "LINEAR" as const, axis: "HORIZONTAL" as const }] };
+    expect(projectFigmaPluginNode([group], group)).toMatchObject({ type: "TRANSFORM_GROUP", transformModifiers: group.transformModifiers, isMask: true, maskType: "ALPHA" });
+  });
+
+  it("projects Group BlendMixin masks while omitting isMask from Slice and Section", () => {
+    const group = { ...createNode("group", 0, 0), id: "group-mask", isMask: true };
+    const slice = { ...createNode("slice", 0, 0), id: "slice", isMask: true };
+    const section = { ...createNode("section", 0, 0), id: "section", isMask: true };
+    expect(projectFigmaPluginNode([group], group)).toMatchObject({ type: "GROUP", isMask: true, maskType: "ALPHA" });
+    expect(projectFigmaPluginNode([slice], slice)).not.toHaveProperty("isMask");
+    expect(projectFigmaPluginNode([section], section)).not.toHaveProperty("isMask");
   });
 
   it("projects WashiTape as its dedicated FigJam node type", () => {

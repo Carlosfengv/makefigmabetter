@@ -1,0 +1,129 @@
+{
+  "format": "makefigma-remediation-non-linear-gradient-v1",
+  "name": "W12-P-NON-LINEAR-GRADIENT",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000930",
+      "name": "Gradient evidence background",
+      "kind": "rectangle",
+      "x": -300,
+      "y": -130,
+      "width": 600,
+      "height": 260,
+      "rotation": 0,
+      "fill": "#f1f5f9",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000931",
+      "name": "Radial gradient",
+      "kind": "rectangle",
+      "x": -250,
+      "y": -75,
+      "width": 150,
+      "height": 150,
+      "rotation": 0,
+      "fill": "#ff3355",
+      "stroke": "#ffffff",
+      "strokeWidth": 3,
+      "radius": 18,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "paint": {
+            "css": "#ff3355",
+            "gradientPaint": {
+              "kind": "radial",
+              "transform": { "a": 2, "b": 0, "c": 0, "d": 1, "e": -1, "f": 0 },
+              "stops": [
+                { "position": 0, "color": { "space": "srgb", "components": [1, 0.2, 0.33333334], "alpha": 1 } },
+                { "position": 0.55, "color": { "space": "srgb", "components": [1, 0.8, 0.1], "alpha": 1 } },
+                { "position": 1, "color": { "space": "srgb", "components": [0.1, 0.2, 0.8], "alpha": 1 } }
+              ]
+            }
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000932",
+      "name": "Angular gradient",
+      "kind": "ellipse",
+      "x": -75,
+      "y": -75,
+      "width": 150,
+      "height": 150,
+      "rotation": 0,
+      "fill": "#ff3355",
+      "stroke": "#ffffff",
+      "strokeWidth": 3,
+      "radius": 0,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "paint": {
+            "css": "#ff3355",
+            "gradientPaint": {
+              "kind": "angular",
+              "transform": { "a": 2, "b": 0, "c": 0, "d": 1, "e": -1, "f": 0 },
+              "stops": [
+                { "position": 0, "color": { "space": "srgb", "components": [1, 0.2, 0.33333334], "alpha": 1 } },
+                { "position": 0.33, "color": { "space": "srgb", "components": [1, 0.8, 0.1], "alpha": 1 } },
+                { "position": 0.66, "color": { "space": "srgb", "components": [0.1, 0.8, 0.5], "alpha": 1 } },
+                { "position": 1, "color": { "space": "srgb", "components": [1, 0.2, 0.33333334], "alpha": 1 } }
+              ]
+            }
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000933",
+      "name": "Diamond gradient",
+      "kind": "rectangle",
+      "x": 100,
+      "y": -75,
+      "width": 150,
+      "height": 150,
+      "rotation": 0,
+      "fill": "#ff3355",
+      "stroke": "#ffffff",
+      "strokeWidth": 3,
+      "radius": 18,
+      "opacity": 1,
+      "visible": true,
+      "fillStack": {
+        "layers": [{
+          "paint": {
+            "css": "#ff3355",
+            "gradientPaint": {
+              "kind": "diamond",
+              "transform": { "a": 1.8, "b": 0.2, "c": -0.15, "d": 0.95, "e": -0.82, "f": -0.08 },
+              "stops": [
+                { "position": 0, "color": { "space": "srgb", "components": [1, 0.2, 0.33333334], "alpha": 1 } },
+                { "position": 0.45, "color": { "space": "srgb", "components": [0.6, 0.2, 0.9], "alpha": 0.85 } },
+                { "position": 1, "color": { "space": "srgb", "components": [0.05, 0.1, 0.3], "alpha": 1 } }
+              ]
+            }
+          },
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "normal"
+        }]
+      }
+    }
+  ]
+}

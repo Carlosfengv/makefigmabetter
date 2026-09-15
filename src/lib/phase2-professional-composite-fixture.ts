@@ -66,6 +66,27 @@ export function createPhase2ProfessionalCompositeFixture(): Phase2ProfessionalCo
       { backgroundBlur: { radius: 12, visible: true } },
     ],
   });
+  const blendBackdrop = fixtureNode("rectangle", "00000000-0000-4000-8000-000000003025", "Mode matrix backdrop", 470, 258, {
+    parentId: root.id, width: 330, height: 42, fill: "#f59e0b", stroke: "transparent", strokeWidth: 0, radius: 8,
+  });
+  const blendModes = ["normal", "multiply", "screen", "overlay", "darken", "lighten"] as const;
+  const blendSwatches = blendModes.map((blendMode, index) => fixtureNode(
+    "rectangle",
+    `00000000-0000-4000-8000-0000000030${(0x26 + index).toString(16)}`,
+    `Blend ${blendMode}`,
+    474 + index * 54,
+    263,
+    {
+      parentId: root.id,
+      width: 48,
+      height: 32,
+      fill: "#60a5fa",
+      stroke: "#0f172a",
+      strokeWidth: 1,
+      radius: 5,
+      blendMode,
+    },
+  ));
   // This intentionally contains only the SVG-native ordered effects. The
   // larger card above remains the explicit sidecar/fallback case for
   // Background Blur within a mixed stack.
@@ -114,7 +135,7 @@ export function createPhase2ProfessionalCompositeFixture(): Phase2ProfessionalCo
   });
   const slice = fixtureNode("slice", "00000000-0000-4000-8000-000000003018", "Professional export Slice", 452, 28, { parentId: root.id, width: 370, height: 470, rotation: -4, fill: "transparent", stroke: "transparent", strokeWidth: 0 });
 
-  return { format: "makefigma-phase2-professional-composite-fixture-v1", name: PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME, viewport: { x: 0, y: 0, zoom: 1 }, assets: fixtureAssets.map((asset) => ({ ...asset })), nodes: [root, layoutOne, layoutTwo, layoutThree, title, paragraph, avatar, effectCard, composedEffectBar, maskedRun, mask, maskedTarget, image, missingImage, polygon, star, boolean, booleanLeft, booleanRight, outline, independentlyMaskedRun, independentMask, independentlyMaskedBadge, slice] };
+  return { format: "makefigma-phase2-professional-composite-fixture-v1", name: PHASE2_PROFESSIONAL_COMPOSITE_FIXTURE_NAME, viewport: { x: 0, y: 0, zoom: 1 }, assets: fixtureAssets.map((asset) => ({ ...asset })), nodes: [root, layoutOne, layoutTwo, layoutThree, title, paragraph, avatar, effectCard, blendBackdrop, ...blendSwatches, composedEffectBar, maskedRun, mask, maskedTarget, image, missingImage, polygon, star, boolean, booleanLeft, booleanRight, outline, independentlyMaskedRun, independentMask, independentlyMaskedBadge, slice] };
 }
 
 function fixtureNode(kind: CanvasNode["kind"], id: string, name: string, x: number, y: number, patch: Partial<CanvasNode>): CanvasNode {

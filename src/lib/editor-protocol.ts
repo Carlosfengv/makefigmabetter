@@ -1,5 +1,9 @@
 import type { EditorErrorCode } from "./editor-error";
-import type { FigmaRestAuthorizedAsset, FigmaRestImportPlan } from "./figma-rest-import";
+import type {
+  FigmaRestAssetRequest,
+  FigmaRestAuthorizedAsset,
+  FigmaRestImportPlan,
+} from "./figma-rest-import";
 
 export type { EditorErrorCode } from "./editor-error";
 
@@ -43,11 +47,25 @@ export interface DocumentWidgetMetadata { widgetId: string; syncedState: Record<
 export type SlideTransitionStyle = "NONE" | "DISSOLVE" | "SLIDE_FROM_LEFT" | "SLIDE_FROM_RIGHT" | "SLIDE_FROM_BOTTOM" | "SLIDE_FROM_TOP" | "PUSH_FROM_LEFT" | "PUSH_FROM_RIGHT" | "PUSH_FROM_BOTTOM" | "PUSH_FROM_TOP" | "MOVE_FROM_LEFT" | "MOVE_FROM_RIGHT" | "MOVE_FROM_TOP" | "MOVE_FROM_BOTTOM" | "SLIDE_OUT_TO_LEFT" | "SLIDE_OUT_TO_RIGHT" | "SLIDE_OUT_TO_TOP" | "SLIDE_OUT_TO_BOTTOM" | "MOVE_OUT_TO_LEFT" | "MOVE_OUT_TO_RIGHT" | "MOVE_OUT_TO_TOP" | "MOVE_OUT_TO_BOTTOM" | "SMART_ANIMATE";
 export type SlideTransitionCurve = "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" | "LINEAR" | "GENTLE" | "QUICK" | "BOUNCY" | "SLOW";
 export interface DocumentSlideMetadata { isSkippedSlide: boolean; transition: { style: SlideTransitionStyle; duration: number; curve: SlideTransitionCurve; timing: { type: "ON_CLICK" | "AFTER_DELAY"; delay?: number } }; }
-export type ShapeWithTextType = "SQUARE" | "ELLIPSE" | "ROUNDED_RECTANGLE" | "DIAMOND" | "TRIANGLE_UP" | "TRIANGLE_DOWN" | "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" | "ENG_DATABASE" | "ENG_QUEUE" | "ENG_FILE" | "ENG_FOLDER" | "TRAPEZOID" | "PREDEFINED_PROCESS" | "SHIELD" | "DOCUMENT_SINGLE" | "DOCUMENT_MULTIPLE" | "MANUAL_INPUT" | "HEXAGON" | "CHEVRON" | "PENTAGON" | "OCTAGON" | "STAR" | "PLUS" | "ARROW_LEFT" | "ARROW_RIGHT" | "SUMMING_JUNCTION" | "OR" | "SPEECH_BUBBLE" | "INTERNAL_STORAGE";
+/** Complete ShapeWithText shapeType vocabulary from the current Plugin API
+ * typings. REST derives its documented subset below. */
+export const SHAPE_WITH_TEXT_TYPES = ["SQUARE", "ELLIPSE", "ROUNDED_RECTANGLE", "DIAMOND", "TRIANGLE_UP", "TRIANGLE_DOWN", "PARALLELOGRAM_RIGHT", "PARALLELOGRAM_LEFT", "ENG_DATABASE", "ENG_QUEUE", "ENG_FILE", "ENG_FOLDER", "TRAPEZOID", "PREDEFINED_PROCESS", "SHIELD", "DOCUMENT_SINGLE", "DOCUMENT_MULTIPLE", "MANUAL_INPUT", "HEXAGON", "CHEVRON", "PENTAGON", "OCTAGON", "STAR", "PLUS", "ARROW_LEFT", "ARROW_RIGHT", "SUMMING_JUNCTION", "OR", "SPEECH_BUBBLE", "INTERNAL_STORAGE"] as const;
+export type ShapeWithTextType = typeof SHAPE_WITH_TEXT_TYPES[number];
+const SHAPE_WITH_TEXT_TYPE_SET: ReadonlySet<string> = new Set(SHAPE_WITH_TEXT_TYPES);
+export function isShapeWithTextType(value: unknown): value is ShapeWithTextType {
+  return typeof value === "string" && SHAPE_WITH_TEXT_TYPE_SET.has(value);
+}
+/** The REST ShapeType catalog currently omits Plugin-only TRIANGLE_UP. Derive
+ * the documented 29-value subset from the Canonical/Plugin vocabulary. */
+export const FIGMA_REST_SHAPE_WITH_TEXT_TYPES: readonly ShapeWithTextType[] = SHAPE_WITH_TEXT_TYPES.filter((type) => type !== "TRIANGLE_UP");
+const FIGMA_REST_SHAPE_WITH_TEXT_TYPE_SET: ReadonlySet<string> = new Set(FIGMA_REST_SHAPE_WITH_TEXT_TYPES);
+export function isFigmaRestShapeWithTextType(value: unknown): value is ShapeWithTextType {
+  return typeof value === "string" && FIGMA_REST_SHAPE_WITH_TEXT_TYPE_SET.has(value);
+}
 export interface DocumentConnectorMetadata {
   lineType: "ELBOWED" | "STRAIGHT" | "CURVED";
-  start: { endpointNodeId?: string; magnet?: "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "AUTO"; x: number; y: number };
-  end: { endpointNodeId?: string; magnet?: "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "AUTO"; x: number; y: number };
+  start: { endpointNodeId?: string; magnet?: "NONE" | "AUTO" | "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "CENTER"; x: number; y: number };
+  end: { endpointNodeId?: string; magnet?: "NONE" | "AUTO" | "TOP" | "RIGHT" | "BOTTOM" | "LEFT" | "CENTER"; x: number; y: number };
   startStrokeCap: string;
   endStrokeCap: string;
   text: string;
@@ -59,7 +77,7 @@ export type StrokeCap = "none" | "round" | "square" | "arrowLines" | "arrowEquil
 export type StrokeJoin = "miter" | "bevel" | "round";
 export type StrokeAlign = "center" | "inside" | "outside";
 /** E1's first cross-renderer compositing subset. */
-export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten";
+export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge" | "color-burn" | "hard-light" | "soft-light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity" | "pass-through" | "linear-burn" | "linear-dodge";
 /** Per-axis Figma Frame resize behavior; absence retains legacy no-constraint semantics. */
 export type ConstraintType = "min" | "center" | "max" | "stretch" | "scale";
 export interface DocumentConstraints { horizontal: ConstraintType; vertical: ConstraintType; }
@@ -92,6 +110,7 @@ export interface DocumentAutoLayout {
   maxHeight?: number;
   absolute: boolean;
 }
+export type AutoLayoutPaddingSide = "top" | "right" | "bottom" | "left";
 /** Stable line-height for text records that predate an explicit paragraph value. */
 export const DEFAULT_TEXT_LINE_HEIGHT = 20;
 /** A deterministic capture may opt out of the otherwise automatic WebGPU spike. */
@@ -110,6 +129,13 @@ export interface DocumentColor {
 export interface DocumentLinearGradient {
   start: [number, number];
   end: [number, number];
+  stops: Array<{ position: number; color: DocumentColor }>;
+}
+
+export interface DocumentGradientPaint {
+  kind: "radial" | "angular" | "diamond";
+  /** Figma-compatible node-local normalized coordinates to gradient-space. */
+  transform: RelativeTransform;
   stops: Array<{ position: number; color: DocumentColor }>;
 }
 
@@ -136,7 +162,41 @@ export interface DocumentPaint {
   css: string;
   color?: DocumentColor;
   gradient?: DocumentLinearGradient;
+  gradientPaint?: DocumentGradientPaint;
+  /** Present when projected from the versioned Paint Stack. */
+  layerOpacity?: number;
+  layerBlendMode?: BlendMode;
 }
+export interface DocumentImagePaint {
+  assetId: string;
+  scaleMode: "fill" | "fit" | "crop" | "tile";
+  transform: RelativeTransform;
+  /** Independent Figma ImagePaint quarter-turn. Omitted is canonical zero. */
+  rotationDegrees?: 0 | 90 | 180 | 270;
+  /** Presence-bearing Figma image adjustments. Every present value is finite
+   * and lies in the Plugin API's inclusive -1 through 1 range. */
+  filters?: DocumentImageFilters;
+}
+export interface DocumentImageFilters {
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  temperature?: number;
+  tint?: number;
+  highlights?: number;
+  shadows?: number;
+}
+export type DocumentPaintLayerPaint =
+  | { paint: DocumentPaint; image?: never }
+  | { image: DocumentImagePaint; paint?: never };
+export type DocumentPaintLayer = DocumentPaintLayerPaint & {
+  visible: boolean;
+  opacity: number;
+  blendMode: BlendMode;
+};
+/** Presence-bearing stack. `layers: []` is explicit no paint; an omitted stack
+ * keeps the legacy singular/repeated compatibility fields authoritative. */
+export interface DocumentPaintStack { layers: DocumentPaintLayer[]; }
 export interface EllipseArcData { startingAngle: number; endingAngle: number; innerRadius: number; }
 /** Canonical source for generated regular-shape outlines (ADR 0026). */
 export type DocumentParametricShape = { kind: "polygon"; pointCount: number } | { kind: "star"; pointCount: number; innerRatio: number };
@@ -166,27 +226,106 @@ export interface DocumentFontReference {
   variationAxes?: Array<{ tag: string; value: number }>;
 }
 
+export type DocumentTextCase = "original" | "upper" | "lower" | "title" | "smallCaps" | "smallCapsForced";
+export type DocumentTextDecoration = "underline" | "strikethrough";
+export type DocumentTextDecorationStyle = "wavy" | "dotted";
+export type DocumentTextDecorationOffset = Readonly<{ value: number; unit: "pixels" | "percent" }>;
+export type DocumentTextDecorationThickness = Readonly<{ value: number; unit: "pixels" | "percent" }>;
+export type DocumentTextDecorationColor = Readonly<{
+  color: DocumentColor;
+  visible: boolean;
+  opacity: number;
+  blendMode: Exclude<BlendMode, "pass-through">;
+}>;
+export interface DocumentHyperlinkTarget {
+  type: "URL" | "NODE";
+  value: string;
+}
+
+export interface DocumentTextStyle {
+  font?: DocumentFontReference;
+  fontSize: number;
+  fontWeight: number;
+  italic: boolean;
+  letterSpacing: number;
+  /** Omission inherits the Text node's fill. */
+  color?: DocumentColor;
+  /** Presence is semantic: [] means no glyph paint; omission falls back to
+   * the legacy run color and then to the owning Text node fill. */
+  fillStack?: DocumentPaintStack;
+  /** Omission preserves the legacy/original character presentation. */
+  textCase?: DocumentTextCase;
+  /** Omission means the range has no hyperlink metadata. */
+  hyperlink?: DocumentHyperlinkTarget;
+  /** Omission is Figma NONE. */
+  textDecoration?: DocumentTextDecoration;
+  /** Omission is Figma SOLID when textDecoration is active. */
+  textDecorationStyle?: DocumentTextDecorationStyle;
+  /** Omission is Figma AUTO when textDecoration is underline. */
+  textDecorationOffset?: DocumentTextDecorationOffset;
+  /** Omission is Figma AUTO when textDecoration is underline. */
+  textDecorationThickness?: DocumentTextDecorationThickness;
+  /** Omission is Figma AUTO when textDecoration is underline. */
+  textDecorationColor?: DocumentTextDecorationColor;
+  /** Omission preserves legacy continuous underlines; true skips descenders. */
+  textDecorationSkipInk?: boolean;
+  leadingTrim?: "capHeight";
+}
+
 export interface DocumentTextProperties {
-  runs: Array<{
+  runs: Array<DocumentTextStyle & {
     /** UTF-8 byte offsets, always aligned to Unicode scalar boundaries. */
     start: number;
     end: number;
-    font?: DocumentFontReference;
-    fontSize: number;
-    fontWeight: number;
-    italic: boolean;
-    letterSpacing: number;
-    /** Omission inherits the Text node's fill. */
-    color?: DocumentColor;
   }>;
   paragraph: {
     alignment: "left" | "center" | "right" | "justify";
     /** Optional only for legacy snapshots; omission resolves to 20px. */
     lineHeight?: number;
+    /** Omission is the legacy PIXELS interpretation. AUTO omits lineHeight. */
+    lineHeightUnit?: "percent" | "auto";
     paragraphSpacing: number;
+    /** First-line inset from the paragraph's left edge. */
+    paragraphIndent?: number;
+    /** Omission is Figma AUTO and preserves legacy document hashes. */
+    textWrapStyle?: "balance" | "pretty";
+    /** Omission is Figma NONE and preserves legacy document hashes. */
+    listType?: "ordered" | "unordered";
+    /** Omission is Figma's zero spacing between list items. */
+    listSpacing?: number;
+    /** Omission/false keeps list markers inside the text box. */
+    hangingList?: boolean;
+    /** Omission/false keeps boundary punctuation inside the text box. */
+    hangingPunctuation?: boolean;
   };
+  /** Sparse paragraph-level overrides keyed by UTF-8 paragraph starts. */
+  paragraphStyleRuns?: Array<{
+    start: number;
+    /** Figma list nesting level; explicit zero is meaningful. */
+    indentation?: number;
+    /** Omission inherits the global list type; "none" explicitly disables it. */
+    listType?: "none" | "ordered" | "unordered";
+    /** Omission inherits the global spacing; explicit zero disables it. */
+    listSpacing?: number;
+    /** Omission inherits global paragraphSpacing; explicit zero disables it. */
+    paragraphSpacing?: number;
+    /** Omission inherits global paragraphIndent; explicit zero disables it. */
+    paragraphIndent?: number;
+    /** PIXELS/PERCENT value; absence with AUTO unit is meaningful. */
+    lineHeight?: number;
+    /** Absence with a value means PIXELS; both absent inherit the global style. */
+    lineHeightUnit?: "percent" | "auto";
+    /** Omission inherits the global style; "auto" explicitly disables it. */
+    textWrapStyle?: "auto" | "balance" | "pretty";
+  }>;
   autoSize: "fixed" | "height" | "widthAndHeight";
   fallbackFonts?: DocumentFontReference[];
+  /** Omission has the same effective behavior as Figma DISABLED. */
+  textTruncation?: "disabled" | "ending";
+  /** Present only with ending truncation; Figma's public value must be >= 1. */
+  maxLines?: number;
+  /** Persistent insertion style used when text is empty. */
+  baseStyle?: DocumentTextStyle;
 }
 
 /** M3's durable prototype contract.  It intentionally lives beside the Canvas
@@ -218,6 +357,7 @@ export interface CanvasNode {
   fillGradient?: DocumentLinearGradient;
   /** Empty retains the legacy singular fill fields; otherwise composites in order. */
   fills?: DocumentPaint[];
+  fillStack?: DocumentPaintStack;
   /** Canonical sibling-order key, opaque to presentation components. */
   positionId?: string;
   stroke: string;
@@ -226,6 +366,7 @@ export interface CanvasNode {
   strokeGradient?: DocumentLinearGradient;
   /** Empty retains the legacy singular stroke fields; otherwise composites in order. */
   strokes?: DocumentPaint[];
+  strokeStack?: DocumentPaintStack;
   strokeWidth: number;
   strokeCapStart?: StrokeCap;
   strokeCapEnd?: StrokeCap;
@@ -306,6 +447,13 @@ export interface CanvasPage {
   positionId: string;
 }
 
+/** Immutable OpenType name-table projection for one admitted font face. */
+export interface DocumentFontFaceMetadata {
+  faceIndex: number;
+  family: string;
+  style: string;
+}
+
 /** Durable, byte-free metadata for an admitted Asset Service object. */
 export interface DocumentAsset {
   assetId: string;
@@ -314,12 +462,13 @@ export interface DocumentAsset {
   byteLength: number;
   pixelWidth?: number;
   pixelHeight?: number;
+  fontFaces?: readonly DocumentFontFaceMetadata[];
 }
 
 /** A fully resolved Core mutation. It is intentionally byte-free so a pending
  * remote operation can be reapplied to a newer canonical snapshot after a
  * rejected base revision. */
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "fillStack" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeStack" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
   /** External imports create ordered Pages and their scene tree in the same
    * Canonical transaction; ordinary UI page creation remains a convenience
@@ -331,7 +480,8 @@ export type CoreBatchCommand =
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
-  | { type: "update"; node: CoreProjectionNode }
+  | { type: "update"; node: CoreProjectionNode; /** Figma-compatible resizeWithoutConstraints transport flag. */ ignoreConstraints?: true; /** Persist only text content and any supported TextProperties without replaying geometry. */ plainTextOnly?: true; /** The same TextPath text edit also updated its auto-derived name. */ renameTextPath?: true }
+  | { type: "convertToTextPath"; node: CoreProjectionNode }
   | { type: "moveVectorPoint"; id: string; pointId: string; x: number; y: number }
   | { type: "setVectorSubpathClosed"; id: string; subpathIndex: number; closed: boolean }
   | { type: "insertVectorPoint"; id: string; subpathIndex: number; afterPointId?: string; point: DocumentVectorPath["subpaths"][number]["points"][number] }
@@ -391,12 +541,18 @@ export interface RenderPerformanceSummary {
   maxMs: number;
   cullingP95Ms: number;
   gpuPrepareP95Ms: number;
+  gpuIslandP95Ms: number;
+  canvasIslandP95Ms: number;
   overlayP95Ms: number;
   imageBitmapP95Ms: number;
   compositeP95Ms: number;
   candidateNodesP95: number;
   visibleNodesP95: number;
   gpuUploadBytesP95: number;
+  canvasReadbackBytesP95: number;
+  gpuCoverageUpperBoundPixelsP95: number;
+  canvasFallbackCoverageUpperBoundPixelsP95: number;
+  compositeSurfaceBytesP95: number;
   rendersPerInputFrameMax: number;
   /** Browser input timestamp through completed Worker render. */
   inputToRenderSamples: number;
@@ -406,7 +562,16 @@ export interface RenderPerformanceSummary {
 /** Rust-owned legal caret stops for an active DOM text-edit session. This is
  * transient input state; neither offsets nor selections enter Canonical state. */
 export interface RustTextCaretLayout {
+  unitsPerEm?: number;
   carets: Array<{ byteOffset: number; lineIndex: number }>;
+  lines?: Array<{
+    start: number;
+    end: number;
+    direction: "ltr" | "rtl";
+    advance?: number;
+    visualRuns?: Array<{ start: number; end: number; direction: "ltr" | "rtl" }>;
+    visualCarets?: Array<{ byteOffset: number; xAdvance: number }>;
+  }>;
 }
 
 export interface ViewportCheckpointMessage {
@@ -435,12 +600,16 @@ export type PresentationNode = Pick<CanvasNode, "id"> & Partial<Pick<CanvasNode,
 export type CoreJournalOperation =
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
+  /** Applies geometry while deliberately leaving constrained descendants in
+   * place. Used by Command/Ctrl-resize and the Plugin API's
+   * `resizeWithoutConstraints` method. */
+  | { type: "resizeWithoutConstraints"; id: string; patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height" | "rotation" | "relativeTransform" | "autoLayout">> }
   | { type: "reposition"; positionIds: Array<{ id: string; positionId: string }> }
   | { type: "reparent"; ids: string[]; parentId?: string }
   | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
-  | { type: "transformGroup"; ids: string[]; id?: string; modifiers: DocumentTransformModifier[] }
+  | { type: "transformGroup"; ids: string[]; id?: string; parentId?: string; pageId?: string; index?: number; modifiers: DocumentTransformModifier[]; patch?: Partial<CanvasNode> }
   /** Wraps two or more selected hierarchy roots in a live Boolean container. */
-  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
+  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation; id?: string; parentId?: string; pageId?: string; index?: number; patch?: Partial<CanvasNode> }
   | { type: "ungroup"; id: string }
   | { type: "delete"; ids: string[] }
   | { type: "move"; updates: Array<Pick<CanvasNode, "id" | "x" | "y" | "width" | "height">> }
@@ -527,6 +696,14 @@ export interface BenchmarkProjectionSnapshot {
   format: "benchmark-projection-v1";
   nodes: CanvasNode[];
   viewport: Viewport;
+  /** Optional Worker-only action executed after Core hydration. It exists to
+   * measure one deterministic transaction in the same WASM instance and is
+   * never serialized into a Canonical snapshot. */
+  benchmark?: {
+    kind: "pf02-layout-cascade";
+    frameId: string;
+    targetWidth: number;
+  };
 }
 
 export type LocalDocumentSnapshot = CoreLocalSnapshot | LegacyProjectionSnapshot | BenchmarkProjectionSnapshot;
@@ -539,6 +716,23 @@ export interface EditorSnapshot {
   documentHash?: string;
   memory?: { nodeCount: number; nodeBytes: number; maxDocumentBytes: number; undoItems: number; undoBytes: number; redoItems: number; redoBytes: number; dedupeItems: number; dedupeBytes: number; operationDedupeItems: number; operationDedupeBytes: number };
   resources?: { documentNodes: number; maxDocumentNodes: number; documentBytes: number; maxDocumentBytes: number; wasmHeapBytes: number; maxWasmHeapBytes: number; renderSurfaceBytes: number; maxRenderSurfaceBytes: number; gpuSceneBytes: number; maxGpuSceneBytes: number; gpuEffectTextureBytes: number; maxGpuEffectTextureBytes: number; gpuSceneWithinBudget: boolean };
+  /** Ephemeral fixed-fixture evidence. It is emitted to the browser UI only
+   * and does not enter document storage, history, hash, or collaboration. */
+  benchmark?: {
+    kind: "pf02-layout-cascade";
+    status: "complete" | "failed";
+    nodeCount: number;
+    layoutChildren: number;
+    transactionMs?: number;
+    beforeWasmHeapBytes?: number;
+    afterWasmHeapBytes?: number;
+    beforeDocumentBytes?: number;
+    afterDocumentBytes?: number;
+    beforeUndoBytes?: number;
+    afterUndoBytes?: number;
+    beforeDedupeBytes?: number;
+    afterDedupeBytes?: number;
+  };
   /** Ephemeral, privacy-safe Engine Worker evidence; it never enters the document snapshot. */
   diagnostics?: { total: number; recent: readonly DiagnosticEvent[] };
   performance?: RenderPerformanceSummary;
@@ -575,6 +769,8 @@ export type EditorCommand =
   | { type: "select-page"; id: string }
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }
+  /** Applies geometry without cascading Constraints to descendants. */
+  | { type: "resizeWithoutConstraints"; id: string; patch: Partial<Pick<CanvasNode, "x" | "y" | "width" | "height" | "rotation" | "relativeTransform" | "autoLayout">> }
   /** Resolves a deterministic world-space arrangement into concrete geometry
    * updates in the Engine Worker. The concrete updates—not this convenience
    * intent—are the replayable Core operation. */
@@ -593,15 +789,18 @@ export type EditorCommand =
   /** Move selected hierarchy roots under a new parent while preserving world space. */
   | { type: "reparent"; ids: string[]; parentId?: string }
   | { type: "group"; ids: string[]; /** Creates an Auto Layout Frame wrapper instead of a Group. */ autoLayout?: DocumentAutoLayout }
-  | { type: "transformGroup"; ids: string[]; id?: string; modifiers: DocumentTransformModifier[] }
+  | { type: "transformGroup"; ids: string[]; id?: string; parentId?: string; pageId?: string; index?: number; modifiers: DocumentTransformModifier[]; patch?: Partial<CanvasNode> }
   /** Resolves selected roots into one live BooleanOperation container. */
-  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation }
+  | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation; id?: string; parentId?: string; pageId?: string; index?: number; patch?: Partial<CanvasNode> }
   /** Replaces a live Boolean structure with its current Rust-derived VectorPath. */
-  | { type: "flattenBoolean"; id: string }
+  | { type: "flattenBoolean"; id: string; replacementId?: string; parentId?: string; pageId?: string; index?: number }
   /** Replaces a Vector's paint stroke with the Rust-derived editable fill path. */
   | { type: "outlineStroke"; id: string }
   /** Replaces a Polygon or Star with its current closed editable VectorPath. */
   | { type: "convertParametricToVector"; id: string }
+  /** Converts a Figma vector-like shape to TextPath while retaining its ID and
+   * exact hierarchy position. The supplied path is already resolved. */
+  | { type: "convertToTextPath"; id: string; vectorPath: DocumentVectorPath; metadata: DocumentTextPathMetadata }
   | { type: "ungroup"; id: string }
   | { type: "select"; ids: string[] }
   | { type: "delete"; ids: string[] }
@@ -631,11 +830,11 @@ export interface EditorTransaction {
 /** High-frequency browser input carried in a transferable binary batch. */
 export type EditorInputEvent =
   /** Read-only followers may point-select and pan, but must never begin a document mutation. */
-  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; altKey: boolean; button: number; readOnly?: true; /** A repeated press selects through a Frame or Group instead of its container. */ drillDown?: true; /** Command/Ctrl-click directly selects the painted nested layer. */ deepSelect?: true; /** A repeated press on a selected Vector segment requests an exact Core split. */ splitVectorSegment?: true; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number }
+  | { type: "pointer"; event: "down" | "move" | "up" | "leave"; x: number; y: number; shiftKey: boolean; altKey: boolean; button: number; readOnly?: true; /** A repeated press selects through a Frame or Group instead of its container. */ drillDown?: true; /** Command/Ctrl-click directly selects the painted nested layer. */ deepSelect?: true; /** Command/Ctrl-resize leaves constrained descendants unchanged. */ ignoreConstraints?: true; /** A repeated press on a selected Vector segment requests an exact Core split. */ splitVectorSegment?: true; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number }
   | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; ctrlKey: boolean; /** Unix epoch milliseconds, never Canonical document data. */ occurredAt?: number };
 
 export type MainToWorker =
-  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; documentId?: string; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault }
+  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number; documentId?: string; rendererPreference: RendererPreference; simulateGpuLosses: number; simulateGpuLossAfterImage: boolean; simulateGpuFault?: SimulatedGpuFault; /** Development-only full-frame RGBA evidence. */ captureFrameHash?: boolean; /** Development-only document-space pixel probes captured with the full-frame hash. */ captureFrameSamples?: readonly { label: string; x: number; y: number }[] }
   | { type: "resize"; width: number; height: number; dpr: number }
   /** Background editor tabs keep their canonical state live but suspend paint
    * work so duplicate views of a complex document do not contend for CPU. */
@@ -662,6 +861,9 @@ export type MainToWorker =
    * It contains immutable Asset metadata only; URL/token/bytes stay outside the
    * Canonical command stream. */
   | { type: "bind-figma-rest-assets"; transactionId: string; baseRevision: number; authorized: FigmaRestAuthorizedAsset[] }
+  /** Explicitly ends the two-phase Figma image flow. The Worker restores any
+   * source lock deferred for binding and retains the unresolved image metadata. */
+  | { type: "cancel-figma-rest-assets"; transactionId: string; baseRevision: number; pending: FigmaRestAssetRequest[] }
   /** Browser-decoded external clipboard data. The Worker validates it again
    * before replacing its fast-path clipboard. */
   | { type: "set-clipboard"; clipboard: EditorClipboard; sourceDocumentId?: string }
@@ -676,8 +878,13 @@ export type MainToWorker =
    * while the DOM editor draws the same text, avoiding the double-rendered
    * visual jump that browsers otherwise introduce on focus. */
   | { type: "editing-text"; nodeId?: string }
+  /** Inspector/canvas hover preview for one Auto Layout padding edge. */
+  | { type: "auto-layout-padding-hover"; nodeId?: string; side?: AutoLayoutPaddingSide }
   /** Worker-owned Rust layout request used to legalize DOM caret offsets. */
   | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string }
+  /** On-demand frozen Runtime export geometry. Live Boolean paths stay out of
+   * ordinary snapshots and are returned only for this exact Core revision. */
+  | { type: "runtime-export-boolean-paths"; requestId: string; revision: number; nodeIds: string[] }
   /** Development-only fault injection, issued after a confirmed Core snapshot. */
   | { type: "simulate-crash" }
   | { type: "transaction"; transaction: EditorTransaction }
@@ -703,6 +910,16 @@ export type WorkerToMain =
       pageId: string;
       quality: "preview" | "sharp" | "settled";
     }
+  /** The requested revision could not be painted as one complete frame. */
+  | {
+      type: "frame-failed";
+      revision: number;
+      pageId: string;
+      code: "RESOURCE_LIMIT";
+      /** Present only when the transferred canvas still contains this frame. */
+      retainedRevision?: number;
+    }
+  | { type: "frame-hash"; revision: number; pageId: string; width: number; height: number; rgbaSha256: string; sceneKey: string; samples?: readonly { label: string; x: number; y: number; rgba: readonly [number, number, number, number] }[] }
   | { type: "remote-bootstrap"; documentId: string; revision: number; snapshot: Uint8Array }
   /** Coarse, data-free stages for a potentially large remote snapshot load. */
   | { type: "remote-load-progress"; stage: "decode" | "project" | "render" | "render-paint" | "render-overlay" | "render-finalize" | "render-nodes"; completed?: number; total?: number }
@@ -717,6 +934,7 @@ export type WorkerToMain =
   | { type: "remote-reconciled"; removeOperationIds: string[]; replacements: PendingRemoteOperation[]; discardedOperationIds: string[]; coreRejectedOperationIds: string[]; blockedOperationIds: string[]; rejectionDiagnostics: string[] }
   | { type: "remote-reconciliation-progress"; completed: number; total: number }
   | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string; layout?: RustTextCaretLayout }
+  | { type: "runtime-export-boolean-paths-result"; requestId: string; revision: number; paths?: Record<string, DocumentVectorPath>; errorCode?: "REVISION_CONFLICT" | "INVALID_REQUEST" | "RESOURCE_LIMIT" }
   /** Lightweight high-frequency projection update; never contains durable document data. */
   | { type: "view-state"; viewport: Viewport; selectedIds: string[]; activePageId: string; performance: RenderPerformanceSummary; viewportChanged: boolean }
   /** A durable viewport payload deliberately separated from the full Core snapshot. */

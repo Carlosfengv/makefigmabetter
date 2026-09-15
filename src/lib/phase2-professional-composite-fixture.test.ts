@@ -70,6 +70,9 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
         expect.objectContaining({ backgroundBlur: expect.any(Object) }),
       ]),
     });
+    expect(fixture.nodes.filter((node) => node.name.startsWith("Blend ")).map((node) => node.blendMode)).toEqual([
+      "normal", "multiply", "screen", "overlay", "darken", "lighten",
+    ]);
     expect(composedEffectBar).toMatchObject({
       parentId: root?.id,
       effectStack: [
@@ -113,6 +116,8 @@ describe("F-PHASE2-PROFESSIONAL-COMPOSITE fixture", () => {
 
     expect(svg.svg).toContain("<svg");
     expect(svg.svg).toContain("mix-blend-mode:overlay");
+    for (const mode of ["multiply", "screen", "overlay", "darken", "lighten"])
+      expect(svg.svg).toContain(`mix-blend-mode:${mode}`);
     expect(svg.svg).toContain("makefigma-composed-effect-");
     expect(svg.svg).toContain('result="innerMask-2"');
     expect(svg.compatibilityFallbacks).not.toEqual(expect.arrayContaining([

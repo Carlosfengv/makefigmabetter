@@ -30,6 +30,81 @@ describe("RuntimeProjectionStore", () => {
     expect(initial.nodes[1].x).toBe(0);
   });
 
+  it("projects Boolean wrapping and flatten replacement synchronously", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "a", type: "VECTOR", parentId: "page", siblingIndex: 0, x: 10 },
+        { id: "b", type: "VECTOR", parentId: "page", siblingIndex: 1, x: 20 },
+      ],
+    });
+    store.stage({
+      transactionId: "tx-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 0, booleanOperation: "subtract" },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 10 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "subtract",
+      }],
+    });
+    expect(store.getNode("boolean")).toMatchObject({ type: "BOOLEAN_OPERATION", booleanOperation: "subtract" });
+    expect(store.getNode("a")).toMatchObject({ parentId: "boolean", siblingIndex: 0, x: 0 });
+    expect(store.getNode("b")).toMatchObject({ parentId: "boolean", siblingIndex: 1, x: 10 });
+
+    store.append("tx-boolean", [{
+      type: "flattenBoolean",
+      booleanId: "boolean",
+      operandIds: ["a", "b"],
+      replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 0, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+      siblingIndexes: [],
+    }]);
+    expect(store.getNode("boolean")).toMatchObject({ removed: true });
+    expect(store.getNode("a")).toMatchObject({ removed: true });
+    expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", removed: false });
+  });
+
+  it("projects same-page cross-parent Boolean moves and reindexes each source parent", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "frame-a", type: "FRAME", parentId: "page", siblingIndex: 0 },
+        { id: "frame-b", type: "FRAME", parentId: "page", siblingIndex: 1 },
+        { id: "a", type: "VECTOR", parentId: "frame-a", siblingIndex: 0 },
+        { id: "a-sibling", type: "VECTOR", parentId: "frame-a", siblingIndex: 1 },
+        { id: "b", type: "VECTOR", parentId: "frame-b", siblingIndex: 0 },
+        { id: "b-sibling", type: "VECTOR", parentId: "frame-b", siblingIndex: 1 },
+      ],
+    });
+
+    store.stage({
+      transactionId: "tx-cross-parent-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 1, booleanOperation: "union" },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 100 }],
+        siblingIndexes: [
+          { nodeId: "a-sibling", siblingIndex: 0 },
+          { nodeId: "b-sibling", siblingIndex: 0 },
+        ],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    });
+
+    expect(store.getNode("a")).toMatchObject({ parentId: "boolean", siblingIndex: 0, x: 0 });
+    expect(store.getNode("b")).toMatchObject({ parentId: "boolean", siblingIndex: 1, x: 100 });
+    expect(store.getNode("a-sibling")).toMatchObject({ parentId: "frame-a", siblingIndex: 0 });
+    expect(store.getNode("b-sibling")).toMatchObject({ parentId: "frame-b", siblingIndex: 0 });
+  });
+
   it("does not settle a write until the matching accepted projection arrives", () => {
     const store = new RuntimeProjectionStore(initial);
     store.stage({ transactionId: "tx-1", baseRevision: 7, operations: [{ type: "update", nodeId: "frame", patch: { x: 42 } }] });
@@ -56,6 +131,45 @@ describe("RuntimeProjectionStore", () => {
     store.rollback("tx-remove");
     expect(store.getNode("frame")).toMatchObject({ x: 0 });
     expect(store.getNode("frame")).not.toHaveProperty("removed");
+  });
+
+  it("reuses composed node objects until the projection generation changes", () => {
+    const store = new RuntimeProjectionStore(initial);
+    const confirmed = store.getNode("frame");
+
+    expect(store.getNode("frame")).toBe(confirmed);
+    expect(store.listLiveNodes().find((node) => node.id === "frame")).toBe(confirmed);
+    expect(new Set(Array.from({ length: 1_000 }, () => store.getNode("frame"))).size).toBe(1);
+
+    store.stage({ transactionId: "tx-cache", baseRevision: 7, operations: [{ type: "update", nodeId: "frame", patch: { x: 20 } }] });
+    const pending = store.getNode("frame");
+    expect(pending).not.toBe(confirmed);
+    expect(store.getNode("frame")).toBe(pending);
+    expect(store.listLiveNodes().find((node) => node.id === "frame")).toBe(pending);
+
+    store.rollback("tx-cache");
+    expect(store.getNode("frame")).toBe(confirmed);
+
+    store.applyConfirmedProjection({
+      revision: 7,
+      nodes: [{ id: "page", type: "PAGE" }, { id: "frame", type: "FRAME", parentId: "page", x: 30 }],
+    });
+    expect(store.getNode("frame")).toMatchObject({ x: 30 });
+    expect(store.getNode("frame")).not.toBe(confirmed);
+  });
+
+  it("rejects an append that would invalidate a later pending transaction", () => {
+    const store = new RuntimeProjectionStore(initial);
+    store.stage({ transactionId: "tx-first", baseRevision: 7, operations: [{ type: "update", nodeId: "frame", patch: { x: 10 } }] });
+    store.stage({ transactionId: "tx-second", baseRevision: 7, operations: [{ type: "update", nodeId: "frame", patch: { x: 20 } }] });
+    const visibleBeforeFailure = store.getNode("frame");
+
+    const error = captureError(() => store.append("tx-first", [{ type: "remove", nodeId: "frame" }]));
+
+    expect(isRuntimeError(error, "NODE_REMOVED")).toBe(true);
+    expect(store.transaction("tx-first")?.operations).toHaveLength(1);
+    expect(store.getNode("frame")).toBe(visibleBeforeFailure);
+    expect(store.getNode("frame")).toMatchObject({ x: 20 });
   });
 
   it("rejects stale base revisions and writes through a removed node", () => {

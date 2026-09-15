@@ -1,4 +1,5 @@
 import type { CanvasNode } from "./editor-protocol";
+import { invertAffine, transformPoint, worldTransformForNode, type AffineMatrix } from "./scene-transform";
 
 export type ConnectorPoint = Readonly<{ x: number; y: number }>;
 export type ConnectorPath =
@@ -6,16 +7,24 @@ export type ConnectorPath =
   | Readonly<{ kind: "rounded-polyline"; start: ConnectorPoint; segments: readonly ConnectorPathSegment[] }>
   | Readonly<{ kind: "cubic"; start: ConnectorPoint; control1: ConnectorPoint; control2: ConnectorPoint; end: ConnectorPoint }>;
 type ConnectorPathSegment = Readonly<{ kind: "line"; end: ConnectorPoint }> | Readonly<{ kind: "quadratic"; control: ConnectorPoint; end: ConnectorPoint }>;
+export type ConnectorPathContext = Readonly<{
+  nodes: readonly CanvasNode[];
+  defaultPageId?: string;
+  nodeById?: ReadonlyMap<string, CanvasNode>;
+  worldTransformByNodeId?: ReadonlyMap<string, AffineMatrix>;
+}>;
 
 /**
  * Deterministic local Connector geometry. This deliberately covers only the
- * portions represented in Canonical metadata: it does not infer endpoint
- * magnets from another node or claim Figma's obstacle-avoidance algorithm.
+ * portions represented in Canonical metadata. When scene context is available,
+ * explicit magnets follow the referenced node through affine transforms; the
+ * deterministic AUTO heuristic still does not claim Figma obstacle routing.
  */
-export function connectorPathForNode(node: CanvasNode): ConnectorPath | undefined {
+export function connectorPathForNode(node: CanvasNode, context?: ConnectorPathContext): ConnectorPath | undefined {
   if (node.kind !== "connector") return undefined;
-  const start = connectorPoint(node.connectorMetadata?.start, { x: 0, y: 0 });
-  const end = connectorPoint(node.connectorMetadata?.end, { x: node.width, y: 0 });
+  const authoredStart = connectorPoint(node.connectorMetadata?.start, { x: 0, y: 0 });
+  const authoredEnd = connectorPoint(node.connectorMetadata?.end, { x: node.width, y: 0 });
+  const { start, end } = resolveAttachedEndpoints(node, authoredStart, authoredEnd, context);
   const lineType = node.connectorMetadata?.lineType ?? "STRAIGHT";
   if (lineType === "STRAIGHT") return { kind: "polyline", points: [start, end] };
   const dx = end.x - start.x;
@@ -30,6 +39,66 @@ export function connectorPathForNode(node: CanvasNode): ConnectorPath | undefine
     : compactPoints([start, { x: start.x, y: start.y + dy / 2 }, { x: end.x, y: start.y + dy / 2 }, end]);
   const radius = Math.max(0, node.connectorMetadata?.cornerRadius ?? 0);
   return radius > 0 && points.length > 2 ? roundedPolyline(points, radius) : { kind: "polyline", points };
+}
+
+/** Resolves magnet endpoints as a derived view. Canonical retains the last
+ * local point for deterministic fallback; target motion changes presentation
+ * without rewriting history or connector metadata. */
+function resolveAttachedEndpoints(
+  node: CanvasNode,
+  authoredStart: ConnectorPoint,
+  authoredEnd: ConnectorPoint,
+  context: ConnectorPathContext | undefined,
+): Readonly<{ start: ConnectorPoint; end: ConnectorPoint }> {
+  if (!context || !node.connectorMetadata) return { start: authoredStart, end: authoredEnd };
+  const byId = context.nodeById ?? new Map(context.nodes.map((candidate) => [candidate.id, candidate]));
+  const world = context.worldTransformByNodeId?.get(node.id) ?? worldTransformForNode(context.nodes, node.id);
+  const inverse = world && invertAffine(world);
+  if (!world || !inverse) return { start: authoredStart, end: authoredEnd };
+  const authoredStartWorld = transformPoint(world, authoredStart);
+  const authoredEndWorld = transformPoint(world, authoredEnd);
+  return {
+    start: resolveAttachedEndpoint(node, node.connectorMetadata.start, authoredStart, authoredEndWorld, byId, inverse, context),
+    end: resolveAttachedEndpoint(node, node.connectorMetadata.end, authoredEnd, authoredStartWorld, byId, inverse, context),
+  };
+}
+
+function resolveAttachedEndpoint(
+  connector: CanvasNode,
+  endpoint: NonNullable<CanvasNode["connectorMetadata"]>["start"],
+  fallback: ConnectorPoint,
+  oppositeWorld: ConnectorPoint,
+  byId: ReadonlyMap<string, CanvasNode>,
+  connectorWorldInverse: AffineMatrix,
+  context: ConnectorPathContext,
+): ConnectorPoint {
+  if (!endpoint.endpointNodeId || !endpoint.magnet || endpoint.magnet === "NONE") return fallback;
+  const target = byId.get(endpoint.endpointNodeId);
+  const connectorPageId = connector.pageId ?? context.defaultPageId;
+  const targetPageId = target?.pageId ?? context.defaultPageId;
+  if (!target || target.id === connector.id || connectorPageId !== targetPageId) return fallback;
+  const targetWorld = context.worldTransformByNodeId?.get(target.id) ?? worldTransformForNode(context.nodes, target.id);
+  if (!targetWorld || !Number.isFinite(target.width) || !Number.isFinite(target.height) || target.width < 0 || target.height < 0) return fallback;
+  const anchors = {
+    TOP: { x: target.width / 2, y: 0 },
+    RIGHT: { x: target.width, y: target.height / 2 },
+    BOTTOM: { x: target.width / 2, y: target.height },
+    LEFT: { x: 0, y: target.height / 2 },
+    CENTER: { x: target.width / 2, y: target.height / 2 },
+  } as const;
+  const localAnchor = endpoint.magnet === "AUTO"
+    ? (["TOP", "RIGHT", "BOTTOM", "LEFT"] as const)
+      .map((side) => anchors[side])
+      .map((anchor) => ({ anchor, world: transformPoint(targetWorld, anchor) }))
+      .reduce((best, candidate) => distanceSquared(candidate.world, oppositeWorld) < distanceSquared(best.world, oppositeWorld) ? candidate : best).anchor
+    : anchors[endpoint.magnet];
+  return transformPoint(connectorWorldInverse, transformPoint(targetWorld, localAnchor));
+}
+
+function distanceSquared(left: ConnectorPoint, right: ConnectorPoint): number {
+  const dx = left.x - right.x;
+  const dy = left.y - right.y;
+  return dx * dx + dy * dy;
 }
 
 export function connectorPathSvgD(path: ConnectorPath, number: (value: number) => string): string {

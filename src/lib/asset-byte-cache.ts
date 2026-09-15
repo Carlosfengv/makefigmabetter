@@ -24,13 +24,17 @@ export function readCachedAsset(asset: DocumentAsset): Promise<Blob | undefined>
     if (!entry || !matchesAsset(entry, asset)) return undefined;
     try {
       const file = await (await directory.getFileHandle(fileName(asset.assetId))).getFile();
-      if (file.size !== asset.byteLength || await sha256Hex(await file.arrayBuffer()) !== asset.contentHash.toLowerCase()) {
+      const bytes = await file.arrayBuffer();
+      if (file.size !== asset.byteLength || await sha256Hex(bytes) !== asset.contentHash.toLowerCase()) {
         await removeEntry(directory, index, asset.assetId);
         return undefined;
       }
       entry.lastUsedAt = Date.now();
       await writeIndex(directory, index);
-      return file.slice(0, file.size, asset.mediaType);
+      // Detach callers from the live OPFS File handle. Some browsers block a
+      // later File.arrayBuffer() while another tab rotates the same cache
+      // entry, even though validation above already materialized the bytes.
+      return new Blob([bytes], { type: asset.mediaType });
     } catch {
       await removeEntry(directory, index, asset.assetId);
       return undefined;

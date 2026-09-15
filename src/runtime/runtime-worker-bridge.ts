@@ -1,4 +1,4 @@
-import { createId, type DocumentAsset, type DocumentAutoLayout, type EditorSnapshot, type EditorTransaction, type MainToWorker, type WorkerToMain } from "../lib/editor-protocol";
+import { createId, type DocumentAsset, type DocumentAutoLayout, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type EditorSnapshot, type EditorTransaction, type MainToWorker, type WorkerToMain } from "../lib/editor-protocol";
 import { figmaPluginNodeType } from "../lib/figma-plugin-node-projection";
 import { runtimeError } from "./runtime-errors";
 import type { PendingProjectionTransaction, RuntimeProjection, RuntimeProjectionNode } from "./runtime-projection-store";
@@ -6,6 +6,21 @@ import type { RuntimeTransactionResult, RuntimeTransactionTransport } from "./ru
 
 export function runtimeProjectionFromEditorSnapshot(snapshot: EditorSnapshot): RuntimeProjection {
   const documentId = runtimeDocumentNodeId(snapshot.documentId);
+  const nextSiblingIndexByParent = new Map<string, number>();
+  const sceneNodes = snapshot.nodes.flatMap((node) => {
+    const type = node.kind === "image" ? "IMAGE" : figmaPluginNodeType(node.kind);
+    if (!type) return [];
+    const parentId = node.parentId ?? node.pageId ?? snapshot.activePageId;
+    const siblingIndex = nextSiblingIndexByParent.get(parentId) ?? 0;
+    nextSiblingIndexByParent.set(parentId, siblingIndex + 1);
+    return [{
+      ...node,
+      type,
+      parentId,
+      siblingIndex,
+      characters: node.text,
+    }];
+  });
   return {
     revision: snapshot.revision,
     nodes: [
@@ -24,18 +39,7 @@ export function runtimeProjectionFromEditorSnapshot(snapshot: EditorSnapshot): R
         name: page.name,
         siblingIndex,
       })),
-      ...snapshot.nodes.flatMap((node) => {
-        const type = node.kind === "image" ? "IMAGE" : figmaPluginNodeType(node.kind);
-        if (!type) return [];
-        const parentId = node.parentId ?? node.pageId ?? snapshot.activePageId;
-        return [{
-          ...node,
-          type,
-          parentId,
-          siblingIndex: siblingIndexFor(snapshot, node.id, parentId),
-          characters: node.text,
-        }];
-      }),
+      ...sceneNodes,
     ],
   };
 }
@@ -59,6 +63,7 @@ export class RuntimeWorkerBridge implements RuntimeTransactionTransport {
   private readonly assetRegistrationWaiters = new Map<string, { assetId: string; resolve: () => void; reject: (reason?: unknown) => void; timeoutId: ReturnType<typeof setTimeout> }>();
   private readonly pageWaiters = new Map<string, { resolve: () => void; reject: (reason?: unknown) => void; timeoutId: ReturnType<typeof setTimeout> }>();
   private readonly selectionWaiters: Array<{ ids: readonly string[]; resolve: () => void; reject: (reason?: unknown) => void; timeoutId: ReturnType<typeof setTimeout> }> = [];
+  private readonly booleanPathWaiters = new Map<string, { revision: number; resolve: (paths: ReadonlyMap<string, DocumentVectorPath>) => void; reject: (reason?: unknown) => void; timeoutId: ReturnType<typeof setTimeout> }>();
   private readonly viewStateListeners = new Set<(state: RuntimeWorkerViewState) => void>();
   private latestSnapshot?: EditorSnapshot;
 
@@ -87,6 +92,18 @@ export class RuntimeWorkerBridge implements RuntimeTransactionTransport {
   }
 
   observe(message: WorkerToMain): void {
+    if (message.type === "runtime-export-boolean-paths-result") {
+      const waiter = this.booleanPathWaiters.get(message.requestId);
+      if (!waiter) return;
+      clearTimeout(waiter.timeoutId);
+      this.booleanPathWaiters.delete(message.requestId);
+      if (message.errorCode || message.revision !== waiter.revision) {
+        waiter.reject(runtimeError(message.errorCode === "RESOURCE_LIMIT" ? "RESOURCE_LIMIT" : message.errorCode === "INVALID_REQUEST" ? "INVALID_ARGUMENT" : "REVISION_CONFLICT", { revision: waiter.revision }));
+        return;
+      }
+      waiter.resolve(new Map(Object.entries(message.paths ?? {})));
+      return;
+    }
     if (message.type === "snapshot") {
       this.latestSnapshot = message.snapshot;
       this.pageIds.clear();
@@ -159,6 +176,33 @@ export class RuntimeWorkerBridge implements RuntimeTransactionTransport {
     this.selectionWaiters.splice(0).forEach((waiter) => {
       clearTimeout(waiter.timeoutId);
       waiter.reject(reason);
+    });
+    for (const waiter of this.booleanPathWaiters.values()) {
+      clearTimeout(waiter.timeoutId);
+      waiter.reject(reason);
+    }
+    this.booleanPathWaiters.clear();
+  }
+
+  resolveBooleanPathsAsync(revision: number, nodeIds: readonly string[], timeoutMs = 10_000): Promise<ReadonlyMap<string, DocumentVectorPath>> {
+    if (!Number.isSafeInteger(revision) || revision < 0 || nodeIds.length < 1 || nodeIds.length > 256 || new Set(nodeIds).size !== nodeIds.length || nodeIds.some((id) => !id)) {
+      return Promise.reject(runtimeError("INVALID_ARGUMENT", { revision }));
+    }
+    const requestId = createId();
+    return new Promise((resolve, reject) => {
+      const timeoutId = globalThis.setTimeout(() => {
+        if (!this.booleanPathWaiters.has(requestId)) return;
+        this.booleanPathWaiters.delete(requestId);
+        reject(runtimeError("TIMEOUT", { revision }));
+      }, timeoutMs);
+      this.booleanPathWaiters.set(requestId, { revision, resolve, reject, timeoutId });
+      try {
+        this.post({ type: "runtime-export-boolean-paths", requestId, revision, nodeIds: [...nodeIds] });
+      } catch (error) {
+        clearTimeout(timeoutId);
+        this.booleanPathWaiters.delete(requestId);
+        reject(error);
+      }
     });
   }
 
@@ -321,10 +365,28 @@ function transactionToEditorCommands(
   pageIds: ReadonlySet<string>,
 ): EditorTransaction["commands"] {
   const created = new Map<string, RuntimeProjectionNode>();
+  const createdBooleans = new Map<string, Extract<PendingProjectionTransaction["operations"][number], { type: "boolean" }>>();
+  const createdTransformGroups = new Map<string, Extract<PendingProjectionTransaction["operations"][number], { type: "transformGroup" }>>();
   const createdOrder: string[] = [];
   const remaining: PendingProjectionTransaction["operations"][number][] = [];
 
   for (const operation of operations) {
+    if (operation.type === "boolean") {
+      if (created.has(operation.node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.node.id });
+      const cloned = structuredClone(operation);
+      created.set(operation.node.id, cloned.node);
+      createdBooleans.set(operation.node.id, cloned);
+      remaining.push(cloned);
+      continue;
+    }
+    if (operation.type === "transformGroup") {
+      if (created.has(operation.node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.node.id });
+      const cloned = structuredClone(operation);
+      created.set(operation.node.id, cloned.node);
+      createdTransformGroups.set(operation.node.id, cloned);
+      remaining.push(cloned);
+      continue;
+    }
     if (operation.type === "create") {
       if (created.has(operation.node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.node.id });
       created.set(operation.node.id, structuredClone(operation.node));
@@ -335,6 +397,10 @@ function transactionToEditorCommands(
       const node = created.get(operation.nodeId);
       if (node) {
         Object.assign(node, structuredClone(operation.patch));
+        const structural = createdBooleans.get(operation.nodeId);
+        if (structural) Object.assign(structural.wrapperPatch, structuredClone(operation.patch));
+        const transformGroup = createdTransformGroups.get(operation.nodeId);
+        if (transformGroup) Object.assign(transformGroup.wrapperPatch, structuredClone(operation.patch));
         continue;
       }
     }
@@ -355,18 +421,88 @@ function toEditorCommands(
   operation: PendingProjectionTransaction["operations"][number],
   pageIds: ReadonlySet<string>,
 ): EditorTransaction["commands"] {
+  if (operation.type === "boolean") {
+    const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;
+    const index = typeof operation.node.siblingIndex === "number" && Number.isSafeInteger(operation.node.siblingIndex)
+      ? operation.node.siblingIndex
+      : undefined;
+    return [{
+      type: "boolean",
+      ids: [...operation.operandIds],
+      operation: canonicalBooleanOperation(operation.wrapperPatch.booleanOperation) ?? operation.operation,
+      id: operation.node.id,
+      ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
+      ...(index === undefined ? {} : { index }),
+      ...(Object.keys(operation.wrapperPatch).length ? { patch: structuredClone(operation.wrapperPatch) } : {}),
+    }];
+  }
+  if (operation.type === "transformGroup") {
+    const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;
+    const index = typeof operation.node.siblingIndex === "number" && Number.isSafeInteger(operation.node.siblingIndex)
+      ? operation.node.siblingIndex
+      : undefined;
+    const wrapperPatch = structuredClone(operation.wrapperPatch) as Record<string, unknown>;
+    const patchedModifiers = wrapperPatch.transformModifiers;
+    delete wrapperPatch.transformModifiers;
+    const modifiers = Array.isArray(patchedModifiers)
+      ? patchedModifiers as DocumentTransformModifier[]
+      : operation.modifiers.map((modifier) => structuredClone(modifier));
+    return [{
+      type: "transformGroup",
+      ids: [...operation.childIds],
+      id: operation.node.id,
+      modifiers,
+      ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
+      ...(index === undefined ? {} : { index }),
+      ...(Object.keys(wrapperPatch).length ? { patch: wrapperPatch } : {}),
+    }];
+  }
+  if (operation.type === "flattenBoolean") {
+    const runtimeParentId = typeof operation.replacement.parentId === "string" ? operation.replacement.parentId : undefined;
+    const index = typeof operation.replacement.siblingIndex === "number" && Number.isSafeInteger(operation.replacement.siblingIndex)
+      ? operation.replacement.siblingIndex
+      : undefined;
+    return [{
+      type: "flattenBoolean",
+      id: operation.booleanId,
+      replacementId: operation.replacement.id,
+      ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
+      ...(index === undefined ? {} : { index }),
+    }];
+  }
   if (operation.type === "remove") return [{ type: "delete", ids: [operation.nodeId] }];
   if (operation.type === "update") {
     const patch = structuredClone(operation.patch) as Record<string, unknown>;
+    if (operation.convertToTextPath) {
+      const vectorPath = patch.vectorPath;
+      const metadata = patch.textPathMetadata;
+      if (patch.type !== "TEXT_PATH" || !vectorPath || typeof vectorPath !== "object" || !metadata || typeof metadata !== "object") {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.nodeId });
+      }
+      return [{
+        type: "convertToTextPath",
+        id: operation.nodeId,
+        vectorPath: vectorPath as DocumentVectorPath,
+        metadata: metadata as DocumentTextPathMetadata,
+      }];
+    }
     const parentId = patch.parentId;
+    const positionId = patch.positionId;
     const characters = patch.characters;
+    const isMask = patch.isMask;
     delete patch.parentId;
+    delete patch.positionId;
     delete patch.siblingIndex;
     delete patch.characters;
+    delete patch.isMask;
     if (typeof characters === "string") patch.text = characters;
     const commands: EditorTransaction["commands"] = [];
     if (typeof parentId === "string") commands.push({ type: "reparent", ids: [operation.nodeId], parentId: pageIds.has(parentId) ? undefined : parentId });
-    if (Object.keys(patch).length) commands.push({ type: "update", id: operation.nodeId, patch });
+    if (typeof positionId === "string") commands.push({ type: "reposition", positionIds: [{ id: operation.nodeId, positionId }] });
+    if (Object.keys(patch).length) commands.push(operation.ignoreConstraints
+      ? { type: "resizeWithoutConstraints", id: operation.nodeId, patch: patch as Extract<EditorCommand, { type: "resizeWithoutConstraints" }>["patch"] }
+      : { type: "update", id: operation.nodeId, patch });
+    if (typeof isMask === "boolean") commands.push({ type: "setMask", id: operation.nodeId, enabled: isMask });
     return commands;
   }
   const kind = editorKind(operation.node.type);
@@ -389,9 +525,12 @@ function toEditorCommands(
     : runtimeParentId && pageIds.has(runtimeParentId)
       ? runtimeParentId
       : undefined;
+  delete node.parentId;
+  delete node.pageId;
   return [{
     type: "create",
     node: {
+      ...node,
       id: operation.node.id,
       kind,
       x: numberOr(node.x, 0),
@@ -400,10 +539,10 @@ function toEditorCommands(
       height: numberOr(node.height, kind === "line" ? 0 : 100),
       rotation: numberOr(node.rotation, 0),
       name: typeof node.name === "string" ? node.name : kind,
-      fill: "transparent",
-      stroke: "transparent",
-      radius: 0,
-      strokeWidth: 0,
+      fill: typeof node.fill === "string" ? node.fill : "transparent",
+      stroke: typeof node.stroke === "string" ? node.stroke : "transparent",
+      radius: numberOr(node.radius, 0),
+      strokeWidth: numberOr(node.strokeWidth, 0),
       opacity: numberOr(node.opacity, 1),
       visible: node.visible !== false,
       // Preserve the Runtime's sibling order for a batch of new nodes. The
@@ -421,17 +560,6 @@ function toEditorCommands(
   }];
 }
 
-function siblingIndexFor(snapshot: EditorSnapshot, nodeId: string, parentId: string): number {
-  let index = 0;
-  for (const node of snapshot.nodes) {
-    const siblingParentId = node.parentId ?? node.pageId ?? snapshot.activePageId;
-    if (siblingParentId !== parentId) continue;
-    if (node.id === nodeId) return index;
-    index += 1;
-  }
-  return index;
-}
-
 function editorKind(type: string): Extract<EditorTransaction["commands"][number], { type: "create" }> ["node"]["kind"] | undefined {
   const kinds = {
     FRAME: "frame",
@@ -439,9 +567,15 @@ function editorKind(type: string): Extract<EditorTransaction["commands"][number]
     SECTION: "section",
     RECTANGLE: "rectangle",
     ELLIPSE: "ellipse",
+    POLYGON: "polygon",
+    STAR: "star",
+    VECTOR: "vector",
     LINE: "line",
     TEXT: "text",
     IMAGE: "image",
+    CONNECTOR: "connector",
+    SHAPE_WITH_TEXT: "shapeWithText",
+    TEXT_PATH: "textPath",
   } as const;
   return kinds[type as keyof typeof kinds];
 }
@@ -450,7 +584,12 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function canonicalBooleanOperation(value: unknown): "union" | "subtract" | "intersect" | "exclude" | undefined {
+  return value === "union" || value === "subtract" || value === "intersect" || value === "exclude" ? value : undefined;
+}
+
 function positionIdFor(node: RuntimeProjectionNode): string {
+  if (typeof node.positionId === "string" && node.positionId.length > 0) return node.positionId;
   const siblingIndex = typeof node.siblingIndex === "number" && Number.isSafeInteger(node.siblingIndex) && node.siblingIndex >= 0
     ? node.siblingIndex
     : 0;

@@ -40,4 +40,64 @@ describe("M6 TextPath layout", () => {
     expect(layoutTextPath(invalidOffset, 10)).toBeUndefined();
     expect(specialNodeFallback(invalidOffset, "canvas")).toMatchObject({ code: "M6_TEXT_PATH_LAYOUT_FALLBACK" });
   });
+
+  it("wraps closed source contours from the selected segment", () => {
+    const node = textPath();
+    const closed = {
+      ...node,
+      text: "ABCD",
+      vectorPath: {
+        fillRule: "nonZero" as const,
+        subpaths: [{
+          closed: true,
+          points: [
+            { id: "a", x: 0, y: 0, pointType: "corner" as const },
+            { id: "b", x: 100, y: 0, pointType: "corner" as const },
+            { id: "c", x: 100, y: 80, pointType: "corner" as const },
+            { id: "d", x: 0, y: 80, pointType: "corner" as const },
+          ],
+        }],
+      },
+      textPathMetadata: { ...node.textPathMetadata!, startSegment: 3, startPosition: 0, textAlignVertical: "CENTER" as const },
+    };
+
+    expect(layoutTextPath(closed, 20)).toEqual([
+      { text: "A", x: 0, y: 70, angle: -Math.PI / 2 },
+      { text: "B", x: 0, y: 50, angle: -Math.PI / 2 },
+      { text: "C", x: 0, y: 30, angle: -Math.PI / 2 },
+      { text: "D", x: 0, y: 10, angle: -Math.PI / 2 },
+    ]);
+    expect(specialNodeFallback(closed, "canvas")).toBeUndefined();
+    expect(exportPageToSvg([closed], { pageId, defaultPageId: pageId, padding: 0 }).compatibilityFallbacks).toEqual([]);
+  });
+
+  it("exports frozen rich-run metrics through one native SVG textPath", () => {
+    const assetId = "00000000-0000-4000-8000-00000000e0f0";
+    const node = {
+      ...textPath(),
+      textProperties: {
+        runs: [
+          { start: 0, end: 1, font: { assetId, faceIndex: 0 }, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+          { start: 1, end: 2, font: { assetId, faceIndex: 0 }, fontSize: 30, fontWeight: 700, italic: true, letterSpacing: 1, color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+        ],
+        paragraph: { alignment: "left" as const, lineHeight: 32, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+        fallbackFonts: [],
+      },
+    };
+    const exported = exportPageToSvg([node], {
+      pageId, defaultPageId: pageId, padding: 0,
+      fontDataUris: new Map([[assetId, "data:font/woff2;base64,AA=="]]),
+      textLayouts: new Map([[node.id, { unitsPerEm: 1_000, lines: [{ start: 0, end: 2, direction: "ltr", advance: 1_500 }] }]]),
+    });
+
+    expect(exported.svg).toContain('<path id="makefigma-text-path-');
+    expect(exported.svg).toContain('<textPath href="#makefigma-text-path-');
+    expect(exported.svg).toContain('textLength="30"');
+    expect(exported.svg).toContain('font-size="20"');
+    expect(exported.svg).toContain('font-size="30"');
+    expect(exported.svg).toContain('fill="#ff0000"');
+    expect(exported.svg).toContain('fill="#0000ff"');
+    expect(exported.compatibilityFallbacks).toEqual([]);
+  });
 });

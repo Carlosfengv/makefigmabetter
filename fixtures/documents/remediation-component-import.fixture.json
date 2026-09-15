@@ -1,0 +1,87 @@
+{
+  "version": "remediation-component-import-v1",
+  "components": {
+    "2:1": {
+      "key": "remote-card-key",
+      "name": "Remote card",
+      "description": "Cross-page component fixture",
+      "remote": true
+    }
+  },
+  "document": {
+    "children": [
+      {
+        "id": "0:1",
+        "type": "CANVAS",
+        "name": "Instances",
+        "children": [
+          {
+            "id": "1:1",
+            "type": "INSTANCE",
+            "name": "Card instance",
+            "componentId": "2:1",
+            "componentProperties": {
+              "Enabled": { "type": "BOOLEAN", "value": true }
+            },
+            "overrides": [
+              { "id": "1:2", "overriddenFields": ["fills"] }
+            ],
+            "relativeTransform": [[1, 0, 40], [0, 1, 40]],
+            "absoluteBoundingBox": { "x": 40, "y": 40, "width": 240, "height": 140 },
+            "children": [
+              {
+                "id": "1:2",
+                "type": "RECTANGLE",
+                "name": "Locked hidden override",
+                "visible": false,
+                "locked": true,
+                "relativeTransform": [[1, 0, 16], [0, 1, 16]],
+                "absoluteBoundingBox": { "x": 56, "y": 56, "width": 208, "height": 108 },
+                "fills": [{ "type": "SOLID", "color": { "r": 0.2, "g": 0.4, "b": 0.9, "a": 1 } }]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "0:2",
+        "type": "CANVAS",
+        "name": "Library",
+        "children": [
+          {
+            "id": "2:1",
+            "type": "COMPONENT",
+            "name": "Remote card",
+            "clipsContent": true,
+            "relativeTransform": [[1, 0, 40], [0, 1, 40]],
+            "absoluteBoundingBox": { "x": 40, "y": 40, "width": 240, "height": 140 },
+            "componentPropertyDefinitions": {
+              "Enabled": { "type": "BOOLEAN", "defaultValue": true, "description": "Shows content" }
+            },
+            "children": [
+              {
+                "id": "2:2",
+                "type": "SLOT",
+                "name": "Content slot",
+                "slotPropertyName": "Content",
+                "relativeTransform": [[1, 0, 16], [0, 1, 16]],
+                "absoluteBoundingBox": { "x": 56, "y": 56, "width": 96, "height": 108 },
+                "children": []
+              },
+              {
+                "id": "2:3",
+                "type": "SLOT",
+                "name": "Content override slot",
+                "slotPropertyName": "Content override",
+                "sourceSlotId": "2:2",
+                "relativeTransform": [[1, 0, 128], [0, 1, 16]],
+                "absoluteBoundingBox": { "x": 168, "y": 56, "width": 96, "height": 108 },
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

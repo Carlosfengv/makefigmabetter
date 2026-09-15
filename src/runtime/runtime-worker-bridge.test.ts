@@ -2,8 +2,34 @@ import { describe, expect, it } from "vitest";
 import type { EditorSnapshot, MainToWorker } from "../lib/editor-protocol";
 import { resolveCoreBatch } from "../lib/transaction-batch";
 import { RuntimeWorkerBridge, runtimeProjectionFromEditorSnapshot } from "./runtime-worker-bridge";
+import { isRuntimeError } from "./runtime-errors";
 
 describe("RuntimeWorkerBridge", () => {
+  it("resolves on-demand Boolean paths only for the requested Worker revision", async () => {
+    const posted: MainToWorker[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const pending = bridge.resolveBooleanPathsAsync(7, ["boolean"]);
+    const request = posted[0] as Extract<MainToWorker, { type: "runtime-export-boolean-paths" }>;
+    expect(request).toMatchObject({ type: "runtime-export-boolean-paths", revision: 7, nodeIds: ["boolean"] });
+    const path = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "boolean:runtime-export:0:0", x: 0, y: 0, pointType: "corner" as const }] }] };
+    bridge.observe({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision: 7, paths: { boolean: path } });
+    await expect(pending).resolves.toEqual(new Map([["boolean", path]]));
+    bridge.close();
+  });
+
+  it("rejects stale and invalid Boolean export responses and closes pending requests", async () => {
+    const posted: MainToWorker[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const stale = bridge.resolveBooleanPathsAsync(7, ["boolean"]);
+    const staleRequest = posted[0] as Extract<MainToWorker, { type: "runtime-export-boolean-paths" }>;
+    bridge.observe({ type: "runtime-export-boolean-paths-result", requestId: staleRequest.requestId, revision: 8 });
+    await expect(stale).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "REVISION_CONFLICT"));
+    await expect(bridge.resolveBooleanPathsAsync(7, [])).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "INVALID_ARGUMENT"));
+    const closing = bridge.resolveBooleanPathsAsync(7, ["boolean"]);
+    bridge.close();
+    await expect(closing).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));
+  });
+
   it("waits for both Worker Ack and the matching projection before accepting a transaction", async () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
@@ -21,6 +47,21 @@ describe("RuntimeWorkerBridge", () => {
     expect(bridge.hasPendingTransactions).toBe(false);
   });
 
+  it("accepts a transaction when the matching projection arrives before its Worker Ack", async () => {
+    const bridge = new RuntimeWorkerBridge(() => undefined);
+    const pending = bridge.submit({
+      transactionId: "tx-snapshot-first",
+      baseRevision: 4,
+      operations: [{ type: "update", nodeId: "rect", patch: { x: 42 } }],
+    });
+
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(5) });
+    bridge.observe({ type: "ack", transactionId: "tx-snapshot-first", acceptedRevision: 5 });
+
+    await expect(pending).resolves.toMatchObject({ type: "accepted", acceptedRevision: 5, projection: { revision: 5 } });
+    expect(bridge.hasPendingTransactions).toBe(false);
+  });
+
   it("projects document/page ownership and omits non-Plugin IMAGE records", () => {
     const projection = runtimeProjectionFromEditorSnapshot(snapshotAt(4));
     expect(projection.nodes).toEqual(expect.arrayContaining([
@@ -28,6 +69,43 @@ describe("RuntimeWorkerBridge", () => {
       expect.objectContaining({ id: "page", type: "PAGE" }),
       expect.objectContaining({ id: "rect", type: "RECTANGLE", parentId: "page" }),
     ]));
+  });
+
+  it.each([1_000, 5_000, 10_000, 100_000])("assigns sibling indexes in one pass for %i flat nodes", (nodeCount) => {
+    let parentReads = 0;
+    const nodes: EditorSnapshot["nodes"] = Array.from({ length: nodeCount }, (_, index) => {
+      const node = {
+        id: `rect-${index}`,
+        kind: "rectangle" as const,
+        name: `Rectangle ${index}`,
+        x: index,
+        y: 0,
+        width: 10,
+        height: 10,
+        rotation: 0,
+        fill: "#fff",
+        stroke: "transparent",
+        radius: 0,
+        strokeWidth: 0,
+        opacity: 1,
+      };
+      Object.defineProperty(node, "parentId", {
+        enumerable: true,
+        get() {
+          parentReads += 1;
+          return undefined;
+        },
+      });
+      return node;
+    });
+
+    const projection = runtimeProjectionFromEditorSnapshot({ ...snapshotAt(4), nodes });
+    const sceneNodes = projection.nodes.filter((node) => node.type === "RECTANGLE");
+
+    expect(sceneNodes).toHaveLength(nodeCount);
+    expect(sceneNodes[0]).toMatchObject({ id: "rect-0", parentId: "page", siblingIndex: 0 });
+    expect(sceneNodes.at(-1)).toMatchObject({ id: `rect-${nodeCount - 1}`, parentId: "page", siblingIndex: nodeCount - 1 });
+    expect(parentReads).toBeLessThanOrEqual(nodeCount * 2);
   });
 
   it("gives created nodes a deterministic Core layer position", async () => {
@@ -80,6 +158,236 @@ describe("RuntimeWorkerBridge", () => {
         }),
       }),
     ]);
+    bridge.close();
+  });
+
+  it("preserves parametric and vector geometry when lowering Runtime creates", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-geometry-create",
+      baseRevision: 4,
+      operations: [
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000021", type: "POLYGON", parentId: "page", name: "Polygon", width: 100, height: 100, fill: "#d9f99d", stroke: "#4d7c0f", strokeWidth: 1, parametricShape: { kind: "polygon", pointCount: 8 } } },
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000022", type: "VECTOR", parentId: "page", name: "Vector", width: 80, height: 60, vectorPath: { fillRule: "nonZero", subpaths: [{ closed: false, points: [{ id: "point-1", x: 0, y: 0, pointType: "corner" }, { id: "point-2", x: 80, y: 60, pointType: "corner" }] }] } } },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "polygon", fill: "#d9f99d", stroke: "#4d7c0f", strokeWidth: 1, parametricShape: { kind: "polygon", pointCount: 8 } }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "vector", vectorPath: expect.objectContaining({ fillRule: "nonZero" }) }) }),
+    ]);
+    bridge.close();
+  });
+
+  it("lowers bounded special-node Runtime creates without dropping their durable metadata", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-special-create",
+      baseRevision: 4,
+      operations: [
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000031", type: "CONNECTOR", parentId: "page", name: "Connector", width: 200, height: 0, connectorMetadata: { lineType: "ELBOWED", start: { x: 0, y: 0 }, end: { x: 200, y: 80 }, startStrokeCap: "NONE", endStrokeCap: "TRIANGLE_FILLED", text: "Review" } } },
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000032", type: "SHAPE_WITH_TEXT", parentId: "page", name: "Decision", width: 208, height: 208, shapeWithTextType: "DIAMOND", characters: "Approve" } },
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000033", type: "TEXT_PATH", parentId: "page", name: "Text path", width: 160, height: 120, characters: "Curve", vectorPath: { fillRule: "nonZero", subpaths: [] }, textPathMetadata: { startSegment: 0, startPosition: .25, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "CENTER" } } },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "connector", connectorMetadata: expect.objectContaining({ lineType: "ELBOWED", text: "Review" }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "shapeWithText", shapeWithTextType: "DIAMOND", text: "Approve" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "textPath", textPathMetadata: expect.objectContaining({ startPosition: .25 }), text: "Curve" }) }),
+    ]);
+    expect(resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands)).toBeDefined();
+    bridge.close();
+  });
+
+  it("lowers an existing vector-like node to an identity-preserving TextPath conversion", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const vectorPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{
+        closed: false,
+        points: [
+          { id: "point-1", x: 0, y: 40, pointType: "corner" as const },
+          { id: "point-2", x: 100, y: 40, pointType: "corner" as const },
+        ],
+      }],
+    };
+    const textPathMetadata = {
+      startSegment: 0,
+      startPosition: .25,
+      autoRename: true,
+      textAlignHorizontal: "LEFT" as const,
+      textAlignVertical: "CENTER" as const,
+    };
+
+    void bridge.submit({
+      transactionId: "tx-convert-text-path",
+      baseRevision: 4,
+      operations: [{
+        type: "update",
+        nodeId: "rect",
+        convertToTextPath: true,
+        patch: { type: "TEXT_PATH", vectorPath, textPathMetadata },
+      }],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([{
+      type: "convertToTextPath",
+      id: "rect",
+      vectorPath,
+      metadata: textPathMetadata,
+    }]);
+    const resolved = resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands);
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({
+        type: "convertToTextPath",
+        node: expect.objectContaining({ id: "rect", kind: "textPath", x: 0, y: 0, width: 100, height: 80 }),
+      }),
+    ]);
+    expect(resolved?.nextNodes).toContainEqual(expect.objectContaining({ id: "rect", kind: "textPath" }));
+    bridge.close();
+  });
+
+  it("lowers Runtime Boolean and flatten operations to forced-ID structural commands", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-boolean",
+      baseRevision: 4,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean-id", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 0 },
+        operandIds: ["vector-a", "vector-b"],
+        operandPatches: [{}, {}],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "exclude",
+      }],
+    }).catch(() => undefined);
+    void bridge.submit({
+      transactionId: "tx-flatten",
+      baseRevision: 4,
+      operations: [{
+        type: "flattenBoolean",
+        booleanId: "boolean-id",
+        operandIds: ["vector-a", "vector-b"],
+        replacement: { id: "flat-id", type: "VECTOR", parentId: "page" },
+        siblingIndexes: [],
+      }],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([{ type: "boolean", ids: ["vector-a", "vector-b"], operation: "exclude", id: "boolean-id", pageId: "page", index: 0 }]);
+    expect(posted[1]?.transaction.commands).toEqual([{ type: "flattenBoolean", id: "boolean-id", replacementId: "flat-id", pageId: "page" }]);
+    bridge.close();
+  });
+
+  it("lowers a same-turn linear Repeat to the official target parent and index", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const modifier = [{ type: "REPEAT" as const, repeatType: "LINEAR" as const, count: 2, unitType: "PIXELS" as const, offset: 240, axis: "HORIZONTAL" as const }];
+    void bridge.submit({
+      transactionId: "tx-repeat",
+      baseRevision: 4,
+      operations: [
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000041", type: "RECTANGLE", parentId: "page", siblingIndex: 1, x: 20, y: 30, width: 100, height: 80 } },
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000042", type: "ELLIPSE", parentId: "page", siblingIndex: 2, x: 140, y: 30, width: 80, height: 80 } },
+        {
+          type: "transformGroup",
+          node: { id: "00000000-0000-4000-8000-000000000043", type: "TRANSFORM_GROUP", parentId: "page", siblingIndex: 0, x: 20, y: 30, width: 200, height: 80, transformModifiers: modifier },
+          childIds: ["00000000-0000-4000-8000-000000000041", "00000000-0000-4000-8000-000000000042"],
+          childPatches: [{ x: 0, y: 0 }, { x: 120, y: 0 }],
+          siblingIndexes: [{ nodeId: "rect", siblingIndex: 1 }],
+          modifiers: modifier,
+          wrapperPatch: {},
+        },
+        { type: "update", nodeId: "00000000-0000-4000-8000-000000000043", patch: { name: "Repeated pair" } },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands.map((command) => command.type)).toEqual(["create", "create", "transformGroup"]);
+    expect(posted[0]?.transaction.commands.at(-1)).toEqual({
+      type: "transformGroup",
+      ids: ["00000000-0000-4000-8000-000000000041", "00000000-0000-4000-8000-000000000042"],
+      id: "00000000-0000-4000-8000-000000000043",
+      pageId: "page",
+      index: 0,
+      modifiers: modifier,
+      patch: { name: "Repeated pair" },
+    });
+    expect(resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands)).toBeDefined();
+    bridge.close();
+  });
+
+  it("lowers same-turn Vector creation and Boolean wrapping to one resolvable Core batch", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const path = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "p1", x: 0, y: 0, pointType: "corner" as const }, { id: "p2", x: 100, y: 0, pointType: "corner" as const }, { id: "p3", x: 0, y: 100, pointType: "corner" as const }] }] };
+    void bridge.submit({
+      transactionId: "tx-create-boolean",
+      baseRevision: 4,
+      operations: [
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000201", type: "VECTOR", parentId: "page", siblingIndex: 1, x: 40, y: 40, width: 100, height: 100, vectorPath: path } },
+        { type: "create", node: { id: "00000000-0000-4000-8000-000000000202", type: "VECTOR", parentId: "page", siblingIndex: 2, x: 40, y: 40, width: 100, height: 100, vectorPath: path } },
+        { type: "boolean", node: { id: "00000000-0000-4000-8000-000000000203", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 0 }, operandIds: ["00000000-0000-4000-8000-000000000201", "00000000-0000-4000-8000-000000000202"], operandPatches: [{}, {}], siblingIndexes: [{ nodeId: "rect", siblingIndex: 1 }], wrapperPatch: {}, operation: "subtract" },
+        { type: "update", nodeId: "00000000-0000-4000-8000-000000000203", patch: { name: "Runtime Boolean" } },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands.map((command) => command.type)).toEqual(["create", "create", "boolean"]);
+    expect(posted[0]?.transaction.commands.at(-1)).toMatchObject({ type: "boolean", patch: { name: "Runtime Boolean" } });
+    expect(resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands)).toBeDefined();
+    bridge.close();
+  });
+
+  it("lowers Runtime insertChild order to one atomic reparent and reposition", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-ordered-reparent",
+      baseRevision: 4,
+      operations: [{
+        type: "update",
+        nodeId: "rect",
+        patch: {
+          parentId: "frame",
+          siblingIndex: 0,
+          positionId: "40000000000000000000000000000000:00000000000000000000000000000007",
+        },
+      }],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      { type: "reparent", ids: ["rect"], parentId: "frame" },
+      { type: "reposition", positionIds: [{ id: "rect", positionId: "40000000000000000000000000000000:00000000000000000000000000000007" }] },
+    ]);
+    bridge.close();
+  });
+
+  it("lowers an isMask update to Core's dedicated SetMask operation", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-mask",
+      baseRevision: 4,
+      operations: [{ type: "update", nodeId: "rect", patch: { name: "Mask source", isMask: true } }],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      { type: "update", id: "rect", patch: { name: "Mask source" } },
+      { type: "setMask", id: "rect", enabled: true },
+    ]);
+    expect(resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands)?.batch.map((command) => command.type)).toEqual(["update", "setMask"]);
     bridge.close();
   });
 

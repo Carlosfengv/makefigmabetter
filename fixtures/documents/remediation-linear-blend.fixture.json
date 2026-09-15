@@ -1,0 +1,16 @@
+{
+  "format": "makefigma-remediation-linear-blend-v1",
+  "name": "W12-P-LINEAR-BLEND",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000960", "name": "Linear blend backdrop", "kind": "rectangle", "x": -260, "y": -100, "width": 520, "height": 200, "rotation": 0, "fill": "#cc3366", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000961", "name": "Linear burn 50%", "kind": "rectangle", "x": -210, "y": -40, "width": 80, "height": 80, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.5, "blendMode": "linear-burn", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000962", "name": "Linear dodge 50%", "kind": "rectangle", "x": -90, "y": -40, "width": 80, "height": 80, "rotation": 0, "fill": "#66cc33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.5, "blendMode": "linear-dodge", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000963", "name": "Linear burn reference", "kind": "rectangle", "x": 40, "y": -40, "width": 80, "height": 80, "rotation": 0, "fill": "#801a33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000964", "name": "Linear dodge reference", "kind": "rectangle", "x": 160, "y": -40, "width": 80, "height": 80, "rotation": 0, "fill": "#e69980", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000965", "name": "Paint linear burn 50%", "kind": "rectangle", "x": -210, "y": 55, "width": 80, "height": 30, "rotation": 0, "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true, "fillStack": { "layers": [{ "paint": { "css": "#66cc33" }, "visible": true, "opacity": 0.5, "blendMode": "linear-burn" }] } },
+    { "id": "00000000-0000-4000-8000-000000000966", "name": "Paint linear dodge 50%", "kind": "rectangle", "x": -90, "y": 55, "width": 80, "height": 30, "rotation": 0, "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true, "fillStack": { "layers": [{ "paint": { "css": "#66cc33" }, "visible": true, "opacity": 0.5, "blendMode": "linear-dodge" }] } },
+    { "id": "00000000-0000-4000-8000-000000000967", "name": "Paint linear burn reference", "kind": "rectangle", "x": 40, "y": 55, "width": 80, "height": 30, "rotation": 0, "fill": "#801a33", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000968", "name": "Paint linear dodge reference", "kind": "rectangle", "x": 160, "y": 55, "width": 80, "height": 30, "rotation": 0, "fill": "#e69980", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true }
+  ]
+}

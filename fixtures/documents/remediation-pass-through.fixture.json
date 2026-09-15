@@ -1,0 +1,13 @@
+{
+  "format": "makefigma-remediation-pass-through-v1",
+  "name": "W12-P-PASS-THROUGH",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000000960", "name": "Pass through backdrop", "kind": "rectangle", "x": -300, "y": -130, "width": 600, "height": 260, "rotation": 0, "fill": "#d97706", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000961", "name": "Pass through group", "kind": "group", "x": -250, "y": -80, "width": 230, "height": 160, "rotation": 0, "fill": "transparent", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "blendMode": "pass-through", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000962", "parentId": "00000000-0000-4000-8000-000000000961", "name": "Grouped multiply", "kind": "rectangle", "x": -250, "y": -80, "width": 100, "height": 160, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 16, "opacity": 0.9, "blendMode": "multiply", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000963", "parentId": "00000000-0000-4000-8000-000000000961", "name": "Grouped screen", "kind": "ellipse", "x": -120, "y": -50, "width": 100, "height": 100, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "screen", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000964", "name": "Direct multiply reference", "kind": "rectangle", "x": 20, "y": -80, "width": 100, "height": 160, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 16, "opacity": 0.9, "blendMode": "multiply", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000000965", "name": "Direct screen reference", "kind": "ellipse", "x": 150, "y": -50, "width": 100, "height": 100, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.9, "blendMode": "screen", "visible": true }
+  ]
+}

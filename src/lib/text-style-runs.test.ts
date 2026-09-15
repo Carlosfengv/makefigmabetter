@@ -45,6 +45,64 @@ describe("styled text spans", () => {
     expect(spans[1].style.color).toBeUndefined();
   });
 
+  it("projects text decoration style without leaking it into an adjacent run", () => {
+    const spans = styledTextSpans("AB", 0, 2, {
+      runs: [
+        { start: 0, end: 1, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textDecorationStyle: "wavy", textDecorationOffset: { value: 2, unit: "pixels" }, textDecorationThickness: { value: 2, unit: "pixels" } },
+        { start: 1, end: 2, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "strikethrough", textDecorationStyle: "dotted", textDecorationOffset: { value: -20, unit: "percent" }, textDecorationThickness: { value: 10, unit: "percent" } },
+      ],
+      paragraph: { alignment: "left", paragraphSpacing: 0 },
+      autoSize: "fixed",
+    });
+
+    expect(spans.map(({ style }) => [style.textDecoration, style.textDecorationStyle, style.textDecorationOffset, style.textDecorationThickness])).toEqual([
+      ["underline", "wavy", { value: 2, unit: "pixels" }, { value: 2, unit: "pixels" }],
+      ["strikethrough", "dotted", { value: -20, unit: "percent" }, { value: 10, unit: "percent" }],
+    ]);
+  });
+
+  it("applies TextCase only to presentation while retaining Canonical UTF-8 ranges", () => {
+    const text = "straße déjà";
+    const spans = styledTextSpans(text, 0, new TextEncoder().encode(text).byteLength, {
+      runs: [
+        { start: 0, end: 7, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "upper" },
+        { start: 7, end: 14, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "title" },
+      ],
+      paragraph: { alignment: "left", paragraphSpacing: 0 },
+      autoSize: "fixed",
+    });
+
+    expect(spans.map(({ text: value, start, end, style }) => [value, start, end, style.textCase])).toEqual([
+      ["STRASSE", 0, 7, "upper"],
+      [" Déjà", 7, 14, "title"],
+    ]);
+    expect(text).toBe("straße déjà");
+  });
+
+  it("keeps title-case context across wrapped and visual span boundaries", () => {
+    const properties = {
+      runs: [{ start: 0, end: 5, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "title" as const }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0 },
+      autoSize: "fixed" as const,
+    };
+
+    expect(styledTextSpans("hello", 2, 5, properties)[0]?.text).toBe("llo");
+    expect(styledTextVisualSpans("hello", 0, 5, properties, [
+      { start: 0, end: 2, direction: "ltr" },
+      { start: 2, end: 5, direction: "ltr" },
+    ]).map((span) => span.text)).toEqual(["He", "llo"]);
+  });
+
+  it("slices a byte-expanding display span with source offsets", () => {
+    const properties = {
+      runs: [{ start: 0, end: 3, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0, textCase: "lower" as const }],
+      paragraph: { alignment: "left" as const, paragraphSpacing: 0 },
+      autoSize: "fixed" as const,
+    };
+    expect(styledTextSpans("İx", 0, 2, properties)[0]?.text).toBe("i\u0307");
+    expect(styledTextSpans("İx", 2, 3, properties)[0]?.text).toBe("x");
+  });
+
   it("orders RTL style pieces physically while retaining their source ranges", () => {
     const text = "אבגד";
     const properties = {

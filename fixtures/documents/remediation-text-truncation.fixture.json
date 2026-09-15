@@ -1,0 +1,76 @@
+{
+  "format": "makefigma-remediation-text-truncation-v1",
+  "name": "W12-T-TEXT-TRUNCATION",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-0000000009a0",
+      "name": "Text truncation evidence background",
+      "kind": "rectangle",
+      "x": -260,
+      "y": -120,
+      "width": 520,
+      "height": 240,
+      "rotation": 0,
+      "fill": "#f8fafc",
+      "stroke": "#cbd5e1",
+      "strokeWidth": 1,
+      "radius": 12,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000009a1",
+      "name": "Disabled truncation control",
+      "kind": "text",
+      "x": -210,
+      "y": -60,
+      "width": 160,
+      "height": 100,
+      "rotation": 0,
+      "fill": "#0f172a",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "text": "Alpha\nBeta\nGamma",
+      "visible": true,
+      "textProperties": {
+        "runs": [
+          { "start": 0, "end": 16, "fontSize": 20, "fontWeight": 400, "italic": false, "letterSpacing": 0 }
+        ],
+        "paragraph": { "alignment": "left", "lineHeight": 24, "paragraphSpacing": 0 },
+        "autoSize": "fixed",
+        "fallbackFonts": [],
+        "textTruncation": "disabled"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000009a2",
+      "name": "Ending truncation max two lines",
+      "kind": "text",
+      "x": 50,
+      "y": -60,
+      "width": 160,
+      "height": 100,
+      "rotation": 0,
+      "fill": "#0f172a",
+      "stroke": "transparent",
+      "strokeWidth": 0,
+      "radius": 0,
+      "opacity": 1,
+      "text": "Alpha\nBeta\nGamma",
+      "visible": true,
+      "textProperties": {
+        "runs": [
+          { "start": 0, "end": 16, "fontSize": 20, "fontWeight": 400, "italic": false, "letterSpacing": 0 }
+        ],
+        "paragraph": { "alignment": "left", "lineHeight": 24, "paragraphSpacing": 0 },
+        "autoSize": "fixed",
+        "fallbackFonts": [],
+        "textTruncation": "ending",
+        "maxLines": 2
+      }
+    }
+  ]
+}

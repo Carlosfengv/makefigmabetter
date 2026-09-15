@@ -1,25 +1,36 @@
 /// <reference lib="webworker" />
 
-import type { CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentFontReference, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, Viewport, WorkerToMain } from "@/lib/editor-protocol";
+import type { AutoLayoutPaddingSide, BenchmarkProjectionSnapshot, CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentAutoLayout, DocumentFontReference, DocumentGradientPaint, DocumentImagePaint, DocumentPaintLayer, DocumentVectorPath, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, Viewport, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
 import { createCooperativeYield } from "@/lib/cooperative-yield";
-import { findTopmostCanvasSelectionCandidate, findTopmostHit } from "@/lib/hit-test";
+import { findTopmostCanvasSelectionCandidate, findTopmostHit, nodeContainsWorldPoint } from "@/lib/hit-test";
 import { createRenderPerformanceSampler } from "@/lib/performance-sampling";
 import { admitRenderSurface, MAX_RENDER_SURFACE_BYTES } from "@/lib/render-surface-budget";
 import { admitAlphaMaskSurface } from "@/lib/alpha-mask-budget";
-import { admitEffectSurfacePool } from "@/lib/effect-surface-budget";
+import { admitCompositeSurfaceBytes } from "@/lib/composite-surface-budget";
+import { admitCompositeFrame, type CompositeFrameSurfacePlan, type CompositePoolDimensions } from "@/lib/composite-frame-demand";
+import { admitSubtreeCompositeSurfacePool, MAX_SUBTREE_COMPOSITE_NESTING } from "@/lib/subtree-composite-budget";
 import { morphAlphaChannel } from "@/lib/alpha-morphology";
 import { compositeEffectSurface } from "@/lib/canvas-effect-composite";
+import { canvasTextGlyphBitmap, canvasTextGlyphPose, canvasTextGlyphSurfaceByteLength, MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES } from "@/lib/canvas-text-glyph";
+import { isLinearBlendMode, type LinearBlendMode } from "@/lib/linear-blend-composite";
+import { compositeLinearPaintLayer } from "@/lib/linear-paint-layer-composite";
+import { compositeSurfaceWindowForWorldBounds, setCompositeSurfaceTransform, transformedCompositeSurfaceWindow, type CompositeSurfaceWindow } from "@/lib/composite-surface-window";
+import { activeMaskAlphaEffects, activeNodeEffects, effectChangesPixels, nodePresentationRequiresBackdrop, requiresSubtreeComposition, subtreeSourceNode } from "@/lib/subtree-compositing";
+import { normalizedFillLayers, normalizedFillPaints, normalizedNodeEffects, normalizedStrokeLayers, normalizedStrokePaints } from "@/lib/normalized-node-view";
 import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
 import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
-import { colorToSrgbCss, sampleLinearGradientForCanvas } from "@/lib/color-rendering";
-import { layoutTextRanges, resolveTextRenderMetrics } from "@/lib/text-layout";
+import { resolvedTextLineHeight, resolvedTextLineHeightAt } from "@/lib/text-line-height";
+import { colorToLinearSrgbComponents, colorToSrgbCss, sampleLinearGradientForCanvas } from "@/lib/color-rendering";
+import { layoutTextRanges, resolveTextRenderMetrics, textAlignedLineLeft, textHangingPunctuationOffsets, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "@/lib/text-layout";
 import { styledTextSpans, styledTextVisualSpans, type RenderTextStyle } from "@/lib/text-style-runs";
-import { classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
+import { basicTextDecorationPattern, basicTextDecorationRect, textDecorationPaintLayers, textDecorationVisibleSegments, type BasicTextDecorationPattern, type BasicTextDecorationRect } from "@/lib/text-decoration";
+import { usesSmallCaps } from "@/lib/text-case";
+import { admitWebGpuSceneResources, classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, coalesceAdjacentNodeUpdates, coreProjectionNode, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
 import { validateClipboardCapture } from "@/lib/editor-clipboard";
-import { resolveFigmaRestAssetBindings, resolveFigmaRestImportBatch } from "@/lib/figma-rest-import";
+import { cancelFigmaRestAssetBindings, resolveFigmaRestAssetBindings, resolveFigmaRestImportBatch } from "@/lib/figma-rest-import";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
 import { sha256Bytes } from "../lib/sha256";
 import { migrateLegacyCoreRotationSnapshot } from "@/lib/legacy-rotation-migration";
@@ -32,11 +43,17 @@ import { insetRoundedRectRadii, outsetRoundedRectRadii } from "@/lib/aligned-rou
 import { cornerSmoothingExponent, resolveCornerSmoothing } from "@/lib/corner-smoothing";
 import { clampCanvasZoom, resolveVisibleCanvasGridStep, shouldRenderCanvasGrid, snapCanvasPoint } from "@/lib/canvas-grid";
 import { toolAfterLayerCreated } from "@/lib/creation-tool";
-import { gpuLayerPrefix, requiresCanvasEffectOrBlend } from "@/lib/gpu-layer-prefix";
+import { canMaterializeCanvasIsland, gpuLayerIslands, limitGpuLayerIslands, type GpuLayerIsland } from "@/lib/gpu-layer-prefix";
 import { exceedsMarqueeDragThreshold, lineSelectionBounds, marqueeRect, resolveMarqueeSelection, rotatedNodeBounds } from "@/lib/marquee-selection";
 import { resolveMultiResizeSelection, type MultiResizeSelection } from "@/lib/multi-selection";
 import { worldLineVisualBounds } from "@/lib/line-world-bounds";
 import { selectionDimensions } from "@/lib/selection-label";
+import { selectionParentRelationship } from "@/lib/selection-parent-relationship";
+import { renderParentRelationship } from "@/lib/render-parent-relationship";
+import { autoLayoutPaddingOverlay, autoLayoutPaddingSideAtWorldPoint } from "@/lib/auto-layout-padding-overlay";
+import { autoLayoutPaddingBadgeBounds, isPointInAutoLayoutPaddingBadge, renderAutoLayoutPadding } from "@/lib/render-auto-layout-padding";
+import { autoLayoutPaddingDragDelta, autoLayoutWithDraggedPadding } from "@/lib/auto-layout-padding-drag";
+import { normalizeAutoLayout } from "@/lib/auto-layout-normalization";
 import { resolveCanvasObjectSelection, resolveNestedKeyboardTarget, resolveNestedSelectionTarget } from "@/lib/canvas-selection";
 import { normalizePageSelection } from "@/lib/page-selection";
 import { withManualAutoLayoutSizing } from "@/lib/auto-layout-sizing";
@@ -49,21 +66,34 @@ import { renderDpr, resolveRenderQuality, vectorPresentationTolerance, type Rend
 import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
 import { showsPersistentCanvasLayerName } from "@/lib/canvas-layer-name";
 import { cacheAsset, readCachedAsset } from "@/lib/asset-byte-cache";
+import { firstAvailableResource, LatestResourceLoad } from "@/lib/latest-resource-load";
 import { ImageBitmapCache } from "@/lib/image-bitmap-cache";
+import { imagePaintHasAlphaAtLocalPoint, type RasterAlpha } from "@/lib/image-alpha-hit";
+import { applyImageFiltersToRgba, imageFiltersAreNeutral, imageFiltersKey } from "@/lib/image-filters";
+import { alphaChannelFromRgba, maskNeedsRenderedAlphaHit, renderedMaskAlphaAtWorldPoint, type RenderedMaskAlphaHit } from "@/lib/rendered-mask-alpha-hit";
+import { scenePresentationKey } from "@/lib/scene-presentation-key";
 import { decodeRasterInWorker } from "@/lib/asset-decode-client";
 import { MAX_RASTER_DECODED_BYTES } from "@/lib/untrusted-asset";
 import { FontFaceRegistry } from "@/lib/font-face-registry";
 import { fontVariationCss } from "@/lib/font-variation-axes";
 import { documentFontFamilyChain } from "@/lib/document-font-family-chain";
-import { cssLineBoxBaseline as resolveCssLineBoxBaseline } from "@/lib/text-baseline";
+import { leadingTrimLineBox as resolveLeadingTrimLineBox } from "@/lib/text-baseline";
 import { parseRustGpuSceneBatch } from "@/lib/rust-gpu-batch";
-import { hasMissingRustTextGlyph, parseRustTextLayout, type RustTextLayout, type RustTextVisualRun } from "@/lib/rust-text-layout";
-import { textFrozenLayoutFace } from "@/lib/text-svg-layout-input";
+import { hasMissingRustTextGlyph, parseRustTextLayout, remapRustTextLayoutToSource, type RustTextLayout, type RustTextVisualRun } from "@/lib/rust-text-layout";
+import {
+  textFrozenLayoutPlan,
+  TEXT_PATH_SINGLE_LINE_WIDTH,
+  textLayoutInputFromPlan,
+} from "@/lib/text-svg-layout-input";
+import { endingEllipsis, textDisplayLines } from "@/lib/text-truncation";
+import { findTopmostTransformGroupRepeatHit } from "@/lib/transform-group-repeat-hit";
 import { parseRustTextCaretLayout } from "@/lib/rust-text-caret";
 import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
+import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
+import { constraintGuidesForNode } from "@/lib/constraint-guides";
 import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
 import { hasCommittedLineEndpointResize, lineEndpoints, resizeLegacyLineEndpoint, type LineEndpoint } from "@/lib/line-endpoint-resize";
 import { resizeRelativeLineEndpointFromWorldGesture } from "@/lib/relative-line-endpoint-resize";
@@ -77,8 +107,8 @@ import { hasCommittedSelectionTransform, scaleSelectionTransforms, type Selectio
 import { parametricShapePoints as fallbackParametricShapePoints } from "@/lib/parametric-shape";
 import { traceShapeWithTextDecorations, traceShapeWithTextPath } from "@/lib/shape-with-text-path";
 import { layoutTextPath } from "@/lib/text-path-layout";
-import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "@/lib/connector-presentation";
-import { affineScreenMatrix, transformGroupRepeatMatrices } from "@/lib/transform-group-repeat";
+import { connectorEndpointDecorations, connectorLabelLayout, scaledConnectorDecorationTriangles } from "@/lib/connector-presentation";
+import { affineScreenMatrix, indexTransformGroupRepeatChildren, transformGroupRepeatDerivedBounds, transformGroupRepeatMatrices, transformGroupRepeatSubtree, transformGroupRepeatWorldBounds } from "@/lib/transform-group-repeat";
 import { traceVectorPath } from "@/lib/vector-path";
 import { rotateSelectionAroundWorldPoint, type SelectionRotationPatch } from "@/lib/selection-rotation";
 import { wasmHydrationBatches } from "@/lib/wasm-hydration-batches";
@@ -88,29 +118,38 @@ import { rebaseCoreBatchForSnapshot } from "@/lib/rebase-core-batch";
 import { fullStateReplayBatch, historyReplayBatch } from "@/lib/history-replay-batch";
 import { canvasNodeFromWasmProjection } from "@/lib/wasm-projection-node";
 import { visibleNodesOnPage } from "@/lib/hierarchy-visibility";
-import { fitViewportToBounds, isSameRenderedViewport, pageContentBounds, selectCoveringViewportFrame } from "@/lib/page-viewport";
+import { fitViewportToBounds, isSameRenderedViewport, pageContentBounds, selectViewportFrameForInteraction } from "@/lib/page-viewport";
 import { isFullyClippedForSelection } from "@/lib/selection-clip";
 import { invertAffine, multiplyAffine, nodePropsForWorldTransform, normalizeGroupBounds, transformPoint, translateNodeWorldPatch, worldBoundsForTransform, worldSpaceProjectionNodes, worldTransformForNode, worldTransformsForNodes, type AffineMatrix } from "@/lib/scene-transform";
-import { worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
+import {
+  imagePaintLayoutBox,
+  resolvedImagePaintTransform,
+} from "@/lib/image-paint-transform";
+import { worldEffectPaddingForNodeBounds, worldVisualBoundsForNode } from "@/lib/world-visual-bounds";
 import { closedShapeStrokeLocalBounds } from "@/lib/closed-shape-stroke-bounds";
 import { ellipseStrokeRing } from "@/lib/ellipse-stroke-ring";
 import { frameDropTargetAtPoint, frameExitTargetAtPoint } from "@/lib/frame-drop-target";
 import { autoLayoutArrowReorder, autoLayoutDropReorder } from "@/lib/auto-layout-reorder";
 import { joinCrossVectorEndpoints } from "@/lib/vector-cross-connect";
 import { compileScene, findTopmostSceneHit, sceneNodesInPaintOrder } from "@/runtime/scene-compiler";
+import { planDirtyRegionReplay, type DirtyRegionReplayPlan } from "@/runtime/dirty-region-replay";
+import { sceneClipGeometryByNodeId, sceneMaskSourceByNodeId, type ClipGeometryRef, type OrderedRenderScene } from "@/runtime/ordered-render-ir";
 import { specialNodeFallback } from "@/lib/special-node-fallback";
+import { clipsChildren } from "@/lib/node-capabilities";
 import { connectorPathForNode, traceConnectorPath } from "@/lib/connector-path";
 import { DEFAULT_PAGE_ID, migrateLegacyFigmaBootstrapPage } from "@/lib/document-bootstrap";
 
 declare const self: DedicatedWorkerGlobalScope;
+const ENGINE_SEMANTICS_VERSION = 29;
 
 type Drag =
   | { mode: "draw"; startX: number; startY: number; node: CanvasNode }
   | { mode: "move"; startX: number; startY: number; currentX: number; currentY: number; before: CanvasNode[]; initial: Set<string>; dropTargetId?: string }
-  | { mode: "resize"; id: string; handle: CanvasResizeHandle; start: { x: number; y: number }; node: CanvasNode; before: CanvasNode[] }
+  | { mode: "resize"; id: string; handle: CanvasResizeHandle; start: { x: number; y: number }; node: CanvasNode; before: CanvasNode[]; ignoreConstraints: boolean; previewTransactionId: string }
   | { mode: "multi-resize"; handle: CanvasResizeHandle; start: { x: number; y: number }; bounds: ResizeGeometry; before: CanvasNode[]; ids: string[]; requiresAffine: boolean }
   | { mode: "rotate"; start: { x: number; y: number }; pivot: { x: number; y: number }; before: CanvasNode[]; ids: string[] }
   | { mode: "line-resize"; id: string; endpoint: LineEndpoint; node: CanvasNode; before: CanvasNode[] }
+  | { mode: "auto-layout-padding"; id: string; side: AutoLayoutPaddingSide; startX: number; startY: number; layout: DocumentAutoLayout; before: CanvasNode[] }
   | { mode: "vector-point"; id: string; pointId: string; before: CanvasNode[] }
   | { mode: "vector-handle"; id: string; pointId: string; handle: "handleIn" | "handleOut"; before: CanvasNode[] }
   | { mode: "pen-point"; id: string; pointId: string; start: { x: number; y: number } }
@@ -156,7 +195,8 @@ type WasmDocumentEngine = {
   delete_nodes(transactionId: string, baseRevision: bigint, nodeIds: string): bigint;
   move_nodes(transactionId: string, baseRevision: bigint, updatesJson: string): bigint;
   apply_transaction_json(transactionId: string, baseRevision: bigint, commandsJson: string): bigint;
-  register_asset(transactionId: string, baseRevision: bigint, assetId: string, contentHash: string, mediaType: string, byteLength: bigint, pixelWidth: number, pixelHeight: number): bigint;
+  preview_resize_transaction_json(transactionId: string, commandsJson: string): string;
+  register_asset(transactionId: string, baseRevision: bigint, assetId: string, contentHash: string, mediaType: string, byteLength: bigint, pixelWidth: number, pixelHeight: number, fontFacesJson: string): bigint;
   undo(): bigint;
   redo(): bigint;
   snapshot_json(): string;
@@ -164,6 +204,7 @@ type WasmDocumentEngine = {
   gpu_scene_instances_json(pageId: string): string;
   load_snapshot_protobuf(bytes: Uint8Array): bigint;
   load_snapshot_json(value: string): bigint;
+  seed_document_id(documentId: string): void;
   seed_batch_json(value: string): bigint;
   seed_assets_json(value: string): void;
 };
@@ -193,14 +234,21 @@ function finishProgressivePaint() {
   resolveProgressivePaintCompletion = undefined;
 }
 let presentedPageId: string | undefined;
+let presentedRevision: number | undefined;
 let presentedSurfaceWidth = 0;
 let presentedSurfaceHeight = 0;
+let presentedViewport: Viewport | undefined;
+let presentedScene: OrderedRenderScene | undefined;
+let lastDirtyRegionReplaySignature = "";
+let lastDirtyRegionReplayBlockerSignature = "";
+let lastDirtyRegionPlanSignature = "";
 let cachedPresentedFrame: OffscreenCanvas | undefined;
 let cachedPresentedFramePageId: string | undefined;
 let cachedPresentedFrameSceneKey: string | undefined;
 let cachedPresentedFrameViewport: Viewport | undefined;
 let cachedPresentedFrameSurfaceWidth = 0;
 let cachedPresentedFrameSurfaceHeight = 0;
+let interactionCacheSurface: OffscreenCanvas | undefined;
 let cachedOverviewFrame: {
   canvas: OffscreenCanvas;
   sceneKey: string;
@@ -231,11 +279,58 @@ let clipboard: EditorClipboard | undefined;
 let clipboardSourceDocumentId: string | undefined;
 let pasteInFlight = false;
 const imageBitmaps = new ImageBitmapCache<ImageBitmap>(MAX_RASTER_DECODED_BYTES);
+const filteredImageSurfaces = new Map<string, { bitmap: ImageBitmap; surface: OffscreenCanvas; bytes: number }>();
+const MAX_FILTERED_IMAGE_SURFACE_BYTES = 64 * 1024 * 1024;
+let filteredImageSurfaceBytes = 0;
+const canvasTextGlyphSurfaces = new Map<string, { surface: OffscreenCanvas; bytes: number }>();
+let canvasTextGlyphSurfaceBytes = 0;
+let canvasTextGlyphLimitReported = false;
+const nonLinearGradientSurfaces = new Map<string, OffscreenCanvas>();
+const MAX_NON_LINEAR_GRADIENT_CACHE_ENTRIES = 16;
+const imageDecodeLoads = new LatestResourceLoad();
+const MAX_IMAGE_ALPHA_HIT_BYTES = Math.min(32 * 1024 * 1024, Math.floor(MAX_RASTER_DECODED_BYTES / 8));
+const imageAlphaHits = new Map<string, { bitmap: ImageBitmap; raster: RasterAlpha; bytes: number }>();
+let imageAlphaHitBytes = 0;
+const MAX_RENDERED_MASK_ALPHA_HIT_BYTES = 16 * 1024 * 1024;
+const renderedMaskAlphaHits = new Map<string, { rendered: RenderedMaskAlphaHit; bytes: number }>();
+let renderedMaskAlphaHitBytes = 0;
 const imageLoads = new Set<string>();
 const fontFaces = new FontFaceRegistry();
+const runtimeFontBlobs = new Map<string, Blob>();
+const runtimeFontBlobWaiters = new Map<string, Set<(blob: Blob | undefined) => void>>();
+const MAX_RUNTIME_FONT_BYTES = 32 * 1024 * 1024;
+const RUNTIME_FONT_WAIT_MS = 1_000;
+let runtimeFontBytes = 0;
 let nodeById = new Map(nodes.map((node) => [node.id, node]));
 let nodeBoundsById = new Map(nodes.map((node) => [node.id, boundsForNode(node)]));
 let worldTransformById = worldTransformsForNodes(nodes);
+let repeatSourceIdsByGroupId = new Map<string, readonly string[]>();
+let activeNodesCache: CanvasNode[] | undefined;
+let activeNodeOrderByIdCache: ReadonlyMap<string, number> | undefined;
+let activePageRenderFactsCache: Readonly<{
+  nodes: readonly CanvasNode[];
+  hasFrameChildren: boolean;
+  hasAlphaMasks: boolean;
+  hasTransformGroupRepeat: boolean;
+  hasSubtreeComposition: boolean;
+  hasRelativeTransform: boolean;
+  hasSlices: boolean;
+  parentIds: ReadonlySet<string>;
+}> | undefined;
+let gpuBackendPlanCache: Readonly<{
+  key: string;
+  pageNodes: readonly CanvasNode[];
+  backendIslands: readonly GpuLayerIsland[];
+  gpuIslands: readonly Extract<GpuLayerIsland, { backend: "gpu" }>[];
+  gpuNodes: readonly CanvasNode[];
+  gpuNodeIds: ReadonlySet<string>;
+  gpuImageAssetIds: ReadonlySet<string>;
+  textGlyphs: readonly WebGpuTextGlyph[];
+  admission?: Readonly<{
+    surfaceKey: string;
+    value: ReturnType<typeof admitWebGpuSceneResources>;
+  }>;
+}> | undefined;
 let spatialGrid = createSpatialGridIndex(nodes, (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
 let selectedIds: string[] = nodes[0] ? [nodes[0].id] : [];
 /** Page owns the transient selection. It is deliberately not Canonical state,
@@ -258,16 +353,22 @@ let revision = 0;
 /** M4A's shared derived scene. It is rebuilt with the node/spatial indexes and
  * never enters a Snapshot, transaction, Canonical hash or collaboration wire. */
 let compiledScene: ReturnType<typeof compileScene> | undefined;
+let compiledScenePreviousScene: OrderedRenderScene | undefined;
+let compiledClipGeometryByNodeId: ReadonlyMap<string, ClipGeometryRef> = new Map();
+let compiledMaskSourceByNodeId: ReturnType<typeof sceneMaskSourceByNodeId> = new Map();
 let compiledSceneFallbackSignature = "";
+let sceneResourceGeneration = 0;
 let documentId = "00000000-0000-0000-0000-000000000000";
 let drag: Drag | undefined;
 let hoveredId: string | undefined;
+let hoveredAutoLayoutPadding: { frameId: string; side: AutoLayoutPaddingSide } | undefined;
 let editingTextNodeId: string | undefined;
 let documentCore: EditorSnapshot["documentCore"] = "Starting Rust/WASM bridge";
 let wasmDocument: WasmDocumentEngine | undefined;
 let bridgeLoadSequence = 0;
 let hydrationCompletionRequestId: string | undefined;
 let ephemeralBenchmarkProjection = false;
+let benchmarkEvidence: EditorSnapshot["benchmark"];
 let remoteBootstrapPending = false;
 let remoteResetPending = false;
 const localDevActorId = "00000000-0000-0000-0000-000000000007";
@@ -286,6 +387,9 @@ let simulatedGpuLosses = 0;
 let simulateGpuLossAfterImage = false;
 let simulatedGpuFault: SimulatedGpuFault | undefined;
 let simulatedGpuFaultReported = false;
+let captureFrameHash = false;
+let captureFrameSamples: readonly { label: string; x: number; y: number }[] = [];
+let capturedFrameHashKey = "";
 let gpuSceneBytes = 0;
 let gpuEffectTextureBytes = 0;
 let gpuSceneWithinBudget = true;
@@ -293,6 +397,7 @@ let gpuSceneLimitReported = false;
 let textAtlasStatsSignature = "";
 let imageTextureStatsSignature = "";
 let effectTextureStatsSignature = "";
+let affineGpuTextStatsSignature = "";
 let rustRenderGraphFailureSignature = "";
 type RustGpuScene = { revision: number; pageId: string; transientSceneVersion: number; instances: Float32Array; renderedNodeIds: ReadonlySet<string> };
 let rustGpuScene: RustGpuScene | undefined;
@@ -301,14 +406,23 @@ type RustTextLayoutProjection = { revision: number; key: string; layout: RustTex
 const rustTextLayouts = new Map<string, RustTextLayoutProjection>();
 const rustTextLayoutLoads = new Set<string>();
 /** Explicit-font shaping cannot safely decide line breaks once browser font
- * fallback participates. Remember that expected fallback per revision so an
- * ordinary render does not repeatedly request the same unusable layout. */
+ * fallback participates. Remember the content-addressed fallback so an
+ * unrelated document revision does not repeatedly request the same unusable
+ * layout. */
 const rustTextLayoutFallbacks = new Map<string, Omit<RustTextLayoutProjection, "layout">>();
-type RustGpuTextProjection = { revision: number; key: string; glyphs: readonly WebGpuTextGlyph[] };
-const rustGpuTextGlyphs = new Map<string, RustGpuTextProjection>();
-const rustGpuTextLoads = new Set<string>();
-const MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE = 4_096;
+type RustTextGlyphProjection = {
+  revision: number;
+  key: string;
+  /** World-space unit-quad affines accepted by the WebGPU text pass. */
+  glyphs: readonly WebGpuTextGlyph[];
+  /** Node-local quads consumed under Canvas's existing full node affine. */
+  canvasGlyphs?: readonly WebGpuTextGlyph[];
+};
+const rustTextGlyphs = new Map<string, RustTextGlyphProjection>();
+const rustTextGlyphLoads = new Set<string>();
+const MAX_RUST_TEXT_GLYPHS_PER_NODE = 4_096;
 const COMPLEX_DOCUMENT_NODE_THRESHOLD = 1_000;
+const MAX_INTERACTION_CACHE_SURFACE_BYTES = 32 * 1024 * 1024;
 const PROGRESSIVE_PAINT_BUDGET_MS = 6;
 const PROGRESSIVE_PAINT_MAX_NODES = 24;
 const progressivePaintTasks: Array<() => void> = [];
@@ -326,11 +440,40 @@ let alphaMaskLimitReported = false;
 let effectSurfaceLimitReported = false;
 type EffectSurfaces = { source: OffscreenCanvas; sourceContext: OffscreenCanvasRenderingContext2D; shadow: OffscreenCanvas; shadowContext: OffscreenCanvasRenderingContext2D; scratch: OffscreenCanvas; scratchContext: OffscreenCanvasRenderingContext2D };
 let effectSurfaces: EffectSurfaces | undefined;
-type AlphaMaskSurface = { surface: OffscreenCanvas; context: OffscreenCanvasRenderingContext2D };
-// A mask run only needs one surface at each live nesting depth. Reusing the
-// pair avoids allocating a full-canvas bitmap for every masked sibling run on
-// every frame, while retaining G4's two-level composition limit.
-let alphaMaskSurfaces: Array<AlphaMaskSurface | undefined> = [];
+type AlphaMaskSurfaces = {
+  target: OffscreenCanvas;
+  targetContext: OffscreenCanvasRenderingContext2D;
+  mask: OffscreenCanvas;
+  maskContext: OffscreenCanvasRenderingContext2D;
+};
+// Reuse one target/mask pair at each live nesting depth instead of allocating
+// two full-canvas bitmaps for every sibling run and every frame.
+let alphaMaskSurfaces: Array<AlphaMaskSurfaces | undefined> = [];
+type SubtreeCompositeSurfaces = EffectSurfaces;
+let subtreeCompositeSurfaces: Array<SubtreeCompositeSurfaces | undefined> = [];
+type CanvasFallbackSurface = {
+  surface: OffscreenCanvas;
+  context: OffscreenCanvasRenderingContext2D;
+};
+let canvasFallbackSurface: CanvasFallbackSurface | undefined;
+let subtreeCompositeLimitReported = false;
+let compositeSurfaceLimitReported = false;
+const compositeContextWindows = new WeakMap<OffscreenCanvasRenderingContext2D, CompositeSurfaceWindow>();
+const repeatScreenTransformByContext = new WeakMap<OffscreenCanvasRenderingContext2D, AffineMatrix>();
+const repeatSourcePreparationContexts = new WeakSet<OffscreenCanvasRenderingContext2D>();
+/** Mask sources are rendered for coverage only. Background Blur changes the
+ * colour behind a layer, not its source alpha, and must not seed this surface
+ * with destination alpha. The flag follows nested prepared surfaces while a
+ * mask branch is being evaluated. */
+const maskAlphaPreparationContexts = new WeakSet<OffscreenCanvasRenderingContext2D>();
+/** A prepared subtree is transparent by construction, but descendant
+ * Background Blur must see both its earlier local siblings and the real
+ * destination behind the prepared owner. The chain is scoped to one paint
+ * call and may itself point at another prepared surface. */
+const preparedBackdropContextByContext = new WeakMap<
+  OffscreenCanvasRenderingContext2D,
+  OffscreenCanvasRenderingContext2D
+>();
 let wasmMemory: WebAssembly.Memory | undefined;
 let wasmRuntimePromise: Promise<typeof import("@/wasm/generated/editor_wasm")> | undefined;
 let wasmRuntime: WasmRuntime | undefined;
@@ -350,6 +493,12 @@ const canonicalBooleanPaths = new Map<string, FlattenedVectorPath | null>();
 let transientSceneVersion = 0;
 const diagnostics = createDiagnosticRecorder();
 const renderPerformance = createRenderPerformanceSampler();
+type ActiveFrameRenderCost = { canvasReadbackBytes: number };
+let activeFrameRenderCost: ActiveFrameRenderCost | undefined;
+function recordCanvasReadbackBytes(bytes: number) {
+  if (activeFrameRenderCost && Number.isSafeInteger(bytes) && bytes > 0)
+    activeFrameRenderCost.canvasReadbackBytes += bytes;
+}
 
 function cloneDocument() { return structuredClone(nodes); }
 function storeActivePageSelection() {
@@ -391,12 +540,34 @@ function scaleVectorPath(path: NonNullable<CanvasNode["vectorPath"]>, scaleX: nu
   };
 }
 function activeNodes() {
+  if (activeNodesCache) return activeNodesCache;
   const visible = visibleNodesOnPage(nodes, activePageId, defaultPageId);
   const projected = sortNodesByLayerOrder(visible.map((node) => nodeById.get(node.id) ?? node));
   // Every backend starts with the Scene Compiler's display list. The local
   // sort is retained solely as the cold-start/stale-IR fallback inside
   // sceneNodesInPaintOrder; it may not define a different render order.
-  return sceneNodesInPaintOrder(compiledScene?.scene, projected);
+  activeNodesCache = sceneNodesInPaintOrder(compiledScene?.scene, projected);
+  activeNodeOrderByIdCache = new Map(activeNodesCache.map((node, index) => [node.id, index]));
+  return activeNodesCache;
+}
+function activePageRenderFacts(pageNodes: readonly CanvasNode[]) {
+  if (activePageRenderFactsCache?.nodes === pageNodes) return activePageRenderFactsCache;
+  const parentIds = new Set(pageNodes.flatMap((node) => node.parentId ? [node.parentId] : []));
+  const facts = {
+    nodes: pageNodes,
+    hasFrameChildren: pageNodes.some((node) => {
+      const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
+      return Boolean(parent && isFrameLike(parent) && parent.clipsContent !== false);
+    }),
+    hasAlphaMasks: pageNodes.some((node) => Boolean(node.isMask)),
+    hasTransformGroupRepeat: pageNodes.some((node) => node.kind === "transformGroup" && Boolean(transformGroupRepeatMatrices(nodes, node)?.length)),
+    hasSubtreeComposition: pageNodes.some((node) => requiresSubtreeComposition(node, parentIds.has(node.id))),
+    hasRelativeTransform: pageNodes.some((node) => Boolean(node.relativeTransform)),
+    hasSlices: pageNodes.some((node) => node.kind === "slice"),
+    parentIds,
+  } as const;
+  activePageRenderFactsCache = facts;
+  return facts;
 }
 function rememberActivePageViewport() {
   viewportByPage.set(activePageId, { ...viewport });
@@ -413,14 +584,54 @@ function restoreOrFitPageViewport(pageId: string) {
  * applies the exact world affine directly to Canvas instead of decomposing it.
  */
 function nativeAffineForNode(node: CanvasNode): AffineMatrix | undefined {
-  return node.relativeTransform ? worldTransformById.get(node.id) : undefined;
+  return node.relativeTransform
+    ? compiledMaskSourceByNodeId.get(node.id)?.worldTransform ?? worldTransformById.get(node.id)
+    : undefined;
 }
 function isFrameLike(node: CanvasNode | undefined) {
-  return node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet";
+  return Boolean(node && clipsChildren(node.kind));
+}
+
+/** Projects a Frame resize through a disposable Core document. This keeps
+ * transient Constraints and Auto Layout geometry identical to pointer-up while
+ * leaving the live revision/history untouched. */
+function coreResizePreview(activeDrag: Extract<Drag, { mode: "resize" }>, geometry: ResizeGeometry): CanvasNode[] | undefined {
+  if (!wasmDocument || !isFrameLike(activeDrag.node)) return undefined;
+  const command: EditorCommand = activeDrag.ignoreConstraints
+    ? { type: "resizeWithoutConstraints", id: activeDrag.id, patch: geometry }
+    : { type: "update", id: activeDrag.id, patch: geometry };
+  const resolved = resolveCoreBatch(activeDrag.before, [command]);
+  if (!resolved) return undefined;
+  try {
+    const projection = JSON.parse(wasmDocument.preview_resize_transaction_json(
+      activeDrag.previewTransactionId,
+      JSON.stringify(resolved.batch),
+    )) as CoreProjectionNode[];
+    const changed = new Map(projection.map((node) => {
+      const projected = canvasNodeFromWasmProjection(node);
+      return [projected.id, projected] as const;
+    }));
+    return activeDrag.before.map((node) => changed.get(node.id) ?? node);
+  } catch {
+    // Invalid intermediate sizes are transient pointer states. Fall back to the
+    // authored parent geometry and let the next valid frame retry Core.
+    return undefined;
+  }
 }
 function boundsForNode(node: CanvasNode) {
   if (node.kind === "line" || node.kind === "connector") {
-    const visual = worldLineVisualBounds(nodes, node);
+    const visual = worldLineVisualBounds(nodes, node, {
+      transform: worldTransformById.get(node.id),
+      defaultPageId,
+      worldTransformByNodeId: worldTransformById,
+      nodeById,
+    });
+    if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
+  }
+  if ((node.kind === "text" || node.kind === "shapeWithText") && node.textProperties?.paragraph.hangingList) {
+    // The spatial index owns projected world nodes. Resolve against that
+    // projection so a parent's scale is not applied twice to the marker gutter.
+    const visual = worldVisualBoundsForNode([node], node);
     if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
   }
   const alignedClosedShape = (node.kind === "ellipse" && !node.arcData) || isFrameLike(node) || node.kind === "rectangle";
@@ -552,6 +763,7 @@ function containsWorldPoint(node: CanvasNode, point: { x: number; y: number }) {
   if (vectorContains !== undefined) return vectorContains;
   const parametricContains = canonicalParametricContainsWorldPoint(node, point);
   if (parametricContains !== undefined) return parametricContains;
+  if (node.kind === "connector") return nodeContainsWorldPoint(node, point, nodes, worldTransformById, nodeById, defaultPageId);
   const affine = nativeAffineForNode(node);
   if (!affine) return findTopmostHit([node], point) === node;
   const inverse = invertAffine(affine);
@@ -559,10 +771,150 @@ function containsWorldPoint(node: CanvasNode, point: { x: number; y: number }) {
   const local = transformPoint(inverse, point);
   return findTopmostHit([{ ...node, x: 0, y: 0, rotation: 0, relativeTransform: undefined }], local) !== undefined;
 }
+
+function localPointForNode(node: CanvasNode, point: Readonly<{ x: number; y: number }>) {
+  const affine = nativeAffineForNode(node);
+  if (affine) {
+    const inverse = invertAffine(affine);
+    return inverse ? transformPoint(inverse, point) : undefined;
+  }
+  const radians = node.rotation * Math.PI / 180;
+  const dx = point.x - (node.x + node.width / 2);
+  const dy = point.y - (node.y + node.height / 2);
+  return {
+    x: Math.cos(radians) * dx + Math.sin(radians) * dy + node.width / 2,
+    y: -Math.sin(radians) * dx + Math.cos(radians) * dy + node.height / 2,
+  };
+}
+
+function rasterAlphaForBitmap(assetId: string, bitmap: ImageBitmap): RasterAlpha | undefined {
+  const cached = imageAlphaHits.get(assetId);
+  if (cached?.bitmap === bitmap) {
+    imageAlphaHits.delete(assetId);
+    imageAlphaHits.set(assetId, cached);
+    return cached.raster;
+  }
+  if (cached) {
+    imageAlphaHits.delete(assetId);
+    imageAlphaHitBytes -= cached.bytes;
+  }
+  const bytes = bitmap.width * bitmap.height;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > MAX_IMAGE_ALPHA_HIT_BYTES) return undefined;
+  try {
+    const surface = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = surface.getContext("2d", { willReadFrequently: true });
+    if (!context) return undefined;
+    context.drawImage(bitmap, 0, 0);
+    const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    const alpha = new Uint8Array(bitmap.width * bitmap.height);
+    for (let index = 0; index < alpha.length; index += 1) alpha[index] = rgba[index * 4 + 3]!;
+    const result = { width: bitmap.width, height: bitmap.height, alpha };
+    while (imageAlphaHitBytes + bytes > MAX_IMAGE_ALPHA_HIT_BYTES) {
+      const oldest = imageAlphaHits.entries().next().value as [string, { bitmap: ImageBitmap; raster: RasterAlpha; bytes: number }] | undefined;
+      if (!oldest) break;
+      imageAlphaHits.delete(oldest[0]);
+      imageAlphaHitBytes -= oldest[1].bytes;
+    }
+    imageAlphaHits.set(assetId, { bitmap, raster: result, bytes });
+    imageAlphaHitBytes += bytes;
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Image-only masks use decoded source alpha for hit testing. A missing or
+ * unreadable bitmap keeps the visible placeholder's conservative geometry hit. */
+function cachedRenderedMaskAlphaAtWorldPoint(nodeId: string, point: Readonly<{ x: number; y: number }>) {
+  const cached = renderedMaskAlphaHits.get(nodeId);
+  if (!cached) return undefined;
+  const rendered = renderedMaskAlphaAtWorldPoint(cached.rendered, {
+    revision,
+    resourceGeneration: sceneResourceGeneration,
+    viewport,
+    canvasWidth: width,
+    canvasHeight: height,
+  }, point);
+  if (rendered !== undefined) {
+    renderedMaskAlphaHits.delete(nodeId);
+    renderedMaskAlphaHits.set(nodeId, cached);
+  }
+  return rendered;
+}
+
+function maskPaintHasAlphaAtWorldPoint(node: CanvasNode, point: Readonly<{ x: number; y: number }>) {
+  const rendered = cachedRenderedMaskAlphaAtWorldPoint(node.id, point);
+  if (rendered !== undefined) return rendered;
+  const local = localPointForNode(node, point);
+  if (!local) return false;
+  if (node.assetId) {
+    const bitmap = imageBitmaps.get(node.assetId);
+    const raster = bitmap && rasterAlphaForBitmap(node.assetId, bitmap);
+    return !bitmap || !raster || imagePaintHasAlphaAtLocalPoint({
+      assetId: node.assetId,
+      scaleMode: "fill",
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    }, node.width, node.height, raster, local);
+  }
+  const layers = activeFillLayers(node).filter((layer) => layer.visible && layer.opacity > 0);
+  if (!layers.some((layer) => layer.image)) return true;
+  for (const layer of layers) {
+    if (layer.paint) {
+      const paintAlpha = layer.paint.gradient?.stops.some((stop) => stop.color.alpha > 0)
+        ?? layer.paint.gradientPaint?.stops.some((stop) => stop.color.alpha > 0)
+        ?? (layer.paint.color ?? documentColorFromCssHex(layer.paint.css))?.alpha !== 0;
+      if (paintAlpha) return true;
+      continue;
+    }
+    const bitmap = imageBitmaps.get(layer.image.assetId);
+    const raster = bitmap && rasterAlphaForBitmap(layer.image.assetId, bitmap);
+    if (!bitmap || !raster || imagePaintHasAlphaAtLocalPoint(layer.image, node.width, node.height, raster, local)) return true;
+  }
+  return false;
+}
+
+function cacheRenderedMaskAlphaHit(
+  node: CanvasNode,
+  context: OffscreenCanvasRenderingContext2D,
+  window: CompositeSurfaceWindow,
+  force = false,
+) {
+  const existing = renderedMaskAlphaHits.get(node.id);
+  if (existing) {
+    renderedMaskAlphaHits.delete(node.id);
+    renderedMaskAlphaHitBytes -= existing.bytes;
+  }
+  if (!force && !maskNeedsRenderedAlphaHit(node)) return;
+  try {
+    const rgba = context.getImageData(0, 0, window.pixelWidth, window.pixelHeight).data;
+    const alpha = alphaChannelFromRgba(rgba, window.pixelWidth, window.pixelHeight);
+    if (!alpha || alpha.byteLength > MAX_RENDERED_MASK_ALPHA_HIT_BYTES) return;
+    while (renderedMaskAlphaHitBytes + alpha.byteLength > MAX_RENDERED_MASK_ALPHA_HIT_BYTES) {
+      const oldest = renderedMaskAlphaHits.entries().next().value as [string, { rendered: RenderedMaskAlphaHit; bytes: number }] | undefined;
+      if (!oldest) break;
+      renderedMaskAlphaHits.delete(oldest[0]);
+      renderedMaskAlphaHitBytes -= oldest[1].bytes;
+    }
+    const rendered: RenderedMaskAlphaHit = {
+      revision,
+      resourceGeneration: sceneResourceGeneration,
+      viewport: { ...viewport },
+      canvasWidth: width,
+      canvasHeight: height,
+      window: { ...window },
+      alpha,
+    };
+    renderedMaskAlphaHits.set(node.id, { rendered, bytes: alpha.byteLength });
+    renderedMaskAlphaHitBytes += alpha.byteLength;
+  } catch {
+    // An unavailable readback keeps the existing conservative analytic hit
+    // path. Rendering and document state remain unaffected.
+  }
+}
 /** Frame clipping and G4 alpha masks are structural visibility gates. Keep
  * this test beside hit testing so targets outside either source are never
  * selected even if their own geometry contains the pointer. */
-function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number }) {
+function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number }, stopParentId?: string) {
   const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]));
   const visited = new Set<string>();
   let current: CanvasNode | undefined = node;
@@ -575,10 +927,11 @@ function isInsideClippingFrames(node: CanvasNode, point: { x: number; y: number 
     const maskIndex = siblings.slice(0, index).map((candidate, offset) => candidate.isMask ? offset : -1).reduce((latest, candidate) => Math.max(latest, candidate), -1);
     if (!current.isMask && maskIndex >= 0) {
       const mask = siblings[maskIndex];
-      if (mask.visible === false || !containsWorldPoint(mask, point)) return false;
+      const renderedAlpha = cachedRenderedMaskAlphaAtWorldPoint(mask.id, point);
+      if (mask.visible === false || renderedAlpha === false || (renderedAlpha === undefined && (!containsWorldPoint(mask, point) || !maskPaintHasAlphaAtWorldPoint(mask, point)))) return false;
     }
     const parentId = current.parentId;
-    if (!parentId) return true;
+    if (!parentId || parentId === stopParentId) return true;
     const parent = byId.get(parentId);
     if (!parent) return false;
     if (isFrameLike(parent) && parent.clipsContent !== false && !containsWorldPoint(parent, point)) return false;
@@ -596,14 +949,59 @@ function rebuildNodeIndex() {
   // projection rebuild instead of recreating the full id/ancestry map for
   // every node and every clipping ancestor.
   worldTransformById = worldTransformsForNodes(nodes);
+  activeNodesCache = undefined;
+  activeNodeOrderByIdCache = undefined;
+  activePageRenderFactsCache = undefined;
+  gpuBackendPlanCache = undefined;
   const projected = worldSpaceProjectionNodes(nodes);
   nodeById = new Map(projected.map((node) => [node.id, node]));
   nodeBoundsById = new Map(projected.map((node) => [node.id, boundsForNode(node)]));
-  spatialGrid = createSpatialGridIndex(activeNodes(), (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
+  repeatSourceIdsByGroupId = new Map();
+  const visibleCanonical = visibleNodesOnPage(nodes, activePageId, defaultPageId);
+  const visibleProjected = visibleCanonical.map((node) => nodeById.get(node.id) ?? node);
+  const canonicalNodeById = new Map(visibleCanonical.map((node) => [node.id, node]));
+  const visibleChildrenByParentId = indexTransformGroupRepeatChildren(visibleProjected);
+  visibleCanonical.filter((node) => node.kind === "transformGroup").forEach((group) => {
+    const subtree = transformGroupRepeatSubtree(visibleProjected, group, visibleChildrenByParentId);
+    if (!subtree) return;
+    const sourceBounds = nodeBoundsById.get(group.id) ?? boundsForNode(nodeById.get(group.id) ?? group);
+    const repeatBounds = transformGroupRepeatWorldBounds(nodes, group, {
+      subtree,
+      sourceBounds: {
+        left: sourceBounds.x,
+        top: sourceBounds.y,
+        right: sourceBounds.x + sourceBounds.width,
+        bottom: sourceBounds.y + sourceBounds.height,
+      },
+      groupWorld: worldTransformById.get(group.id),
+      worldTransformByNodeId: worldTransformById,
+      canonicalNodeById,
+      paintNodes: visibleProjected,
+      childrenByParentId: visibleChildrenByParentId,
+    });
+    if (!repeatBounds) return;
+    repeatSourceIdsByGroupId.set(group.id, subtree.nodes.map((source) => source.id));
+    nodeBoundsById.set(group.id, {
+      x: repeatBounds.left,
+      y: repeatBounds.top,
+      width: repeatBounds.right - repeatBounds.left,
+      height: repeatBounds.bottom - repeatBounds.top,
+    });
+  });
+  spatialGrid = createSpatialGridIndex(visibleProjected, (node) => nodeBoundsById.get(node.id) ?? boundsForNode(node));
   rebuildCompiledScene();
+  // The compiled Scene is now the ordering authority for the next lazy read.
+  activeNodesCache = undefined;
+  activeNodeOrderByIdCache = undefined;
+  activePageRenderFactsCache = undefined;
 }
 function rebuildCompiledScene() {
-  compiledScene = compileScene({ revision, nodes, pageId: activePageId, defaultPageId, previousScene: compiledScene?.scene });
+  renderedMaskAlphaHits.clear();
+  renderedMaskAlphaHitBytes = 0;
+  compiledScenePreviousScene = compiledScene?.scene;
+  compiledScene = compileScene({ revision, nodes, pageId: activePageId, defaultPageId, resourceGeneration: sceneResourceGeneration, previousScene: compiledScenePreviousScene });
+  compiledClipGeometryByNodeId = sceneClipGeometryByNodeId(compiledScene.scene);
+  compiledMaskSourceByNodeId = sceneMaskSourceByNodeId(compiledScene.scene);
   const specialFallbacks = compiledScene.diagnostics.filter((diagnostic) => diagnostic.capability === "special-node");
   const signature = specialFallbacks.map((diagnostic) => `${diagnostic.nodeId}:${diagnostic.reason}`).join("|");
   if (signature && signature !== compiledSceneFallbackSignature) {
@@ -635,7 +1033,7 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
   const fontAvailability = Object.fromEntries(assets.filter((asset) => asset.mediaType.startsWith("font/")).map((asset) => [asset.assetId, fontFaces.statusFor(asset.assetId)]));
-  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuEffectTextureBytes, maxGpuEffectTextureBytes: MAX_GPU_EFFECT_TEXTURE_BYTES, gpuSceneWithinBudget }, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
+  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuEffectTextureBytes, maxGpuEffectTextureBytes: MAX_GPU_EFFECT_TEXTURE_BYTES, gpuSceneWithinBudget }, benchmark: benchmarkEvidence, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
 }
 function emitRemoteBootstrap() {
   if (!wasmDocument || documentCore !== "Rust/WASM bridge ready") return;
@@ -759,7 +1157,7 @@ async function buildPendingRemoteOperation(transactionId: string, baseRevision: 
     sessionId: remoteSessionId,
     clientSequence,
     baseRevision: BigInt(baseRevision),
-    engineSemanticsVersion: 3,
+    engineSemanticsVersion: ENGINE_SEMANTICS_VERSION,
   }, payload);
   return {
     format: "pending-operation-v1",
@@ -812,7 +1210,7 @@ function applyPendingReplay(replay: PendingOperationReplay, transactionId: strin
     payload = encodeCreatePagePayload(replay.page);
   } else {
     const asset = replay.asset;
-    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0);
+    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0, JSON.stringify(asset.fontFaces ?? []));
     payload = encodeRegisterResourcePayload(asset);
   }
   return { baseRevision, payload, replay };
@@ -940,18 +1338,10 @@ function emitInteractiveViewState() {
 }
 function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: number) {
   const qualityDpr = renderDpr(nextDeviceDpr, renderQuality);
-  // A dense full-page overview is fill-rate bound: hundreds of overlapping
-  // Frame backgrounds at full Retina resolution can otherwise dominate the
-  // Canvas fallback. A fixed 1.5x backing store is noticeably sharper than
-  // CSS-pixel rendering on Retina and avoids DPR resizing between interaction
-  // and settled frames.
-  const complexDocumentDprCap =
-    nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
-      ? 1.5
-      : Number.POSITIVE_INFINITY;
-  const nextDpr = nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
-    ? Math.min(Math.max(1, nextDeviceDpr), complexDocumentDprCap)
-    : Math.min(qualityDpr, complexDocumentDprCap);
+  // Large pages use the same dynamic-quality contract as ordinary pages:
+  // interaction may lower the backing scale, while the settled frame restores
+  // the device DPR for exact presentation and pixel evidence.
+  const nextDpr = qualityDpr;
   const admission = admitRenderSurface(nextWidth, nextHeight, nextDpr);
   if (!admission.accepted) {
     diagnostics.record({ category: "renderer", code: "RENDER_SURFACE_REJECTED" });
@@ -969,12 +1359,19 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: 
     canvas.height = Math.max(1, admission.pixelHeight);
     completedProgressivePaintKey = undefined;
     presentedPageId = undefined;
+    presentedRevision = undefined;
     presentedSurfaceWidth = 0;
     presentedSurfaceHeight = 0;
+    presentedViewport = undefined;
+    presentedScene = undefined;
     effectSurfaces = undefined;
     alphaMaskSurfaces = [];
+    subtreeCompositeSurfaces = [];
+    canvasFallbackSurface = undefined;
     alphaMaskLimitReported = false;
     effectSurfaceLimitReported = false;
+    subtreeCompositeLimitReported = false;
+    compositeSurfaceLimitReported = false;
   }
   return true;
 }
@@ -989,7 +1386,7 @@ function cachePresentedFrame(
   cachedPresentedFrameViewport = { ...frameViewport };
   cachedPresentedFrameSurfaceWidth = surfaceWidth;
   cachedPresentedFrameSurfaceHeight = surfaceHeight;
-  const sceneKey = `${revision}:${activePageId}:${transientSceneVersion}`;
+  const sceneKey = currentScenePresentationKey();
   cachedPresentedFrameSceneKey = sceneKey;
   if (cachedOverviewFrame?.sceneKey !== sceneKey) cachedOverviewFrame = undefined;
   // Retain the widest completed view as an alternative to the detail raster.
@@ -1000,6 +1397,32 @@ function cachePresentedFrame(
     cachedOverviewFrame = { canvas: frame, sceneKey, viewport: { ...frameViewport }, width: surfaceWidth, height: surfaceHeight };
   }
 }
+
+/** Flat large pages do not enter the progressive structural painter, so they
+ * need their own presentation copy for camera-only interaction. */
+function cacheCurrentPresentedFrameForInteraction() {
+  if (renderQuality.tier !== "settled" || nodes.length < COMPLEX_DOCUMENT_NODE_THRESHOLD || !canvas) return;
+  if (canvas.width * canvas.height * 4 > MAX_INTERACTION_CACHE_SURFACE_BYTES) return;
+  // The overview metadata must continue to describe immutable pixels. When a
+  // newer detail frame is more zoomed in, allocate a separate current-frame
+  // surface instead of overwriting the canvas retained as the widest view.
+  if (!interactionCacheSurface
+    || interactionCacheSurface.width !== canvas.width
+    || interactionCacheSurface.height !== canvas.height
+    || (cachedOverviewFrame?.canvas === interactionCacheSurface
+      && viewport.zoom > cachedOverviewFrame.viewport.zoom)) {
+    interactionCacheSurface = new OffscreenCanvas(canvas.width, canvas.height);
+  }
+  const cacheContext = interactionCacheSurface.getContext("2d");
+  if (!cacheContext) return;
+  cacheContext.save();
+  cacheContext.setTransform(1, 0, 0, 1, 0, 0);
+  cacheContext.globalAlpha = 1;
+  cacheContext.globalCompositeOperation = "copy";
+  cacheContext.drawImage(canvas, 0, 0);
+  cacheContext.restore();
+  cachePresentedFrame(interactionCacheSurface, viewport, width, height);
+}
 function reprojectCachedFrameDuringInteraction() {
   if (
     renderQuality.tier !== "interactive" ||
@@ -1009,7 +1432,7 @@ function reprojectCachedFrameDuringInteraction() {
     !cachedPresentedFrame ||
     !cachedPresentedFrameViewport ||
     cachedPresentedFramePageId !== activePageId ||
-    cachedPresentedFrameSceneKey !== `${revision}:${activePageId}:${transientSceneVersion}`
+    cachedPresentedFrameSceneKey !== currentScenePresentationKey()
   ) return false;
   const frames = [{
     canvas: cachedPresentedFrame,
@@ -1018,7 +1441,7 @@ function reprojectCachedFrameDuringInteraction() {
     height: cachedPresentedFrameSurfaceHeight,
   }];
   if (cachedOverviewFrame?.sceneKey === cachedPresentedFrameSceneKey) frames.push(cachedOverviewFrame);
-  const projection = selectCoveringViewportFrame(
+  const projection = selectViewportFrameForInteraction(
     frames,
     viewport,
     { width, height },
@@ -1040,9 +1463,105 @@ function reprojectCachedFrameDuringInteraction() {
   );
   context.restore();
   presentedPageId = activePageId;
+  presentedRevision = revision;
   presentedSurfaceWidth = canvas.width;
   presentedSurfaceHeight = canvas.height;
   return true;
+}
+function currentScenePresentationKey() {
+  return scenePresentationKey({ revision, pageId: activePageId, transientSceneVersion, resourceGeneration: sceneResourceGeneration });
+}
+
+function markPresentedScene() {
+  presentedPageId = activePageId;
+  presentedRevision = revision;
+  presentedSurfaceWidth = canvas?.width ?? 0;
+  presentedSurfaceHeight = canvas?.height ?? 0;
+  presentedViewport = { ...viewport };
+  presentedScene = compiledScene?.scene;
+}
+
+function emitFrameHashEvidence() {
+  if (!captureFrameHash || !canvas || !context) return;
+  const evidenceCanvas = canvas;
+  const evidenceContext = context;
+  const evidenceSceneFingerprint = compiledScene
+    ? compactEvidenceFingerprint(JSON.stringify([
+        compiledScene.scene.dependencyFingerprint,
+        compiledScene.scene.semanticNodes.map((node) => [
+          node.nodeId,
+          node.presentationFingerprint,
+          node.visible,
+          node.paintable,
+          node.worldBounds,
+          node.effectBounds,
+          node.clipBounds,
+          node.maskNodeIds,
+        ]),
+      ]))
+    : "scene-unavailable";
+  const sceneKey = JSON.stringify([
+    currentScenePresentationKey(),
+    evidenceSceneFingerprint,
+    viewport.x,
+    viewport.y,
+    viewport.zoom,
+    evidenceCanvas.width,
+    evidenceCanvas.height,
+    renderQuality.tier,
+  ]);
+  if (sceneKey === capturedFrameHashKey) return;
+  capturedFrameHashKey = sceneKey;
+  try {
+    const rgba = evidenceContext.getImageData(0, 0, evidenceCanvas.width, evidenceCanvas.height).data;
+    const pixels = new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+    const capturedRevision = revision;
+    const capturedPageId = activePageId;
+    const capturedWidth = evidenceCanvas.width;
+    const capturedHeight = evidenceCanvas.height;
+    const samples = captureFrameSamples.flatMap((sample) => {
+      const screen = toScreen(sample.x, sample.y);
+      const x = Math.floor(screen.x * dpr);
+      const y = Math.floor(screen.y * dpr);
+      if (x < 0 || y < 0 || x >= evidenceCanvas.width || y >= evidenceCanvas.height) return [];
+      const offset = (y * evidenceCanvas.width + x) * 4;
+      return [{
+        ...sample,
+        rgba: [rgba[offset]!, rgba[offset + 1]!, rgba[offset + 2]!, rgba[offset + 3]!] as const,
+      }];
+    });
+    void sha256Bytes(pixels)
+      .then((digest) => emit({
+        type: "frame-hash",
+        revision: capturedRevision,
+        pageId: capturedPageId,
+        width: capturedWidth,
+        height: capturedHeight,
+        rgbaSha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+        sceneKey,
+        ...(samples.length ? { samples } : {}),
+      }))
+      .catch(() => {
+        if (capturedFrameHashKey === sceneKey) capturedFrameHashKey = "";
+        diagnostics.record({ category: "renderer", code: "FRAME_HASH_UNAVAILABLE", documentRevision: capturedRevision });
+      });
+  } catch {
+    diagnostics.record({ category: "renderer", code: "FRAME_HASH_UNAVAILABLE", documentRevision: revision });
+  }
+}
+
+/** Fixed-length, non-cryptographic cache identity. The cryptographic evidence
+ * remains the RGBA SHA-256; this value only prevents a different frozen Scene
+ * at the same canonical revision from suppressing capture. */
+function compactEvidenceFingerprint(value: string) {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0).toString(16).padStart(8, "0")}`;
 }
 function scheduleSettledRenderQuality() {
   if (renderQualityTimer) clearTimeout(renderQualityTimer);
@@ -1103,6 +1622,7 @@ async function probeGpuDevice(recovery = false) {
     textAtlasStatsSignature = "";
     imageTextureStatsSignature = "";
     effectTextureStatsSignature = "";
+    affineGpuTextStatsSignature = "";
     gpuStatus = "ready";
     diagnostics.record({ category: "renderer", code: "WEBGPU_SCENE_READY" });
     // The first draw uploads the derived instance scene. It is renderer startup,
@@ -1139,9 +1659,10 @@ function handleGpuDeviceLoss(renderer: WebGpuSceneRenderer) {
   gpuRenderer = undefined;
   gpuSceneBytes = 0;
   gpuEffectTextureBytes = 0;
-  textAtlasStatsSignature = "";
-  imageTextureStatsSignature = "";
-  effectTextureStatsSignature = "";
+    textAtlasStatsSignature = "";
+    imageTextureStatsSignature = "";
+    effectTextureStatsSignature = "";
+    affineGpuTextStatsSignature = "";
   if (gpuRecoveryAttempts >= 1) {
     gpuStatus = "unavailable";
     diagnostics.record({ category: "renderer", code: "WEBGPU_RECOVERY_EXHAUSTED" });
@@ -1225,6 +1746,12 @@ function syncProjectionFromWasm(rememberExisting = true) {
   documentSchemaVersion = snapshot.schemaVersion;
   pages = snapshot.pages?.length ? snapshot.pages : pages;
   assets = snapshot.resourceIndex ?? [];
+  const activeAssetIds = new Set(assets.map((asset) => asset.assetId));
+  for (const [assetId, blob] of runtimeFontBlobs) {
+    if (activeAssetIds.has(assetId)) continue;
+    runtimeFontBlobs.delete(assetId);
+    runtimeFontBytes -= blob.size;
+  }
   if (!pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id ?? defaultPageId;
   nodes = snapshot.nodes.map((node) => {
     const previous = preservedProjectionNodes.get(node.id);
@@ -1233,23 +1760,24 @@ function syncProjectionFromWasm(rememberExisting = true) {
     preservedProjectionNodes.set(projected.id, presentationNode(projected));
     return projected;
   });
+  revision = snapshot.revision;
   setRenderSurface(width, height, deviceDpr);
   selectedIds = normalizePageSelection(nodes, activePageId, selectedIds, defaultPageId);
   rebuildNodeIndex();
-  revision = snapshot.revision;
   refreshRustGpuScene();
-  nodes.filter((node) => node.assetId).forEach((node) => void ensureImageBitmap(node.assetId!));
-  nodes.filter((node) => node.kind === "text").forEach((node) => {
+  new Set(nodes.flatMap(nodeImagePaintAssetIds)).forEach((assetId) => void ensureImageBitmap(assetId));
+  nodes.filter((node) => node.textProperties).forEach((node) => {
     const properties = node.textProperties;
     if (!properties) return;
     const fontIds = [
       ...properties.runs.flatMap((run) => run.font ? [run.font.assetId] : []),
+      ...(properties.baseStyle?.font ? [properties.baseStyle.font.assetId] : []),
       ...(properties.fallbackFonts ?? []).map((font) => font.assetId),
     ];
     new Set(fontIds).forEach((assetId) => void ensureFontFace(assetId));
   });
   refreshRustTextLayouts();
-  refreshRustGpuTextGlyphs();
+  refreshRustTextGlyphs();
 }
 
 /** Builds the immutable, committed solid-shape batch once per Canonical sync.
@@ -1325,33 +1853,57 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
   }
 }
 
-/** Derives line ranges only for one stable document face. Contiguous paint-only
- * Style Runs and a fallback-only default span may share it; metric-changing
- * runs remain on the documented Canvas transition path. */
-function variationAxesKey(font: DocumentFontReference | undefined) {
-  return JSON.stringify([...(font?.variationAxes ?? [])]
-    // Do not discard malformed coordinates here: the Rust boundary must reject
-    // them instead of silently rendering the default variable-font instance.
-    .sort((left, right) => left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0)
-    .map((axis) => ({ tag: axis.tag, value: axis.value })));
-}
-
+/** Derives one source-addressed layout from contiguous explicit font/size runs.
+ * PIXELS tracking participates in Rust line fitting and caret geometry;
+ * synthetic weight/italic retain authored advances and travel with the raster
+ * identity, while small caps remain on the documented Canvas transition. */
 function rustTextLayoutRequest(node: CanvasNode) {
-  const face = textFrozenLayoutFace(node);
-  if (!face) return undefined;
-  const axesKey = variationAxesKey(face.font);
-  const key = JSON.stringify([revision, node.id, face.source, node.width, face.font.assetId, face.font.faceIndex, axesKey, face.fontSize]);
-  return { key, source: face.source, font: face.font, axesKey, fontSize: face.fontSize, widthEm: node.width / face.fontSize };
+  if ((node.textProperties?.paragraph.paragraphIndent ?? 0) !== 0
+      || node.textProperties?.paragraphStyleRuns?.some((run) => (run.paragraphIndent ?? 0) !== 0)) return undefined;
+  if (node.textProperties?.paragraphStyleRuns?.some((run) =>
+    run.lineHeight !== undefined || run.lineHeightUnit !== undefined)) return undefined;
+  if (node.textProperties?.paragraph.textWrapStyle
+      || node.textProperties?.paragraphStyleRuns?.some((run) => run.textWrapStyle !== undefined)) return undefined;
+  if (node.textProperties?.paragraph.hangingPunctuation) return undefined;
+  if (node.textProperties?.paragraph.listType
+    || node.textProperties?.paragraphStyleRuns?.some((run) => run.listType && run.listType !== "none")) return undefined;
+  if (node.textProperties?.runs.some((run) => run.leadingTrim !== undefined)
+    || node.textProperties?.baseStyle?.leadingTrim !== undefined) return undefined;
+  const plan = textFrozenLayoutPlan(node);
+  if (!plan) return undefined;
+  const key = JSON.stringify([
+    node.id,
+    plan.source,
+    plan.shapingSource,
+    node.width,
+    plan.runs.map((run) => [run.start, run.end, run.font.assetId, run.font.faceIndex, run.axes, run.fontSize, run.fontWeight, run.italic, run.letterSpacing]),
+  ]);
+  return {
+    key,
+    plan,
+    fontSize: plan.fontSize,
+    widthPx: node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width,
+  };
 }
 
 function refreshRustTextLayouts() {
   const active = new Set<string>();
-  nodes.filter((node) => node.kind === "text").forEach((node) => {
+  nodes.filter((node) => node.kind === "text" || node.kind === "textPath").forEach((node) => {
     const request = rustTextLayoutRequest(node);
     if (!request) return;
     active.add(node.id);
-    if (rustTextLayouts.get(node.id)?.key === request.key || rustTextLayoutFallbacks.get(node.id)?.key === request.key || rustTextLayoutLoads.has(request.key)) return;
-    if (fontFaces.statusFor(request.font.assetId) !== "ready") return;
+    const cached = rustTextLayouts.get(node.id);
+    if (cached?.key === request.key) {
+      cached.revision = revision;
+      return;
+    }
+    const fallback = rustTextLayoutFallbacks.get(node.id);
+    if (fallback?.key === request.key) {
+      fallback.revision = revision;
+      return;
+    }
+    if (rustTextLayoutLoads.has(request.key)) return;
+    if (request.plan.runs.some((run) => fontFaces.statusFor(run.font.assetId) !== "ready")) return;
     rustTextLayoutLoads.add(request.key);
     void loadRustTextLayout(node.id, request);
   });
@@ -1368,35 +1920,57 @@ async function loadRustTextLayout(
   request: NonNullable<ReturnType<typeof rustTextLayoutRequest>>,
 ) {
   try {
-    const asset = assets.find((candidate) => candidate.assetId === request.font.assetId);
-    if (!asset) throw new Error("FONT_ASSET_MISSING");
-    const blob = await loadAssetBlob(asset);
-    if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
-    const wasm = await loadWasmRuntime();
-    const payload = wasm.layout_shaped_text_with_variations_json(
-      new Uint8Array(await blob.arrayBuffer()),
-      request.font.faceIndex,
-      request.axesKey,
-      request.source,
-      request.widthEm,
-    );
-    const layout = parseRustTextLayout(payload, request.source);
-    if (!layout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
+    const layout = await deriveRustTextLayout(request);
     const currentNode = nodes.find((node) => node.id === nodeId);
     if (!currentNode || rustTextLayoutRequest(currentNode)?.key !== request.key) return;
     if (hasMissingRustTextGlyph(layout)) {
       rustTextLayoutFallbacks.set(nodeId, { revision, key: request.key });
+      if (captureFrameHash) diagnostics.record({ category: "renderer", code: "RUST_TEXT_LAYOUT_MISSING_GLYPH", documentRevision: revision });
+      emitSnapshot(undefined, false);
       return;
     }
     rustTextLayoutFallbacks.delete(nodeId);
     rustTextLayouts.set(nodeId, { revision, key: request.key, layout });
-    refreshRustGpuTextGlyphs();
+    sceneResourceGeneration += 1;
+    refreshRustTextGlyphs();
     render();
-  } catch {
-    diagnostics.record({ category: "renderer", code: "RUST_TEXT_LAYOUT_UNAVAILABLE", documentRevision: revision });
+  } catch (error) {
+    diagnostics.record({
+      category: "renderer",
+      code: "RUST_TEXT_LAYOUT_UNAVAILABLE",
+      documentRevision: revision,
+      details: captureFrameHash ? { errorCode: error instanceof Error ? error.message : String(error) } : undefined,
+    });
+    emitSnapshot(undefined, false);
   } finally {
     rustTextLayoutLoads.delete(request.key);
   }
+}
+
+async function deriveRustTextLayout(
+  request: NonNullable<ReturnType<typeof rustTextLayoutRequest>>,
+) {
+  const fontBytes = new Map<string, ArrayBuffer>();
+  for (const assetId of new Set(request.plan.runs.map((run) => run.font.assetId))) {
+    const asset = assets.find((candidate) => candidate.assetId === assetId);
+    if (!asset) throw new Error("FONT_ASSET_MISSING");
+    const blob = await loadAssetBlob(asset);
+    if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
+    fontBytes.set(assetId, await blob.arrayBuffer());
+  }
+  const input = textLayoutInputFromPlan(request.plan, fontBytes);
+  if (!input) throw new Error("INVALID_RUST_TEXT_STYLE_RUNS");
+  const wasm = await loadWasmRuntime();
+  const payload = wasm.layout_shaped_text_runs_json(
+    new Uint8Array(input.fontBundle),
+    input.runsJson,
+    input.shapingSource,
+    request.widthPx,
+  );
+  const displayLayout = parseRustTextLayout(payload, input.shapingSource);
+  const sourceLayout = displayLayout && remapRustTextLayoutToSource(displayLayout, input.projection);
+  if (!sourceLayout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
+  return sourceLayout;
 }
 
 /** Returns the Core-owned set of legal UTF-8 caret stops for a live DOM edit.
@@ -1405,8 +1979,41 @@ async function loadRustTextLayout(
 async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "text-caret-layout" }>) {
   try {
     const wasm = await loadWasmRuntime();
-    const maxGraphemes = Math.max(1, Math.min(65_535, Array.from(request.text).length));
-    const layout = parseRustTextCaretLayout(JSON.parse(wasm.fallback_text_layout_json(request.text, maxGraphemes)));
+    const node = nodes.find((candidate) => candidate.id === request.nodeId && candidate.kind === "text");
+    let shaped = node && (node.text ?? "") === request.text ? rustTextLayoutFor(node) : undefined;
+    if (!shaped && node && (node.text ?? "") === request.text) {
+      const shapedRequest = rustTextLayoutRequest(node);
+      if (shapedRequest) {
+        const candidate = await deriveRustTextLayout(shapedRequest);
+        if (!hasMissingRustTextGlyph(candidate)) shaped = candidate;
+      }
+    }
+    const positionedCaretComplete = shaped?.carets && shaped.lines.every((line, lineIndex) => {
+      if (!line.visualCarets?.length) return false;
+      const logical = new Set(shaped.carets!
+        .filter((caret) => caret.lineIndex === lineIndex)
+        .map((caret) => caret.byteOffset));
+      const positioned = new Set(line.visualCarets.map((caret) => caret.byteOffset));
+      return logical.size === positioned.size && [...logical].every((offset) => positioned.has(offset));
+    });
+    const payload = shaped && positionedCaretComplete
+      ? {
+          unitsPerEm: shaped.unitsPerEm,
+          lines: shaped.lines.map((line) => ({
+            start: line.start,
+            end: line.end,
+            direction: line.direction,
+            advance: line.advance,
+            visualRuns: line.visualRuns,
+            visualCarets: line.visualCarets,
+          })),
+          carets: shaped.carets!,
+        }
+      : JSON.parse(wasm.fallback_text_layout_json(
+          request.text,
+          Math.max(1, Math.min(65_535, Array.from(request.text).length)),
+        ));
+    const layout = parseRustTextCaretLayout(payload);
     if (!layout) throw new Error("INVALID_RUST_TEXT_CARET_LAYOUT");
     emit({ type: "text-caret-layout", requestId: request.requestId, nodeId: request.nodeId, text: request.text, layout });
   } catch {
@@ -1415,96 +2022,196 @@ async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "t
   }
 }
 
-/** Converts only the already-validated single-face LTR layout into ephemeral
- * GPU glyph draws. Mixed styles and RTL remain Canvas until the Text Pass has
- * the equivalent line transform model. Variable Font coordinates stay in the
- * Rust layout/raster path and renderer cache key. */
-function rustGpuTextRequest(node: CanvasNode) {
+/** Converts an already-validated multi-run horizontal layout into ephemeral GPU glyph
+ * draws. Each Rust glyph selects its run's immutable font raster resource.
+ * Rust has already included PIXELS tracking in glyph advances; paint changes
+ * remain on Canvas until the GPU pass preserves those semantics. */
+function rustTextGlyphRequest(node: CanvasNode) {
   const layoutRequest = rustTextLayoutRequest(node);
   const layout = rustTextLayoutFor(node);
-  if (!layoutRequest || !layout || !layout.lines.length || layout.lines.some((line) => line.direction !== "ltr")) return undefined;
+  if (!layoutRequest || !layout || !layout.lines.length) return undefined;
   const properties = node.textProperties;
-  const run = properties?.runs[0];
-  // The current instance format expresses glyph-local geometry. Keep node
-  // rotation, non-left alignment, synthetic styling and paragraph gaps on the
-  // Canvas path until the Text Pass has the equivalent line transform model.
-  if (node.rotation !== 0 || properties?.paragraph.alignment !== "left" || (properties?.paragraph.paragraphSpacing ?? 0) !== 0 || properties?.runs.some((candidate) => candidate.color) || run?.italic || (run?.letterSpacing ?? 0) !== 0 || run?.fontWeight !== 400) return undefined;
-  if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_GPU_TEXT_GLYPHS_PER_NODE) return undefined;
-  const pixelSize = Math.min(512, Math.max(8, Math.ceil(layoutRequest.fontSize)));
-  const key = JSON.stringify([layoutRequest.key, pixelSize, node.x, node.y, node.rotation, node.fill, node.opacity, node.textProperties?.paragraph.lineHeight, node.textProperties?.paragraph.paragraphSpacing]);
+  // Ordinary Text still needs a full box-transform projection. TextPath owns
+  // a complete local-glyph → world affine in its WebGPU instance.
+  if ((node.kind !== "textPath" && node.rotation !== 0)
+    || node.fillStack !== undefined
+    || Boolean(node.fillGradient)
+    || Boolean(node.fills?.length)
+    || properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)) return undefined;
+  if (node.kind === "text" && (
+    properties?.paragraph.alignment !== "left"
+    || (properties?.paragraph.paragraphSpacing ?? 0) !== 0
+    || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
+    || properties?.runs.some((candidate) => candidate.color)
+  )) return undefined;
+  if (node.kind === "textPath" && layout.lines.length !== 1) return undefined;
+  if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_TEXT_GLYPHS_PER_NODE) return undefined;
+  const gpuRuns = layoutRequest.plan.runs.map((run, index) => ({
+    font: run.font,
+    axesKey: run.axes,
+    syntheticStyleKey: `${run.fontWeight}:${run.italic ? "italic" : "normal"}`,
+    fontSize: run.fontSize,
+    fontWeight: run.fontWeight,
+    italic: run.italic,
+    pixelSize: Math.min(512, Math.max(8, Math.ceil(run.fontSize))),
+    fill: properties?.runs[index]?.color ? colorToSrgbCss(properties.runs[index]!.color!) : node.fill,
+    opacity: 1,
+  }));
+  if (layout.lines.some((line) => line.glyphs.some((glyph) => !gpuRuns[glyph.runIndex]))) return undefined;
+  const textPathWorldTransform = node.kind === "textPath" ? worldTransformById.get(node.id) : undefined;
+  if (node.kind === "textPath" && !textPathWorldTransform) return undefined;
+  const key = JSON.stringify([
+    layoutRequest.key,
+    gpuRuns.map((run) => [run.font.assetId, run.font.faceIndex, run.axesKey, run.syntheticStyleKey, run.fontSize, run.pixelSize]),
+    node.kind === "textPath" ? textPathWorldTransform : [node.x, node.y, node.rotation],
+    node.fill,
+    node.opacity,
+    node.textProperties?.paragraph.lineHeight,
+    node.textProperties?.paragraph.lineHeightUnit,
+    node.textProperties?.paragraph.paragraphSpacing,
+    node.vectorPath,
+    node.textPathMetadata,
+    gpuRuns.map((run) => run.fill),
+  ]);
   return {
     ...layoutRequest,
+    node,
+    gpuRuns,
     key,
     layout,
-    pixelSize,
     nodeX: node.x,
     nodeY: node.y,
+    nodeWidth: node.width,
     nodeRotation: node.rotation,
     nodeFill: node.fill,
     nodeOpacity: node.opacity,
-    nodeLineHeight: node.textProperties?.paragraph.lineHeight,
+    nodeLineHeight: resolvedTextLineHeight(node.textProperties, node.kind === "shapeWithText" ? 14 : 31),
+    textPathWorldTransform,
   };
 }
 
-function refreshRustGpuTextGlyphs() {
+function refreshRustTextGlyphs() {
   const active = new Set<string>();
-  activeNodes().filter((node) => node.kind === "text" && node.visible !== false).forEach((node) => {
-    const request = rustGpuTextRequest(node);
+  // TextPath projection owns its node transform explicitly: Canvas consumes
+  // node-local glyphs under the full affine and WebGPU receives a full world
+  // projection. Feeding it `activeNodes()` would substitute the Scene's AABB
+  // compatibility projection for a rotated node, so the async completion key
+  // could never match the current Canonical node. Ordinary Text retains its
+  // existing world-space compatibility projection.
+  visibleNodesOnPage(nodes, activePageId, defaultPageId)
+    .filter((node) => (node.kind === "text" || node.kind === "textPath") && node.visible !== false)
+    .forEach((node) => {
+    const projectionNode = node.kind === "textPath" ? node : (nodeById.get(node.id) ?? node);
+    const request = rustTextGlyphRequest(projectionNode);
     if (!request) return;
     active.add(node.id);
-    if (rustGpuTextGlyphs.get(node.id)?.key === request.key || rustGpuTextLoads.has(request.key)) return;
-    rustGpuTextLoads.add(request.key);
-    void loadRustGpuTextGlyphs(node.id, request);
+    const cached = rustTextGlyphs.get(node.id);
+    if (cached?.key === request.key) {
+      cached.revision = revision;
+      return;
+    }
+    if (rustTextGlyphLoads.has(request.key)) return;
+    rustTextGlyphLoads.add(request.key);
+    void loadRustTextGlyphs(node.id, request);
   });
-  [...rustGpuTextGlyphs].forEach(([nodeId, cached]) => {
-    if (!active.has(nodeId) || cached.revision !== revision) rustGpuTextGlyphs.delete(nodeId);
+  [...rustTextGlyphs].forEach(([nodeId, cached]) => {
+    if (!active.has(nodeId) || cached.revision !== revision) rustTextGlyphs.delete(nodeId);
   });
 }
 
-async function loadRustGpuTextGlyphs(
+async function loadRustTextGlyphs(
   nodeId: string,
-  request: NonNullable<ReturnType<typeof rustGpuTextRequest>>,
+  request: NonNullable<ReturnType<typeof rustTextGlyphRequest>>,
 ) {
   try {
-    const asset = assets.find((candidate) => candidate.assetId === request.font.assetId);
-    if (!asset) throw new Error("FONT_ASSET_MISSING");
-    const blob = await loadAssetBlob(asset);
-    if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
     const wasm = await loadWasmRuntime();
-    const fontBytes = new Uint8Array(await blob.arrayBuffer());
-    const rasters = new Map<number, ReturnType<typeof parseRustGlyphRaster>>();
+    const bytesByAssetId = new Map<string, Uint8Array>();
+    for (const run of request.gpuRuns) {
+      if (bytesByAssetId.has(run.font.assetId)) continue;
+      const asset = assets.find((candidate) => candidate.assetId === run.font.assetId);
+      if (!asset) throw new Error("FONT_ASSET_MISSING");
+      const blob = await loadAssetBlob(asset);
+      if (!blob) throw new Error("FONT_ASSET_UNAVAILABLE");
+      bytesByAssetId.set(run.font.assetId, new Uint8Array(await blob.arrayBuffer()));
+    }
+    const rasterRuns = request.gpuRuns.map((run) => ({
+      fontAssetId: run.font.assetId,
+      faceIndex: run.font.faceIndex,
+      variationAxesKey: run.axesKey,
+      syntheticStyleKey: run.syntheticStyleKey,
+      fontSize: run.fontSize,
+      pixelSize: run.pixelSize,
+      rasters: new Map<number, NonNullable<ReturnType<typeof parseRustGlyphRaster>>>(),
+    }));
     for (const line of request.layout.lines) {
       for (const glyph of line.glyphs) {
         if (glyph.glyphId === 0) throw new Error("MISSING_GLYPH_OUTLINE");
-        if (rasters.has(glyph.glyphId)) continue;
-        rasters.set(glyph.glyphId, parseRustGlyphRaster(wasm.rasterize_glyph_with_variations_json(fontBytes, request.font.faceIndex, request.axesKey, glyph.glyphId, request.pixelSize)));
+        const run = request.gpuRuns[glyph.runIndex];
+        const rasterRun = rasterRuns[glyph.runIndex];
+        if (!run || !rasterRun) throw new Error("INVALID_GLYPH_RUN_INDEX");
+        if (rasterRun.rasters.has(glyph.glyphId)) continue;
+        const fontBytes = bytesByAssetId.get(run.font.assetId);
+        if (!fontBytes) throw new Error("FONT_ASSET_UNAVAILABLE");
+        const raster = parseRustGlyphRaster(wasm.rasterize_glyph_with_style_json(
+          fontBytes,
+          run.font.faceIndex,
+          run.axesKey,
+          run.fontWeight,
+          run.italic,
+          glyph.glyphId,
+          run.pixelSize,
+        ));
+        if (!raster) throw new Error("INVALID_GLYPH_RASTER");
+        rasterRun.rasters.set(glyph.glyphId, raster);
       }
     }
-    const glyphs = projectGpuTextGlyphs({
-      nodeId,
-      fontAssetId: request.font.assetId,
-      faceIndex: request.font.faceIndex,
-      variationAxesKey: request.axesKey,
-      fontSize: request.fontSize,
-      pixelSize: request.pixelSize,
-      x: request.nodeX,
-      y: request.nodeY,
-      rotation: request.nodeRotation,
-      fill: request.nodeFill,
-      opacity: request.nodeOpacity,
-      lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
-      layout: request.layout,
-      rasters,
-    });
-    if (!glyphs) throw new Error("INVALID_GPU_TEXT_PROJECTION");
+    const projectionRuns = rasterRuns.map((run, index) => ({
+      ...run,
+      fill: request.gpuRuns[index]!.fill,
+      opacity: request.gpuRuns[index]!.opacity,
+    }));
+    const canvasGlyphs = request.node.kind === "textPath"
+      ? projectTextPathLocalGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout })
+      : undefined;
+    const glyphs = request.node.kind === "textPath"
+      ? projectTextPathGpuGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, worldTransform: request.textPathWorldTransform })
+      : projectGpuTextGlyphs({
+          nodeId,
+          runs: projectionRuns,
+          x: request.nodeX,
+          y: request.nodeY,
+          width: request.nodeWidth,
+          rotation: request.nodeRotation,
+          fill: request.nodeFill,
+          opacity: request.nodeOpacity,
+          lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
+          layout: request.layout,
+        });
+    if (!glyphs || (request.node.kind === "textPath" && !canvasGlyphs)) throw new Error("INVALID_GPU_TEXT_PROJECTION");
     const currentNode = nodes.find((node) => node.id === nodeId);
-    if (!currentNode || rustGpuTextRequest(currentNode)?.key !== request.key) return;
-    rustGpuTextGlyphs.set(nodeId, { revision, key: request.key, glyphs });
+    const currentProjectionNode = currentNode?.kind === "textPath"
+      ? currentNode
+      : currentNode ? (nodeById.get(nodeId) ?? currentNode) : undefined;
+    const currentRequest = currentProjectionNode ? rustTextGlyphRequest(currentProjectionNode) : undefined;
+    if (!currentNode || currentRequest?.key !== request.key) return;
+    rustTextGlyphs.set(nodeId, { revision, key: request.key, glyphs, ...(canvasGlyphs ? { canvasGlyphs } : {}) });
+    // Full-frame evidence runs expose the asynchronous resource fence so a
+    // browser gate can distinguish the final GPU frame from the short Canvas
+    // fallback shown while a newly created Text/TextPath raster is loading.
+    if (captureFrameHash) diagnostics.record({ category: "renderer", code: "RUST_TEXT_GLYPH_RESOURCE_READY", documentRevision: revision, details: { entries: canvasGlyphs?.length ?? glyphs.length } });
+    sceneResourceGeneration += 1;
     render();
-  } catch {
-    diagnostics.record({ category: "renderer", code: "RUST_TEXT_GLYPH_RASTER_UNAVAILABLE", documentRevision: revision });
+    if (captureFrameHash) emitSnapshot(undefined, false);
+  } catch (error) {
+    diagnostics.record({
+      category: "renderer",
+      code: "RUST_TEXT_GLYPH_RASTER_UNAVAILABLE",
+      documentRevision: revision,
+      details: captureFrameHash ? { errorCode: error instanceof Error ? error.message : String(error) } : undefined,
+    });
+    emitSnapshot(undefined, false);
   } finally {
-    rustGpuTextLoads.delete(request.key);
+    rustTextGlyphLoads.delete(request.key);
   }
 }
 
@@ -1513,18 +2220,38 @@ function rustTextLayoutFor(node: CanvasNode): RustTextLayout | undefined {
   return cached?.revision === revision ? cached.layout : undefined;
 }
 
+function nodeImagePaintAssetIds(node: CanvasNode): string[] {
+  return [
+    ...(node.assetId ? [node.assetId] : []),
+    ...(node.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+    ...(node.strokeStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+    ...(node.textProperties?.runs.flatMap((run) => run.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []) ?? []),
+    ...(node.textProperties?.baseStyle?.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+  ];
+}
+
 function imageDecodeBudget(assetId: string) {
   const visibleAssetIds = new Set(activeNodes()
-    .filter((node) => node.visible !== false && node.kind !== "text" && Boolean(node.assetId))
-    .map((node) => node.assetId!));
+    .filter((node) => node.visible !== false)
+    .flatMap(nodeImagePaintAssetIds));
   // Dividing the global cache budget ensures every simultaneously visible
   // background can stay resident instead of repeatedly evicting one another.
   const assetCount = Math.max(1, visibleAssetIds.has(assetId) ? visibleAssetIds.size : 1);
   return Math.max(4, Math.floor(MAX_RASTER_DECODED_BYTES / assetCount));
 }
 
-function cacheImageBitmap(assetId: string, bitmap: ImageBitmap) {
-  imageBitmaps.set(assetId, bitmap, bitmap.width * bitmap.height * 4);
+function cacheImageBitmap(assetId: string, attempt: number, bitmap: ImageBitmap) {
+  if (!imageDecodeLoads.isCurrent(assetId, attempt)) {
+    bitmap.close();
+    return;
+  }
+  if (!imageBitmaps.set(assetId, bitmap, bitmap.width * bitmap.height * 4)) return;
+  for (const [key, cached] of filteredImageSurfaces) {
+    if (!key.startsWith(`${assetId}|`)) continue;
+    filteredImageSurfaces.delete(key);
+    filteredImageSurfaceBytes -= cached.bytes;
+  }
+  sceneResourceGeneration += 1;
   render();
 }
 
@@ -1541,20 +2268,29 @@ async function decodeImageBitmap(asset: DocumentAsset, blob: Blob): Promise<Imag
 async function ensureImageBitmap(assetId: string) {
   if (imageBitmaps.has(assetId) || imageLoads.has(assetId) || !documentId) return;
   imageLoads.add(assetId);
+  const attempt = imageDecodeLoads.begin(assetId);
   try {
     const asset = assets.find((candidate) => candidate.assetId === assetId);
     if (!asset) return;
     const blob = await loadAssetBlob(asset);
     if (!blob) return;
-    cacheImageBitmap(assetId, await decodeImageBitmap(asset, blob));
+    cacheImageBitmap(assetId, attempt, await decodeImageBitmap(asset, blob));
   } catch {
     // Rendering keeps the documented placeholder; network failure never changes Core.
   } finally { imageLoads.delete(assetId); }
 }
 
 async function loadAssetBlob(asset: DocumentAsset): Promise<Blob | undefined> {
-  const cached = await readCachedAsset(asset);
+  const runtimeFont = runtimeFontBlobFor(asset);
+  if (runtimeFont) return runtimeFont;
+  let cached: Blob | undefined;
+  if (asset.mediaType.startsWith("font/")) {
+    const runtimeDelivery = waitForRuntimeFontBlob(asset);
+    cached = await firstAvailableResource(readCachedAsset(asset), runtimeDelivery);
+  } else cached = await readCachedAsset(asset);
   if (cached) return cached;
+  const lateRuntimeFont = runtimeFontBlobFor(asset);
+  if (lateRuntimeFont) return lateRuntimeFont;
   if (!documentId) return undefined;
   const headers = { "content-type": "application/json", "x-makefigma-dev-tenant-id": "00000000-0000-0000-0000-000000000002", "x-makefigma-dev-actor-id": localDevActorId };
   const grant = await fetch(`${assetApiUrl}/v1/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(asset.assetId)}/download-grants`, { method: "POST", headers, body: JSON.stringify({ lifetimeSeconds: 300 }) });
@@ -1565,6 +2301,32 @@ async function loadAssetBlob(asset: DocumentAsset): Promise<Blob | undefined> {
   const blob = await download.blob();
   void cacheAsset(asset, blob);
   return blob;
+}
+
+function runtimeFontBlobFor(asset: DocumentAsset): Blob | undefined {
+  const runtimeFont = runtimeFontBlobs.get(asset.assetId);
+  if (runtimeFont && asset.mediaType.startsWith("font/") && runtimeFont.type === asset.mediaType && runtimeFont.size === asset.byteLength) {
+    runtimeFontBlobs.delete(asset.assetId);
+    runtimeFontBlobs.set(asset.assetId, runtimeFont);
+    return runtimeFont;
+  }
+  return undefined;
+}
+
+function waitForRuntimeFontBlob(asset: DocumentAsset): Promise<Blob | undefined> {
+  return new Promise((resolve) => {
+    const waiters = runtimeFontBlobWaiters.get(asset.assetId) ?? new Set();
+    let timer = 0;
+    const finish = (blob: Blob | undefined) => {
+      clearTimeout(timer);
+      waiters.delete(finish);
+      if (!waiters.size) runtimeFontBlobWaiters.delete(asset.assetId);
+      resolve(blob && blob.type === asset.mediaType && blob.size === asset.byteLength ? blob : undefined);
+    };
+    waiters.add(finish);
+    runtimeFontBlobWaiters.set(asset.assetId, waiters);
+    timer = setTimeout(() => finish(undefined), RUNTIME_FONT_WAIT_MS) as unknown as number;
+  });
 }
 
 async function ensureFontFace(assetId: string) {
@@ -1581,8 +2343,10 @@ async function ensureFontFace(assetId: string) {
   const create = typeof FontFace === "function"
     ? (family: string, source: ArrayBuffer) => new FontFace(family, source)
     : undefined;
-  const family = await fontFaces.load(assetId, await blob.arrayBuffer(), fontScope.fonts, create);
-  if (family) { refreshRustTextLayouts(); render(); }
+  const source = await blob.arrayBuffer();
+  retainRuntimeFontBlob(asset.assetId, asset.mediaType, new Blob([source], { type: asset.mediaType }));
+  const family = await fontFaces.load(assetId, source, fontScope.fonts, create);
+  if (family) { sceneResourceGeneration += 1; refreshRustTextLayouts(); render(); }
   else diagnostics.record({ category: "renderer", code: "FONT_FACE_UNAVAILABLE", details: { assetId } });
   emitSnapshot(undefined, false);
 }
@@ -1590,32 +2354,66 @@ async function ensureFontFace(assetId: string) {
 function seedAssetBytes(assetId: string, mediaType: string, bytes: ArrayBuffer, decodedBitmap?: ImageBitmap) {
   const blob = new Blob([bytes], { type: mediaType });
   const asset = assets.find((candidate) => candidate.assetId === assetId);
-  if (asset) void cacheAsset(asset, blob);
   if (mediaType.startsWith("font/")) {
-    void ensureFontFaceFromBlob(assetId, blob);
+    retainRuntimeFontBlob(assetId, mediaType, blob);
+    void ensureFontFaceFromBlob(assetId, blob, asset);
   } else {
+    const attempt = imageDecodeLoads.begin(assetId);
     const imageAsset = asset;
-    if (!imageAsset) return;
+    if (!imageAsset) {
+      decodedBitmap?.close();
+      return;
+    }
     if (decodedBitmap) {
-      cacheImageBitmap(assetId, decodedBitmap);
+      if (imageDecodeLoads.isCurrent(assetId, attempt)) void cacheAsset(imageAsset, blob);
+      cacheImageBitmap(assetId, attempt, decodedBitmap);
       return;
     }
     void decodeImageBitmap(imageAsset, blob)
-      .then((bitmap) => cacheImageBitmap(assetId, bitmap))
+      .then((bitmap) => {
+        if (!imageDecodeLoads.isCurrent(assetId, attempt)) {
+          bitmap.close();
+          return;
+        }
+        void cacheAsset(imageAsset, blob);
+        cacheImageBitmap(assetId, attempt, bitmap);
+      })
       .catch(() => {
+        if (!imageDecodeLoads.isCurrent(assetId, attempt)) return;
         diagnostics.record({ category: "renderer", code: "IMAGE_ASSET_DECODE_FAILED", details: { assetId } });
         emitSnapshot(undefined, false);
       });
   }
 }
 
-async function ensureFontFaceFromBlob(assetId: string, blob: Blob) {
+function retainRuntimeFontBlob(assetId: string, mediaType: string, blob: Blob) {
+  if (!mediaType.startsWith("font/") || mediaType !== blob.type || blob.size <= 0 || blob.size > MAX_RUNTIME_FONT_BYTES) return;
+  const previous = runtimeFontBlobs.get(assetId);
+  if (previous) runtimeFontBytes -= previous.size;
+  runtimeFontBlobs.delete(assetId);
+  while (runtimeFontBytes + blob.size > MAX_RUNTIME_FONT_BYTES && runtimeFontBlobs.size) {
+    const oldest = runtimeFontBlobs.entries().next().value as [string, Blob] | undefined;
+    if (!oldest) break;
+    runtimeFontBlobs.delete(oldest[0]);
+    runtimeFontBytes -= oldest[1].size;
+  }
+  runtimeFontBlobs.set(assetId, blob);
+  runtimeFontBytes += blob.size;
+  runtimeFontBlobWaiters.get(assetId)?.forEach((resolve) => resolve(blob));
+}
+
+async function ensureFontFaceFromBlob(assetId: string, blob: Blob, asset?: DocumentAsset) {
   const fontScope = self as unknown as { fonts?: { add(face: { load(): Promise<unknown> }): void } };
   const create = typeof FontFace === "function"
     ? (family: string, source: ArrayBuffer) => new FontFace(family, source)
     : undefined;
   const family = await fontFaces.load(assetId, await blob.arrayBuffer(), fontScope.fonts, create);
-  if (family) { refreshRustTextLayouts(); render(); }
+  if (family) {
+    if (asset) void cacheAsset(asset, blob);
+    sceneResourceGeneration += 1;
+    refreshRustTextLayouts();
+    render();
+  }
   else diagnostics.record({ category: "renderer", code: "FONT_FACE_UNAVAILABLE", details: { assetId } });
   emitSnapshot(undefined, false);
 }
@@ -1623,7 +2421,7 @@ function registerAsset(transactionId: string, asset: DocumentAsset) {
   if (!wasmDocument) { emitError(undefined, "TRANSIENT", transactionId); return; }
   const baseRevision = Number(wasmDocument.revision);
   try {
-    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0);
+    wasmDocument.register_asset(transactionId, wasmDocument.revision, asset.assetId, asset.contentHash, asset.mediaType, BigInt(asset.byteLength), asset.pixelWidth ?? 0, asset.pixelHeight ?? 0, JSON.stringify(asset.fontFaces ?? []));
     recordHistory("core");
     syncProjectionFromWasm(false);
     render();
@@ -1734,6 +2532,44 @@ function bindFigmaRestAssets(input: Extract<MainToWorker, { type: "bind-figma-re
     emit({ type: "ack", transactionId: input.transactionId, errorCode });
   }
 }
+
+function cancelFigmaRestAssets(input: Extract<MainToWorker, { type: "cancel-figma-rest-assets" }>) {
+  if (!wasmDocument) {
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  if (input.baseRevision !== Number(wasmDocument.revision)) {
+    emitError(undefined, "REVISION_CONFLICT", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "REVISION_CONFLICT" });
+    return;
+  }
+  const resolved = cancelFigmaRestAssetBindings(nodes, input.pending);
+  if (resolved.issues.some((issue) => issue.outcome === "rejected")) {
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_ASSET_CANCELLATION_REJECTED", documentRevision: revision, transactionId: input.transactionId, details: { issueCount: resolved.issues.length } });
+    emitError(undefined, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+    return;
+  }
+  if (!resolved.batch.length) {
+    emit({ type: "ack", transactionId: input.transactionId, acceptedRevision: revision });
+    return;
+  }
+  try {
+    const baseRevision = Number(wasmDocument.revision);
+    wasmDocument.apply_transaction_json(input.transactionId, wasmDocument.revision, JSON.stringify(resolved.batch));
+    recordHistory("core");
+    syncProjectionFromWasm(false);
+    render();
+    diagnostics.record({ category: "transaction", code: "FIGMA_REST_ASSET_CANCELLATION_ACCEPTED", documentRevision: revision, transactionId: input.transactionId, details: { cancelledNodeCount: resolved.cancelledNodeIds.length } });
+    emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, input.transactionId));
+    queueRemoteOperation(input.transactionId, baseRevision, resolved.batch, wasmDocument.canonical_hash());
+    emit({ type: "ack", transactionId: input.transactionId, acceptedRevision: revision });
+  } catch (error) {
+    emitError(error, "INVALID_COMMAND", input.transactionId);
+    emit({ type: "ack", transactionId: input.transactionId, errorCode: "INVALID_TRANSACTION" });
+  }
+}
 type JournalReplayEngine = Pick<WasmDocumentEngine, "revision" | "snapshot_json" | "apply_transaction_json" | "move_nodes" | "load_snapshot_json">;
 
 function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntry) {
@@ -1741,7 +2577,7 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
   try {
     if (entry.baseRevision !== Number(engine.revision)) throw new Error("JOURNAL_REVISION_CONFLICT");
     const operation = entry.operation;
-    if (operation.type === "create" || operation.type === "update" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "boolean" || operation.type === "ungroup" || operation.type === "transformGroup" || operation.type === "delete") {
+    if (operation.type === "create" || operation.type === "update" || operation.type === "resizeWithoutConstraints" || operation.type === "reposition" || operation.type === "reparent" || operation.type === "group" || operation.type === "boolean" || operation.type === "ungroup" || operation.type === "transformGroup" || operation.type === "delete") {
       const currentNodes = (JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot).nodes.map(canvasNodeFromProjection);
       const resolved = resolveCoreBatch(currentNodes, [operation]);
       if (!resolved) throw new Error("INVALID_JOURNAL_OPERATION");
@@ -1754,8 +2590,95 @@ function replayJournalEntry(engine: JournalReplayEngine, entry: LocalJournalEntr
     engine.load_snapshot_json(entry.fallbackCoreSnapshot);
   }
 }
-async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkProjection = false, seedAssets: readonly DocumentAsset[] = [], hydrationRequestId?: string) {
+type BenchmarkScenario = NonNullable<BenchmarkProjectionSnapshot["benchmark"]>;
+
+function runBenchmarkScenario(
+  engine: WasmDocumentEngine,
+  benchmark: BenchmarkScenario,
+): EditorSnapshot["benchmark"] {
+  const layoutChildren = nodes.filter(
+    (node) => node.parentId === benchmark.frameId,
+  ).length;
+  const failed = (): NonNullable<EditorSnapshot["benchmark"]> => ({
+    kind: "pf02-layout-cascade",
+    status: "failed",
+    nodeCount: nodes.length,
+    layoutChildren,
+  });
+  try {
+    const frame = nodes.find((node) => node.id === benchmark.frameId);
+    if (!frame || frame.kind !== "frame") return failed();
+    const autoLayout: DocumentAutoLayout = {
+      mode: "horizontal",
+      padding: [0, 0, 0, 0],
+      itemSpacing: 0,
+      wrap: false,
+      primaryAlignment: "spaceBetween",
+      counterAlignment: "start",
+      primarySizing: "fixed",
+      counterSizing: "fixed",
+      absolute: false,
+    };
+
+    // Enable layout only after all nodes have hydrated. This setup is excluded
+    // from the measured width transaction and prevents batch-by-batch cascades.
+    engine.apply_transaction_json(
+      createId(),
+      engine.revision,
+      JSON.stringify([
+        {
+          type: "update",
+          node: coreProjectionNode({ ...frame, autoLayout }),
+        } satisfies CoreBatchCommand,
+      ]),
+    );
+    const before = JSON.parse(
+      engine.memory_stats_json(),
+    ) as NonNullable<EditorSnapshot["memory"]>;
+    const beforeWasmHeapBytes = wasmMemory?.buffer.byteLength ?? 0;
+    const started = performance.now();
+    engine.apply_transaction_json(
+      createId(),
+      engine.revision,
+      JSON.stringify([
+        {
+          type: "update",
+          node: coreProjectionNode({
+            ...frame,
+            width: benchmark.targetWidth,
+            autoLayout,
+          }),
+        } satisfies CoreBatchCommand,
+      ]),
+    );
+    const transactionMs = performance.now() - started;
+    const after = JSON.parse(
+      engine.memory_stats_json(),
+    ) as NonNullable<EditorSnapshot["memory"]>;
+    revision = Number(engine.revision);
+    return {
+      kind: "pf02-layout-cascade",
+      status: "complete",
+      nodeCount: nodes.length,
+      layoutChildren,
+      transactionMs,
+      beforeWasmHeapBytes,
+      afterWasmHeapBytes: wasmMemory?.buffer.byteLength ?? 0,
+      beforeDocumentBytes: before.nodeBytes,
+      afterDocumentBytes: after.nodeBytes,
+      beforeUndoBytes: before.undoBytes,
+      afterUndoBytes: after.undoBytes,
+      beforeDedupeBytes: before.dedupeBytes,
+      afterDedupeBytes: after.dedupeBytes,
+    };
+  } catch {
+    return failed();
+  }
+}
+
+async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkProjection = false, seedAssets: readonly DocumentAsset[] = [], hydrationRequestId?: string, benchmark?: BenchmarkScenario) {
   const loadSequence = ++bridgeLoadSequence;
+  benchmarkEvidence = undefined;
   renderPerformance.reset();
   try {
     // `hydrate` can arrive immediately after `init`. wasm-bindgen's default
@@ -1764,7 +2687,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
     const wasm = await loadWasmRuntime();
     const runtime = await wasm.default();
     wasmMemory = runtime.memory;
-    if (wasm.engine_semantics_version() !== 3) throw new Error("Unsupported WASM engine semantics");
+    if (wasm.engine_semantics_version() !== ENGINE_SEMANTICS_VERSION) throw new Error("Unsupported WASM engine semantics");
     const engine = new wasm.DocumentEngine();
     if (localSnapshot) {
       engine.load_snapshot_json(localSnapshot.coreSnapshot);
@@ -1778,6 +2701,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
       }
       migrateLoadedFigmaBootstrapPage(engine);
     } else {
+      engine.seed_document_id(documentId);
       if (seedAssets.length) engine.seed_assets_json(JSON.stringify(seedAssets));
       nodes = normalizeAutoLayoutProjection(nodes);
       for (const batchNodes of wasmHydrationBatches(nodes)) {
@@ -1785,11 +2709,8 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
         if (!hydrated) throw new Error("INVALID_LEGACY_PROJECTION");
         engine.seed_batch_json(JSON.stringify(hydrated.batch));
       }
-      // A workspace document gets its own Canonical identity before its first
-      // local or remote snapshot is emitted. Production documents start with an
-      // empty Page 1; demo content belongs exclusively to explicit fixtures.
-      const seeded = JSON.parse(engine.snapshot_json()) as WasmProjectionSnapshot;
-      if (seeded.documentId !== documentId) engine.load_snapshot_json(JSON.stringify({ ...seeded, documentId }));
+      // Identity was installed before the first node so hydration never needs
+      // a second full Snapshot projection solely to replace `documentId`.
     }
     if (loadSequence !== bridgeLoadSequence) return;
     wasmDocument = engine;
@@ -1824,6 +2745,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
       // The generated projection has just been accepted by Core. Avoid building
       // an unnecessary second 100k-node Snapshot solely for benchmark display.
       revision = Number(engine.revision);
+      if (benchmark) benchmarkEvidence = runBenchmarkScenario(engine, benchmark);
       refreshRustGpuScene();
     } else syncProjectionFromWasm();
     render();
@@ -1841,7 +2763,7 @@ async function loadDocumentBridge(localSnapshot?: CoreLocalSnapshot, benchmarkPr
       // empty Rust document instead; the already-requested remote bootstrap then
       // restores the service-owned Protobuf snapshot through the same Core codec.
       diagnostics.record({ category: "recovery", code: "LOCAL_CORE_SNAPSHOT_REJECTED", details: { errorKind: localSnapshotFailureKind(error) } });
-      void loadDocumentBridge(undefined, benchmarkProjection, [], hydrationRequestId);
+      void loadDocumentBridge(undefined, benchmarkProjection, [], hydrationRequestId, benchmark);
       return;
     }
     documentCore = "TypeScript document prototype";
@@ -1906,7 +2828,7 @@ function admitToWasm(command: EditorCommand) {
       if (!resolved) throw new Error("INVALID_TRANSACTION");
       wasmDocument.apply_transaction_json(createId(), wasmDocument.revision, JSON.stringify(resolved.batch));
     }
-    if (command.type === "update") {
+    if (command.type === "update" || command.type === "resizeWithoutConstraints") {
       const resolved = resolveCoreBatch(nodes, [command]);
       if (!resolved) throw new Error("INVALID_TRANSACTION");
       wasmDocument.apply_transaction_json(createId(), wasmDocument.revision, JSON.stringify(resolved.batch));
@@ -1924,7 +2846,7 @@ function admitToWasm(command: EditorCommand) {
   }
 }
 function isWasmDocumentCommand(command: EditorCommand) {
-  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || command.type === "reposition" || command.type === "update");
+  return Boolean(wasmDocument) && (command.type === "create" || command.type === "delete" || command.type === "reposition" || command.type === "update" || command.type === "resizeWithoutConstraints");
 }
 function recordHistory(kind: HistoryKind) {
   undoOrder.push(kind);
@@ -1942,9 +2864,13 @@ function resetDocumentToBlankPage() {
   rustGpuScene = undefined;
   rustTextLayouts.clear();
   rustTextLayoutFallbacks.clear();
+  nonLinearGradientSurfaces.clear();
+  filteredImageSurfaces.clear();
+  filteredImageSurfaceBytes = 0;
   documentCore = "Starting Rust/WASM bridge";
   const reset = resetDocumentProjection([]);
   nodes = reset.nodes;
+  revision = reset.revision;
   rebuildNodeIndex();
   selectionByPage.clear();
   selectedIds = reset.selectedIds;
@@ -1955,7 +2881,6 @@ function resetDocumentToBlankPage() {
   future = [];
   undoOrder.length = 0;
   redoOrder = [];
-  revision = reset.revision;
   preservedProjectionNodes.clear();
   render();
   emitSnapshot(undefined, false);
@@ -1982,8 +2907,8 @@ function commit(mutator: () => void, appliedByWasm = false, operation?: CoreJour
   recordHistory(appliedByWasm ? "core" : "local");
   if (appliedByWasm) syncProjectionFromWasm();
   else {
-    rebuildNodeIndex();
     if (advancesRevision) revision += 1;
+    rebuildNodeIndex();
   }
   render();
   emitSnapshot(operation && baseRevision !== undefined ? journalEntry(operation, baseRevision, remoteOperationId) : undefined);
@@ -2042,13 +2967,30 @@ function paintedHit(worldX: number, worldY: number) {
     const candidate = nodesById.get(id);
     return Boolean(candidate && candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
   });
-  if (semanticHit) return { active, node: nodesById.get(semanticHit.nodeId) };
-  // Fallback remains available while an older/partial scene compiler cannot
-  // map a node kind. It keeps an optimization failure from changing selection.
-  const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
-  // Slices are export-only regions. The shared selector keeps them available
-  // from Layers while direct canvas clicks reach painted content underneath.
-  return { active, node: findTopmostCanvasSelectionCandidate(candidates) };
+  let ordinaryHit = semanticHit ? nodesById.get(semanticHit.nodeId) : undefined;
+  if (!ordinaryHit) {
+    // Fallback remains available while an older/partial scene compiler cannot
+    // map a node kind. It keeps an optimization failure from changing selection.
+    const candidates = [...active].reverse().filter((candidate) => candidate.visible !== false && !isRenderedBooleanOperand(candidate) && !isEffectivelyLocked(nodesById, candidate.id) && isInsideClippingFrames(candidate, point) && containsWorldPoint(candidate, point));
+    // Slices are export-only regions. The shared selector keeps them available
+    // from Layers while direct canvas clicks reach painted content underneath.
+    ordinaryHit = findTopmostCanvasSelectionCandidate(candidates);
+  }
+  const repeatHit = findTopmostTransformGroupRepeatHit({
+    documentNodes: nodes,
+    paintOrderNodes: active,
+    point,
+    worldTransformByNodeId: worldTransformById,
+    containsSourcePoint: containsWorldPoint,
+    isSourcePointVisible: (candidate, sourcePoint, groupId) =>
+      isInsideClippingFrames(candidate, sourcePoint, groupId),
+    isDerivedPointVisible: (candidate, derivedPoint, groupId) => candidate.visible !== false
+      && !isRenderedBooleanOperand(candidate)
+      && !isEffectivelyLocked(nodesById, candidate.id)
+      && Boolean(nodesById.get(groupId) && isInsideClippingFrames(nodesById.get(groupId)!, derivedPoint)),
+  });
+  const ordinaryPaintIndex = ordinaryHit ? active.findIndex((candidate) => candidate.id === ordinaryHit!.id) : -1;
+  return { active, node: repeatHit && repeatHit.paintAfterIndex >= ordinaryPaintIndex ? repeatHit.node : ordinaryHit };
 }
 function hit(worldX: number, worldY: number, drillDown = false, deepSelect = false) {
   const { active, node: paintedNode } = paintedHit(worldX, worldY);
@@ -2086,22 +3028,510 @@ function paintStyle(ctx: OffscreenCanvasRenderingContext2D, fallback: string, gr
   sampleLinearGradientForCanvas(gradient).forEach((stop) => cssGradient.addColorStop(stop.position, stop.color));
   return cssGradient;
 }
-function fillStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) { return paintStyle(ctx, node.fill, node.fillGradient, width, height); }
-function paintStackStyle(ctx: OffscreenCanvasRenderingContext2D, paint: NonNullable<CanvasNode["fills"]>[number], width: number, height: number) { return paintStyle(ctx, paint.css, paint.gradient, width, height); }
-function activeFills(node: CanvasNode): NonNullable<CanvasNode["fills"]> { return node.fills?.length ? node.fills : [{ css: node.fill, color: node.fillColor, gradient: node.fillGradient }]; }
-function activeStrokes(node: CanvasNode): NonNullable<CanvasNode["strokes"]> { return node.strokes?.length ? node.strokes : [{ css: node.stroke, color: node.strokeColor, gradient: node.strokeGradient }]; }
+function paintStackStyle(ctx: OffscreenCanvasRenderingContext2D, paint: NonNullable<CanvasNode["fills"]>[number], width: number, height: number): string | CanvasGradient | CanvasPattern {
+  if (paint.gradientPaint) return nonLinearGradientPattern(ctx, paint.gradientPaint, width, height) ?? paint.css;
+  return paintStyle(ctx, paint.css, paint.gradient, width, height);
+}
+
+function nonLinearGradientPattern(
+  ctx: OffscreenCanvasRenderingContext2D,
+  gradient: DocumentGradientPaint,
+  width: number,
+  height: number,
+): CanvasPattern | undefined {
+  const pixelWidth = Math.max(1, Math.min(512, Math.ceil(Math.abs(width) * viewport.zoom * dpr)));
+  const pixelHeight = Math.max(1, Math.min(512, Math.ceil(Math.abs(height) * viewport.zoom * dpr)));
+  const key = JSON.stringify([gradient, pixelWidth, pixelHeight]);
+  let surface = nonLinearGradientSurfaces.get(key);
+  if (!surface) {
+    surface = renderNonLinearGradientSurface(gradient, pixelWidth, pixelHeight);
+    nonLinearGradientSurfaces.set(key, surface);
+    while (nonLinearGradientSurfaces.size > MAX_NON_LINEAR_GRADIENT_CACHE_ENTRIES) {
+      const oldest = nonLinearGradientSurfaces.keys().next().value;
+      if (oldest === undefined) break;
+      nonLinearGradientSurfaces.delete(oldest);
+    }
+  } else {
+    nonLinearGradientSurfaces.delete(key);
+    nonLinearGradientSurfaces.set(key, surface);
+  }
+  const pattern = ctx.createPattern(surface, "no-repeat") ?? undefined;
+  pattern?.setTransform({ a: width / pixelWidth, d: height / pixelHeight } as DOMMatrix2DInit);
+  return pattern;
+}
+
+function renderNonLinearGradientSurface(
+  gradient: DocumentGradientPaint,
+  pixelWidth: number,
+  pixelHeight: number,
+): OffscreenCanvas {
+  const surface = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const context = surface.getContext("2d", { alpha: true });
+  if (!context) return surface;
+  const pixels = context.createImageData(pixelWidth, pixelHeight);
+  const stops = gradient.stops.map((stop) => ({
+    position: stop.position,
+    linear: colorToLinearSrgbComponents(stop.color),
+    alpha: stop.color.alpha,
+  }));
+  for (let y = 0; y < pixelHeight; y += 1) {
+    for (let x = 0; x < pixelWidth; x += 1) {
+      const localX = (x + .5) / pixelWidth;
+      const localY = (y + .5) / pixelHeight;
+      const gx = gradient.transform.a * localX + gradient.transform.c * localY + gradient.transform.e;
+      const gy = gradient.transform.b * localX + gradient.transform.d * localY + gradient.transform.f;
+      const dx = gx;
+      const dy = (gy - .5) * 2;
+      const position = gradient.kind === "radial"
+        ? Math.hypot(dx, dy)
+        : gradient.kind === "diamond"
+          ? Math.abs(dx) + Math.abs(dy)
+          : ((Math.atan2(dy, dx) / (Math.PI * 2)) + 1) % 1;
+      const [red, green, blue, alpha] = sampleNonLinearGradient(stops, position);
+      const offset = (y * pixelWidth + x) * 4;
+      pixels.data[offset] = red;
+      pixels.data[offset + 1] = green;
+      pixels.data[offset + 2] = blue;
+      pixels.data[offset + 3] = alpha;
+    }
+  }
+  context.putImageData(pixels, 0, 0);
+  return surface;
+}
+
+function sampleNonLinearGradient(
+  stops: readonly { position: number; linear: [number, number, number]; alpha: number }[],
+  rawPosition: number,
+): [number, number, number, number] {
+  const position = Math.min(1, Math.max(0, rawPosition));
+  let rightIndex = stops.findIndex((stop) => stop.position >= position);
+  if (rightIndex < 0) rightIndex = stops.length - 1;
+  const right = stops[rightIndex]!;
+  const left = stops[Math.max(0, rightIndex - 1)]!;
+  const amount = right.position === left.position ? 1 : (position - left.position) / (right.position - left.position);
+  const encode = (value: number) => {
+    const bounded = Math.min(1, Math.max(0, value));
+    const srgb = bounded <= .0031308 ? bounded * 12.92 : 1.055 * bounded ** (1 / 2.4) - .055;
+    return Math.round(srgb * 255);
+  };
+  return [
+    encode(left.linear[0] + (right.linear[0] - left.linear[0]) * amount),
+    encode(left.linear[1] + (right.linear[1] - left.linear[1]) * amount),
+    encode(left.linear[2] + (right.linear[2] - left.linear[2]) * amount),
+    Math.round(Math.min(1, Math.max(0, left.alpha + (right.alpha - left.alpha) * amount)) * 255),
+  ];
+}
+function activeFills(node: CanvasNode) { return normalizedFillPaints(node); }
+function activeStrokes(node: CanvasNode) { return normalizedStrokePaints(node); }
+function activeFillLayers(node: CanvasNode) { return normalizedFillLayers(node); }
+function activeStrokeLayers(node: CanvasNode) { return normalizedStrokeLayers(node); }
 function hasVisibleFill(node: CanvasNode) {
+  if (activeFillLayers(node).some((layer) => Boolean(layer.image))) return true;
   return activeFills(node).some(
     (paint) =>
       paint.gradient?.stops.some((stop) => stop.color.alpha > 0) ??
+      paint.gradientPaint?.stops.some((stop) => stop.color.alpha > 0) ??
       (paint.color ?? documentColorFromCssHex(paint.css))?.alpha !== 0,
   );
 }
-function fillPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
-  activeFills(node).forEach((paint) => { ctx.fillStyle = paintStackStyle(ctx, paint, width, height); ctx.fill(); });
+function withNormalizedPaintLayer(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, layer: DocumentPaintLayer, draw: () => void) {
+  if (maskAlphaPreparationContexts.has(ctx)) {
+    // Mask source rendering consumes alpha only. Every supported Figma paint
+    // blend uses source-over coverage, so its colour equation cannot change
+    // the resulting mask alpha. Draw as Normal here to avoid native colour
+    // blending and the Linear Burn/Dodge device-pixel readback path while
+    // retaining the authored layer opacity and geometry.
+    ctx.save();
+    ctx.globalAlpha *= layer.opacity;
+    ctx.globalCompositeOperation = "source-over";
+    draw();
+    ctx.restore();
+    return;
+  }
+  if (isLinearBlendMode(layer.blendMode)) {
+    const repeatTransform = repeatScreenTransformByContext.get(ctx);
+    const canonicalWindow = compositeWindowForBounds(
+      worldCompositeBoundsForNode(node),
+      !repeatTransform && !repeatSourcePreparationContexts.has(ctx),
+    );
+    const window = canonicalWindow && repeatTransform
+      ? transformedCompositeSurfaceWindow(canonicalWindow, repeatTransform, width, height)
+      : canonicalWindow;
+    if (window && !compositeLinearPaintLayer(
+      ctx,
+      window,
+      compositeContextWindows.get(ctx),
+      layer.blendMode,
+      layer.opacity,
+      draw,
+      recordCanvasReadbackBytes,
+    )) diagnostics.record({
+      category: "renderer",
+      code: "LINEAR_PAINT_BLEND_READBACK_FAILED",
+      documentRevision: revision,
+      details: { nodeId: node.id },
+    });
+    return;
+  }
+  ctx.save();
+  ctx.globalAlpha *= layer.opacity;
+  // A normal paint layer must inherit the node-level composite selected by
+  // renderNode. Resetting it to source-over makes every simple node blend a
+  // no-op. Non-normal layer blends deliberately override that inherited mode.
+  if (layer.blendMode !== "normal") ctx.globalCompositeOperation = canvasCompositeMode(layer.blendMode);
+  draw();
+  ctx.restore();
+}
+
+function drawImagePaint(ctx: OffscreenCanvasRenderingContext2D, image: DocumentImagePaint, width: number, height: number) {
+  const bitmap = imageBitmaps.get(image.assetId);
+  const documentWidth = width / viewport.zoom;
+  const documentHeight = height / viewport.zoom;
+  const transform = resolvedImagePaintTransform(image, documentWidth, documentHeight);
+  const layout = imagePaintLayoutBox(image, documentWidth, documentHeight);
+  if (!transform || !layout) return;
+  ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e * viewport.zoom, transform.f * viewport.zoom);
+  if (!bitmap) {
+    ctx.fillStyle = "rgba(0, 72, 255, .16)";
+    for (let offset = -height; offset < width; offset += 18) ctx.fillRect(offset, 0, 8, height);
+    return;
+  }
+  const source = filteredImageSource(image, bitmap);
+  if (image.scaleMode === "tile") {
+    const pattern = ctx.createPattern(source, "repeat");
+    if (pattern) {
+      ctx.fillStyle = pattern;
+      ctx.fillRect(-width * 2, -height * 2, width * 5, height * 5);
+    }
+    return;
+  }
+  const layoutX = layout.x * viewport.zoom;
+  const layoutY = layout.y * viewport.zoom;
+  const layoutWidth = layout.width * viewport.zoom;
+  const layoutHeight = layout.height * viewport.zoom;
+  const scale = image.scaleMode === "fit"
+    ? Math.min(layoutWidth / source.width, layoutHeight / source.height)
+    : Math.max(layoutWidth / source.width, layoutHeight / source.height);
+  const drawWidth = source.width * scale;
+  const drawHeight = source.height * scale;
+  ctx.drawImage(
+    source,
+    layoutX + (layoutWidth - drawWidth) / 2,
+    layoutY + (layoutHeight - drawHeight) / 2,
+    drawWidth,
+    drawHeight,
+  );
+}
+
+function filteredImageSource(image: DocumentImagePaint, bitmap: ImageBitmap): ImageBitmap | OffscreenCanvas {
+  if (imageFiltersAreNeutral(image.filters)) return bitmap;
+  const key = `${image.assetId}|${imageFiltersKey(image.filters!)}`;
+  const cached = filteredImageSurfaces.get(key);
+  if (cached?.bitmap === bitmap) {
+    filteredImageSurfaces.delete(key);
+    filteredImageSurfaces.set(key, cached);
+    return cached.surface;
+  }
+  if (cached) {
+    filteredImageSurfaces.delete(key);
+    filteredImageSurfaceBytes -= cached.bytes;
+  }
+  const surface = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const context = surface.getContext("2d", { willReadFrequently: true });
+  if (!context) return bitmap;
+  context.drawImage(bitmap, 0, 0);
+  const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height);
+  applyImageFiltersToRgba(pixels.data, image.filters!);
+  context.putImageData(pixels, 0, 0);
+  const bytes = bitmap.width * bitmap.height * 4;
+  while (filteredImageSurfaces.size && filteredImageSurfaceBytes + bytes > MAX_FILTERED_IMAGE_SURFACE_BYTES) {
+    const oldestKey = filteredImageSurfaces.keys().next().value as string;
+    const oldest = filteredImageSurfaces.get(oldestKey)!;
+    filteredImageSurfaces.delete(oldestKey);
+    filteredImageSurfaceBytes -= oldest.bytes;
+  }
+  if (bytes <= MAX_FILTERED_IMAGE_SURFACE_BYTES) {
+    filteredImageSurfaces.set(key, { bitmap, surface, bytes });
+    filteredImageSurfaceBytes += bytes;
+  }
+  return surface;
+}
+
+function textImagePaintPattern(
+  ctx: OffscreenCanvasRenderingContext2D,
+  image: DocumentImagePaint,
+  width: number,
+  height: number,
+): CanvasPattern | undefined {
+  const bitmap = imageBitmaps.get(image.assetId);
+  if (!bitmap) return undefined;
+  const source = filteredImageSource(image, bitmap);
+  const documentWidth = width / viewport.zoom;
+  const documentHeight = height / viewport.zoom;
+  const transform = resolvedImagePaintTransform(image, documentWidth, documentHeight);
+  const layout = imagePaintLayoutBox(image, documentWidth, documentHeight);
+  if (!transform || !layout) return undefined;
+  const pattern = ctx.createPattern(source, image.scaleMode === "tile" ? "repeat" : "no-repeat") ?? undefined;
+  if (!pattern) return undefined;
+  if (image.scaleMode === "tile") {
+    pattern.setTransform({
+      a: transform.a,
+      b: transform.b,
+      c: transform.c,
+      d: transform.d,
+      e: transform.e * viewport.zoom,
+      f: transform.f * viewport.zoom,
+    });
+    return pattern;
+  }
+  const layoutX = layout.x * viewport.zoom;
+  const layoutY = layout.y * viewport.zoom;
+  const layoutWidth = layout.width * viewport.zoom;
+  const layoutHeight = layout.height * viewport.zoom;
+  const scale = image.scaleMode === "fit"
+    ? Math.min(layoutWidth / source.width, layoutHeight / source.height)
+    : Math.max(layoutWidth / source.width, layoutHeight / source.height);
+  const drawWidth = source.width * scale;
+  const drawHeight = source.height * scale;
+  const drawX = layoutX + (layoutWidth - drawWidth) / 2;
+  const drawY = layoutY + (layoutHeight - drawHeight) / 2;
+  pattern.setTransform({
+    a: transform.a * scale,
+    b: transform.b * scale,
+    c: transform.c * scale,
+    d: transform.d * scale,
+    e: transform.a * drawX + transform.c * drawY + transform.e * viewport.zoom,
+    f: transform.b * drawX + transform.d * drawY + transform.f * viewport.zoom,
+  });
+  return pattern;
+}
+
+function textPaintLayers(
+  node: CanvasNode,
+  style: RenderTextStyle,
+  fallback: readonly DocumentPaintLayer[],
+): readonly DocumentPaintLayer[] {
+  if (style.fillStack !== undefined) return style.fillStack.layers.filter((layer) => layer.visible && layer.opacity > 0);
+  if (style.color) return [{
+    visible: true,
+    opacity: 1,
+    blendMode: "normal",
+    paint: { css: colorToSrgbCss(style.color), color: style.color },
+  }];
+  return fallback;
+}
+
+function paintTextSpan(
+  ctx: OffscreenCanvasRenderingContext2D,
+  node: CanvasNode,
+  style: RenderTextStyle,
+  text: string,
+  x: number,
+  baseline: number,
+  width: number,
+  height: number,
+  fallback: readonly DocumentPaintLayer[],
+) {
+  const glyphLayers = textPaintLayers(node, style, fallback);
+  glyphLayers.forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+    if (layer.paint) ctx.fillStyle = paintStackStyle(ctx, layer.paint, width, height);
+    else if (layer.image) ctx.fillStyle = textImagePaintPattern(ctx, layer.image, width, height) ?? "rgba(0, 72, 255, .16)";
+    else return;
+    ctx.fillText(text, x, baseline);
+  }));
+  paintTextDecorationLayers(ctx, node, style, text, x, baseline, width, height, glyphLayers);
+}
+
+function paintTextDecorationLayers(
+  ctx: OffscreenCanvasRenderingContext2D,
+  node: CanvasNode,
+  style: RenderTextStyle,
+  text: string,
+  x: number,
+  baseline: number,
+  width: number,
+  height: number,
+  glyphLayers: readonly DocumentPaintLayer[],
+) {
+  textDecorationPaintLayers(style.textDecoration, style.textDecorationColor, glyphLayers)
+    .forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+      if (layer.paint) ctx.fillStyle = paintStackStyle(ctx, layer.paint, width, height);
+      else if (layer.image) ctx.fillStyle = textImagePaintPattern(ctx, layer.image, width, height) ?? "rgba(0, 72, 255, .16)";
+      else return;
+      paintBasicTextDecoration(ctx, style, text, x, baseline);
+    }));
+}
+
+/** Draws the supported underline and strikethrough decoration forms. Metrics,
+ * SOLID/WAVY/DOTTED patterns, explicit offsets/thicknesses and descender-aware
+ * skip-ink are resolved from the same Canvas font metrics as glyph painting. */
+function paintBasicTextDecoration(
+  ctx: OffscreenCanvasRenderingContext2D,
+  style: RenderTextStyle,
+  text: string,
+  x: number,
+  baseline: number,
+) {
+  if (!style.textDecoration || !text) return;
+  const metrics = ctx.measureText(text);
+  const rect = basicTextDecorationRect({
+    decoration: style.textDecoration,
+    fontSize: style.fontSize,
+    zoom: viewport.zoom,
+    textWidth: metrics.width,
+    textAlign: ctx.textAlign,
+    anchorX: x,
+    baseline,
+    actualBoundingBoxDescent: metrics.actualBoundingBoxDescent,
+    offset: style.textDecoration === "underline" ? style.textDecorationOffset : undefined,
+    thickness: style.textDecoration === "underline" ? style.textDecorationThickness : undefined,
+  });
+  if (!rect) return;
+  const styleKind = style.textDecoration === "underline" ? style.textDecorationStyle : undefined;
+  const pattern = basicTextDecorationPattern(styleKind, rect.height);
+  if (!pattern) return;
+  const segments = style.textDecoration === "underline" && style.textDecorationSkipInk === true
+    ? textDecorationVisibleSegments(rect, textDecorationInkExclusions(ctx, text, rect, baseline))
+    : [rect];
+  for (const segment of segments) paintBasicTextDecorationSegment(ctx, segment, pattern);
+}
+
+function textDecorationInkExclusions(
+  ctx: OffscreenCanvasRenderingContext2D,
+  text: string,
+  rect: BasicTextDecorationRect,
+  baseline: number,
+) {
+  const glyphs = Array.from(text).map((glyph) => {
+    const metrics = ctx.measureText(glyph);
+    return { advance: metrics.width, descent: metrics.actualBoundingBoxDescent };
+  });
+  const totalAdvance = glyphs.reduce((sum, glyph) => sum + glyph.advance, 0);
+  if (!(totalAdvance > 0)) return [];
+  const scale = rect.width / totalAdvance;
+  const rtl = ctx.direction === "rtl";
+  const gap = Math.max(1, rect.height * .75);
+  let advance = 0;
+  const exclusions: Array<{ start: number; end: number }> = [];
+  for (const glyph of glyphs) {
+    const next = advance + glyph.advance;
+    if (Number.isFinite(glyph.descent) && baseline + glyph.descent >= rect.y) {
+      const start = rtl ? rect.x + rect.width - next * scale : rect.x + advance * scale;
+      const end = rtl ? rect.x + rect.width - advance * scale : rect.x + next * scale;
+      exclusions.push({ start: start - gap, end: end + gap });
+    }
+    advance = next;
+  }
+  return exclusions;
+}
+
+function paintBasicTextDecorationSegment(
+  ctx: OffscreenCanvasRenderingContext2D,
+  rect: BasicTextDecorationRect,
+  pattern: BasicTextDecorationPattern,
+) {
+  if (pattern.kind === "solid") {
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    return;
+  }
+  const centerY = rect.y + rect.height / 2;
+  if (pattern.kind === "dotted") {
+    ctx.beginPath();
+    if (rect.width < pattern.radius * 2) {
+      const center = rect.x + rect.width / 2;
+      ctx.moveTo(center + rect.width / 2, centerY);
+      ctx.arc(center, centerY, rect.width / 2, 0, Math.PI * 2);
+    } else {
+      const limit = rect.x + rect.width - pattern.radius;
+      for (let center = rect.x + pattern.radius; center <= limit + Number.EPSILON; center += pattern.spacing) {
+        ctx.moveTo(center + pattern.radius, centerY);
+        ctx.arc(center, centerY, pattern.radius, 0, Math.PI * 2);
+      }
+    }
+    ctx.fill();
+    return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.lineWidth = pattern.strokeWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.moveTo(rect.x, centerY);
+  const end = rect.x + rect.width;
+  for (let cursor = rect.x; cursor < end;) {
+    const segment = Math.min(pattern.wavelength, end - cursor);
+    const amplitude = pattern.amplitude * (segment / pattern.wavelength);
+    ctx.bezierCurveTo(
+      cursor + segment * .25, centerY - amplitude,
+      cursor + segment * .75, centerY + amplitude,
+      cursor + segment, centerY,
+    );
+    cursor += segment;
+  }
+  ctx.strokeStyle = ctx.fillStyle;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function fillPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number, fillRule: CanvasFillRule = "nonzero") {
+  activeFillLayers(node).forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+    if (layer.paint) {
+      ctx.fillStyle = paintStackStyle(ctx, layer.paint, width, height);
+      ctx.fill(fillRule);
+      return;
+    }
+    if (layer.image) {
+      ctx.save();
+      ctx.clip(fillRule);
+      drawImagePaint(ctx, layer.image, width, height);
+      ctx.restore();
+    }
+  }));
 }
 function strokePaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
-  activeStrokes(node).forEach((paint) => { ctx.strokeStyle = paintStackStyle(ctx, paint, width, height); ctx.stroke(); });
+  activeStrokeLayers(node).forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+    if (layer.paint) {
+      ctx.strokeStyle = paintStackStyle(ctx, layer.paint, width, height);
+      ctx.stroke();
+      return;
+    }
+    const bitmap = layer.image && imageBitmaps.get(layer.image.assetId);
+    const source = bitmap && layer.image ? filteredImageSource(layer.image, bitmap) : undefined;
+    const pattern = source && ctx.createPattern(source, "repeat");
+    if (pattern) {
+      const transform = layer.image && resolvedImagePaintTransform(
+        layer.image,
+        width / viewport.zoom,
+        height / viewport.zoom,
+      );
+      if (!transform) return;
+      pattern.setTransform({
+        a: transform.a,
+        b: transform.b,
+        c: transform.c,
+        d: transform.d,
+        e: transform.e * viewport.zoom,
+        f: transform.f * viewport.zoom,
+      });
+      ctx.strokeStyle = pattern;
+      ctx.stroke();
+    }
+  }));
+}
+function fillStrokePaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number, fillRule: CanvasFillRule = "nonzero") {
+  activeStrokeLayers(node).forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+    if (layer.paint) {
+      ctx.fillStyle = paintStackStyle(ctx, layer.paint, width, height);
+      ctx.fill(fillRule);
+      return;
+    }
+    if (layer.image) {
+      ctx.save();
+      ctx.clip(fillRule);
+      drawImagePaint(ctx, layer.image, width, height);
+      ctx.restore();
+    }
+  }));
 }
 function fillCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, mesh: StrokeMesh, width: number, height: number) {
   ctx.beginPath();
@@ -2114,10 +3544,7 @@ function fillCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: C
   // Fill the complete path once per layer. The Core mesh deliberately overlaps
   // join/cap triangles, and one non-zero fill preserves its union without
   // darkening translucent paint at those overlaps.
-  activeStrokes(node).forEach((paint) => {
-    ctx.fillStyle = paintStackStyle(ctx, paint, width, height);
-    ctx.fill();
-  });
+  fillStrokePaintStack(ctx, node, width, height);
 }
 function fillScaledCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, mesh: StrokeMesh, width: number, height: number, scale: number) {
   ctx.beginPath();
@@ -2127,10 +3554,7 @@ function fillScaledCanonicalStrokeMesh(ctx: OffscreenCanvasRenderingContext2D, n
     ctx.lineTo(c.x * scale, c.y * scale);
     ctx.closePath();
   });
-  activeStrokes(node).forEach((paint) => {
-    ctx.fillStyle = paintStackStyle(ctx, paint, width, height);
-    ctx.fill();
-  });
+  fillStrokePaintStack(ctx, node, width, height);
 }
 function canvasStrokeCap(cap: CanvasNode["strokeCapStart"]): "butt" | "round" | "square" | undefined {
   if (!cap || cap === "none") return "butt";
@@ -2338,6 +3762,53 @@ function canonicalBooleanPath(node: CanvasNode): FlattenedVectorPath | undefined
     canonicalBooleanPaths.set(key, null);
     return undefined;
   }
+}
+
+const MAX_RUNTIME_EXPORT_BOOLEAN_NODES = 256;
+const MAX_RUNTIME_EXPORT_BOOLEAN_POINTS = 100_000;
+
+function emitRuntimeExportBooleanPaths(request: Extract<MainToWorker, { type: "runtime-export-boolean-paths" }>) {
+  const validIds = request.nodeIds.length >= 1
+    && request.nodeIds.length <= MAX_RUNTIME_EXPORT_BOOLEAN_NODES
+    && new Set(request.nodeIds).size === request.nodeIds.length
+    && request.nodeIds.every((id) => id.length >= 1 && id.length <= 256);
+  if (!request.requestId || request.requestId.length > 128 || !Number.isSafeInteger(request.revision) || request.revision < 0 || !validIds) {
+    emit({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision, errorCode: "INVALID_REQUEST" });
+    return;
+  }
+  if (request.revision !== revision) {
+    emit({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision, errorCode: "REVISION_CONFLICT" });
+    return;
+  }
+  const requestedNodes = request.nodeIds.map((id) => nodes.find((node) => node.id === id));
+  if (requestedNodes.some((node) => node?.kind !== "booleanOperation")) {
+    emit({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision, errorCode: "INVALID_REQUEST" });
+    return;
+  }
+  const paths = Object.create(null) as Record<string, DocumentVectorPath>;
+  let pointCount = 0;
+  for (const node of requestedNodes as CanvasNode[]) {
+    const path = canonicalBooleanPath(node);
+    if (!path) continue;
+    pointCount += path.subpaths.reduce((total, subpath) => total + subpath.points.length, 0);
+    if (pointCount > MAX_RUNTIME_EXPORT_BOOLEAN_POINTS) {
+      emit({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision, errorCode: "RESOURCE_LIMIT" });
+      return;
+    }
+    paths[node.id] = {
+      fillRule: "nonZero",
+      subpaths: path.subpaths.map((subpath, subpathIndex) => ({
+        closed: subpath.closed,
+        points: subpath.points.map((point, pointIndex) => ({
+          id: `${node.id}:runtime-export:${subpathIndex}:${pointIndex}`,
+          x: point.x,
+          y: point.y,
+          pointType: "corner",
+        })),
+      })),
+    };
+  }
+  emit({ type: "runtime-export-boolean-paths-result", requestId: request.requestId, revision, paths });
 }
 function renderedBooleanOperandIds(orderedNodes: readonly CanvasNode[]) {
   const ids = new Set<string>();
@@ -2633,7 +4104,10 @@ function canonicalPerSideRectangleStrokeMeshes(node: CanvasNode, width: number, 
 }
 function hasVisibleStroke(node: CanvasNode): boolean {
   if (node.opacity <= 0 || node.strokeWidth <= 0) return false;
-  return activeStrokes(node).some((paint) => paint.gradient?.stops.some((stop) => stop.color.alpha > 0) ?? (paint.color ?? documentColorFromCssHex(paint.css))?.alpha !== 0);
+  if (activeStrokeLayers(node).some((layer) => Boolean(layer.image))) return true;
+  return activeStrokes(node).some((paint) => paint.gradient?.stops.some((stop) => stop.color.alpha > 0)
+    ?? paint.gradientPaint?.stops.some((stop) => stop.color.alpha > 0)
+    ?? (paint.color ?? documentColorFromCssHex(paint.css))?.alpha !== 0);
 }
 function applyStrokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   ctx.lineJoin = node.strokeJoin ?? "miter";
@@ -2641,7 +4115,493 @@ function applyStrokeStyle(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNo
   ctx.setLineDash((node.strokeDashPattern ?? []).map((segment) => segment * viewport.zoom));
 }
 function orderedEffects(node: CanvasNode): readonly NonNullable<CanvasNode["effectStack"]>[number][] {
-  return node.effectStack?.length ? node.effectStack : node.dropShadow ? [{ dropShadow: node.dropShadow }] : [];
+  return normalizedNodeEffects(node);
+}
+function nodeEffectScale(node: CanvasNode) {
+  const transform = worldTransformById.get(node.id);
+  return transform
+    ? Math.max(Math.hypot(transform.a, transform.b), Math.hypot(transform.c, transform.d))
+    : 1;
+}
+function worldEffectPaddingForNode(node: CanvasNode, includeOffsets = false) {
+  return worldEffectPaddingForNodeBounds(node, worldTransformById.get(node.id), !includeOffsets);
+}
+function expandedBounds(bounds: Readonly<{ left: number; top: number; right: number; bottom: number }> | undefined, padding: number) {
+  if (!bounds) return undefined;
+  return {
+    left: bounds.left - padding,
+    top: bounds.top - padding,
+    right: bounds.right + padding,
+    bottom: bounds.bottom + padding,
+  };
+}
+function worldCompositeBoundsForNode(node: CanvasNode) {
+  return expandedBounds(worldVisualBoundsForNode(nodes, node), worldEffectPaddingForNode(node));
+}
+function combinedWorldCompositeBounds(nodesToMeasure: readonly CanvasNode[]) {
+  return nodesToMeasure.reduce<Readonly<{ left: number; top: number; right: number; bottom: number }> | undefined>((combined, node) => {
+    const bounds = cachedWorldCompositeBoundsForNode(node);
+    if (!bounds) return combined;
+    if (!combined) return bounds;
+    return {
+      left: Math.min(combined.left, bounds.left),
+      top: Math.min(combined.top, bounds.top),
+      right: Math.max(combined.right, bounds.right),
+      bottom: Math.max(combined.bottom, bounds.bottom),
+    };
+  }, undefined);
+}
+function cachedWorldCompositeBoundsForNode(node: CanvasNode) {
+  const cached = nodeBoundsById.get(node.id);
+  if (!cached) return worldCompositeBoundsForNode(node);
+  const scale = nodeEffectScale(node);
+  const align = node.strokeAlign ?? "inside";
+  const strokeExpansion = Math.max(0, node.strokeWidth) * scale * (align === "outside" ? 1 : align === "center" ? .5 : 0);
+  // `nodeBoundsById` stores the geometry envelope, unlike
+  // `worldVisualBoundsForNode` which already includes the first drop-shadow
+  // radius and its directional offset. The cached fast path therefore needs
+  // the complete effect envelope. Using the smaller visual-bounds padding here
+  // clipped the soft tail of Canvas islands before they were composited back
+  // between WebGPU islands.
+  return expandedBounds({
+    left: cached.x,
+    top: cached.y,
+    right: cached.x + cached.width,
+    bottom: cached.y + cached.height,
+  }, worldEffectPaddingForNode(node, true) + strokeExpansion);
+}
+function compositeWindowForBounds(
+  bounds: Readonly<{ left: number; top: number; right: number; bottom: number }> | undefined,
+  clipToCanvas = true,
+) {
+  if (!bounds) return undefined;
+  return compositeSurfaceWindowForWorldBounds(
+    bounds,
+    viewport,
+    width,
+    height,
+    dpr,
+    2 / dpr,
+    clipToCanvas,
+  );
+}
+/** Sum of clipped paint envelopes, capped to the frame. Overlapping nodes may
+ * make this an upper bound; the metric is intentionally cheap enough to keep
+ * enabled on large pages and is reported as such in the public field name. */
+function clippedNodeCoverageUpperBound(nodesToMeasure: readonly CanvasNode[]) {
+  if (!canvas) return 0;
+  const framePixels = canvas.width * canvas.height;
+  let coveredPixels = 0;
+  for (const node of nodesToMeasure) {
+    // Coverage is diagnostic data on the hot render path. Recomputing
+    // worldVisualBoundsForNode here rebuilds a document-wide ancestry resolver
+    // for every node and turns a 50K flat scene into quadratic work. The
+    // spatial index already owns the projected world bounds; expand that cache
+    // conservatively for effects and any outward stroke before clipping.
+    const bounds = cachedWorldCompositeBoundsForNode(node);
+    const window = compositeWindowForBounds(bounds);
+    if (!window) continue;
+    coveredPixels += window.pixelWidth * window.pixelHeight;
+    if (coveredPixels >= framePixels) return framePixels;
+  }
+  return coveredPixels;
+}
+function effectSurfaceWindowForNode(node: CanvasNode, context?: OffscreenCanvasRenderingContext2D): CompositeSurfaceWindow | undefined {
+  const repeatedSource = Boolean(context && (
+    repeatScreenTransformByContext.has(context) || repeatSourcePreparationContexts.has(context)
+  ));
+  return compositeWindowForBounds(worldCompositeBoundsForNode(node), !repeatedSource);
+}
+function structuralCompositeSurfacePlan(orderedNodes: readonly CanvasNode[]): CompositeFrameSurfacePlan {
+  const ids = new Set(orderedNodes.map((node) => node.id));
+  const children = new Map<string, CanvasNode[]>();
+  const roots: CanvasNode[] = [];
+  orderedNodes.forEach((node) => {
+    if (!node.parentId || !ids.has(node.parentId)) roots.push(node);
+    else {
+      const siblings = children.get(node.parentId) ?? [];
+      siblings.push(node);
+      children.set(node.parentId, siblings);
+    }
+  });
+  type PaintBounds = { left: number; top: number; right: number; bottom: number };
+  const combine = (left: PaintBounds | undefined, right: PaintBounds | undefined): PaintBounds | undefined => {
+    if (!left) return right;
+    if (!right) return left;
+    return {
+      left: Math.min(left.left, right.left),
+      top: Math.min(left.top, right.top),
+      right: Math.max(left.right, right.right),
+      bottom: Math.max(left.bottom, right.bottom),
+    };
+  };
+  const cache = new Map<string, PaintBounds | undefined>();
+  const subtreeBackgroundBlurCache = new Map<string, boolean>();
+  const canonicalById = new Map(nodes.map((node) => [node.id, node]));
+  const subtreeBounds = (node: CanvasNode): PaintBounds | undefined => {
+    if (cache.has(node.id)) return cache.get(node.id);
+    const descendants = children.get(node.id) ?? [];
+    let bounds = descendants.length > 0 && requiresSubtreeComposition(node, true)
+      ? worldVisualBoundsForNode(nodes, node)
+      : worldCompositeBoundsForNode(node);
+    descendants.forEach((child) => { bounds = combine(bounds, subtreeBounds(child)); });
+    if (node.kind === "transformGroup") {
+      const canonical = canonicalById.get(node.id);
+      const repeatSubtree = canonical ? transformGroupRepeatSubtree(orderedNodes, canonical, children) : undefined;
+      const derived = canonical && repeatSubtree ? transformGroupRepeatDerivedBounds(nodes, canonical, repeatSubtree.sources, {
+        groupWorld: worldTransformById.get(canonical.id),
+        worldTransformByNodeId: worldTransformById,
+        canonicalNodeById: canonicalById,
+        paintNodes: orderedNodes,
+        childrenByParentId: children,
+      }) : undefined;
+      bounds = combine(bounds, derived);
+    }
+    if (descendants.length > 0 && requiresSubtreeComposition(node, true))
+      bounds = expandedBounds(bounds, worldEffectPaddingForNode(node, true));
+    cache.set(node.id, bounds);
+    return bounds;
+  };
+  const subtreeHasBackgroundBlur = (node: CanvasNode): boolean => {
+    const cached = subtreeBackgroundBlurCache.get(node.id);
+    if (cached !== undefined) return cached;
+    const result = (!node.isMask && activeNodeEffects(node).some((effect) => Boolean(effect.backgroundBlur)))
+      || (children.get(node.id) ?? []).some(subtreeHasBackgroundBlur);
+    subtreeBackgroundBlurCache.set(node.id, result);
+    return result;
+  };
+  let effectPool: CompositePoolDimensions | undefined;
+  let linearPaintPool: CompositePoolDimensions | undefined;
+  const alphaMaskPools: CompositePoolDimensions[] = [];
+  const subtreePools: CompositePoolDimensions[] = [];
+  const include = (current: CompositePoolDimensions | undefined, window: CompositeSurfaceWindow | undefined) => window
+    ? {
+        pixelWidth: Math.max(current?.pixelWidth ?? 1, window.pixelWidth),
+        pixelHeight: Math.max(current?.pixelHeight ?? 1, window.pixelHeight),
+      }
+    : current ?? { pixelWidth: 1, pixelHeight: 1 };
+  const includeRepeatBackgroundBlurWindows = (
+    current: CompositePoolDimensions | undefined,
+    window: CompositeSurfaceWindow | undefined,
+    transforms: readonly AffineMatrix[],
+  ) => {
+    let dimensions = include(current, window);
+    if (!window) return dimensions;
+    for (const transform of transforms) {
+      dimensions = include(dimensions, transformedCompositeSurfaceWindow(window, transform, width, height));
+    }
+    return dimensions;
+  };
+  const repeatTransformsForChildren = (node: CanvasNode, inherited: readonly AffineMatrix[]) => {
+    if (node.kind !== "transformGroup") return inherited;
+    const canonical = canonicalById.get(node.id) ?? node;
+    const own = (transformGroupRepeatMatrices(nodes, canonical) ?? []).map((matrix) =>
+      affineScreenMatrix(matrix, toScreen(0, 0), viewport.zoom));
+    if (!own.length) return inherited;
+    return [
+      ...inherited,
+      ...own,
+      ...inherited.flatMap((outer) => own.map((inner) => multiplyAffine(outer, inner))),
+    ];
+  };
+  const visitSiblings = (
+    siblings: readonly CanvasNode[],
+    maskDepth: number,
+    compositionDepth: number,
+    repeatTransforms: readonly AffineMatrix[] = [],
+    maskAlphaOnly = false,
+  ) => {
+    for (let index = 0; index < siblings.length; index += 1) {
+      const node = siblings[index]!;
+      const insideRepeat = repeatTransforms.length > 0;
+      const alphaOnly = maskAlphaOnly || Boolean(node.isMask);
+      const nodeEffects = alphaOnly ? activeMaskAlphaEffects(node) : activeNodeEffects(node);
+      const hasAdmittedBackgroundBlur = !alphaOnly
+        && nodeEffects.some((effect) => Boolean(effect.backgroundBlur));
+      const childRepeatTransforms = repeatTransformsForChildren(node, repeatTransforms);
+      if (!alphaOnly && [...activeFillLayers(node), ...activeStrokeLayers(node)]
+        .some((layer) => isLinearBlendMode(layer.blendMode))) {
+        linearPaintPool = include(linearPaintPool, compositeWindowForBounds(worldCompositeBoundsForNode(node), !insideRepeat));
+      }
+      if (node.isMask) {
+        let end = index + 1;
+        while (end < siblings.length && !siblings[end]!.isMask) end += 1;
+        const targets = siblings.slice(index + 1, end);
+        const maskDescendants = children.get(node.id) ?? [];
+        const maskIsolated = requiresSubtreeComposition(node, maskDescendants.length > 0, nodeEffects);
+        if (maskIsolated) {
+          const maskWindow = compositeWindowForBounds(subtreeBounds(node), !insideRepeat);
+          subtreePools[compositionDepth] = include(subtreePools[compositionDepth], maskWindow);
+          visitSiblings(maskDescendants, maskDepth + 1, compositionDepth + 1, childRepeatTransforms, true);
+        } else {
+          if (nodeEffects.length > 0)
+            effectPool = include(effectPool, compositeWindowForBounds(worldCompositeBoundsForNode(node), !insideRepeat));
+          visitSiblings(maskDescendants, maskDepth + 1, compositionDepth, childRepeatTransforms, true);
+        }
+        if (targets.length) {
+          const runBounds = targets.reduce<PaintBounds | undefined>(
+            (bounds, target) => combine(bounds, subtreeBounds(target)),
+            subtreeBounds(node),
+          );
+          alphaMaskPools[maskDepth] = include(alphaMaskPools[maskDepth], compositeWindowForBounds(runBounds, !insideRepeat));
+          visitSiblings(targets, maskDepth + 1, compositionDepth, repeatTransforms, false);
+        }
+        index = end - 1;
+        continue;
+      }
+      const descendants = children.get(node.id) ?? [];
+      const isolated = requiresSubtreeComposition(node, descendants.length > 0, nodeEffects);
+      if (isolated) {
+        const subtreeWindow = compositeWindowForBounds(subtreeBounds(node), !insideRepeat);
+        subtreePools[compositionDepth] = !maskAlphaOnly && subtreeHasBackgroundBlur(node)
+          ? includeRepeatBackgroundBlurWindows(subtreePools[compositionDepth], subtreeWindow, repeatTransforms)
+          : include(subtreePools[compositionDepth], subtreeWindow);
+        visitSiblings(descendants, maskDepth, compositionDepth + 1, childRepeatTransforms, maskAlphaOnly);
+      } else {
+        if (node.kind !== "group" && node.kind !== "slice" && nodeEffects.length > 0) {
+          const effectWindow = compositeWindowForBounds(worldCompositeBoundsForNode(node), !insideRepeat);
+          effectPool = hasAdmittedBackgroundBlur
+            ? includeRepeatBackgroundBlurWindows(effectPool, effectWindow, repeatTransforms)
+            : include(effectPool, effectWindow);
+        }
+        visitSiblings(descendants, maskDepth, compositionDepth, childRepeatTransforms, maskAlphaOnly);
+      }
+    }
+  };
+  visitSiblings(roots, 0, 0);
+  return { effectPool, linearPaintPool, alphaMaskPools, subtreePools };
+}
+function prepareCompositeSurface(
+  context: OffscreenCanvasRenderingContext2D,
+  surface: OffscreenCanvas,
+  window: CompositeSurfaceWindow,
+) {
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, surface.width, surface.height);
+  setCompositeSurfaceTransform(context, window);
+  compositeContextWindows.set(context, window);
+}
+function isPreparingRepeatedSource(context: OffscreenCanvasRenderingContext2D) {
+  return repeatScreenTransformByContext.has(context) || repeatSourcePreparationContexts.has(context);
+}
+function withRepeatSourcePreparation<T>(
+  context: OffscreenCanvasRenderingContext2D,
+  enabled: boolean,
+  paint: () => T,
+): T {
+  const alreadyEnabled = repeatSourcePreparationContexts.has(context);
+  if (enabled) repeatSourcePreparationContexts.add(context);
+  try {
+    return paint();
+  } finally {
+    if (enabled && !alreadyEnabled) repeatSourcePreparationContexts.delete(context);
+  }
+}
+function withMaskAlphaPreparation<T>(
+  context: OffscreenCanvasRenderingContext2D,
+  enabled: boolean,
+  paint: () => T,
+): T {
+  const alreadyEnabled = maskAlphaPreparationContexts.has(context);
+  if (enabled) maskAlphaPreparationContexts.add(context);
+  try {
+    return paint();
+  } finally {
+    if (enabled && !alreadyEnabled) maskAlphaPreparationContexts.delete(context);
+  }
+}
+function drawCompositeSurface(
+  context: OffscreenCanvasRenderingContext2D,
+  source: OffscreenCanvas,
+  window: CompositeSurfaceWindow,
+  offsetX = 0,
+  offsetY = 0,
+) {
+  context.drawImage(
+    source,
+    0,
+    0,
+    window.pixelWidth,
+    window.pixelHeight,
+    window.x + offsetX,
+    window.y + offsetY,
+    window.width,
+    window.height,
+  );
+}
+
+function repeatBackgroundBlurWindow(
+  destination: OffscreenCanvasRenderingContext2D,
+  window: CompositeSurfaceWindow,
+  effects: readonly NonNullable<CanvasNode["effectStack"]>[number][],
+) {
+  const active = effects.filter(effectChangesPixels);
+  const repeatTransform = repeatScreenTransformByContext.get(destination);
+  return repeatTransform
+    && active.some((effect) => Boolean(effect.backgroundBlur))
+    ? transformedCompositeSurfaceWindow(window, repeatTransform, width, height)
+    : undefined;
+}
+
+/** Effect offsets are authored in the canonical layer coordinate space. Once
+ * Background Blur materializes a Repeat copy into occurrence screen space,
+ * rotate the remaining shadow offsets through the same rigid Repeat matrix. */
+function repeatOccurrenceEffectOffset(
+  destination: OffscreenCanvasRenderingContext2D,
+  offsetX: number,
+  offsetY: number,
+  materializedOccurrence: boolean,
+) {
+  const transform = materializedOccurrence ? repeatScreenTransformByContext.get(destination) : undefined;
+  return transform
+    ? {
+        x: transform.a * offsetX + transform.c * offsetY,
+        y: transform.b * offsetX + transform.d * offsetY,
+      }
+    : { x: offsetX, y: offsetY };
+}
+
+function compositePoolDimensionsForWindows(
+  first: CompositeSurfaceWindow,
+  second?: CompositeSurfaceWindow,
+): CompositePoolDimensions {
+  return {
+    pixelWidth: Math.max(first.pixelWidth, second?.pixelWidth ?? 0),
+    pixelHeight: Math.max(first.pixelHeight, second?.pixelHeight ?? 0),
+  };
+}
+
+/** Paints a canonical prepared surface into the current Repeat occurrence.
+ * The resulting bitmap is in ordinary screen coordinates, which lets
+ * Background Blur sample and filter the actual destination behind that copy. */
+function materializeRepeatPreparedSurface(
+  context: OffscreenCanvasRenderingContext2D,
+  surface: OffscreenCanvas,
+  source: OffscreenCanvas,
+  sourceWindow: CompositeSurfaceWindow,
+  occurrenceWindow: CompositeSurfaceWindow,
+  transform: AffineMatrix,
+) {
+  context.save();
+  prepareCompositeSurface(context, surface, occurrenceWindow);
+  context.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
+  drawCompositeSurface(context, source, sourceWindow);
+  context.restore();
+}
+
+function compositeMaterializedOccurrence(
+  destination: OffscreenCanvasRenderingContext2D,
+  source: OffscreenCanvas,
+  window: CompositeSurfaceWindow,
+  mode: GlobalCompositeOperation | LinearBlendMode,
+  opacity = 1,
+) {
+  return compositeEffectSurface(
+    destination,
+    source,
+    window,
+    mode,
+    opacity,
+    compositeContextWindows.get(destination),
+    recordCanvasReadbackBytes,
+  );
+}
+/** Repeat matrices live on the destination context. Native Canvas modes draw
+ * the prepared screen-space window through that current transform. Linear
+ * Burn and Dodge first project the window to the occurrence AABB, then reuse
+ * the bounded readback compositor against the real destination backdrop. */
+function compositePreparedSurface(
+  destination: OffscreenCanvasRenderingContext2D,
+  source: OffscreenCanvas,
+  window: CompositeSurfaceWindow,
+  mode: GlobalCompositeOperation | LinearBlendMode = "source-over",
+  opacity = 1,
+) {
+  const repeatTransform = repeatScreenTransformByContext.get(destination);
+  if (repeatTransform && isLinearBlendMode(mode)) {
+    const transformedWindow = transformedCompositeSurfaceWindow(window, repeatTransform, width, height);
+    if (!transformedWindow) return true;
+    return compositeLinearPaintLayer(
+      destination,
+      transformedWindow,
+      compositeContextWindows.get(destination),
+      mode,
+      opacity,
+      () => {
+        destination.save();
+        destination.globalCompositeOperation = "source-over";
+        destination.globalAlpha = 1;
+        drawCompositeSurface(destination, source, window);
+        destination.restore();
+      },
+      recordCanvasReadbackBytes,
+    );
+  }
+  if (repeatTransform && !isLinearBlendMode(mode)) {
+    destination.save();
+    try {
+      destination.globalCompositeOperation = mode;
+      destination.globalAlpha = opacity;
+      drawCompositeSurface(destination, source, window);
+      return true;
+    } finally {
+      destination.restore();
+    }
+  }
+  return compositeEffectSurface(
+    destination,
+    source,
+    window,
+    mode,
+    opacity,
+    compositeContextWindows.get(destination),
+    recordCanvasReadbackBytes,
+  );
+}
+function drawCompositeBacking(
+  context: OffscreenCanvasRenderingContext2D,
+  sourceContext: OffscreenCanvasRenderingContext2D,
+  window: CompositeSurfaceWindow,
+) {
+  const preparedBackdrop = preparedBackdropContextByContext.get(sourceContext);
+  if (preparedBackdrop) drawCompositeBacking(context, preparedBackdrop, window);
+  const sourceWindow = compositeContextWindows.get(sourceContext);
+  context.drawImage(
+    sourceContext.canvas,
+    window.pixelX - (sourceWindow?.pixelX ?? 0),
+    window.pixelY - (sourceWindow?.pixelY ?? 0),
+    window.pixelWidth,
+    window.pixelHeight,
+    window.x,
+    window.y,
+    window.width,
+    window.height,
+  );
+}
+
+/** Seeds a canonical intermediate surface with the backing seen by the
+ * current Repeat occurrence. Drawing the occurrence through the inverse rigid
+ * transform lets target blends and Background Blur execute in canonical space;
+ * the completed masked result is transformed once when it is composited. */
+function drawRepeatOccurrenceBacking(
+  context: OffscreenCanvasRenderingContext2D,
+  sourceContext: OffscreenCanvasRenderingContext2D,
+  canonicalWindow: CompositeSurfaceWindow,
+  repeatTransform: AffineMatrix,
+) {
+  const occurrenceWindow = transformedCompositeSurfaceWindow(
+    canonicalWindow,
+    repeatTransform,
+    width,
+    height,
+  );
+  const inverse = invertAffine(repeatTransform);
+  if (!occurrenceWindow || !inverse) return false;
+  context.save();
+  context.transform(inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f);
+  drawCompositeBacking(context, sourceContext, occurrenceWindow);
+  context.restore();
+  return true;
 }
 function applyDropShadow(ctx: OffscreenCanvasRenderingContext2D, shadow: CanvasNode["dropShadow"]) {
   if (!shadow?.visible || shadow.color.alpha <= 0) return;
@@ -2653,10 +4613,10 @@ function applyDropShadow(ctx: OffscreenCanvasRenderingContext2D, shadow: CanvasN
   // pass will replace this with an exact morphology step.
   ctx.shadowBlur = Math.max(0, shadow.blurRadius + Math.max(0, shadow.spread) * 2) * viewport.zoom;
 }
-function roundedRectPath(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"], cornerSmoothing?: number) {
+function roundedRectPath(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number, cornerRadii?: CanvasNode["cornerRadii"], cornerSmoothing?: number, beginPath = true) {
   const radii = resolveCornerRadii(width, height, radius, cornerRadii);
   const smoothing = resolveCornerSmoothing(cornerSmoothing);
-  ctx.beginPath();
+  if (beginPath) ctx.beginPath();
   if (smoothing === 0) { ctx.roundRect(x, y, width, height, radii); return; }
   const [topLeft, topRight, bottomRight, bottomLeft] = radii;
   const exponent = cornerSmoothingExponent(smoothing);
@@ -2695,7 +4655,9 @@ function renderNode(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, co
     !hasVisibleStroke(node)
   )
     return;
-  const effects = orderedEffects(node);
+  const effects = maskAlphaPreparationContexts.has(ctx)
+    ? activeMaskAlphaEffects(node)
+    : activeNodeEffects(node);
   if (!effects.length) {
     ctx.save();
     ctx.globalCompositeOperation = compositeMode ?? canvasCompositeMode(node.blendMode);
@@ -2743,14 +4705,124 @@ function renderNodePreview(ctx: OffscreenCanvasRenderingContext2D, node: CanvasN
   ctx.restore();
 }
 
-function canvasCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOperation {
-  return mode === "multiply" || mode === "screen" || mode === "overlay" || mode === "darken" || mode === "lighten" ? mode : "source-over";
+/** A clipping container owns two distinct paint scopes: its fill/image sits
+ * behind descendants, while its stroke remains visible above them. Keeping the
+ * split as a presentation-only copy avoids adding a second persisted model. */
+function containerFillSourceNode(node: CanvasNode): CanvasNode {
+  return {
+    ...node,
+    strokeWidth: 0,
+    strokeWeights: undefined,
+    strokeStack: { layers: [] },
+  };
 }
 
-function acquireEffectSurfaces(): EffectSurfaces | undefined {
+/** Paints only the outline of a Frame-like owner after its descendants. Rust
+ * stroke meshes remain the exact path. The Canvas fallback clips a doubled
+ * boundary stroke to the requested inside/outside half so it never repaints
+ * the fill or erases already-rendered children. */
+function renderContainerStrokeOverlay(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (!hasVisibleStroke(node)) return;
+  const point = toScreen(node.x, node.y);
+  const width = node.width * viewport.zoom;
+  const height = node.height * viewport.zoom;
+  const radius = node.radius * viewport.zoom;
+  ctx.save();
+  ctx.globalAlpha = node.opacity;
+  ctx.globalCompositeOperation = canvasCompositeMode(node.blendMode);
+  if (!applyNativeAffine(ctx, node)) {
+    ctx.translate(point.x + width / 2, point.y + height / 2);
+    ctx.rotate(node.rotation * Math.PI / 180);
+    ctx.translate(-width / 2, -height / 2);
+  }
+  applyStrokeStyle(ctx, node);
+  if (node.strokeWeights?.length === 4) {
+    const meshes = canonicalPerSideRectangleStrokeMeshes(node, width, height);
+    if (meshes) {
+      if ((node.strokeAlign ?? "inside") === "inside") {
+        ctx.save();
+        roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+        ctx.clip();
+        meshes.forEach((mesh) => fillCanonicalStrokeMesh(ctx, node, mesh, width, height));
+        ctx.restore();
+      } else meshes.forEach((mesh) => fillCanonicalStrokeMesh(ctx, node, mesh, width, height));
+    } else renderPerSideStroke(ctx, node, width, height, radius);
+    ctx.restore();
+    return;
+  }
+  const mesh = canonicalRectangleStrokeMesh(node, width, height);
+  if (mesh) {
+    fillCanonicalStrokeMesh(ctx, node, mesh, width, height);
+    ctx.restore();
+    return;
+  }
+  const strokeWidth = Math.max(1, node.strokeWidth * viewport.zoom);
+  const align = node.strokeAlign ?? "inside";
+  if (align !== "center") {
+    ctx.save();
+    ctx.beginPath();
+    if (align === "outside") {
+      const extent = Math.max(width, height, strokeWidth) * 4 + 16;
+      ctx.rect(-extent, -extent, width + extent * 2, height + extent * 2);
+      roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing, false);
+      ctx.clip("evenodd");
+    } else {
+      roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+      ctx.clip();
+    }
+    roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+    ctx.lineWidth = strokeWidth * 2;
+    strokePaintStack(ctx, node, width, height);
+    ctx.restore();
+  } else {
+    roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
+    ctx.lineWidth = strokeWidth;
+    strokePaintStack(ctx, node, width, height);
+  }
+  ctx.restore();
+}
+
+function canvasCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOperation {
+  return mode && mode !== "normal" && mode !== "pass-through" && !isLinearBlendMode(mode) ? mode : "source-over";
+}
+
+function surfaceCompositeMode(mode: CanvasNode["blendMode"]): GlobalCompositeOperation | LinearBlendMode {
+  return isLinearBlendMode(mode) ? mode : canvasCompositeMode(mode);
+}
+
+function surfaceBytes(surface: OffscreenCanvas) {
+  return surface.width * surface.height * 4;
+}
+
+function allocatedCompositeSurfaceBytes() {
+  return (effectSurfaces ? surfaceBytes(effectSurfaces.source) * 3 : 0)
+    + alphaMaskSurfaces.reduce((total, pool) => total + (pool ? surfaceBytes(pool.target) * 2 : 0), 0)
+    + subtreeCompositeSurfaces.reduce((total, pool) => total + (pool ? surfaceBytes(pool.source) * 3 : 0), 0)
+    + (canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0);
+}
+
+function admitAdditionalCompositeSurfaces(pixelWidth: number, pixelHeight: number, additionalSurfaces: number, replacingBytes = 0) {
+  if (!canvas) return { accepted: false as const, reason: "invalidDimensions" as const };
+  const admission = admitCompositeSurfaceBytes(
+    Math.max(0, allocatedCompositeSurfaceBytes() - replacingBytes),
+    pixelWidth,
+    pixelHeight,
+    additionalSurfaces,
+  );
+  if (!admission.accepted && !compositeSurfaceLimitReported) {
+    diagnostics.record({ category: "renderer", code: `COMPOSITE_SURFACE_${admission.reason.toUpperCase()}`, documentRevision: revision });
+    compositeSurfaceLimitReported = true;
+  }
+  return admission;
+}
+
+function acquireEffectSurfaces(window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">): EffectSurfaces | undefined {
   if (!canvas) return undefined;
-  if (effectSurfaces && effectSurfaces.source.width === canvas.width && effectSurfaces.source.height === canvas.height) return effectSurfaces;
-  const admission = admitEffectSurfacePool(canvas.width, canvas.height, 3);
+  if (effectSurfaces && effectSurfaces.source.width >= window.pixelWidth && effectSurfaces.source.height >= window.pixelHeight) return effectSurfaces;
+  const pixelWidth = Math.max(effectSurfaces?.source.width ?? 0, window.pixelWidth);
+  const pixelHeight = Math.max(effectSurfaces?.source.height ?? 0, window.pixelHeight);
+  const replacedBytes = effectSurfaces ? surfaceBytes(effectSurfaces.source) * 3 : 0;
+  const admission = admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, 3, replacedBytes);
   if (!admission.accepted) {
     if (!effectSurfaceLimitReported) {
       diagnostics.record({ category: "renderer", code: `EFFECT_SURFACE_${admission.reason.toUpperCase()}`, documentRevision: revision });
@@ -2758,9 +4830,9 @@ function acquireEffectSurfaces(): EffectSurfaces | undefined {
     }
     return undefined;
   }
-  const source = new OffscreenCanvas(canvas.width, canvas.height);
-  const shadow = new OffscreenCanvas(canvas.width, canvas.height);
-  const scratch = new OffscreenCanvas(canvas.width, canvas.height);
+  const source = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const shadow = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const scratch = new OffscreenCanvas(pixelWidth, pixelHeight);
   const sourceContext = source.getContext("2d");
   const shadowContext = shadow.getContext("2d");
   const scratchContext = scratch.getContext("2d");
@@ -2769,17 +4841,107 @@ function acquireEffectSurfaces(): EffectSurfaces | undefined {
   return effectSurfaces;
 }
 
+function acquireCanvasFallbackSurface(window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">): CanvasFallbackSurface | undefined {
+  if (!canvas) return undefined;
+  const existing = canvasFallbackSurface;
+  if (existing && existing.surface.width >= window.pixelWidth && existing.surface.height >= window.pixelHeight) return existing;
+  const pixelWidth = Math.max(existing?.surface.width ?? 0, window.pixelWidth);
+  const pixelHeight = Math.max(existing?.surface.height ?? 0, window.pixelHeight);
+  const replacedBytes = existing ? surfaceBytes(existing.surface) : 0;
+  if (!admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, 1, replacedBytes).accepted) return undefined;
+  try {
+    const surface = new OffscreenCanvas(pixelWidth, pixelHeight);
+    const context = surface.getContext("2d", { alpha: true });
+    if (!context) return undefined;
+    canvasFallbackSurface = { surface, context };
+    return canvasFallbackSurface;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Captures the destination window before painting the island. Rendering on
+ * this opaque backing avoids a second alpha blend for curved edges and also
+ * freezes the exact previous-islands input required by blend/background blur. */
+function prepareCanvasFallbackSurface(
+  acquired: CanvasFallbackSurface,
+  destination: OffscreenCanvasRenderingContext2D,
+  window: CompositeSurfaceWindow,
+) {
+  acquired.context.setTransform(1, 0, 0, 1, 0, 0);
+  acquired.context.clearRect(0, 0, acquired.surface.width, acquired.surface.height);
+  acquired.context.drawImage(
+    destination.canvas,
+    window.pixelX,
+    window.pixelY,
+    window.pixelWidth,
+    window.pixelHeight,
+    0,
+    0,
+    window.pixelWidth,
+    window.pixelHeight,
+  );
+  setCompositeSurfaceTransform(acquired.context, window);
+  compositeContextWindows.set(acquired.context, window);
+}
+
+function materializeCanvasIsland(
+  destination: OffscreenCanvasRenderingContext2D,
+  islandNodes: readonly CanvasNode[],
+  dragPreviewRootIds: ReadonlySet<string>,
+) {
+  const window = compositeWindowForBounds(combinedWorldCompositeBounds(islandNodes));
+  if (!window) return false;
+  const acquired = acquireCanvasFallbackSurface(window);
+  if (!acquired) return false;
+  let bitmap: ImageBitmap;
+  try {
+    prepareCanvasFallbackSurface(acquired, destination, window);
+    renderFrameClippedTree(acquired.context, islandNodes, dragPreviewRootIds);
+    bitmap = acquired.surface.transferToImageBitmap();
+  } catch {
+    return false;
+  }
+  try {
+    destination.save();
+    try {
+      destination.globalAlpha = 1;
+      destination.globalCompositeOperation = "source-over";
+      destination.drawImage(
+        bitmap,
+        0,
+        0,
+        window.pixelWidth,
+        window.pixelHeight,
+        window.x,
+        window.y,
+        window.width,
+        window.height,
+      );
+    } finally {
+      destination.restore();
+    }
+  } finally {
+    bitmap.close();
+  }
+  return true;
+}
+
 /** Builds the spread-adjusted SourceAlpha mask used by the Canvas shadow pass.
  * This is deliberately separate from `ctx.filter`: Canvas exposes blur but no
  * morphology, while Figma spread must alter alpha before blur and offset. */
-function renderSpreadAlphaMask(context: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, spread: number) {
-  context.drawImage(source, 0, 0, width, height);
-  if (!Number.isFinite(spread) || spread === 0) return;
+function renderSpreadAlphaMask(context: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, spread: number, window: CompositeSurfaceWindow) {
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.drawImage(source, 0, 0, window.pixelWidth, window.pixelHeight, 0, 0, window.pixelWidth, window.pixelHeight);
+  if (!Number.isFinite(spread) || spread === 0) {
+    setCompositeSurfaceTransform(context, window);
+    return;
+  }
   try {
-    const pixels = context.getImageData(0, 0, source.width, source.height);
-    const alpha = new Uint8ClampedArray(source.width * source.height);
+    const pixels = context.getImageData(0, 0, window.pixelWidth, window.pixelHeight);
+    const alpha = new Uint8ClampedArray(window.pixelWidth * window.pixelHeight);
     for (let index = 0; index < alpha.length; index += 1) alpha[index] = pixels.data[index * 4 + 3];
-    const morphed = morphAlphaChannel(alpha, source.width, source.height, spread);
+    const morphed = morphAlphaChannel(alpha, window.pixelWidth, window.pixelHeight, spread);
     for (let index = 0; index < morphed.length; index += 1) {
       const pixel = index * 4;
       pixels.data[pixel] = 255;
@@ -2789,23 +4951,26 @@ function renderSpreadAlphaMask(context: OffscreenCanvasRenderingContext2D, sourc
     }
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.putImageData(pixels, 0, 0);
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    setCompositeSurfaceTransform(context, window);
   } catch {
     // Tainted or resource-constrained canvas input remains on the established
     // blur-only path; the editable document is never modified for rendering.
   }
+  setCompositeSurfaceTransform(context, window);
 }
 
 /** A viewport-sized alpha buffer ends at the camera edge, which is not
  * necessarily the shape's edge. Keep simple inset shadows near their actual
  * contour so magnifying a large background cannot add a border to the view. */
-function clipInnerShadowToShape(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow: NonNullable<CanvasNode["dropShadow"]>) {
+function clipInnerShadowToShape(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, shadow: NonNullable<CanvasNode["dropShadow"]>, window: CompositeSurfaceWindow) {
   if ((!isFrameLike(node) && node.kind !== "rectangle") || node.assetId || node.cornerSmoothing || node.opacity !== 1 ||
       (hasVisibleStroke(node) && (node.strokeAlign ?? "inside") !== "inside") ||
       orderedEffects(node).some((effect) => effect.layerBlur?.visible || effect.backgroundBlur?.visible)) return false;
   const hasOpaqueFill = activeFills(node).some((paint) => paint.gradient
     ? paint.gradient.stops.length > 0 && paint.gradient.stops.every((stop) => stop.color.alpha === 1)
-    : (paint.color ?? documentColorFromCssHex(paint.css))?.alpha === 1);
+    : paint.gradientPaint
+      ? paint.gradientPaint.stops.length > 0 && paint.gradientPaint.stops.every((stop) => stop.color.alpha === 1)
+      : (paint.color ?? documentColorFromCssHex(paint.css))?.alpha === 1);
   if (!hasOpaqueFill) return false;
   const w = node.width * viewport.zoom;
   const h = node.height * viewport.zoom;
@@ -2825,7 +4990,7 @@ function clipInnerShadowToShape(ctx: OffscreenCanvasRenderingContext2D, node: Ca
   ctx.rect(0, 0, w, h);
   ctx.roundRect(inset, inset, w - inset * 2, h - inset * 2, radii ?? Math.max(0, node.radius * viewport.zoom - inset));
   ctx.clip("evenodd");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  setCompositeSurfaceTransform(ctx, window);
   return true;
 }
 
@@ -2834,7 +4999,11 @@ function clipInnerShadowToShape(ctx: OffscreenCanvasRenderingContext2D, node: Ca
  * it, and the source is finally drawn exactly once to avoid alpha darkening. */
 function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, effects: readonly NonNullable<CanvasNode["effectStack"]>[number][]) {
   if (node.visible === false || node.kind === "group" || node.kind === "slice") return;
-  const surfaces = acquireEffectSurfaces();
+  const repeatedSource = isPreparingRepeatedSource(ctx);
+  const window = effectSurfaceWindowForNode(node, ctx);
+  if (!window) return;
+  const occurrenceWindow = repeatBackgroundBlurWindow(ctx, window, effects);
+  const surfaces = acquireEffectSurfaces(compositePoolDimensionsForWindows(window, occurrenceWindow));
   if (!surfaces) {
     // A resource limit remains visible through diagnostics; preserve the R3
     // compatibility projection instead of allocating an unbounded surface.
@@ -2848,88 +5017,134 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
   let sourceContext = surfaces.sourceContext;
   let target = surfaces.shadow;
   let targetContext = surfaces.shadowContext;
-  sourceContext.save(); sourceContext.setTransform(dpr, 0, 0, dpr, 0, 0); sourceContext.clearRect(0, 0, width, height); renderNodePaint(sourceContext, node); sourceContext.restore();
+  let sourceWindow = window;
+  let materializedOccurrence = false;
+  sourceContext.save();
+  prepareCompositeSurface(sourceContext, source, window);
+  withRepeatSourcePreparation(sourceContext, repeatedSource, () => renderNodePaint(sourceContext, node));
+  sourceContext.restore();
   for (const effect of effects) {
+    const effectWindow = sourceWindow;
     targetContext.save();
-    targetContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-    targetContext.clearRect(0, 0, width, height);
+    prepareCompositeSurface(targetContext, target, effectWindow);
     if (effect.layerBlur) {
-      if (!effect.layerBlur.visible || effect.layerBlur.radius <= 0) { targetContext.drawImage(source, 0, 0, width, height); }
-      else { targetContext.filter = `blur(${effect.layerBlur.radius * viewport.zoom}px)`; targetContext.drawImage(source, 0, 0, width, height); }
+      if (!effect.layerBlur.visible || effect.layerBlur.radius <= 0) { drawCompositeSurface(targetContext, source, effectWindow); }
+      else { targetContext.filter = `blur(${effect.layerBlur.radius * viewport.zoom}px)`; drawCompositeSurface(targetContext, source, effectWindow); }
     } else if (effect.dropShadow) {
       const shadow = effect.dropShadow;
       if (shadow.visible && shadow.color.alpha > 0) {
-        renderSpreadAlphaMask(targetContext, source, shadow.spread * viewport.zoom);
+        renderSpreadAlphaMask(targetContext, source, shadow.spread * viewport.zoom * dpr, effectWindow);
         const scratch = surfaces.scratch;
         const scratchContext = surfaces.scratchContext;
+        const offset = repeatOccurrenceEffectOffset(
+          ctx,
+          shadow.offsetX * viewport.zoom,
+          shadow.offsetY * viewport.zoom,
+          materializedOccurrence,
+        );
         scratchContext.save();
-        scratchContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-        scratchContext.clearRect(0, 0, width, height);
+        prepareCompositeSurface(scratchContext, scratch, effectWindow);
         scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
-        scratchContext.drawImage(target, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
+        drawCompositeSurface(scratchContext, target, effectWindow, offset.x, offset.y);
         scratchContext.filter = "none";
         scratchContext.globalCompositeOperation = "source-in";
         scratchContext.fillStyle = colorToSrgbCss(shadow.color);
-        scratchContext.fillRect(0, 0, width, height);
+        scratchContext.fillRect(effectWindow.x, effectWindow.y, effectWindow.width, effectWindow.height);
         scratchContext.restore();
-        targetContext.clearRect(0, 0, width, height);
-        targetContext.drawImage(scratch, 0, 0, width, height);
+        prepareCompositeSurface(targetContext, target, effectWindow);
+        drawCompositeSurface(targetContext, scratch, effectWindow);
       }
       // The blurred, tinted alpha is already in `target`. Put the untouched
       // source *over* it: `destination-over` puts the source behind the
       // shadow and lets blur visible beneath the fill read as an inner shadow
       // whenever Frame clipping selects this Canvas renderer path.
       targetContext.globalCompositeOperation = "source-over";
-      targetContext.drawImage(source, 0, 0, width, height);
+      drawCompositeSurface(targetContext, source, effectWindow);
     } else if (effect.innerShadow) {
       const shadow = effect.innerShadow;
       if (shadow.visible && shadow.color.alpha > 0) {
         // An inset shadow shades the gap around an offset alpha mask. Positive
         // spread shrinks that mask, widening the inner edge in device pixels.
-        renderSpreadAlphaMask(targetContext, source, -shadow.spread * viewport.zoom * dpr);
+        renderSpreadAlphaMask(targetContext, source, -shadow.spread * viewport.zoom * dpr, effectWindow);
         const scratch = surfaces.scratch;
         const scratchContext = surfaces.scratchContext;
+        const offset = repeatOccurrenceEffectOffset(
+          ctx,
+          shadow.offsetX * viewport.zoom,
+          shadow.offsetY * viewport.zoom,
+          materializedOccurrence,
+        );
         scratchContext.save();
-        scratchContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-        scratchContext.clearRect(0, 0, width, height);
+        prepareCompositeSurface(scratchContext, scratch, effectWindow);
         scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
-        scratchContext.drawImage(target, shadow.offsetX * viewport.zoom, shadow.offsetY * viewport.zoom, width, height);
+        drawCompositeSurface(scratchContext, target, effectWindow, offset.x, offset.y);
         scratchContext.filter = "none";
         // Keep the colored complement of the shifted mask, then clip it to
         // the source. Intersecting both masks instead tints the entire opaque
         // interior (notably turning a white 1px inset into a white overlay).
         scratchContext.globalCompositeOperation = "source-out";
         scratchContext.fillStyle = colorToSrgbCss(shadow.color);
-        scratchContext.fillRect(0, 0, width, height);
+        scratchContext.fillRect(effectWindow.x, effectWindow.y, effectWindow.width, effectWindow.height);
         scratchContext.globalCompositeOperation = "destination-in";
-        scratchContext.drawImage(source, 0, 0, width, height);
+        drawCompositeSurface(scratchContext, source, effectWindow);
         scratchContext.restore();
         // The source pool normally rests at the identity transform.
         sourceContext.save();
-        sourceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const clippedToShape = clipInnerShadowToShape(sourceContext, node, shadow);
-        compositeEffectSurface(sourceContext, scratch, { width, height, dpr });
+        setCompositeSurfaceTransform(sourceContext, effectWindow);
+        const clippedToShape = clipInnerShadowToShape(sourceContext, node, shadow, effectWindow);
+        compositeEffectSurface(sourceContext, scratch, effectWindow, "source-over", 1, effectWindow, recordCanvasReadbackBytes);
         if (clippedToShape) sourceContext.restore();
         sourceContext.restore();
-        targetContext.clearRect(0, 0, width, height);
-      } else targetContext.drawImage(source, 0, 0, width, height);
+        prepareCompositeSurface(targetContext, target, effectWindow);
+      } else drawCompositeSurface(targetContext, source, effectWindow);
     }
     else if (effect.backgroundBlur) {
       const blur = effect.backgroundBlur;
-      if (blur.visible && blur.radius > 0 && renderQuality.tier === "settled") {
-        targetContext.filter = `blur(${blur.radius * viewport.zoom}px)`;
-        targetContext.drawImage(ctx.canvas, 0, 0, width, height);
-        targetContext.filter = "none";
-        targetContext.globalCompositeOperation = "destination-in";
-        targetContext.drawImage(source, 0, 0, width, height);
-        targetContext.globalCompositeOperation = "source-over";
-        targetContext.drawImage(source, 0, 0, width, height);
+      const repeatTransform = repeatScreenTransformByContext.get(ctx);
+      if (blur.visible && blur.radius > 0 && renderQuality.tier === "settled" && occurrenceWindow && repeatTransform && !materializedOccurrence) {
+        materializeRepeatPreparedSurface(
+          surfaces.scratchContext,
+          surfaces.scratch,
+          source,
+          sourceWindow,
+          occurrenceWindow,
+          repeatTransform,
+        );
+        prepareCompositeSurface(targetContext, target, occurrenceWindow);
+        drawCompositeBacking(targetContext, ctx, occurrenceWindow);
+        prepareCompositeSurface(sourceContext, source, occurrenceWindow);
+        sourceContext.filter = `blur(${blur.radius * viewport.zoom}px)`;
+        drawCompositeSurface(sourceContext, target, occurrenceWindow);
+        sourceContext.filter = "none";
+        sourceContext.globalCompositeOperation = "destination-in";
+        drawCompositeSurface(sourceContext, surfaces.scratch, occurrenceWindow);
+        sourceContext.globalCompositeOperation = "source-over";
+        drawCompositeSurface(sourceContext, surfaces.scratch, occurrenceWindow);
+        prepareCompositeSurface(targetContext, target, occurrenceWindow);
+        drawCompositeSurface(targetContext, source, occurrenceWindow);
+        sourceWindow = occurrenceWindow;
+        materializedOccurrence = true;
+      } else if (blur.visible && blur.radius > 0 && renderQuality.tier === "settled") {
+        drawCompositeBacking(targetContext, ctx, effectWindow);
+        const scratchContext = surfaces.scratchContext;
+        scratchContext.save();
+        prepareCompositeSurface(scratchContext, surfaces.scratch, effectWindow);
+        scratchContext.filter = `blur(${blur.radius * viewport.zoom}px)`;
+        drawCompositeSurface(scratchContext, target, effectWindow);
+        scratchContext.filter = "none";
+        scratchContext.globalCompositeOperation = "destination-in";
+        drawCompositeSurface(scratchContext, source, effectWindow);
+        scratchContext.globalCompositeOperation = "source-over";
+        drawCompositeSurface(scratchContext, source, effectWindow);
+        scratchContext.restore();
+        prepareCompositeSurface(targetContext, target, effectWindow);
+        drawCompositeSurface(targetContext, surfaces.scratch, effectWindow);
       } else {
         // Background blur samples the complete backing store. During a zoom or
         // pan gesture that full-surface filter is immediately obsolete and can
         // dominate the frame budget. Keep the source visible while interacting;
         // scheduleSettledRenderQuality restores the exact blur after 160 ms.
-        targetContext.drawImage(source, 0, 0, width, height);
+        drawCompositeSurface(targetContext, source, effectWindow);
       }
     }
     targetContext.restore();
@@ -2938,7 +5153,280 @@ function renderNodeWithEffects(ctx: OffscreenCanvasRenderingContext2D, node: Can
       [sourceContext, targetContext] = [targetContext, sourceContext];
     }
   }
-  compositeEffectSurface(ctx, source, { width, height, dpr }, canvasCompositeMode(node.blendMode));
+  const composited = materializedOccurrence
+    ? compositeMaterializedOccurrence(ctx, source, sourceWindow, canvasCompositeMode(node.blendMode))
+    : compositePreparedSurface(ctx, source, sourceWindow, canvasCompositeMode(node.blendMode));
+  if (!composited)
+    diagnostics.record({ category: "renderer", code: "REPEAT_BACKGROUND_BLUR_COMPOSITE_FAILED", documentRevision: revision, details: { nodeId: node.id } });
+}
+
+function acquireSubtreeCompositeSurfaces(depth: number, window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">): SubtreeCompositeSurfaces | undefined {
+  if (!canvas) return undefined;
+  const existing = subtreeCompositeSurfaces[depth];
+  if (existing && existing.source.width >= window.pixelWidth && existing.source.height >= window.pixelHeight) return existing;
+  const pixelWidth = Math.max(existing?.source.width ?? 0, window.pixelWidth);
+  const pixelHeight = Math.max(existing?.source.height ?? 0, window.pixelHeight);
+  const admission = depth >= MAX_SUBTREE_COMPOSITE_NESTING
+    ? { accepted: false as const, reason: "nesting" as const }
+    : admitSubtreeCompositeSurfacePool(pixelWidth, pixelHeight, 0);
+  if (!admission.accepted) {
+    if (!subtreeCompositeLimitReported) {
+      diagnostics.record({ category: "renderer", code: `SUBTREE_COMPOSITE_${admission.reason.toUpperCase()}_LIMIT`, documentRevision: revision });
+      subtreeCompositeLimitReported = true;
+    }
+    return undefined;
+  }
+  const replacedBytes = existing ? surfaceBytes(existing.source) * 3 : 0;
+  if (!admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, 3, replacedBytes).accepted) return undefined;
+  const source = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const shadow = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const scratch = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const sourceContext = source.getContext("2d");
+  const shadowContext = shadow.getContext("2d");
+  const scratchContext = scratch.getContext("2d");
+  if (!sourceContext || !shadowContext || !scratchContext) return undefined;
+  const acquired = { source, sourceContext, shadow, shadowContext, scratch, scratchContext };
+  subtreeCompositeSurfaces[depth] = acquired;
+  return acquired;
+}
+
+/** Applies one container's ordered presentation stack to an already rendered
+ * source subtree. Descendant effects have finished before this function runs,
+ * so the owner opacity and blend are applied exactly once at the exit edge. */
+function compositePreparedSubtree(
+  destination: OffscreenCanvasRenderingContext2D,
+  node: CanvasNode,
+  surfaces: SubtreeCompositeSurfaces,
+  window: CompositeSurfaceWindow,
+  initiallyMaterializedOccurrence = false,
+) {
+  const ownerEffects = renderQuality.tier === "interactive"
+    ? []
+    : maskAlphaPreparationContexts.has(destination)
+      ? activeMaskAlphaEffects(node)
+      : activeNodeEffects(node);
+  let source = surfaces.source;
+  let sourceContext = surfaces.sourceContext;
+  let target = surfaces.shadow;
+  let targetContext = surfaces.shadowContext;
+  let sourceWindow = window;
+  let materializedOccurrence = initiallyMaterializedOccurrence;
+  const occurrenceWindow = initiallyMaterializedOccurrence
+    ? undefined
+    : repeatBackgroundBlurWindow(destination, window, ownerEffects);
+  for (const effect of ownerEffects) {
+    const effectWindow = sourceWindow;
+    targetContext.save();
+    prepareCompositeSurface(targetContext, target, effectWindow);
+    if (effect.layerBlur) {
+      targetContext.filter = `blur(${effect.layerBlur.radius * viewport.zoom}px)`;
+      drawCompositeSurface(targetContext, source, effectWindow);
+      targetContext.filter = "none";
+    } else if (effect.dropShadow) {
+      const shadow = effect.dropShadow;
+      renderSpreadAlphaMask(targetContext, source, shadow.spread * viewport.zoom * dpr, effectWindow);
+      const scratchContext = surfaces.scratchContext;
+      const offset = repeatOccurrenceEffectOffset(
+        destination,
+        shadow.offsetX * viewport.zoom,
+        shadow.offsetY * viewport.zoom,
+        materializedOccurrence,
+      );
+      scratchContext.save();
+      prepareCompositeSurface(scratchContext, surfaces.scratch, effectWindow);
+      scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
+      drawCompositeSurface(scratchContext, target, effectWindow, offset.x, offset.y);
+      scratchContext.filter = "none";
+      scratchContext.globalCompositeOperation = "source-in";
+      scratchContext.fillStyle = colorToSrgbCss(shadow.color);
+      scratchContext.fillRect(effectWindow.x, effectWindow.y, effectWindow.width, effectWindow.height);
+      scratchContext.restore();
+      prepareCompositeSurface(targetContext, target, effectWindow);
+      drawCompositeSurface(targetContext, surfaces.scratch, effectWindow);
+      targetContext.globalCompositeOperation = "source-over";
+      drawCompositeSurface(targetContext, source, effectWindow);
+    } else if (effect.innerShadow) {
+      const shadow = effect.innerShadow;
+      renderSpreadAlphaMask(targetContext, source, -shadow.spread * viewport.zoom * dpr, effectWindow);
+      const scratchContext = surfaces.scratchContext;
+      const offset = repeatOccurrenceEffectOffset(
+        destination,
+        shadow.offsetX * viewport.zoom,
+        shadow.offsetY * viewport.zoom,
+        materializedOccurrence,
+      );
+      scratchContext.save();
+      prepareCompositeSurface(scratchContext, surfaces.scratch, effectWindow);
+      scratchContext.filter = `blur(${Math.max(0, shadow.blurRadius) * viewport.zoom}px)`;
+      drawCompositeSurface(scratchContext, target, effectWindow, offset.x, offset.y);
+      scratchContext.filter = "none";
+      scratchContext.globalCompositeOperation = "source-out";
+      scratchContext.fillStyle = colorToSrgbCss(shadow.color);
+      scratchContext.fillRect(effectWindow.x, effectWindow.y, effectWindow.width, effectWindow.height);
+      scratchContext.globalCompositeOperation = "destination-in";
+      drawCompositeSurface(scratchContext, source, effectWindow);
+      scratchContext.restore();
+      sourceContext.save();
+      setCompositeSurfaceTransform(sourceContext, effectWindow);
+      compositeEffectSurface(sourceContext, surfaces.scratch, effectWindow, "source-over", 1, effectWindow, recordCanvasReadbackBytes);
+      sourceContext.restore();
+      prepareCompositeSurface(targetContext, target, effectWindow);
+    } else if (effect.backgroundBlur) {
+      const repeatTransform = repeatScreenTransformByContext.get(destination);
+      if (occurrenceWindow && repeatTransform && !materializedOccurrence) {
+        materializeRepeatPreparedSurface(
+          surfaces.scratchContext,
+          surfaces.scratch,
+          source,
+          sourceWindow,
+          occurrenceWindow,
+          repeatTransform,
+        );
+        prepareCompositeSurface(targetContext, target, occurrenceWindow);
+        drawCompositeBacking(targetContext, destination, occurrenceWindow);
+        prepareCompositeSurface(sourceContext, source, occurrenceWindow);
+        sourceContext.filter = `blur(${effect.backgroundBlur.radius * viewport.zoom}px)`;
+        drawCompositeSurface(sourceContext, target, occurrenceWindow);
+        sourceContext.filter = "none";
+        sourceContext.globalCompositeOperation = "destination-in";
+        drawCompositeSurface(sourceContext, surfaces.scratch, occurrenceWindow);
+        sourceContext.globalCompositeOperation = "source-over";
+        drawCompositeSurface(sourceContext, surfaces.scratch, occurrenceWindow);
+        prepareCompositeSurface(targetContext, target, occurrenceWindow);
+        drawCompositeSurface(targetContext, source, occurrenceWindow);
+        sourceWindow = occurrenceWindow;
+        materializedOccurrence = true;
+      } else {
+        drawCompositeBacking(targetContext, destination, effectWindow);
+        const scratchContext = surfaces.scratchContext;
+        scratchContext.save();
+        prepareCompositeSurface(scratchContext, surfaces.scratch, effectWindow);
+        scratchContext.filter = `blur(${effect.backgroundBlur.radius * viewport.zoom}px)`;
+        drawCompositeSurface(scratchContext, target, effectWindow);
+        scratchContext.filter = "none";
+        scratchContext.globalCompositeOperation = "destination-in";
+        drawCompositeSurface(scratchContext, source, effectWindow);
+        scratchContext.globalCompositeOperation = "source-over";
+        drawCompositeSurface(scratchContext, source, effectWindow);
+        scratchContext.restore();
+        prepareCompositeSurface(targetContext, target, effectWindow);
+        drawCompositeSurface(targetContext, surfaces.scratch, effectWindow);
+      }
+    }
+    targetContext.restore();
+    if (!effect.innerShadow) {
+      [source, target] = [target, source];
+      [sourceContext, targetContext] = [targetContext, sourceContext];
+    }
+  }
+  const composited = materializedOccurrence
+    ? compositeMaterializedOccurrence(destination, source, sourceWindow, surfaceCompositeMode(node.blendMode), node.opacity)
+    : compositePreparedSurface(destination, source, sourceWindow, surfaceCompositeMode(node.blendMode), node.opacity);
+  if (!composited)
+    diagnostics.record({ category: "renderer", code: materializedOccurrence ? "REPEAT_BACKGROUND_BLUR_COMPOSITE_FAILED" : "LINEAR_BLEND_READBACK_FAILED", documentRevision: revision, details: { nodeId: node.id } });
+}
+
+type PreparedCanvasTextGlyph = Readonly<{
+  surface: OffscreenCanvas;
+  pose: NonNullable<ReturnType<typeof canvasTextGlyphPose>>;
+}>;
+
+function canvasTextGlyphSurfaceKey(glyph: WebGpuTextGlyph) {
+  return JSON.stringify([glyph.textureKey, glyph.fill]);
+}
+
+/**
+ * Resolves every surface before drawing so a failed color/resource/budget
+ * check falls back for the whole TextPath instead of publishing half a word.
+ * Map insertion order is the LRU; resources needed by this node are protected
+ * while unrelated older entries are evicted.
+ */
+function prepareCanvasTextGlyphs(glyphs: readonly WebGpuTextGlyph[]): PreparedCanvasTextGlyph[] | undefined {
+  const requiredKeys = new Set(glyphs.map(canvasTextGlyphSurfaceKey));
+  const poses = glyphs.map((glyph) => canvasTextGlyphPose(glyph));
+  if (poses.some((pose) => !pose)) return undefined;
+  const missing = new Map<string, WebGpuTextGlyph>();
+  glyphs.forEach((glyph) => {
+    const key = canvasTextGlyphSurfaceKey(glyph);
+    const cached = canvasTextGlyphSurfaces.get(key);
+    if (cached?.surface.width === glyph.maskWidth && cached.surface.height === glyph.maskHeight) return;
+    if (cached) {
+      canvasTextGlyphSurfaces.delete(key);
+      canvasTextGlyphSurfaceBytes -= cached.bytes;
+    }
+    missing.set(key, glyph);
+  });
+  const missingBytes = [...missing.values()].reduce((total, glyph) => {
+    const bytes = canvasTextGlyphSurfaceByteLength(glyph);
+    return bytes === undefined ? Number.POSITIVE_INFINITY : total + bytes;
+  }, 0);
+  while (canvasTextGlyphSurfaceBytes + missingBytes > MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES) {
+    const oldest = [...canvasTextGlyphSurfaces].find(([key]) => !requiredKeys.has(key));
+    if (!oldest) {
+      if (!canvasTextGlyphLimitReported) {
+        canvasTextGlyphLimitReported = true;
+        diagnostics.record({
+          category: "renderer",
+          code: "CANVAS_TEXT_GLYPH_CACHE_LIMIT",
+          documentRevision: revision,
+          details: {
+            residentBytes: canvasTextGlyphSurfaceBytes,
+            requiredBytes: missingBytes,
+            limitBytes: MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES,
+          },
+        });
+      }
+      return undefined;
+    }
+    canvasTextGlyphSurfaces.delete(oldest[0]);
+    canvasTextGlyphSurfaceBytes -= oldest[1].bytes;
+  }
+  for (const [key, glyph] of missing) {
+    const bitmap = canvasTextGlyphBitmap(glyph);
+    if (!bitmap) return undefined;
+    const surface = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = surface.getContext("2d");
+    if (!context) return undefined;
+    const image = context.createImageData(bitmap.width, bitmap.height);
+    image.data.set(bitmap.rgba);
+    context.putImageData(image, 0, 0);
+    const bytes = bitmap.rgba.byteLength;
+    canvasTextGlyphSurfaces.set(key, { surface, bytes });
+    canvasTextGlyphSurfaceBytes += bytes;
+  }
+  const prepared = glyphs.map((glyph, index) => {
+    const key = canvasTextGlyphSurfaceKey(glyph);
+    const cached = canvasTextGlyphSurfaces.get(key);
+    if (!cached) return undefined;
+    canvasTextGlyphSurfaces.delete(key);
+    canvasTextGlyphSurfaces.set(key, cached);
+    return { surface: cached.surface, pose: poses[index]! };
+  });
+  if (prepared.some((item) => !item)) return undefined;
+  canvasTextGlyphLimitReported = false;
+  return prepared as PreparedCanvasTextGlyph[];
+}
+
+function renderShapedCanvasTextPath(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  const cached = rustTextGlyphs.get(node.id);
+  if (!cached || cached.revision !== revision) return false;
+  const prepared = prepareCanvasTextGlyphs(cached.canvasGlyphs ?? cached.glyphs);
+  if (!prepared) return false;
+  prepared.forEach(({ surface, pose }) => {
+    ctx.save();
+    ctx.translate(pose.centerX * viewport.zoom, pose.centerY * viewport.zoom);
+    ctx.rotate(pose.rotationRadians);
+    ctx.globalAlpha = pose.opacity;
+    ctx.drawImage(
+      surface,
+      -pose.width * viewport.zoom / 2,
+      -pose.height * viewport.zoom / 2,
+      pose.width * viewport.zoom,
+      pose.height * viewport.zoom,
+    );
+    ctx.restore();
+  });
+  return true;
 }
 
 /** Renders one node's source paint, optionally through the legacy/single
@@ -2962,7 +5450,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     }
     applyDropShadow(ctx, shadow);
     applyStrokeStyle(ctx, node);
-    const connectorPath = node.kind === "connector" ? connectorPathForNode(node) : undefined;
+    const connectorPath = node.kind === "connector" ? connectorPathForNode(node, { nodes, defaultPageId, nodeById, worldTransformByNodeId: worldTransformById }) : undefined;
     if (connectorPath) {
       const strokeWidth = Math.max(1, node.strokeWidth * viewport.zoom);
       ctx.lineWidth = strokeWidth;
@@ -2971,12 +5459,8 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
         : "butt";
       ctx.beginPath();
       traceConnectorPath(ctx, connectorPath, viewport.zoom);
-      activeStrokes(node).forEach((layer) => {
-        ctx.strokeStyle = paintStackStyle(ctx, layer, Math.max(w, 1), Math.max(h, 1));
-        ctx.stroke();
-        ctx.fillStyle = ctx.strokeStyle;
-        renderConnectorEndpointDecorations(ctx, node, connectorPath, node.strokeWidth * viewport.zoom, viewport.zoom);
-      });
+      strokePaintStack(ctx, node, Math.max(w, 1), Math.max(h, 1));
+      renderConnectorEndpointDecorations(ctx, node, connectorPath, viewport.zoom, Math.max(w, 1), Math.max(h, 1));
       renderConnectorLabel(ctx, node, connectorPath);
       ctx.restore();
       return;
@@ -2991,18 +5475,13 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       // independent start/end Cap semantics without alpha-darkening overlap.
       if (!node.strokeDashPattern?.length) {
         const outline = solidLineStrokeOutline(w, strokeWidth, node.strokeCapStart, node.strokeCapEnd);
-        activeStrokes(node).forEach((layer) => {
-          ctx.beginPath();
-          outline.forEach((piece) => {
-            if (piece.kind === "rect") ctx.rect(piece.x, piece.y, piece.width, piece.height);
-            else ctx.arc(piece.x, piece.y, piece.radius, 0, Math.PI * 2);
-          });
-          ctx.fillStyle = paintStackStyle(ctx, layer, w, 1);
-          ctx.fill();
-          ctx.strokeStyle = ctx.fillStyle;
-          renderLineEndpoint(ctx, node.strokeCapStart, 0, -1, strokeWidth);
-          renderLineEndpoint(ctx, node.strokeCapEnd, w, 1, strokeWidth);
+        ctx.beginPath();
+        outline.forEach((piece) => {
+          if (piece.kind === "rect") ctx.rect(piece.x, piece.y, piece.width, piece.height);
+          else ctx.arc(piece.x, piece.y, piece.radius, 0, Math.PI * 2);
         });
+        fillStrokePaintStack(ctx, node, w, 1);
+        renderLineEndpointPaintStack(ctx, node, w, strokeWidth);
       } else {
         // Canvas has a single lineCap property. For a dashed Line with
         // asymmetric caps, Butt is the conservative fallback rather than
@@ -3014,13 +5493,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
         ctx.moveTo(0, 0);
         ctx.lineTo(w, 0);
         strokePaintStack(ctx, node, w, 1);
-        activeStrokes(node).forEach((layer) => {
-          const style = paintStackStyle(ctx, layer, w, 1);
-          ctx.strokeStyle = style;
-          ctx.fillStyle = style;
-          renderLineEndpoint(ctx, node.strokeCapStart, 0, -1, strokeWidth);
-          renderLineEndpoint(ctx, node.strokeCapEnd, w, 1, strokeWidth);
-        });
+        renderLineEndpointPaintStack(ctx, node, w, strokeWidth);
       }
     }
     ctx.restore();
@@ -3035,7 +5508,8 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   }
   applyDropShadow(ctx, shadow);
   applyStrokeStyle(ctx, node);
-  const paint = fillStyle(ctx, node, w, h);
+  const fallbackPaint = activeFills(node)[0];
+  const paint = fallbackPaint ? paintStackStyle(ctx, fallbackPaint, w, h) : "transparent";
   if (node.assetId) {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, 0);
     const alignedEllipse = node.kind === "ellipse" && !node.arcData;
@@ -3052,7 +5526,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     // conventional Canvas stroke to the image mask.
     if (alignedEllipse && align === "outside" && ring) {
       ctx.beginPath(); ctx.ellipse(w / 2, h / 2, ring.outerRx, ring.outerRy, 0, 0, Math.PI * 2);
-      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+      fillStrokePaintStack(ctx, node, w, h);
     }
     ctx.save();
     if (node.kind === "ellipse") {
@@ -3091,7 +5565,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       if (align === "inside" && ring) {
         ctx.beginPath(); ctx.ellipse(w / 2, h / 2, ring.outerRx, ring.outerRy, 0, 0, Math.PI * 2);
         if (ring.innerRx !== undefined && ring.innerRy !== undefined) ctx.ellipse(w / 2, h / 2, ring.innerRx, ring.innerRy, 0, 0, Math.PI * 2);
-        activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill("evenodd"); });
+        fillStrokePaintStack(ctx, node, w, h, "evenodd");
       } else if (alignedEllipse && align === "outside") {
         // Already painted behind the image mask above.
       } else {
@@ -3122,7 +5596,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     // bounded source for bounds, hit testing, Boolean and outline operations.
     traceVectorPath(ctx, node.vectorPath, viewport.zoom);
     const fillRule = node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero";
-    activeFills(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(fillRule); });
+    fillPaintStack(ctx, node, w, h, fillRule);
     if (hasVisibleStroke(node)) {
       const mesh = canonicalVectorStrokeMesh(node);
       if (mesh) fillScaledCanonicalStrokeMesh(ctx, node, mesh, w, h, viewport.zoom);
@@ -3143,7 +5617,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     if (hasVisibleStroke(node) && align === "outside") {
       const outset = node.strokeWidth * viewport.zoom;
       ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2 + outset, h / 2 + outset, 0, 0, Math.PI * 2);
-      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+      fillStrokePaintStack(ctx, node, w, h);
       ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
       fillPaintStack(ctx, node, w, h);
     } else if (hasVisibleStroke(node) && align === "center") {
@@ -3151,7 +5625,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
       strokePaintStack(ctx, node, w, h);
     } else if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
-      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+      fillStrokePaintStack(ctx, node, w, h);
       if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
         ctx.beginPath(); ctx.ellipse(w / 2, h / 2, geometry.innerWidth / 2, geometry.innerHeight / 2, 0, 0, Math.PI * 2);
         fillPaintStack(ctx, node, w, h);
@@ -3179,7 +5653,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     const fallbackFonts = node.textProperties?.fallbackFonts;
     const baseMetrics = resolveTextRenderMetrics(node.width, node.height, viewport.zoom);
     const fontSize = (primaryStyle?.fontSize ?? 31) * viewport.zoom;
-    const lineHeight = (node.textProperties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
+    const lineHeight = resolvedTextLineHeight(node.textProperties, 31) * viewport.zoom;
     const textMetrics = { ...baseMetrics, fontSize, lineHeight };
     const source = node.text ?? "Text";
     const sourceBytes = new TextEncoder().encode(source);
@@ -3190,44 +5664,124 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       italic: primaryStyle.italic,
       letterSpacing: primaryStyle.letterSpacing,
       color: primaryStyle.color,
+      fillStack: primaryStyle.fillStack,
+      textCase: primaryStyle.textCase,
+      textDecoration: primaryStyle.textDecoration,
+      textDecorationStyle: primaryStyle.textDecorationStyle,
+      textDecorationOffset: primaryStyle.textDecorationOffset,
+      textDecorationThickness: primaryStyle.textDecorationThickness,
+      textDecorationColor: primaryStyle.textDecorationColor,
+      textDecorationSkipInk: primaryStyle.textDecorationSkipInk,
+      leadingTrim: primaryStyle.leadingTrim,
     } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
     ctx.fillStyle = paint;
     applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
+    const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, (value) => ctx.measureText(value).width);
+    const listMarkerGap = listMarkerGutter > 0 ? Math.max(0, ctx.measureText(" ").width) : 0;
     // CSS line boxes center the font's bounding ascent/descent inside the
     // declared line-height. Canvas' `middle` baseline uses a different em-box
     // convention, which was visibly a few pixels above the textarea glyphs.
     // Draw against an explicit alphabetic baseline instead.
     ctx.textBaseline = "alphabetic";
     ctx.save();
-    ctx.beginPath(); ctx.rect(0, 0, textMetrics.width, textMetrics.height); ctx.clip();
-    let lineY = 0;
-    let previousEnd = 0;
+    const hangingMarkerClip = node.textProperties?.paragraph.hangingList ? listMarkerGutter : 0;
+    const hangingPunctuationClip = node.textProperties?.paragraph.hangingPunctuation ? fontSize : 0;
+    ctx.beginPath();
+    ctx.rect(-hangingMarkerClip - hangingPunctuationClip, 0, textMetrics.width + hangingMarkerClip + hangingPunctuationClip * 2, textMetrics.height);
+    ctx.clip();
     const shapedLayout = rustTextLayoutFor(node);
     const lines = shapedLayout
       ? shapedLayout.lines.map((line) => ({ ...line, text: new TextDecoder().decode(sourceBytes.slice(line.start, line.end)) }))
-      : layoutTextRanges({ text: source, maxWidth: Math.max(1, textMetrics.width), measure: (value) => ctx.measureText(value).width });
-    lines.forEach((line) => {
-      const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
-      if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) lineY += (node.textProperties?.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
-      const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
-      const lineHeight = (node.textProperties?.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
+      : layoutTextRanges({
+        text: source,
+        maxWidth: Math.max(1, textMetrics.width),
+        firstLineIndent: (_index, start) => textParagraphIndentAt(node.textProperties, start) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, start),
+        paragraphIndent: (_index, start) => textListIndentationOffset(source, node.textProperties, start, listMarkerGutter),
+        wrapStyle: (_index, start) => textParagraphWrapStyleAt(node.textProperties, start),
+        hangingPunctuation: node.textProperties?.paragraph.hangingPunctuation ?? false,
+        measure: (value) => ctx.measureText(value).width,
+        measureRange: (start, end) => measureStyledTextRange(ctx, source, start, end, node.textProperties, primaryRenderStyle, fallbackFonts),
+      });
+    const displayLines = textDisplayLines(
+      source,
+      lines,
+      node.textProperties,
+      textMetrics.height,
+      (paragraphStart) => resolvedTextLineHeightAt(node.textProperties, paragraphStart, 31) * viewport.zoom,
+      (previousStart, nextStart) => textParagraphGap(node.textProperties, previousStart, nextStart) * viewport.zoom,
+    );
+    let previousLineEnd = 0;
+    let paragraphIndex = 0;
+    displayLines.forEach((line, lineIndex) => {
+      const skippedBeforeLine = new TextDecoder().decode(sourceBytes.slice(previousLineEnd, line.start));
+      const isParagraphFirstLine = textLineStartsParagraph(lineIndex, skippedBeforeLine);
+      if (lineIndex > 0 && isParagraphFirstLine) paragraphIndex += 1;
+      const paragraphStart = textParagraphStartAtOffset(source, line.start);
+      const listType = textParagraphListTypeAt(node.textProperties, paragraphStart);
+      const nestingIndent = textListIndentationOffset(source, node.textProperties, line.start, listMarkerGutter);
+      const lineIndent = nestingIndent + (isParagraphFirstLine
+        ? textParagraphIndentAt(node.textProperties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
+        : 0);
+      const lineBoxWidth = Math.max(0, textMetrics.width - lineIndent);
+      applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
+      const truncated = line.truncateEnding
+        ? endingEllipsis(
+            line.text,
+            lineBoxWidth,
+            (value) => ctx.measureText(value).width,
+            (_retained, retainedUtf8Bytes) => measureStyledTextRange(
+              ctx,
+              source,
+              line.start,
+              line.start + retainedUtf8Bytes,
+              node.textProperties,
+              primaryRenderStyle,
+              fallbackFonts,
+            ) + measureStyledEllipsis(ctx, source, line.start, retainedUtf8Bytes, node.textProperties, primaryRenderStyle, fallbackFonts),
+          )
+        : undefined;
+      const displayEnd = truncated ? line.start + truncated.retainedUtf8Bytes : line.end;
+      const spans = styledTextSpans(source, line.start, displayEnd, node.textProperties);
+      if (truncated?.text) {
+        spans.push({
+          text: "…",
+          start: displayEnd,
+          end: displayEnd,
+          style: spans.at(-1)?.style ?? primaryRenderStyle,
+        });
+      }
+      const displayText = truncated?.text ?? line.text;
+      const lineY = line.lineTop;
       if (lineY < textMetrics.height) {
         // A CSS line has one shared alphabetic baseline. Measuring each style
         // run separately made a larger CJK/emoji run jump a few pixels from
         // the Latin run when the DOM editor opened.
         applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
-        const lineBaseline = cssLineBoxBaseline(ctx, lineY, lineHeight);
+        const lineBaseline = textLineBox(ctx, lineY, line.lineHeight, primaryRenderStyle.leadingTrim).baseline;
         ctx.direction = line.direction;
         const alignment = node.textProperties?.paragraph.alignment ?? "left";
         if (spans.length <= 1) {
           const style = spans[0]?.style ?? primaryRenderStyle;
           applyCanvasTextStyle(ctx, style, fallbackFonts);
-          ctx.fillStyle = style.color ? colorToSrgbCss(style.color) : paint;
-          ctx.textAlign = alignment === "center" ? "center" : alignment === "right" || line.direction === "rtl" ? "right" : "left";
-          const x = alignment === "center" ? textMetrics.width / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width : 0;
-          ctx.fillText(line.text, x, lineBaseline);
+          const spanText = spans[0]?.text ?? displayText;
+          const lineWidth = ctx.measureText(spanText).width;
+          const hanging = node.textProperties?.paragraph.hangingPunctuation
+            ? textHangingPunctuationOffsets(spanText, line.direction, (value) => ctx.measureText(value).width)
+            : { left: 0, right: 0 };
+          const contentStart = textAlignedLineLeft(lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+          if (listType && isParagraphFirstLine) {
+            ctx.direction = "ltr";
+            ctx.textAlign = "right";
+            paintTextSpan(ctx, node, style, textListMarker(listType, paragraphIndex), contentStart - listMarkerGap, lineBaseline, w, h, activeFillLayers(node));
+            ctx.direction = line.direction;
+            ctx.textAlign = "left";
+            paintTextSpan(ctx, node, style, spanText, contentStart, lineBaseline, w, h, activeFillLayers(node));
+          } else {
+            ctx.textAlign = "left";
+            paintTextSpan(ctx, node, style, spanText, contentStart, lineBaseline, w, h, activeFillLayers(node));
+          }
         } else {
-          const shapedVisualRuns = "visualRuns" in line && Array.isArray(line.visualRuns)
+          const shapedVisualRuns = !truncated && "visualRuns" in line && Array.isArray(line.visualRuns)
             ? line.visualRuns as RustTextVisualRun[]
             : undefined;
           const visualSpans = shapedVisualRuns
@@ -3244,37 +5798,64 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
             return ctx.measureText(span.text).width;
           });
           const lineWidth = measured.reduce((sum, width) => sum + width, 0);
-          let x = alignment === "center" ? (textMetrics.width - lineWidth) / 2 : alignment === "right" || line.direction === "rtl" ? textMetrics.width - lineWidth : 0;
+          applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
+          const hanging = node.textProperties?.paragraph.hangingPunctuation
+            ? textHangingPunctuationOffsets(displayText, line.direction, (value) => ctx.measureText(value).width)
+            : { left: 0, right: 0 };
+          let x = textAlignedLineLeft(lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+          if (listType && isParagraphFirstLine) {
+            applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryRenderStyle, fallbackFonts);
+            ctx.direction = "ltr";
+            ctx.textAlign = "right";
+            paintTextSpan(ctx, node, spans[0]?.style ?? primaryRenderStyle, textListMarker(listType, paragraphIndex), x - listMarkerGap, lineBaseline, w, h, activeFillLayers(node));
+            ctx.textAlign = "left";
+          }
           drawableSpans.forEach((span, index) => {
             applyCanvasTextStyle(ctx, span.style, fallbackFonts);
             ctx.direction = span.direction;
-            ctx.fillStyle = span.style.color ? colorToSrgbCss(span.style.color) : paint;
-            ctx.fillText(span.text, x, lineBaseline);
+            paintTextSpan(ctx, node, span.style, span.text, x, lineBaseline, w, h, activeFillLayers(node));
             x += measured[index];
           });
         }
       }
-      lineY += lineHeight;
-      previousEnd = line.end;
+      previousLineEnd = line.end;
     });
     ctx.restore();
   } else if (node.kind === "textPath") {
-    const fontSize = (node.textProperties?.runs[0]?.fontSize ?? 14) * viewport.zoom;
-    const glyphs = layoutTextPath(node, Math.max(1, (node.textProperties?.runs[0]?.fontSize ?? 14) * .6));
-    if (glyphs) {
-      ctx.save();
-      ctx.fillStyle = paint;
-      ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      glyphs.forEach((glyph) => {
+    if (!renderShapedCanvasTextPath(ctx, node)) {
+      const fontSize = (node.textProperties?.runs[0]?.fontSize ?? 14) * viewport.zoom;
+      const glyphs = layoutTextPath(node, Math.max(1, (node.textProperties?.runs[0]?.fontSize ?? 14) * .6));
+      if (glyphs) {
         ctx.save();
-        ctx.translate(glyph.x * viewport.zoom, glyph.y * viewport.zoom);
-        ctx.rotate(glyph.angle);
-        ctx.fillText(glyph.text, 0, 0);
+        ctx.fillStyle = paint;
+        ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        glyphs.forEach((glyph) => {
+          ctx.save();
+          ctx.translate(glyph.x * viewport.zoom, glyph.y * viewport.zoom);
+          ctx.rotate(glyph.angle);
+          ctx.fillText(glyph.text, 0, 0);
+          const style: RenderTextStyle = {
+            fontSize: node.textProperties?.runs[0]?.fontSize ?? 14,
+            fontWeight: node.textProperties?.runs[0]?.fontWeight ?? 400,
+            italic: node.textProperties?.runs[0]?.italic ?? false,
+            letterSpacing: node.textProperties?.runs[0]?.letterSpacing ?? 0,
+            textDecoration: node.textProperties?.runs[0]?.textDecoration,
+            textDecorationStyle: node.textProperties?.runs[0]?.textDecorationStyle,
+            textDecorationOffset: node.textProperties?.runs[0]?.textDecorationOffset,
+            textDecorationThickness: node.textProperties?.runs[0]?.textDecorationThickness,
+            textDecorationColor: node.textProperties?.runs[0]?.textDecorationColor,
+          };
+          if (style.textDecorationColor) {
+            paintTextDecorationLayers(ctx, node, style, glyph.text, 0, 0, fontSize, fontSize, []);
+          } else {
+            paintBasicTextDecoration(ctx, style, glyph.text, 0, 0);
+          }
+          ctx.restore();
+        });
         ctx.restore();
-      });
-      ctx.restore();
+      }
     }
   } else {
     const geometry = resolveInsideRoundedRect(w, h, node.radius * viewport.zoom, node.strokeWidth * viewport.zoom);
@@ -3289,10 +5870,16 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       // path plus fill forces expensive full-surface path rasterization for
       // every nested background; fillRect maps to the browser's optimized
       // rectangular paint and is pixel-identical for this geometry.
-      activeFills(node).forEach((layer) => {
-        ctx.fillStyle = paintStackStyle(ctx, layer, w, h);
-        ctx.fillRect(0, 0, w, h);
-      });
+      if (node.fillStack) {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        fillPaintStack(ctx, node, w, h);
+      } else {
+        activeFills(node).forEach((layer) => {
+          ctx.fillStyle = paintStackStyle(ctx, layer, w, h);
+          ctx.fillRect(0, 0, w, h);
+        });
+      }
     } else if (node.kind === "shapeWithText" && traceShapeWithTextPath(ctx, node.shapeWithTextType, w, h)) {
       fillPaintStack(ctx, node, w, h);
       if (hasVisibleStroke(node)) {
@@ -3324,7 +5911,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
         renderAlignedShapeStroke(ctx, node, w, h, geometry.outerRadius);
       } else if (geometry.insideStrokeWidth > 0) {
         roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
-        activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+        fillStrokePaintStack(ctx, node, w, h);
         if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
           roundedRectPath(ctx, geometry.innerX, geometry.innerY, geometry.innerWidth, geometry.innerHeight, geometry.innerRadius, insetCornerRadii(w, h, geometry.outerRadius, node.cornerRadii, geometry.insideStrokeWidth), node.cornerSmoothing);
           fillPaintStack(ctx, node, w, h);
@@ -3332,7 +5919,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       }
     } else if (hasVisibleStroke(node) && geometry.insideStrokeWidth > 0) {
       roundedRectPath(ctx, 0, 0, w, h, geometry.outerRadius, node.cornerRadii, node.cornerSmoothing);
-      activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, w, h); ctx.fill(); });
+      fillStrokePaintStack(ctx, node, w, h);
       if (geometry.innerWidth > 0 && geometry.innerHeight > 0) {
         roundedRectPath(ctx, geometry.innerX, geometry.innerY, geometry.innerWidth, geometry.innerHeight, geometry.innerRadius, insetCornerRadii(w, h, geometry.outerRadius, node.cornerRadii, geometry.insideStrokeWidth), node.cornerSmoothing);
         fillPaintStack(ctx, node, w, h);
@@ -3350,13 +5937,17 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
  * usable without dereferencing a remote provider.  The shared scene compiler
  * separately records a diagnostic whenever the live behavior is unavailable. */
 function renderSpecialNodeOverlay(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  if (node.kind === "shapeWithText") {
+    renderShapeWithTextSublayer(ctx, node, width, height);
+    return;
+  }
   const fallback = specialNodeFallback(node, "canvas");
   const label = node.kind === "media" ? "▶ Media"
     : node.kind === "embed" ? (node.embedMetadata?.title || node.embedMetadata?.provider || "Embed preview")
       : node.kind === "linkUnfurl" ? (node.linkUnfurlMetadata?.title || node.linkUnfurlMetadata?.provider || "Link preview")
         : node.kind === "interactiveSlideElement" ? `${node.interactiveSlideElementType ?? "Slide"} interaction`
           : node.kind === "textPath" && specialNodeFallback(node, "canvas") ? node.text
-            : node.kind === "shapeWithText" || node.kind === "sticky" || node.kind === "tableCell" ? node.text
+            : node.kind === "sticky" || node.kind === "tableCell" ? node.text
               : undefined;
   if (!label && node.kind !== "table") return;
   ctx.save();
@@ -3377,6 +5968,141 @@ function renderSpecialNodeOverlay(ctx: OffscreenCanvasRenderingContext2D, node: 
     ctx.fillStyle = node.kind === "media" ? "rgba(248,250,252,.72)" : "rgba(71,85,105,.72)";
     ctx.font = `${11 * viewport.zoom}px ui-sans-serif, system-ui, sans-serif`;
     ctx.fillText("Static preview", 10 * viewport.zoom, Math.max(28 * viewport.zoom, height - 24 * viewport.zoom));
+  }
+  ctx.restore();
+}
+
+/** Paints ShapeWithText's live TextSublayer from the same Canonical UTF-8 run
+ * records used by ordinary Text. Shape geometry remains owned by the special
+ * node path above; only the inset text box is clipped here. */
+function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  const source = node.text ?? "";
+  if (!source) return;
+  const inset = 10 * viewport.zoom;
+  const availableWidth = Math.max(1, width - inset * 2);
+  const availableHeight = Math.max(1, height - inset * 2);
+  const primary = node.textProperties?.runs[0];
+  const primaryStyle: RenderTextStyle = primary ? {
+    font: primary.font,
+    fontSize: primary.fontSize,
+    fontWeight: primary.fontWeight,
+    italic: primary.italic,
+    letterSpacing: primary.letterSpacing,
+    color: primary.color,
+    fillStack: primary.fillStack,
+    textCase: primary.textCase,
+    textDecoration: primary.textDecoration,
+    textDecorationStyle: primary.textDecorationStyle,
+    textDecorationOffset: primary.textDecorationOffset,
+    textDecorationThickness: primary.textDecorationThickness,
+    textDecorationColor: primary.textDecorationColor,
+    textDecorationSkipInk: primary.textDecorationSkipInk,
+    leadingTrim: primary.leadingTrim,
+  } : { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 };
+  const fallbackFonts = node.textProperties?.fallbackFonts;
+  const lineHeight = resolvedTextLineHeight(node.textProperties, 14, 20) * viewport.zoom;
+  const alignment = node.textProperties?.paragraph.alignment ?? "center";
+  const sourceBytes = new TextEncoder().encode(source);
+
+  ctx.save();
+  applyCanvasTextStyle(ctx, primaryStyle, fallbackFonts);
+  const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, (value) => ctx.measureText(value).width);
+  const listMarkerGap = listMarkerGutter > 0 ? Math.max(0, ctx.measureText(" ").width) : 0;
+  ctx.beginPath();
+  const hangingMarkerClip = node.textProperties?.paragraph.hangingList && listMarkerGutter > 0
+    ? listMarkerGutter
+    : 0;
+  const hangingPunctuationClip = node.textProperties?.paragraph.hangingPunctuation ? primaryStyle.fontSize * viewport.zoom : 0;
+  ctx.rect(inset - hangingMarkerClip - hangingPunctuationClip, inset, availableWidth + hangingMarkerClip + hangingPunctuationClip * 2, availableHeight);
+  ctx.clip();
+  ctx.textBaseline = "alphabetic";
+  const lines = layoutTextRanges({
+    text: source,
+    maxWidth: availableWidth,
+    firstLineIndent: (_index, start) => textParagraphIndentAt(node.textProperties, start) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, start),
+    paragraphIndent: (_index, start) => textListIndentationOffset(source, node.textProperties, start, listMarkerGutter),
+    wrapStyle: (_index, start) => textParagraphWrapStyleAt(node.textProperties, start),
+    hangingPunctuation: node.textProperties?.paragraph.hangingPunctuation ?? false,
+    measure: (value) => ctx.measureText(value).width,
+    measureRange: (start, end) => measureStyledTextRange(ctx, source, start, end, node.textProperties, primaryStyle, fallbackFonts),
+  });
+  let paragraphGapTotal = 0;
+  let previousEnd = 0;
+  let previousParagraphStart = 0;
+  for (const line of lines) {
+    const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) {
+      const paragraphStart = textParagraphStartAtOffset(source, line.start);
+      paragraphGapTotal += textParagraphGap(node.textProperties, previousParagraphStart, paragraphStart) * viewport.zoom;
+      previousParagraphStart = paragraphStart;
+    }
+    previousEnd = line.end;
+  }
+  const lineHeights = lines.map((line) => resolvedTextLineHeightAt(
+    node.textProperties,
+    textParagraphStartAtOffset(source, line.start),
+    14,
+    20,
+  ) * viewport.zoom);
+  const firstLineBox = textLineBox(ctx, 0, lineHeights[0] ?? lineHeight, primaryStyle.leadingTrim);
+  const lastLineBox = textLineBox(ctx, 0, lineHeights.at(-1) ?? lineHeight, primaryStyle.leadingTrim);
+  const logicalHeight = Math.max(0, lineHeights.reduce((sum, value) => sum + value, 0) + paragraphGapTotal - firstLineBox.trimStart - lastLineBox.trimEnd);
+  let lineTop = inset + Math.max(0, (availableHeight - logicalHeight) / 2);
+  previousEnd = 0;
+  previousParagraphStart = 0;
+  let paragraphIndex = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
+    const isParagraphFirstLine = textLineStartsParagraph(lineIndex, skipped);
+    const paragraphStart = textParagraphStartAtOffset(source, line.start);
+    if (lineIndex > 0 && isParagraphFirstLine) {
+      lineTop += textParagraphGap(node.textProperties, previousParagraphStart, paragraphStart) * viewport.zoom;
+      previousParagraphStart = paragraphStart;
+    }
+    if (lineIndex > 0 && isParagraphFirstLine) paragraphIndex += 1;
+    const listType = textParagraphListTypeAt(node.textProperties, paragraphStart);
+    const spans = styledTextSpans(source, line.start, line.end, node.textProperties);
+    const measured = spans.map((span) => {
+      applyCanvasTextStyle(ctx, span.style, fallbackFonts);
+      return ctx.measureText(span.text).width;
+    });
+    const lineWidth = measured.reduce((sum, value) => sum + value, 0);
+    const nestingIndent = textListIndentationOffset(source, node.textProperties, line.start, listMarkerGutter);
+    const lineIndent = nestingIndent + (isParagraphFirstLine
+      ? textParagraphIndentAt(node.textProperties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
+      : 0);
+    const lineBoxWidth = Math.max(0, availableWidth - lineIndent);
+    applyCanvasTextStyle(ctx, primaryStyle, fallbackFonts);
+    const hanging = node.textProperties?.paragraph.hangingPunctuation
+      ? textHangingPunctuationOffsets(line.text, line.direction, (value) => ctx.measureText(value).width)
+      : { left: 0, right: 0 };
+    let x = textAlignedLineLeft(inset + lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+    const effectiveLineHeight = lineHeights[lineIndex] ?? lineHeight;
+    const baseline = textLineBox(ctx, lineTop, effectiveLineHeight, primaryStyle.leadingTrim).baseline;
+    if (listType && isParagraphFirstLine) {
+      applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle, fallbackFonts);
+      ctx.direction = "ltr";
+      ctx.textAlign = "right";
+      paintTextSpan(ctx, node, spans[0]?.style ?? primaryStyle, textListMarker(listType, paragraphIndex), x - listMarkerGap, baseline, width, height, [{
+        visible: true,
+        opacity: 1,
+        blendMode: "normal",
+        paint: { css: "#1f2937" },
+      }]);
+    }
+    for (const [index, span] of spans.entries()) {
+      applyCanvasTextStyle(ctx, span.style, fallbackFonts);
+      ctx.textAlign = "left";
+      paintTextSpan(ctx, node, span.style, span.text, x, baseline, width, height, [{
+        visible: true,
+        opacity: 1,
+        blendMode: "normal",
+        paint: { css: "#1f2937" },
+      }]);
+      x += measured[index] ?? 0;
+    }
+    lineTop += effectiveLineHeight;
+    previousEnd = line.end;
   }
   ctx.restore();
 }
@@ -3418,6 +6144,7 @@ function renderFrameClippedTree(
   orderedNodes: readonly CanvasNode[],
   dragPreviewRootIds: ReadonlySet<string> = new Set(),
   reportProgress?: (completed: number, total: number) => void,
+  alreadyRenderedNodeIds: ReadonlySet<string> = new Set(),
 ) {
   let paintedNodes = 0;
   const ids = new Set(orderedNodes.map((node) => node.id));
@@ -3433,6 +6160,8 @@ function renderFrameClippedTree(
   });
   type PaintBounds = { left: number; top: number; right: number; bottom: number };
   const subtreeBounds = new Map<string, PaintBounds | undefined>();
+  const subtreeBackgroundBlur = new Map<string, boolean>();
+  const canonicalById = new Map(nodes.map((node) => [node.id, node]));
   const combinedBounds = (
     left: PaintBounds | undefined,
     right: PaintBounds | undefined,
@@ -3448,49 +6177,55 @@ function renderFrameClippedTree(
   };
   const boundsForSubtree = (node: CanvasNode): PaintBounds | undefined => {
     if (subtreeBounds.has(node.id)) return subtreeBounds.get(node.id);
-    const own = nodeBoundsById.get(node.id);
-    let combined = own
-      ? {
-          left: own.x,
-          top: own.y,
-          right: own.x + own.width,
-          bottom: own.y + own.height,
-        }
-      : undefined;
-    (children.get(node.id) ?? []).forEach((child) => {
+    const descendants = children.get(node.id) ?? [];
+    const isolated = descendants.length > 0 && requiresSubtreeComposition(node, true);
+    let combined = isolated ? worldVisualBoundsForNode(nodes, node) : worldCompositeBoundsForNode(node);
+    descendants.forEach((child) => {
       combined = combinedBounds(combined, boundsForSubtree(child));
     });
+    if (node.kind === "transformGroup") {
+      const canonical = canonicalById.get(node.id);
+      const repeatSubtree = canonical ? transformGroupRepeatSubtree(orderedNodes, canonical, children) : undefined;
+      const derived = canonical && repeatSubtree ? transformGroupRepeatDerivedBounds(nodes, canonical, repeatSubtree.sources, {
+        groupWorld: worldTransformById.get(canonical.id),
+        worldTransformByNodeId: worldTransformById,
+        canonicalNodeById: canonicalById,
+        paintNodes: orderedNodes,
+        childrenByParentId: children,
+      }) : undefined;
+      combined = combinedBounds(combined, derived);
+    }
+    if (isolated) combined = expandedBounds(combined, worldEffectPaddingForNode(node, true));
     subtreeBounds.set(node.id, combined);
     return combined;
   };
-  const frameClipChangesPixels = (
-    frame: CanvasNode,
-    descendants: readonly CanvasNode[],
-  ) => {
-    if (
-      frame.radius > 0 ||
-      frame.cornerSmoothing ||
-      frame.cornerRadii?.some((radius) => radius > 0)
-    )
-      return true;
-    const frameBounds = nodeBoundsById.get(frame.id);
-    const contentBounds = descendants.reduce<PaintBounds | undefined>(
-      (combined, child) =>
-        combinedBounds(combined, boundsForSubtree(child)),
-      undefined,
-    );
-    if (!frameBounds || !contentBounds) return false;
-    const epsilon = 0.01;
-    return (
-      contentBounds.left < frameBounds.x - epsilon ||
-      contentBounds.top < frameBounds.y - epsilon ||
-      contentBounds.right > frameBounds.x + frameBounds.width + epsilon ||
-      contentBounds.bottom > frameBounds.y + frameBounds.height + epsilon
-    );
+  const subtreeHasBackgroundBlur = (node: CanvasNode): boolean => {
+    const cached = subtreeBackgroundBlur.get(node.id);
+    if (cached !== undefined) return cached;
+    const result = (!node.isMask && activeNodeEffects(node).some((effect) => Boolean(effect.backgroundBlur)))
+      || (children.get(node.id) ?? []).some(subtreeHasBackgroundBlur);
+    subtreeBackgroundBlur.set(node.id, result);
+    return result;
   };
-  const compositeMaskedSiblings = (destination: OffscreenCanvasRenderingContext2D, mask: CanvasNode, targets: readonly CanvasNode[], depth: number) => {
+  const subtreeBackdropRequirement = new Map<string, boolean>();
+  const subtreeRequiresBackdrop = (node: CanvasNode): boolean => {
+    const cached = subtreeBackdropRequirement.get(node.id);
+    if (cached !== undefined) return cached;
+    const result = nodePresentationRequiresBackdrop(node)
+      || (children.get(node.id) ?? []).some(subtreeRequiresBackdrop);
+    subtreeBackdropRequirement.set(node.id, result);
+    return result;
+  };
+  const compositeMaskedSiblings = (destination: OffscreenCanvasRenderingContext2D, mask: CanvasNode, targets: readonly CanvasNode[], maskDepth: number, compositionDepth: number) => {
     if (!targets.length || !canvas) return;
-    const admission = admitAlphaMaskSurface(canvas.width, canvas.height, depth);
+    const repeatedSource = isPreparingRepeatedSource(destination);
+    const runBounds = targets.reduce<PaintBounds | undefined>(
+      (bounds, target) => combinedBounds(bounds, boundsForSubtree(target)),
+      boundsForSubtree(mask),
+    );
+    const window = compositeWindowForBounds(runBounds, !repeatedSource);
+    if (!window) return;
+    const admission = admitAlphaMaskSurface(window.pixelWidth, window.pixelHeight, maskDepth);
     // A rejected mask must fail closed rather than accidentally paint its
     // targets unmasked. This keeps a resource-limit event from exposing a
     // layer the document says is clipped.
@@ -3501,64 +6236,97 @@ function renderFrameClippedTree(
       }
       return;
     }
-    const acquired = acquireAlphaMaskSurface(depth);
+    const acquired = acquireAlphaMaskSurface(maskDepth, window);
     if (!acquired) return;
-    const { surface, context: surfaceContext } = acquired;
-    // The surface is reused for later sibling runs at this depth. Clear it in
+    const { target, targetContext, mask: maskSurface, maskContext } = acquired;
+    // The surfaces are reused for later sibling runs at this depth. Clear in
     // device coordinates before restoring the document-space transform.
-    surfaceContext.setTransform(1, 0, 0, 1, 0, 0);
-    surfaceContext.clearRect(0, 0, surface.width, surface.height);
-    surfaceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-    renderSiblings(targets, surfaceContext, depth + 1);
-    surfaceContext.save();
-    renderNode(surfaceContext, mask, "destination-in");
-    surfaceContext.restore();
-    destination.save();
-    // The temporary surface is already in device pixels, unlike the logical
-    // document drawing state maintained by the destination context.
-    destination.setTransform(1, 0, 0, 1, 0, 0);
-    destination.drawImage(surface, 0, 0);
-    destination.restore();
+    prepareCompositeSurface(targetContext, target, window);
+    const needsBackdrop = targets.some(subtreeRequiresBackdrop);
+    if (needsBackdrop) {
+      const repeatTransform = repeatScreenTransformByContext.get(destination);
+      const seeded = repeatTransform
+        ? drawRepeatOccurrenceBacking(targetContext, destination, window, repeatTransform)
+        : (drawCompositeBacking(targetContext, destination, window), true);
+      // An unavailable occurrence window is fully clipped. Failing closed here
+      // avoids rendering a backdrop-dependent target against transparency.
+      if (!seeded) return;
+    }
+    withRepeatSourcePreparation(targetContext, repeatedSource, () => {
+      renderSiblings(targets, targetContext, maskDepth + 1, compositionDepth);
+    });
+
+    // Each Paint Stack layer owns its local blend mode. Render the mask on a
+    // separate transparent surface so those source-over writes cannot replace
+    // the one destination-in operation applied to the combined target run.
+    prepareCompositeSurface(maskContext, maskSurface, window);
+    const frozenMask = compiledMaskSourceByNodeId.get(mask.id)?.node ?? mask;
+    const maskDescendants = children.get(mask.id) ?? [];
+    // A paint-owning container mask contributes both its own paint and the
+    // recursively clipped child subtree. Clear the control flag only for this
+    // root invocation so nested sibling masks retain their ordinary semantics.
+    withMaskAlphaPreparation(maskContext, true, () => {
+      withRepeatSourcePreparation(maskContext, repeatedSource, () => {
+        renderBranchInto(maskContext, maskDepth + 1, compositionDepth)({ ...frozenMask, isMask: false });
+      });
+    });
+    cacheRenderedMaskAlphaHit(frozenMask, maskContext, window, maskDescendants.length > 0);
+    targetContext.save();
+    setCompositeSurfaceTransform(targetContext, window);
+    targetContext.globalCompositeOperation = "destination-in";
+    drawCompositeSurface(targetContext, maskSurface, window);
+    targetContext.restore();
+    compositePreparedSurface(destination, target, window);
   };
-  const renderSiblings = (siblings: readonly CanvasNode[], destination = ctx, depth = 0) => {
+  const renderSiblings = (siblings: readonly CanvasNode[], destination = ctx, maskDepth = 0, compositionDepth = 0) => {
     for (let index = 0; index < siblings.length; index += 1) {
       const node = siblings[index];
       if (node.isMask) {
         let end = index + 1;
         while (end < siblings.length && !siblings[end].isMask) end += 1;
-        compositeMaskedSiblings(destination, node, siblings.slice(index + 1, end), depth);
+        compositeMaskedSiblings(destination, node, siblings.slice(index + 1, end), maskDepth, compositionDepth);
         index = end - 1;
         continue;
       }
-      renderBranchInto(destination, depth)(node);
+      renderBranchInto(destination, maskDepth, compositionDepth)(node);
     }
   };
-  const isSafeRepeatSubtree = (siblings: readonly CanvasNode[]): boolean => siblings.every((node) => {
-    const descendants = children.get(node.id) ?? [];
-    return !node.isMask
-      && !orderedEffects(node).length
-      && node.kind !== "booleanOperation"
-      && !isFrameLike(node)
-      && node.kind !== "group"
-      && node.kind !== "transformGroup"
-      && !descendants.length;
-  });
-  const applyRepeatWorldAffine = (destination: OffscreenCanvasRenderingContext2D, matrix: AffineMatrix) => {
+  const renderWithRepeatWorldAffine = (
+    destination: OffscreenCanvasRenderingContext2D,
+    matrix: AffineMatrix,
+    paint: () => void,
+  ) => {
+    destination.save();
     const screen = affineScreenMatrix(matrix, toScreen(0, 0), viewport.zoom);
-    destination.transform(
-      screen.a,
-      screen.b,
-      screen.c,
-      screen.d,
-      screen.e,
-      screen.f,
+    const previousTransform = repeatScreenTransformByContext.get(destination);
+    repeatScreenTransformByContext.set(
+      destination,
+      previousTransform ? multiplyAffine(previousTransform, screen) : screen,
     );
+    try {
+      destination.transform(screen.a, screen.b, screen.c, screen.d, screen.e, screen.f);
+      paint();
+    } finally {
+      if (previousTransform) repeatScreenTransformByContext.set(destination, previousTransform);
+      else repeatScreenTransformByContext.delete(destination);
+      destination.restore();
+    }
   };
-  function renderBranchInto(destination: OffscreenCanvasRenderingContext2D, depth: number, detachedPreview = false) {
+  function renderBranchInto(
+    destination: OffscreenCanvasRenderingContext2D,
+    maskDepth: number,
+    compositionDepth: number,
+    detachedPreview = false,
+    suppressedOwnerId?: string,
+  ) {
     return (node: CanvasNode) => {
-      paintedNodes += 1;
-      if (paintedNodes === 1 || paintedNodes % 100 === 0)
-        reportProgress?.(paintedNodes, orderedNodes.length);
+      if (alreadyRenderedNodeIds.has(node.id)) return;
+      const suppressOwnerPresentation = suppressedOwnerId === node.id;
+      if (!suppressOwnerPresentation) {
+        paintedNodes += 1;
+        if (paintedNodes === 1 || paintedNodes % 100 === 0)
+          reportProgress?.(paintedNodes, orderedNodes.length);
+      }
       // A child that has been dragged completely beyond an ancestor Frame's
       // clip stays visible until pointer-up. Omit it from the clipped document
       // pass so it can be rendered once as the detached Figma-style preview.
@@ -3567,39 +6335,98 @@ function renderFrameClippedTree(
       // destination may itself be an offscreen surface, so defer to the shared
       // sibling renderer rather than painting a mask as an ordinary node.
       if (node.isMask) return;
+      const descendants = children.get(node.id) ?? [];
+      const maskAlphaOnly = maskAlphaPreparationContexts.has(destination);
+      const presentationEffects = maskAlphaOnly ? activeMaskAlphaEffects(node) : activeNodeEffects(node);
+      if (!suppressOwnerPresentation && requiresSubtreeComposition(node, descendants.length > 0, presentationEffects)) {
+        const repeatedSource = isPreparingRepeatedSource(destination);
+        const window = compositeWindowForBounds(boundsForSubtree(node), !repeatedSource);
+        if (!window) return;
+        const repeatTransform = repeatScreenTransformByContext.get(destination);
+        const materializeOccurrence = Boolean(!maskAlphaOnly && repeatTransform && subtreeHasBackgroundBlur(node));
+        const occurrenceWindow = materializeOccurrence && repeatTransform
+          ? transformedCompositeSurfaceWindow(window, repeatTransform, width, height)
+          : repeatBackgroundBlurWindow(destination, window, presentationEffects);
+        if (materializeOccurrence && !occurrenceWindow) return;
+        const renderWindow = materializeOccurrence ? occurrenceWindow! : window;
+        const surfaces = acquireSubtreeCompositeSurfaces(
+          compositionDepth,
+          compositePoolDimensionsForWindows(window, occurrenceWindow),
+        );
+        // Resource failure is closed: painting descendants directly would
+        // expose an output that violates the document's group semantics.
+        if (!surfaces) return;
+        surfaces.sourceContext.save();
+        prepareCompositeSurface(surfaces.sourceContext, surfaces.source, renderWindow);
+        const previousBackdrop = preparedBackdropContextByContext.get(surfaces.sourceContext);
+        const previousRepeatTransform = repeatScreenTransformByContext.get(surfaces.sourceContext);
+        preparedBackdropContextByContext.set(surfaces.sourceContext, destination);
+        if (materializeOccurrence && repeatTransform) {
+          repeatScreenTransformByContext.set(surfaces.sourceContext, repeatTransform);
+          surfaces.sourceContext.transform(
+            repeatTransform.a,
+            repeatTransform.b,
+            repeatTransform.c,
+            repeatTransform.d,
+            repeatTransform.e,
+            repeatTransform.f,
+          );
+        }
+        try {
+          withMaskAlphaPreparation(surfaces.sourceContext, maskAlphaOnly, () => {
+            withRepeatSourcePreparation(surfaces.sourceContext, repeatedSource, () => {
+              renderBranchInto(
+                surfaces.sourceContext,
+                maskDepth,
+                compositionDepth + 1,
+                detachedPreview,
+                node.id,
+              )(node);
+            });
+          });
+        } finally {
+          if (previousBackdrop) preparedBackdropContextByContext.set(surfaces.sourceContext, previousBackdrop);
+          else preparedBackdropContextByContext.delete(surfaces.sourceContext);
+          if (previousRepeatTransform) repeatScreenTransformByContext.set(surfaces.sourceContext, previousRepeatTransform);
+          else repeatScreenTransformByContext.delete(surfaces.sourceContext);
+          surfaces.sourceContext.restore();
+        }
+        compositePreparedSubtree(destination, node, surfaces, renderWindow, materializeOccurrence);
+        return;
+      }
       if (node.kind === "transformGroup") {
-        const descendants = children.get(node.id) ?? [];
-        // A derived copy is only painted through this direct Canvas route when
-        // each source leaf is free of masks, clipping containers and effects.
-        // Those features use offscreen composition that resets its transform;
-        // keeping their one-time source plus a diagnostic is safer than
-        // silently changing blend or clip order.
-        renderSiblings(descendants, destination, depth);
         const canonical = nodes.find((candidate) => candidate.id === node.id);
-        const repeats = canonical && isSafeRepeatSubtree(descendants) ? transformGroupRepeatMatrices(nodes, canonical) : undefined;
+        const repeatSubtree = canonical ? transformGroupRepeatSubtree(orderedNodes, canonical, children) : undefined;
+        const repeats = repeatSubtree ? transformGroupRepeatMatrices(nodes, canonical!) : undefined;
+        // Every occurrence replays the admitted recursive subtree. Prepared
+        // effects, isolated containers and mask runs retain this destination
+        // transform for their final composite, so node and paint-layer blends
+        // see the real backdrop at the derived position.
+        renderSiblings(descendants, destination, maskDepth, compositionDepth);
         repeats?.forEach((matrix) => {
-          destination.save();
-          applyRepeatWorldAffine(destination, matrix);
-          renderSiblings(descendants, destination, depth);
-          destination.restore();
+          renderWithRepeatWorldAffine(destination, matrix, () => {
+            renderSiblings(descendants, destination, maskDepth, compositionDepth);
+          });
         });
         return;
       }
-      renderNode(destination, node);
+      const sourceNode = suppressOwnerPresentation ? subtreeSourceNode(node) : node;
+      const splitContainerPaint = isFrameLike(node) && descendants.length > 0 && hasVisibleStroke(sourceNode);
+      renderNode(destination, splitContainerPaint ? containerFillSourceNode(sourceNode) : sourceNode);
       if (node.kind === "booleanOperation" && canonicalBooleanPath(node)) return;
-      const descendants = children.get(node.id) ?? [];
       if (!descendants.length) return;
       if (
         isFrameLike(node) &&
-        node.clipsContent !== false &&
-        frameClipChangesPixels(node, descendants)
+        node.clipsContent !== false
       ) {
         clipFrameContents(destination, node);
-        renderSiblings(descendants, destination, depth);
+        renderSiblings(descendants, destination, maskDepth, compositionDepth);
         destination.restore();
+        if (splitContainerPaint) renderContainerStrokeOverlay(destination, sourceNode);
         return;
       }
-      renderSiblings(descendants, destination, depth);
+      renderSiblings(descendants, destination, maskDepth, compositionDepth);
+      if (splitContainerPaint) renderContainerStrokeOverlay(destination, sourceNode);
     };
   }
   renderSiblings(roots);
@@ -3608,7 +6435,7 @@ function renderFrameClippedTree(
   // structure (including clips they own) still uses the normal recursion.
   orderedNodes
     .filter((node) => dragPreviewRootIds.has(node.id))
-    .forEach((node) => renderBranchInto(ctx, 0, true)(node));
+    .forEach((node) => renderBranchInto(ctx, 0, 0, true)(node));
 }
 
 /** This is a presentation-only escape hatch for an active move. The durable
@@ -3619,30 +6446,54 @@ function escapedFrameDragPreviewRootIds() {
   return new Set([...drag.initial].filter((id) => isFullyClippedForSelection(nodes, id, boundsForNode)));
 }
 
-function acquireAlphaMaskSurface(depth: number): AlphaMaskSurface | undefined {
+function acquireAlphaMaskSurface(depth: number, window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">): AlphaMaskSurfaces | undefined {
   if (!canvas) return undefined;
   const existing = alphaMaskSurfaces[depth];
-  if (existing && existing.surface.width === canvas.width && existing.surface.height === canvas.height) return existing;
-  const surface = new OffscreenCanvas(canvas.width, canvas.height);
-  const context = surface.getContext("2d");
-  if (!context) return undefined;
-  const acquired = { surface, context };
+  if (existing && existing.target.width >= window.pixelWidth && existing.target.height >= window.pixelHeight) return existing;
+  const pixelWidth = Math.max(existing?.target.width ?? 0, window.pixelWidth);
+  const pixelHeight = Math.max(existing?.target.height ?? 0, window.pixelHeight);
+  const admission = admitAlphaMaskSurface(pixelWidth, pixelHeight, depth);
+  if (!admission.accepted) return undefined;
+  const replacedBytes = existing ? surfaceBytes(existing.target) * 2 : 0;
+  if (!admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, 2, replacedBytes).accepted) return undefined;
+  const target = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const mask = new OffscreenCanvas(pixelWidth, pixelHeight);
+  const targetContext = target.getContext("2d");
+  const maskContext = mask.getContext("2d");
+  if (!targetContext || !maskContext) return undefined;
+  const acquired = { target, targetContext, mask, maskContext };
   alphaMaskSurfaces[depth] = acquired;
   return acquired;
 }
 
 function clipFrameContents(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   const screenTransform = ctx.getTransform();
+  const frozenGeometry = compiledClipGeometryByNodeId.get(node.id);
   const point = toScreen(node.x, node.y);
-  const frameWidth = node.width * viewport.zoom;
-  const frameHeight = node.height * viewport.zoom;
+  const frameWidth = (frozenGeometry?.width ?? node.width) * viewport.zoom;
+  const frameHeight = (frozenGeometry?.height ?? node.height) * viewport.zoom;
   ctx.save();
-  if (!applyNativeAffine(ctx, node)) {
+  if (frozenGeometry?.geometry === "rounded-rect") {
+    const world = frozenGeometry.worldTransform;
+    const origin = toScreen(world.e, world.f);
+    ctx.transform(world.a, world.b, world.c, world.d, origin.x, origin.y);
+  } else if (!applyNativeAffine(ctx, node)) {
     ctx.translate(point.x + frameWidth / 2, point.y + frameHeight / 2);
     ctx.rotate(node.rotation * Math.PI / 180);
     ctx.translate(-frameWidth / 2, -frameHeight / 2);
   }
-  roundedRectPath(ctx, 0, 0, frameWidth, frameHeight, Math.max(0, node.radius * viewport.zoom), node.cornerRadii, node.cornerSmoothing);
+  roundedRectPath(
+    ctx,
+    0,
+    0,
+    frameWidth,
+    frameHeight,
+    Math.max(0, (frozenGeometry?.radius ?? node.radius) * viewport.zoom),
+    frozenGeometry?.cornerRadii
+      ? [...frozenGeometry.cornerRadii] as [number, number, number, number]
+      : node.cornerRadii,
+    frozenGeometry?.cornerSmoothing ?? node.cornerSmoothing,
+  );
   ctx.clip();
   // `clip()` stores the region in device space, but the current transform is
   // still the Frame transform. Descendants are rendered with their own world
@@ -3674,7 +6525,7 @@ function renderEllipseArc(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNo
     ctx.lineTo(outerX, outerY);
   }
   ctx.closePath();
-  activeFills(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, width, height); ctx.fill("evenodd"); });
+  fillPaintStack(ctx, node, width, height, "evenodd");
   if (hasVisibleStroke(node)) {
     ctx.lineWidth = Math.max(1, node.strokeWidth * viewport.zoom);
     applyStrokeStyle(ctx, node);
@@ -3715,7 +6566,7 @@ function renderAlignedShapeStroke(ctx: OffscreenCanvasRenderingContext2D, node: 
   const align = node.strokeAlign ?? "inside";
   if (align === "outside") {
     roundedRectPath(ctx, -strokeWidth, -strokeWidth, width + strokeWidth * 2, height + strokeWidth * 2, radius + strokeWidth, outsetCornerRadii(width, height, radius, node.cornerRadii, strokeWidth), node.cornerSmoothing);
-    activeStrokes(node).forEach((layer) => { ctx.fillStyle = paintStackStyle(ctx, layer, width, height); ctx.fill(); });
+    fillStrokePaintStack(ctx, node, width, height);
     roundedRectPath(ctx, 0, 0, width, height, radius, node.cornerRadii, node.cornerSmoothing);
     fillPaintStack(ctx, node, width, height);
     return;
@@ -3727,35 +6578,35 @@ function renderAlignedShapeStroke(ctx: OffscreenCanvasRenderingContext2D, node: 
   strokePaintStack(ctx, node, width, height);
 }
 
-function renderLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasNode["strokeCapStart"], x: number, direction: -1 | 1, strokeWidth: number) {
+function traceLineEndpoint(ctx: OffscreenCanvasRenderingContext2D, cap: CanvasNode["strokeCapStart"], x: number, direction: -1 | 1, strokeWidth: number) {
   if (!isDecorativeCap(cap)) return;
   // Canvas, hit test and SVG all consume this one mesh from the shared
   // `decorative-cap-mesh` source, so the arrowhead/diamond/dot can never drift
   // between what is drawn, what is hit and what is exported.
   const mesh = decorativeCapMesh(cap, x, direction, strokeWidth);
-  ctx.beginPath();
   mesh.triangles.forEach(([a, b, c]) => {
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.lineTo(c.x, c.y);
     ctx.closePath();
   });
-  ctx.fill();
 }
 
-function renderConnectorEndpointDecorations(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>, strokeWidth: number, scale: number) {
+function renderLineEndpointPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, strokeWidth: number) {
+  ctx.beginPath();
+  traceLineEndpoint(ctx, node.strokeCapStart, 0, -1, strokeWidth);
+  traceLineEndpoint(ctx, node.strokeCapEnd, width, 1, strokeWidth);
+  fillStrokePaintStack(ctx, node, Math.max(width, 1), Math.max(strokeWidth, 1));
+}
+
+function renderConnectorEndpointDecorations(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>, scale: number, width: number, height: number) {
+  ctx.beginPath();
   connectorEndpointDecorations(node, path).forEach((decoration) => {
-    ctx.beginPath();
-    connectorDecorationTriangles(decoration, strokeWidth).forEach(([a, b, c]) => {
-      const transform = (point: { x: number; y: number }) => ({
-        x: decoration.point.x * scale + point.x * decoration.direction.x - point.y * decoration.direction.y,
-        y: decoration.point.y * scale + point.x * decoration.direction.y + point.y * decoration.direction.x,
-      });
-      const first = transform(a); const second = transform(b); const third = transform(c);
-      ctx.moveTo(first.x, first.y); ctx.lineTo(second.x, second.y); ctx.lineTo(third.x, third.y); ctx.closePath();
+    scaledConnectorDecorationTriangles(decoration, node.strokeWidth, scale).forEach(([a, b, c]) => {
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.closePath();
     });
-    ctx.fill();
   });
+  fillStrokePaintStack(ctx, node, width, height);
 }
 
 function renderConnectorLabel(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, path: NonNullable<ReturnType<typeof connectorPathForNode>>) {
@@ -3778,7 +6629,7 @@ function renderConnectorLabel(ctx: OffscreenCanvasRenderingContext2D, node: Canv
 
 function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle, fallbackFonts?: readonly DocumentFontReference[]) {
   const fontFamilies = documentFontFamilyChain(style.font, fallbackFonts, (assetId) => fontFaces.familyFor(assetId));
-  ctx.font = `${style.italic ? "italic " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
+  ctx.font = `${style.italic ? "italic " : ""}${usesSmallCaps(style.textCase) ? "small-caps " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
   const letterSpacingTarget = ctx as unknown as { letterSpacing?: string };
   if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * viewport.zoom}px`;
   // This Canvas property is not exposed in every lib.dom version. Reset it for
@@ -3787,23 +6638,60 @@ function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: Ren
   if ("fontVariationSettings" in variationTarget) variationTarget.fontVariationSettings = fontVariationCss(style.font?.variationAxes);
 }
 
-/** Matches the browser's inline line-box rule: center the selected font's
- * bounding box in the line-height, then place its alphabetic baseline. */
-function cssLineBoxBaseline(ctx: OffscreenCanvasRenderingContext2D, lineTop: number, lineHeight: number): number {
+/** Measures the exact presentation spans while retaining Canonical source
+ * offsets. This keeps wrapping stable when text case expands glyph content
+ * (for example `ß` becoming `SS`) or a line crosses style-run boundaries. */
+function measureStyledTextRange(
+  ctx: OffscreenCanvasRenderingContext2D,
+  source: string,
+  start: number,
+  end: number,
+  properties: CanvasNode["textProperties"],
+  fallbackStyle: RenderTextStyle,
+  fallbackFonts?: readonly DocumentFontReference[],
+): number {
+  const spans = styledTextSpans(source, start, end, properties);
+  if (!spans.length) {
+    applyCanvasTextStyle(ctx, fallbackStyle, fallbackFonts);
+    return 0;
+  }
+  return spans.reduce((width, span) => {
+    applyCanvasTextStyle(ctx, span.style, fallbackFonts);
+    return width + ctx.measureText(span.text).width;
+  }, 0);
+}
+
+function measureStyledEllipsis(
+  ctx: OffscreenCanvasRenderingContext2D,
+  source: string,
+  start: number,
+  retainedUtf8Bytes: number,
+  properties: CanvasNode["textProperties"],
+  fallbackStyle: RenderTextStyle,
+  fallbackFonts?: readonly DocumentFontReference[],
+): number {
+  const spans = styledTextSpans(source, start, start + retainedUtf8Bytes, properties);
+  applyCanvasTextStyle(ctx, spans.at(-1)?.style ?? fallbackStyle, fallbackFonts);
+  return ctx.measureText("…").width;
+}
+
+/** Resolves the shared CSS or CAP_HEIGHT line-box edge contract. */
+function textLineBox(ctx: OffscreenCanvasRenderingContext2D, lineTop: number, lineHeight: number, leadingTrim?: "capHeight") {
   const metrics = ctx.measureText("Mg");
+  const capMetrics = ctx.measureText("H");
   const fallbackSize = Number.parseFloat(ctx.font.match(/(\d+(?:\.\d+)?)px/u)?.[1] ?? "16");
-  return resolveCssLineBoxBaseline(lineTop, lineHeight, metrics, fallbackSize);
+  return resolveLeadingTrimLineBox(lineTop, lineHeight, metrics, capMetrics, fallbackSize, leadingTrim);
 }
 
 /** Resolves Figma-style auto sizing in document coordinates before the Core
  * transaction is built. The geometry and text update therefore share one
  * revision and undo entry instead of leaving a DOM-only measurement behind. */
 function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
-  if (command.type !== "update" || !context) return command;
+  if (!context || (command.type !== "update" && command.type !== "create")) return command;
   const ctx = context;
-  const previous = nodes.find((node) => node.id === command.id);
-  if (!previous || previous.kind !== "text") return command;
-  const node = { ...previous, ...command.patch };
+  const previous = command.type === "update" ? nodes.find((node) => node.id === command.id) : undefined;
+  const node = command.type === "create" ? command.node : previous ? { ...previous, ...command.patch } : undefined;
+  if (!node || node.kind !== "text") return command;
   const properties = node.textProperties;
   if (!properties || properties.autoSize === "fixed") return command;
 
@@ -3815,39 +6703,87 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
       italic: primary.italic,
       letterSpacing: primary.letterSpacing,
       color: primary.color,
+      textCase: primary.textCase,
+      textDecoration: primary.textDecoration,
+      textDecorationStyle: primary.textDecorationStyle,
+      textDecorationOffset: primary.textDecorationOffset,
+      textDecorationThickness: primary.textDecorationThickness,
+      textDecorationColor: primary.textDecorationColor,
+      textDecorationSkipInk: primary.textDecorationSkipInk,
+      leadingTrim: primary.leadingTrim,
   } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
   const source = node.text ?? "";
   const sourceBytes = new TextEncoder().encode(source);
   applyCanvasTextStyle(ctx, primaryStyle, properties.fallbackFonts);
   const maxWidth = properties.autoSize === "widthAndHeight" ? Number.POSITIVE_INFINITY : Math.max(1, node.width * viewport.zoom);
-  const lines = layoutTextRanges({ text: source, maxWidth, measure: (value) => ctx.measureText(value).width });
+  const listMarkerGutter = textListMarkerGutterForProperties(
+    source,
+    properties,
+    (value) => ctx.measureText(value).width,
+  );
+  const lines = layoutTextRanges({
+    text: source,
+    maxWidth,
+    firstLineIndent: (_index, start) => textParagraphIndentAt(properties, start) * viewport.zoom
+      + textListMarkerBaseIndent(properties, listMarkerGutter, start),
+    paragraphIndent: (_index, start) => textListIndentationOffset(source, properties, start, listMarkerGutter),
+    wrapStyle: (_index, start) => textParagraphWrapStyleAt(properties, start),
+    hangingPunctuation: properties.paragraph.hangingPunctuation ?? false,
+    measure: (value) => ctx.measureText(value).width,
+    measureRange: (start, end) => measureStyledTextRange(ctx, source, start, end, properties, primaryStyle, properties.fallbackFonts),
+  });
   let height = 0;
   let widest = 1;
   let previousEnd = 0;
-  lines.forEach((line) => {
+  let previousParagraphStart = 0;
+  lines.forEach((line, lineIndex) => {
     const skipped = new TextDecoder().decode(sourceBytes.slice(previousEnd, line.start));
-    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) height += (properties.paragraph.paragraphSpacing ?? 0) * viewport.zoom;
+    const isParagraphFirstLine = textLineStartsParagraph(lineIndex, skipped);
+    const paragraphStart = textParagraphStartAtOffset(source, line.start);
+    const nestingIndent = textListIndentationOffset(source, properties, line.start, listMarkerGutter);
+    if (/\r\n|[\n\r\u2028\u2029]/u.test(skipped)) {
+      height += textParagraphGap(properties, previousParagraphStart, paragraphStart) * viewport.zoom;
+      previousParagraphStart = paragraphStart;
+    }
     const spans = styledTextSpans(source, line.start, line.end, properties);
-    const lineHeight = (properties.paragraph.lineHeight ?? DEFAULT_TEXT_LINE_HEIGHT) * viewport.zoom;
+    const lineHeight = resolvedTextLineHeightAt(properties, paragraphStart, primaryStyle.fontSize) * viewport.zoom;
     height += lineHeight;
     if (spans.length <= 1) {
       applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle, properties.fallbackFonts);
-      widest = Math.max(widest, ctx.measureText(line.text).width);
+      const displayText = spans[0]?.text ?? line.text;
+      const measured = ctx.measureText(displayText).width;
+      const hanging = properties.paragraph.hangingPunctuation
+        ? textHangingPunctuationOffsets(displayText, line.direction, (value) => ctx.measureText(value).width)
+        : { left: 0, right: 0 };
+      widest = Math.max(widest, measured - hanging.left - hanging.right + nestingIndent + (isParagraphFirstLine ? textParagraphIndentAt(properties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0));
     } else {
       const measured = spans.reduce((total, span) => {
         applyCanvasTextStyle(ctx, span.style, properties.fallbackFonts);
         return total + ctx.measureText(span.text).width;
       }, 0);
-      widest = Math.max(widest, measured);
+      applyCanvasTextStyle(ctx, primaryStyle, properties.fallbackFonts);
+      const hanging = properties.paragraph.hangingPunctuation
+        ? textHangingPunctuationOffsets(line.text, line.direction, (value) => ctx.measureText(value).width)
+        : { left: 0, right: 0 };
+      widest = Math.max(widest, measured - hanging.left - hanging.right + nestingIndent + (isParagraphFirstLine ? textParagraphIndentAt(properties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0));
     }
     previousEnd = line.end;
   });
-  const patch: Partial<CanvasNode> = {
-    ...command.patch,
+  if (lines.length && primaryStyle.leadingTrim === "capHeight") {
+    applyCanvasTextStyle(ctx, primaryStyle, properties.fallbackFonts);
+    const firstHeight = resolvedTextLineHeightAt(properties, textParagraphStartAtOffset(source, lines[0]!.start), primaryStyle.fontSize) * viewport.zoom;
+    const lastHeight = resolvedTextLineHeightAt(properties, textParagraphStartAtOffset(source, lines.at(-1)!.start), primaryStyle.fontSize) * viewport.zoom;
+    const firstLineBox = textLineBox(ctx, 0, firstHeight, primaryStyle.leadingTrim);
+    const lastLineBox = textLineBox(ctx, 0, lastHeight, primaryStyle.leadingTrim);
+    height = Math.max(0, height - firstLineBox.trimStart - lastLineBox.trimEnd);
+  }
+  const geometry: Partial<CanvasNode> = {
     height: Math.max(1, height / viewport.zoom),
     ...(properties.autoSize === "widthAndHeight" ? { width: Math.max(1, widest / viewport.zoom) } : {}),
   };
-  return { ...command, patch };
+  return command.type === "create"
+    ? { ...command, node: { ...command.node, ...geometry } }
+    : { ...command, patch: { ...command.patch, ...geometry } };
 }
 
 /** Resolves the paste destination: the selected container when a single
@@ -3882,6 +6818,7 @@ function canResizeOnCanvas(node: CanvasNode) {
   return selectedIds.length === 1
     && canonical.kind !== "line"
     && canonical.kind !== "group"
+    && canonical.kind !== "transformGroup"
     && canonical.locked !== true
     && canonical.visible !== false;
 }
@@ -3962,7 +6899,14 @@ function resizeHandleAtScreen(screenX: number, screenY: number): { node: CanvasN
  * can run its Core constraints while the final child transforms still preserve
  * the exact Group-scale result. Group bounds remain Core-derived. */
 function multiResizeSelection() {
-  return resolveMultiResizeSelection(nodes, selectedIds);
+  return resolveMultiResizeSelection(nodes, selectedIds, {
+    repeatBoundsForNode: materializedRepeatResizeBounds,
+  });
+}
+
+function materializedRepeatResizeBounds(node: CanvasNode): ResizeGeometry | undefined {
+  const bounds = repeatSourceIdsByGroupId.has(node.id) ? nodeBoundsById.get(node.id) : undefined;
+  return bounds && bounds.width > 0 && bounds.height > 0 ? bounds : undefined;
 }
 
 function multiResizeHandleAtScreen(screenX: number, screenY: number): { handle: CanvasResizeHandle; bounds: ResizeGeometry; ids: string[]; requiresAffine: boolean } | undefined {
@@ -4455,6 +7399,24 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     renderLineEndpointHandles(ctx, canonical);
     return;
   }
+  if (canonical.kind === "transformGroup") {
+    const bounds = nodeBoundsById.get(canonical.id);
+    if (!bounds) return;
+    const point = toScreen(bounds.x, bounds.y);
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = canvasDesignTokens.color.selection;
+    ctx.lineWidth = canvasDesignTokens.stroke.selection.width;
+    ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]);
+    ctx.strokeRect(
+      point.x + canvasDesignTokens.stroke.selection.pixelInset,
+      point.y + canvasDesignTokens.stroke.selection.pixelInset,
+      Math.max(0, bounds.width * viewport.zoom - 1),
+      Math.max(0, bounds.height * viewport.zoom - 1),
+    );
+    ctx.restore();
+    return;
+  }
   const point = toScreen(canonical.x, canonical.y);
   const w = canonical.width * viewport.zoom;
   const h = canonical.height * viewport.zoom;
@@ -4472,6 +7434,39 @@ function renderSelection(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
   ctx.strokeStyle = canvasDesignTokens.color.selection; ctx.lineWidth = canvasDesignTokens.stroke.selection.width; ctx.setLineDash([...canvasDesignTokens.stroke.selection.dash]); ctx.strokeRect(outlineX + canvasDesignTokens.stroke.selection.pixelInset, outlineY + canvasDesignTokens.stroke.selection.pixelInset, Math.max(0, outlineWidth - 1), Math.max(0, outlineHeight - 1)); ctx.setLineDash([]);
   ctx.restore();
   renderResizeHandles(ctx, canonical);
+}
+
+/** Selected Frame children expose the same dotted constraint relationships as
+ * Figma's canvas. The guide geometry comes from canonical transforms, while
+ * the paint is screen-space so it stays crisp at every zoom level. */
+function renderConstraintGuides(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
+  if (selectedIds.length !== 1 || selectedIds[0] !== node.id) return;
+  const canonical = nodes.find((candidate) => candidate.id === node.id);
+  if (!canonical) return;
+  const guides = constraintGuidesForNode(nodes, canonical, worldTransformById);
+  if (!guides.length) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.strokeStyle = canvasDesignTokens.color.selection;
+  ctx.fillStyle = canvasDesignTokens.color.selection;
+  ctx.lineWidth = 1;
+  for (const guide of guides) {
+    const start = toScreen(guide.start.x, guide.start.y);
+    const end = toScreen(guide.end.x, guide.end.y);
+    ctx.setLineDash(guide.role === "scale" ? [2, 3] : [4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    if (Math.hypot(end.x - start.x, end.y - start.y) < 2) {
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(start.x, start.y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
 /** Figma-style placement affordance for a drag over an eligible Frame. The
@@ -4617,7 +7612,9 @@ function renderHover(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
     // lag a child-derived resize until the next Core snapshot. Selection already
     // expands a Group to its editable descendants, so hover must use that same
     // live world-space envelope rather than the potentially stale Group record.
-    const selection = resolveMultiResizeSelection(nodes, [canonical.id]);
+    const selection = resolveMultiResizeSelection(nodes, [canonical.id], {
+      repeatBoundsForNode: materializedRepeatResizeBounds,
+    });
     if (!selection) return;
     const point = toScreen(selection.bounds.x, selection.bounds.y);
     const hoverWidth = selection.bounds.width * viewport.zoom;
@@ -4764,6 +7761,16 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelec
       })()
     : selectedNodes.map((node) => {
     const canonical = nodes.find((candidate) => candidate.id === node.id) ?? node;
+    const repeatBounds = canonical.kind === "transformGroup" ? nodeBoundsById.get(canonical.id) : undefined;
+    if (repeatBounds) {
+      const point = toScreen(repeatBounds.x, repeatBounds.y);
+      return {
+        left: point.x,
+        top: point.y,
+        right: point.x + repeatBounds.width * viewport.zoom,
+        bottom: point.y + repeatBounds.height * viewport.zoom,
+      };
+    }
     const world = worldTransformForNode(nodes, canonical.id);
     const corners = world
       ? [
@@ -4791,7 +7798,11 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelec
   const dimensions = multiSelection
     ? selectionDimensions(multiSelection.bounds.width, multiSelection.bounds.height)
     : selectedNodes.length === 1
-    ? selectionDimensions(selectedNodes[0].width, selectedNodes[0].height)
+    ? (() => {
+        const selected = selectedNodes[0];
+        const bounds = selected.kind === "transformGroup" ? nodeBoundsById.get(selected.id) : undefined;
+        return selectionDimensions(bounds?.width ?? selected.width, bounds?.height ?? selected.height);
+      })()
     : selectionDimensions((rightEdge - leftEdge) / viewport.zoom, (bottomEdge - topEdge) / viewport.zoom);
   const { height: labelHeight, horizontalInset, cornerRadius, offsetY } = canvasDesignTokens.overlay.selectionLabel;
   ctx.save();
@@ -4802,7 +7813,7 @@ function renderSelectionLabel(ctx: OffscreenCanvasRenderingContext2D, multiSelec
   const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
   ctx.font = canvasFont(canvasDesignTokens.typography.selectionLabel);
   const labelWidth = Math.ceil(ctx.measureText(dimensions).width) + horizontalInset * 2;
-  if (selectedNode && !multiSelection && renderRotatedSingleSelectionLabels(ctx, selectedNode, dimensions, labelWidth, labelHeight, horizontalInset, cornerRadius, offsetY)) {
+  if (selectedNode && selectedNode.kind !== "transformGroup" && !multiSelection && renderRotatedSingleSelectionLabels(ctx, selectedNode, dimensions, labelWidth, labelHeight, horizontalInset, cornerRadius, offsetY)) {
     ctx.restore();
     return;
   }
@@ -4851,7 +7862,7 @@ function render(
 ) {
   if (!renderVisible) return;
   const progressiveRequestKey = nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
-    ? [revision, nodes.length, activePageId, transientSceneVersion, viewport.x, viewport.y, viewport.zoom, width, height, dpr, renderQuality.tier].join(":")
+    ? [currentScenePresentationKey(), nodes.length, viewport.x, viewport.y, viewport.zoom, width, height, dpr, renderQuality.tier].join(":")
     : undefined;
   // Inspector, presence and persistence updates may request the same frame
   // while a dense structural paint is already progressing. Do not restart
@@ -4870,22 +7881,31 @@ function render(
   finishProgressivePaint();
   // Some local commits advance the revision after rebuilding the indexes. Do
   // not let the derived scene advertise that older fence to a Hit Test.
-  if (!compiledScene || compiledScene.scene.revision !== revision) rebuildCompiledScene();
+  if (!compiledScene || compiledScene.scene.revision !== revision || compiledScene.scene.resourceGeneration !== sceneResourceGeneration) rebuildCompiledScene();
   if (!context || !canvas) return;
   const startedAt = performance.now();
+  const frameRenderCost: ActiveFrameRenderCost = { canvasReadbackBytes: 0 };
+  activeFrameRenderCost = frameRenderCost;
   if (reprojectCachedFrameDuringInteraction()) {
     renderPerformance.record({
       totalMs: performance.now() - startedAt,
       cullingMs: 0,
       gpuPrepareMs: 0,
+      gpuIslandMs: 0,
+      canvasIslandMs: 0,
       overlayMs: 0,
       imageBitmapMs: 0,
       compositeMs: 0,
       candidateNodes: 0,
       visibleNodes: 0,
       gpuUploadBytes: 0,
+      canvasReadbackBytes: 0,
+      gpuCoverageUpperBoundPixels: 0,
+      canvasFallbackCoverageUpperBoundPixels: 0,
+      compositeSurfaceBytes: allocatedCompositeSurfaceBytes(),
       rendersPerInputFrame,
     });
+    activeFrameRenderCost = undefined;
     maybeSimulateGpuLoss();
     return;
   }
@@ -4893,8 +7913,9 @@ function render(
   // so a page converges on the shared per-image proxy budget instead of
   // leaving an evicted layer on its striped placeholder indefinitely.
   new Set(activeNodes()
-    .filter((node) => node.visible !== false && node.kind !== "text" && Boolean(node.assetId) && !imageBitmaps.has(node.assetId!))
-    .map((node) => node.assetId!))
+    .filter((node) => node.visible !== false)
+    .flatMap(nodeImagePaintAssetIds)
+    .filter((assetId) => !imageBitmaps.has(assetId)))
     .forEach((assetId) => void ensureImageBitmap(assetId));
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
@@ -4902,9 +7923,20 @@ function render(
   // The spatial index intentionally contains every canonical node. Intersect
   // it with hierarchy visibility here so a hidden Section's descendants cannot
   // reappear merely because this render path bypasses `activeNodes()`.
-  const pageVisibleNodes = visibleNodesOnPage(nodes, activePageId, defaultPageId);
-  const hierarchyVisibleIds = new Set(pageVisibleNodes.map((node) => node.id));
-  const visibleNodes = candidateNodes.filter((node) => hierarchyVisibleIds.has(node.id) && node.id !== editingTextNodeId && boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds));
+  const pageVisibleNodes = activeNodes();
+  const candidateIds = new Set(candidateNodes.map((node) => node.id));
+  const repeatRetainedSourceIds = new Set<string>();
+  candidateNodes.forEach((candidate) => repeatSourceIdsByGroupId.get(candidate.id)?.forEach((id) => {
+    candidateIds.add(id);
+    repeatRetainedSourceIds.add(id);
+  }));
+  const activeNodeOrderById = activeNodeOrderByIdCache ?? new Map(pageVisibleNodes.map((node, index) => [node.id, index]));
+  const visibleNodes = [...candidateIds]
+    .map((id) => nodeById.get(id))
+    .filter((node): node is CanvasNode => Boolean(node
+      && node.id !== editingTextNodeId
+      && (repeatRetainedSourceIds.has(node.id) || boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds))))
+    .sort((left, right) => (activeNodeOrderById.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (activeNodeOrderById.get(right.id) ?? Number.MAX_SAFE_INTEGER));
   // `nodeById` and the spatial grid intentionally build their own projected
   // copies. Object identity therefore cannot decide whether an overlay node is
   // visible; compare the durable NodeId so Line selection/hover is not skipped
@@ -4919,7 +7951,8 @@ function render(
   // now consumes the shared Scene IR as its ordering authority.
   // Recovery can temporarily advance Core ahead of the displayed projection.
   // Such a graph cannot validate this frame; building it only delays zoom.
-  if (Number(wasmDocument?.revision) === revision)
+  if (Number(wasmDocument?.revision) === revision
+    && (renderQuality.tier === "settled" || nodes.length < COMPLEX_DOCUMENT_NODE_THRESHOLD))
     void rustRenderGraphForVisibleNodes(viewportBounds, visibleNodes);
   reportRemoteProgress?.("render-paint");
   // Canvas' input order comes from the same Scene IR used by hit testing. The
@@ -4931,112 +7964,460 @@ function render(
   const cullingMs = performance.now() - cullingStartedAt;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   let gpuRenderedNodeIds: ReadonlySet<string> | undefined;
+  let orderedBackendIslandsRendered = false;
+  let backendIslandPaintStarted = false;
   let gpuUploadBytes = 0;
   let imageBitmapMs = 0;
   let compositeMs = 0;
+  let gpuIslandMs = 0;
+  let canvasIslandMs = 0;
+  let gpuCoverageUpperBoundPixels = 0;
+  let canvasFallbackCoverageUpperBoundPixels = 0;
+  let materializedCanvasIslands = 0;
+  let directCanvasIslands = 0;
+  let materializedBackdropCanvasIslands = 0;
+  let materializedCanvasIslandPixels = 0;
   const gpuStartedAt = performance.now();
-  const pageHasFrameChildren = pageVisibleNodes.some((node) => {
-    const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
-    return parent && isFrameLike(parent) && parent.clipsContent !== false;
-  });
-  const pageHasBooleanOperations = pageVisibleNodes
-    .some((node) => node.kind === "booleanOperation");
-  const pageHasAlphaMasks = pageVisibleNodes
-    .some((node) => Boolean(node.isMask));
-  const pageHasTransformGroupRepeat = pageVisibleNodes
-    .some((node) => node.kind === "transformGroup" && Boolean(transformGroupRepeatMatrices(nodes, node)?.length));
+  const pageFacts = activePageRenderFacts(pageVisibleNodes);
+  const pageHasFrameChildren = pageFacts.hasFrameChildren;
+  const pageHasAlphaMasks = pageFacts.hasAlphaMasks;
+  const pageHasTransformGroupRepeat = pageFacts.hasTransformGroupRepeat;
+  const pageParentIds = pageFacts.parentIds;
+  const pageHasSubtreeComposition = pageFacts.hasSubtreeComposition;
   const useProgressiveStructuralRender =
     (fastStructuralPreview || nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD) &&
     pageHasFrameChildren &&
     !pageHasAlphaMasks &&
-    !pageHasTransformGroupRepeat;
+    !pageHasTransformGroupRepeat &&
+    !pageHasSubtreeComposition;
+  const dirtyReplayPlan: DirtyRegionReplayPlan = planDirtyRegionReplay({
+    dirtyRegions: compiledScene?.dirtyRegions ?? [{ kind: "full-scene", reason: "initial" }],
+    replayBounds: compiledScene?.scene.semanticNodes.flatMap((node) => {
+      const bounds = node.visible && node.paintable ? node.effectBounds ?? node.worldBounds : undefined;
+      return bounds ? [bounds] : [];
+    }),
+    viewport,
+    width,
+    height,
+  });
+  if (captureFrameHash && revision > 0) {
+    const signature = `${activePageId}:${revision}:${dirtyReplayPlan.kind}:${dirtyReplayPlan.kind === "full-scene" ? dirtyReplayPlan.reason : ""}`;
+    if (signature !== lastDirtyRegionPlanSignature) {
+      lastDirtyRegionPlanSignature = signature;
+      diagnostics.record({
+        category: "renderer",
+        code: dirtyReplayPlan.kind === "regions"
+          ? "DIRTY_REGION_PLAN_REGIONS"
+          : dirtyReplayPlan.kind === "none"
+            ? "DIRTY_REGION_PLAN_NONE"
+            : `DIRTY_REGION_PLAN_FULL_${dirtyReplayPlan.reason.toUpperCase().replaceAll("-", "_")}`,
+        documentRevision: revision,
+        details: dirtyReplayPlan.kind === "full-scene"
+          ? { kind: dirtyReplayPlan.kind, reason: dirtyReplayPlan.reason }
+          : { kind: dirtyReplayPlan.kind },
+      });
+    }
+  }
+  const hasTransientOverlay = selectedIds.length > 0
+    || Boolean(hoveredId || drag || editingTextNodeId || hoveredAutoLayoutPadding || penDraft);
+  const useDirtyRegionReplay = dirtyReplayPlan.kind === "regions"
+    && rendererPreference === "canvas2d"
+    && renderQuality.tier === "settled"
+    && nodes.length < COMPLEX_DOCUMENT_NODE_THRESHOLD
+    && !reportRemoteProgress
+    && !fastStructuralPreview
+    && !pageHasFrameChildren
+    && !pageHasAlphaMasks
+    && !pageHasTransformGroupRepeat
+    && !pageHasSubtreeComposition
+    && !pageVisibleNodes.some(showsPersistentCanvasLayerName)
+    && !hasTransientOverlay
+    && presentedScene !== undefined
+    && presentedScene === compiledScenePreviousScene
+    && presentedPageId === activePageId
+    && presentedSurfaceWidth === canvas.width
+    && presentedSurfaceHeight === canvas.height
+    && presentedViewport !== undefined
+    && isSameRenderedViewport(presentedViewport, viewport);
+  if (captureFrameHash && dirtyReplayPlan.kind === "regions" && !useDirtyRegionReplay) {
+    const blockers = [
+      ...(rendererPreference !== "canvas2d" ? ["renderer"] : []),
+      ...(renderQuality.tier !== "settled" ? ["quality"] : []),
+      ...(nodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD ? ["large-document"] : []),
+      ...(reportRemoteProgress ? ["remote-progress"] : []),
+      ...(fastStructuralPreview ? ["structural-preview"] : []),
+      ...(pageHasFrameChildren ? ["frame-clip"] : []),
+      ...(pageHasAlphaMasks ? ["alpha-mask"] : []),
+      ...(pageHasTransformGroupRepeat ? ["transform-repeat"] : []),
+      ...(pageHasSubtreeComposition ? ["subtree-composition"] : []),
+      ...(pageVisibleNodes.some(showsPersistentCanvasLayerName) ? ["persistent-label"] : []),
+      ...(hasTransientOverlay ? ["transient-overlay"] : []),
+      ...(presentedScene === undefined ? ["no-presented-scene"] : []),
+      ...(presentedScene !== compiledScenePreviousScene ? ["scene-fence"] : []),
+      ...(presentedPageId !== activePageId ? ["page-fence"] : []),
+      ...(presentedSurfaceWidth !== canvas.width || presentedSurfaceHeight !== canvas.height ? ["surface-fence"] : []),
+      ...(presentedViewport === undefined || !isSameRenderedViewport(presentedViewport, viewport) ? ["viewport-fence"] : []),
+    ];
+    const signature = `${activePageId}:${revision}:${blockers.join(",")}`;
+    if (signature !== lastDirtyRegionReplayBlockerSignature) {
+      lastDirtyRegionReplayBlockerSignature = signature;
+      diagnostics.record({
+        category: "renderer",
+        code: `DIRTY_REGION_REPLAY_BLOCKED_${blockers.join("_").toUpperCase().replaceAll("-", "_") || "UNKNOWN"}`,
+        documentRevision: revision,
+        details: { blockerCount: blockers.length },
+      });
+    }
+  }
+  const dirtyReplayRects = dirtyReplayPlan.kind === "regions" ? dirtyReplayPlan.rects : [];
   const hasReusablePresentedFrame =
     presentedPageId === activePageId &&
     presentedSurfaceWidth === canvas.width &&
     presentedSurfaceHeight === canvas.height &&
-    cachedPresentedFrameSceneKey === `${revision}:${activePageId}:${transientSceneVersion}` &&
+    cachedPresentedFrameSceneKey === currentScenePresentationKey() &&
     isSameRenderedViewport(cachedPresentedFrameViewport, viewport);
-  if (!useProgressiveStructuralRender || !hasReusablePresentedFrame) {
+  const rejectCompositeFrame = (diagnosticCode: string) => {
+    if (activeFrameRenderCost === frameRenderCost) activeFrameRenderCost = undefined;
+    if (!compositeSurfaceLimitReported) {
+      diagnostics.record({
+        category: "renderer",
+        code: diagnosticCode,
+        documentRevision: revision,
+      });
+      compositeSurfaceLimitReported = true;
+    }
+    const retainsPresentedFrame = presentedPageId === activePageId
+      && presentedSurfaceWidth === canvas!.width
+      && presentedSurfaceHeight === canvas!.height;
+    emit({
+      type: "frame-failed",
+      revision,
+      pageId: activePageId,
+      code: "RESOURCE_LIMIT",
+      ...(retainsPresentedFrame && presentedRevision !== undefined
+        ? { retainedRevision: presentedRevision }
+        : {}),
+    });
+    emitSnapshot(undefined, false);
+  };
+  // Resource admission belongs to the frame, not to individual node paints.
+  // Reject before clearing the transferred canvas so a failed revision cannot
+  // replace the last complete presentation with a partial composite.
+  const compositeSurfacePlan = structuralCompositeSurfacePlan(structuralRenderNodes);
+  const effectPoolWindow = compositeSurfacePlan.effectPool ?? { pixelWidth: 1, pixelHeight: 1 };
+  const compositeAdmission = admitCompositeFrame(canvas.width, canvas.height, structuralRenderNodes, compositeSurfacePlan);
+  if (!compositeAdmission.accepted) {
+    rejectCompositeFrame(`COMPOSITE_FRAME_${compositeAdmission.reason.toUpperCase()}`);
+    return;
+  }
+  // Pools from an earlier scene are presentation caches. Release any capacity
+  // the accepted frame no longer needs so subsequent acquisitions are charged
+  // against this frame's actual simultaneous demand.
+  if (!compositeAdmission.demand.effectPool) effectSurfaces = undefined;
+  alphaMaskSurfaces.length = compositeAdmission.demand.alphaMaskPools;
+  subtreeCompositeSurfaces.length = compositeAdmission.demand.subtreePools;
+  const poolMatches = (surface: OffscreenCanvas, dimensions: CompositePoolDimensions) =>
+    surface.width === dimensions.pixelWidth && surface.height === dimensions.pixelHeight;
+  if (effectSurfaces && !poolMatches(effectSurfaces.source, effectPoolWindow)) effectSurfaces = undefined;
+  alphaMaskSurfaces = alphaMaskSurfaces.map((pool, depth) => {
+    const dimensions = compositeSurfacePlan.alphaMaskPools?.[depth] ?? { pixelWidth: 1, pixelHeight: 1 };
+    return pool && poolMatches(pool.target, dimensions) ? pool : undefined;
+  });
+  subtreeCompositeSurfaces = subtreeCompositeSurfaces.map((pool, depth) => {
+    const dimensions = compositeSurfacePlan.subtreePools?.[depth] ?? { pixelWidth: 1, pixelHeight: 1 };
+    return pool && poolMatches(pool.source, dimensions) ? pool : undefined;
+  });
+  // Materialize every admitted pool while the last complete frame is still on
+  // the transferred canvas. A browser allocation/context failure therefore
+  // follows the same whole-frame contract as an explicit budget rejection.
+  try {
+    const effectReady = !compositeAdmission.demand.effectPool || Boolean(acquireEffectSurfaces(effectPoolWindow));
+    const masksReady = Array.from({ length: compositeAdmission.demand.alphaMaskPools }, (_, depth) => depth)
+      .every((depth) => Boolean(acquireAlphaMaskSurface(depth, compositeSurfacePlan.alphaMaskPools?.[depth] ?? { pixelWidth: 1, pixelHeight: 1 })));
+    const subtreesReady = Array.from({ length: compositeAdmission.demand.subtreePools }, (_, depth) => depth)
+      .every((depth) => Boolean(acquireSubtreeCompositeSurfaces(depth, compositeSurfacePlan.subtreePools?.[depth] ?? { pixelWidth: 1, pixelHeight: 1 })));
+    if (!effectReady || !masksReady || !subtreesReady) {
+      rejectCompositeFrame("COMPOSITE_FRAME_SURFACE_UNAVAILABLE");
+      return;
+    }
+  } catch {
+    rejectCompositeFrame("COMPOSITE_FRAME_SURFACE_UNAVAILABLE");
+    return;
+  }
+  if (useDirtyRegionReplay) {
+    context.save();
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.beginPath();
+    dirtyReplayRects.forEach((rect) => context!.rect(rect.x, rect.y, rect.width, rect.height));
+    context.clip();
+    dirtyReplayRects.forEach((rect) => context!.clearRect(rect.x, rect.y, rect.width, rect.height));
+    context.fillStyle = canvasDesignTokens.color.backdrop;
+    dirtyReplayRects.forEach((rect) => context!.fillRect(rect.x, rect.y, rect.width, rect.height));
+  } else if (!useProgressiveStructuralRender || !hasReusablePresentedFrame) {
     context.clearRect(0, 0, width, height);
     context.fillStyle = canvasDesignTokens.color.backdrop;
     context.fillRect(0, 0, width, height);
     if (useProgressiveStructuralRender) renderGrid(context);
   }
+  const dragPreviewRootIds = escapedFrameDragPreviewRootIds();
   if (gpuRenderer && !useProgressiveStructuralRender) {
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
-      const pageNodes = activeNodes().filter((node) => node.id !== editingTextNodeId && node.kind !== "slice");
-      const pageHasRelativeTransform = pageVisibleNodes
-        .some((node) => Boolean(node.relativeTransform));
-      const decodedImageAssetIds = new Set(pageNodes
-        .filter((node) => node.kind === "image" && Boolean(node.assetId) && Boolean(imageBitmaps.get(node.assetId!)))
-        .map((node) => node.assetId!));
-      refreshRustGpuTextGlyphs();
-      const gpuTextNodeIds = new Set([...rustGpuTextGlyphs]
-        .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
-        .map(([nodeId]) => nodeId));
-      const gpuNodes = pageHasFrameChildren || pageHasBooleanOperations || pageHasAlphaMasks || pageHasTransformGroupRepeat ? [] : gpuLayerPrefix(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => !nativeAffineForNode(node) || requiresCanvasEffectOrBlend(node));
-      const currentRustGpuScene = gpuNodes.length === pageNodes.length && rustGpuScene
-        && rustGpuScene.revision === revision
-        && rustGpuScene.pageId === activePageId
-        && rustGpuScene.transientSceneVersion === transientSceneVersion
-        // A precomputed Rust instance buffer is a local acceleration only.
-        // It is admissible only when it proves the same Scene IR draw order;
-        // otherwise the TypeScript GPU builder receives the shared list.
-        && rustGpuScene.renderedNodeIds.size === gpuNodes.length
-        && [...rustGpuScene.renderedNodeIds].every((nodeId, index) => gpuNodes[index]?.id === nodeId)
-        && !pageHasRelativeTransform
-        ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
+      const pageNodes = !editingTextNodeId && !pageFacts.hasSlices
+        ? pageVisibleNodes
+        : sceneNodesInPaintOrder(
+            compiledScene?.scene,
+            pageVisibleNodes.filter((node) => node.id !== editingTextNodeId && node.kind !== "slice"),
+          );
+      const pageHasRelativeTransform = pageFacts.hasRelativeTransform;
+      const planKey = currentScenePresentationKey();
+      let gpuPlan = gpuBackendPlanCache?.key === planKey && gpuBackendPlanCache.pageNodes === pageNodes
+        ? gpuBackendPlanCache
         : undefined;
+      if (!gpuPlan) {
+        const decodedImageAssetIds = new Set(pageNodes
+          .filter((node) => node.kind === "image" && Boolean(node.assetId) && Boolean(imageBitmaps.get(node.assetId!)))
+          .map((node) => node.assetId!));
+        refreshRustTextGlyphs();
+        const gpuTextNodeIds = new Set([...rustTextGlyphs]
+          .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
+          .map(([nodeId]) => nodeId));
+        const plannedBackendIslands = gpuLayerIslands(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => {
+          const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
+          if (node.isMask) return "mask";
+          if (node.kind === "booleanOperation") return "boolean";
+          if (node.kind === "transformGroup" && transformGroupRepeatMatrices(nodes, node)?.length) return "repeat";
+          if (requiresSubtreeComposition(node, pageParentIds.has(node.id))) return "subtree-composition";
+          if (parent && isFrameLike(parent) && parent.clipsContent !== false) return "frame-clip";
+          return false;
+        }, (node) => nativeAffineForNode(node)
+          ? node.kind === "textPath" && gpuTextNodeIds.has(node.id) ? true : "native-affine"
+          : true);
+        // One renderer caches one uploaded scene. Multiple island scene keys on
+        // a large page would evict each other on every zoom frame, so keep the
+        // first GPU prefix stable and paint the remaining visible suffix through
+        // Canvas. Small pages retain the full ordered multi-island execution.
+        const backendIslands = pageNodes.length >= COMPLEX_DOCUMENT_NODE_THRESHOLD
+          ? limitGpuLayerIslands(plannedBackendIslands, 1)
+          : plannedBackendIslands;
+        const gpuIslands = backendIslands.filter((island): island is Extract<GpuLayerIsland, { backend: "gpu" }> => island.backend === "gpu");
+        const gpuNodes = gpuIslands.flatMap((island) => island.nodes);
+        const gpuNodeIds = new Set(gpuNodes.map((node) => node.id));
+        const gpuImageAssetIds = new Set(gpuNodes.flatMap((node) => node.kind === "image" && node.assetId ? [node.assetId] : []));
+        const textGlyphs = [...rustTextGlyphs]
+          .filter(([nodeId, cached]) => gpuNodeIds.has(nodeId) && cached.revision === revision)
+          .flatMap(([, cached]) => cached.glyphs);
+        gpuPlan = { key: planKey, pageNodes, backendIslands, gpuIslands, gpuNodes, gpuNodeIds, gpuImageAssetIds, textGlyphs };
+        gpuBackendPlanCache = gpuPlan;
+      }
+      const { backendIslands, gpuIslands, gpuNodes, gpuNodeIds: gpuBackendNodeIds, textGlyphs } = gpuPlan;
+      const visibleStructuralNodeIds = new Set(structuralRenderNodes.map((node) => node.id));
+      const visibleGpuNodes = structuralRenderNodes.filter((node) => gpuBackendNodeIds.has(node.id));
+      const visibleCanvasNodes = structuralRenderNodes.filter((node) => !gpuBackendNodeIds.has(node.id));
+      gpuCoverageUpperBoundPixels = clippedNodeCoverageUpperBound(visibleGpuNodes);
+      canvasFallbackCoverageUpperBoundPixels = clippedNodeCoverageUpperBound(visibleCanvasNodes);
       const gpuImageBitmaps = new Map<string, ImageBitmap>();
-      gpuNodes.forEach((node) => {
-        if (node.kind !== "image" || !node.assetId) return;
-        const bitmap = imageBitmaps.get(node.assetId);
-        if (bitmap) gpuImageBitmaps.set(node.assetId, bitmap);
+      gpuPlan.gpuImageAssetIds.forEach((assetId) => {
+        const bitmap = imageBitmaps.get(assetId);
+        if (bitmap) gpuImageBitmaps.set(assetId, bitmap);
       });
-      const textGlyphs = gpuNodes.filter((node) => node.kind === "text").flatMap((node) => rustGpuTextGlyphs.get(node.id)?.glyphs ?? []);
-      const result = gpuRenderer.render({ nodes: gpuNodes, viewport, width, height, dpr, sceneKey: `${revision}:${activePageId}:${transientSceneVersion}:${gpuNodes.map((node) => node.id).join(",")}`, precomputedInstances: currentRustGpuScene, imageBitmaps: gpuImageBitmaps, textGlyphs });
-      const compositeStartedAt = performance.now();
-      context.drawImage(result.bitmap, 0, 0, width, height);
-      compositeMs = performance.now() - compositeStartedAt;
-      result.bitmap.close();
-      gpuRenderedNodeIds = result.renderedNodeIds;
-      gpuUploadBytes = result.gpuUploadBytes;
-      imageBitmapMs = result.imageBitmapMs;
-      gpuSceneBytes = result.resourceBytes;
-      gpuEffectTextureBytes = result.effectTextures.bytes;
-      const imageTextureSignature = `${result.imageTextures.textures}:${result.imageTextures.bytes}`;
-      if (imageTextureSignature !== imageTextureStatsSignature) {
-        imageTextureStatsSignature = imageTextureSignature;
-        diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_STATS", documentRevision: revision, details: { textures: result.imageTextures.textures, bytes: result.imageTextures.bytes, cacheHits: result.imageTextures.cacheHits, uploads: result.imageTextures.uploads, releases: result.imageTextures.releases } });
+      const surfaceKey = `${canvas.width}x${canvas.height}:${dpr}`;
+      const cachedAdmission = gpuPlan.admission?.surfaceKey === surfaceKey ? gpuPlan.admission.value : undefined;
+      const frameAdmission = cachedAdmission ?? admitWebGpuSceneResources({ nodes: gpuNodes, width, height, dpr, imageBitmaps: gpuImageBitmaps, textGlyphs });
+      if (!cachedAdmission) {
+        gpuPlan = { ...gpuPlan, admission: { surfaceKey, value: frameAdmission } };
+        gpuBackendPlanCache = gpuPlan;
       }
-      if (result.imageTextures.releases) diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_RELEASED", documentRevision: revision, details: { textures: result.imageTextures.textures, releases: result.imageTextures.releases, bytes: result.imageTextures.bytes } });
-      const textAtlasSignature = `${result.textAtlas.pages}:${result.textAtlas.entries}:${result.textAtlas.bytes}`;
-      if (textAtlasSignature !== textAtlasStatsSignature) {
-        textAtlasStatsSignature = textAtlasSignature;
-        diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_STATS", documentRevision: revision, details: { pages: result.textAtlas.pages, entries: result.textAtlas.entries, bytes: result.textAtlas.bytes, cacheHits: result.textAtlas.cacheHits, uploads: result.textAtlas.uploads, evictions: result.textAtlas.evictions, rejectedNodes: result.textAtlas.rejectedNodes } });
+      if (!frameAdmission.accepted) throw new GpuSceneResourceLimitError(frameAdmission);
+      const renderedNodeIds = new Set<string>();
+      let lastResult: ReturnType<WebGpuSceneRenderer["render"]> | undefined;
+      if (gpuNodes.length > 0) {
+        for (let islandIndex = 0; islandIndex < backendIslands.length; islandIndex += 1) {
+          const island = backendIslands[islandIndex]!;
+          if (island.backend === "canvas") {
+            const visibleIslandNodes = island.nodes.filter((node) => visibleStructuralNodeIds.has(node.id));
+            if (visibleIslandNodes.length) {
+              backendIslandPaintStarted = true;
+              const canvasIslandStartedAt = performance.now();
+              const materialized = canMaterializeCanvasIsland(island)
+                && materializeCanvasIsland(context!, visibleIslandNodes, dragPreviewRootIds);
+              if (materialized) {
+                materializedCanvasIslands += 1;
+                if (island.backdrop === "previous-islands") materializedBackdropCanvasIslands += 1;
+                materializedCanvasIslandPixels = Math.min(
+                  canvas.width * canvas.height,
+                  materializedCanvasIslandPixels + clippedNodeCoverageUpperBound(visibleIslandNodes),
+                );
+              } else {
+                directCanvasIslands += 1;
+                renderFrameClippedTree(context!, visibleIslandNodes, dragPreviewRootIds);
+              }
+              canvasIslandMs += performance.now() - canvasIslandStartedAt;
+            }
+            continue;
+          }
+          const currentRustGpuScene = backendIslands.length === 1 && island.nodes.length === pageNodes.length && rustGpuScene
+            && rustGpuScene.revision === revision
+            && rustGpuScene.pageId === activePageId
+            && rustGpuScene.transientSceneVersion === transientSceneVersion
+            // A precomputed Rust instance buffer is a local acceleration only.
+            // It is admissible only when it proves the same Scene IR draw order;
+            // otherwise the TypeScript GPU builder receives the shared list.
+            && rustGpuScene.renderedNodeIds.size === island.nodes.length
+            && [...rustGpuScene.renderedNodeIds].every((nodeId, index) => island.nodes[index]?.id === nodeId)
+            && !pageHasRelativeTransform
+            ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
+            : undefined;
+          const islandTextNodeIds = new Set(island.nodes.filter((node) => node.kind === "text" || node.kind === "textPath").map((node) => node.id));
+          const islandTextGlyphs = textGlyphs.filter((glyph) => islandTextNodeIds.has(glyph.nodeId));
+          const gpuIslandStartedAt = performance.now();
+          const result = gpuRenderer.render({
+            nodes: island.nodes,
+            viewport,
+            width,
+            height,
+            dpr,
+            // The presentation key changes whenever island membership can
+            // change. Avoid rebuilding a multi-megabyte NodeId string on every
+            // camera-only frame of a large scene.
+            sceneKey: `${currentScenePresentationKey()}:island-${islandIndex}`,
+            precomputedInstances: currentRustGpuScene,
+            imageBitmaps: gpuImageBitmaps,
+            textGlyphs: islandTextGlyphs,
+          });
+          gpuIslandMs += performance.now() - gpuIslandStartedAt;
+          backendIslandPaintStarted = true;
+          const compositeStartedAt = performance.now();
+          try {
+            context.drawImage(result.bitmap, 0, 0, width, height);
+            compositeMs += performance.now() - compositeStartedAt;
+          } finally {
+            result.bitmap.close();
+          }
+          result.renderedNodeIds.forEach((id) => renderedNodeIds.add(id));
+          // Text atlas admission is all-or-Canvas per node. Paint any node the
+          // GPU declined at this exact island boundary so it cannot jump above
+          // a later Canvas subtree.
+          const declinedNodes = island.nodes.filter((node) => visibleStructuralNodeIds.has(node.id) && !result.renderedNodeIds.has(node.id));
+          if (declinedNodes.length) renderFrameClippedTree(context!, declinedNodes, dragPreviewRootIds);
+          gpuUploadBytes += result.gpuUploadBytes;
+          imageBitmapMs += result.imageBitmapMs;
+          gpuEffectTextureBytes = Math.max(gpuEffectTextureBytes, result.effectTextures.bytes);
+          lastResult = result;
+        }
+        gpuRenderedNodeIds = renderedNodeIds;
+        gpuSceneBytes = frameAdmission.resourceBytes;
+        orderedBackendIslandsRendered = true;
+        if (captureFrameHash && gpuIslands.length > 1) diagnostics.record({
+          category: "renderer",
+          code: "GPU_ORDERED_ISLANDS",
+          documentRevision: revision,
+          details: {
+            islands: backendIslands.length,
+            gpuIslands: gpuIslands.length,
+            canvasIslands: backendIslands.length - gpuIslands.length,
+            backdropIslands: backendIslands.filter((island) => island.backdrop === "previous-islands").length,
+          },
+        });
+        if (captureFrameHash) {
+          const backdropIslands = backendIslands.filter((island) => island.backdrop === "previous-islands");
+          if (backdropIslands.length) diagnostics.record({
+            category: "renderer",
+            code: "GPU_CANVAS_BACKDROP_DEPENDENCY",
+            documentRevision: revision,
+            details: {
+              backdropIslands: backdropIslands.length,
+              entries: backdropIslands.reduce((total, island) => total + island.nodes.length, 0),
+            },
+          });
+          if (materializedCanvasIslands || directCanvasIslands) diagnostics.record({
+            category: "renderer",
+            code: "GPU_CANVAS_ISLAND_TEXTURES",
+            documentRevision: revision,
+            details: {
+              materializedIslands: materializedCanvasIslands,
+              directIslands: directCanvasIslands,
+              backdropIslands: materializedBackdropCanvasIslands,
+              pixels: materializedCanvasIslandPixels,
+              bytes: canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0,
+            },
+          });
+          const canvasReasonNodeCounts = new Map<string, number>();
+          backendIslands.filter((island) => island.backend === "canvas").forEach((island) => {
+            canvasReasonNodeCounts.set(island.reason, (canvasReasonNodeCounts.get(island.reason) ?? 0) + island.nodes.length);
+          });
+          canvasReasonNodeCounts.forEach((entries, reason) => diagnostics.record({
+            category: "renderer",
+            code: `GPU_CANVAS_ISLAND_${reason}`,
+            documentRevision: revision,
+            details: { entries },
+          }));
+        }
       }
-      if (result.textAtlas.evictions) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_EVICTED", documentRevision: revision, details: { pages: result.textAtlas.pages, evictions: result.textAtlas.evictions, entries: result.textAtlas.entries } });
-      if (result.textAtlas.rejectedNodes) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_NODE_FALLBACK", documentRevision: revision, details: { pages: result.textAtlas.pages, rejectedNodes: result.textAtlas.rejectedNodes } });
-      const effectTextureSignature = `${result.effectTextures.textures}:${result.effectTextures.bytes}`;
-      if (effectTextureSignature !== effectTextureStatsSignature) {
-        effectTextureStatsSignature = effectTextureSignature;
-        diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_STATS", documentRevision: revision, details: {
-          textures: result.effectTextures.textures,
-          bytes: result.effectTextures.bytes,
-          active: result.effectTextures.active,
-          cacheHits: result.effectTextures.cacheHits,
-          allocations: result.effectTextures.allocations,
-          evictions: result.effectTextures.evictions,
-          rejected: result.effectTextures.rejected,
-        } });
+      const result = lastResult;
+      if (result) {
+        if (captureFrameHash) {
+          const nativeAffineTextPathIds = new Set(nodes
+            .filter((node) => node.kind === "textPath" && Boolean(node.relativeTransform))
+            .map((node) => node.id));
+          const affineGlyphs = textGlyphs.filter((glyph) => glyph.quadTransform
+            && nativeAffineTextPathIds.has(glyph.nodeId)
+            && renderedNodeIds.has(glyph.nodeId));
+          const affineNodeIds = new Set(affineGlyphs.map((glyph) => glyph.nodeId));
+          const signature = `${revision}:${[...affineNodeIds].sort().join(",")}:${affineGlyphs.length}`;
+          if (affineGlyphs.length && signature !== affineGpuTextStatsSignature) {
+            affineGpuTextStatsSignature = signature;
+            diagnostics.record({
+              category: "renderer",
+              code: "GPU_TEXT_AFFINE_ACTIVE",
+              documentRevision: revision,
+              details: { nodes: affineNodeIds.size, glyphs: affineGlyphs.length },
+            });
+          }
+        }
+        const imageTextureSignature = `${result.imageTextures.textures}:${result.imageTextures.bytes}`;
+        if (imageTextureSignature !== imageTextureStatsSignature) {
+          imageTextureStatsSignature = imageTextureSignature;
+          diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_STATS", documentRevision: revision, details: { textures: result.imageTextures.textures, bytes: result.imageTextures.bytes, cacheHits: result.imageTextures.cacheHits, uploads: result.imageTextures.uploads, releases: result.imageTextures.releases } });
+        }
+        if (result.imageTextures.releases) diagnostics.record({ category: "renderer", code: "IMAGE_TEXTURE_RELEASED", documentRevision: revision, details: { textures: result.imageTextures.textures, releases: result.imageTextures.releases, bytes: result.imageTextures.bytes } });
+        const textAtlasSignature = `${result.textAtlas.pages}:${result.textAtlas.entries}:${result.textAtlas.bytes}`;
+        if (textAtlasSignature !== textAtlasStatsSignature) {
+          textAtlasStatsSignature = textAtlasSignature;
+          diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_STATS", documentRevision: revision, details: { pages: result.textAtlas.pages, entries: result.textAtlas.entries, bytes: result.textAtlas.bytes, cacheHits: result.textAtlas.cacheHits, uploads: result.textAtlas.uploads, evictions: result.textAtlas.evictions, rejectedNodes: result.textAtlas.rejectedNodes } });
+        }
+        if (result.textAtlas.evictions) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_EVICTED", documentRevision: revision, details: { pages: result.textAtlas.pages, evictions: result.textAtlas.evictions, entries: result.textAtlas.entries } });
+        if (result.textAtlas.rejectedNodes) diagnostics.record({ category: "renderer", code: "TEXT_ATLAS_NODE_FALLBACK", documentRevision: revision, details: { pages: result.textAtlas.pages, rejectedNodes: result.textAtlas.rejectedNodes } });
+        const effectTextureSignature = `${result.effectTextures.textures}:${result.effectTextures.bytes}`;
+        if (effectTextureSignature !== effectTextureStatsSignature) {
+          effectTextureStatsSignature = effectTextureSignature;
+          diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_STATS", documentRevision: revision, details: {
+            textures: result.effectTextures.textures,
+            bytes: result.effectTextures.bytes,
+            active: result.effectTextures.active,
+            cacheHits: result.effectTextures.cacheHits,
+            allocations: result.effectTextures.allocations,
+            evictions: result.effectTextures.evictions,
+            rejected: result.effectTextures.rejected,
+          } });
+        }
+        if (result.effectTextures.evictions) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_EVICTED", documentRevision: revision, details: { textures: result.effectTextures.textures, evictions: result.effectTextures.evictions, bytes: result.effectTextures.bytes } });
+        if (result.effectTextures.rejected) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_FALLBACK", documentRevision: revision, details: { textures: result.effectTextures.textures, rejected: result.effectTextures.rejected, bytes: result.effectTextures.bytes } });
       }
-      if (result.effectTextures.evictions) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_EVICTED", documentRevision: revision, details: { textures: result.effectTextures.textures, evictions: result.effectTextures.evictions, bytes: result.effectTextures.bytes } });
-      if (result.effectTextures.rejected) diagnostics.record({ category: "renderer", code: "EFFECT_TEXTURE_FALLBACK", documentRevision: revision, details: { textures: result.effectTextures.textures, rejected: result.effectTextures.rejected, bytes: result.effectTextures.bytes } });
       gpuSceneWithinBudget = true;
       gpuSceneLimitReported = false;
     } catch (error) {
+      // A later island can fail after earlier GPU/Canvas islands were already
+      // composited. Restore a clean document surface before the ordinary
+      // Canvas path below replays the complete canonical scene.
+      if (backendIslandPaintStarted) {
+        context.clearRect(0, 0, width, height);
+        context.fillStyle = canvasDesignTokens.color.backdrop;
+        context.fillRect(0, 0, width, height);
+        gpuRenderedNodeIds = undefined;
+        orderedBackendIslandsRendered = false;
+      }
       if (error instanceof GpuSceneResourceLimitError) {
         gpuSceneBytes = error.admission.resourceBytes;
         gpuEffectTextureBytes = 0;
@@ -5058,7 +8439,7 @@ function render(
   const gpuPrepareMs = performance.now() - gpuStartedAt;
   reportRemoteProgress?.("render-overlay");
   const overlayStartedAt = performance.now();
-  const dragPreviewRootIds = escapedFrameDragPreviewRootIds();
+  const canvasFallbackStartedAt = overlayStartedAt;
   if (useProgressiveStructuralRender) {
     const booleanOperandIds = renderedBooleanOperandIds(structuralRenderNodes);
     const progressiveNodes = structuralRenderNodes.filter((node) => !booleanOperandIds.has(node.id));
@@ -5104,7 +8485,7 @@ function render(
     const renderedViewport = { ...viewport };
     const renderedSurfaceWidth = width;
     const renderedSurfaceHeight = height;
-    const needsEffectPass = renderedViewport.zoom >= 1.5 && progressiveNodes.some((node) => orderedEffects(node).length > 0);
+    const needsEffectPass = renderedViewport.zoom >= 1.5 && progressiveNodes.some((node) => activeNodeEffects(node).length > 0);
     let paintingEffects = false;
     const publishStagingSurface = () => {
       if (paintGeneration !== progressivePaintGeneration || !context || !stagingContext) return;
@@ -5114,6 +8495,7 @@ function render(
       context.drawImage(stagingCanvas, 0, 0);
       context.restore();
       presentedPageId = activePageId;
+      presentedRevision = revision;
       presentedSurfaceWidth = canvas!.width;
       presentedSurfaceHeight = canvas!.height;
       // The completed staging surface is safe to reuse between Worker turns:
@@ -5145,6 +8527,7 @@ function render(
         context.drawImage(previewCanvas, 0, 0, canvas.width, canvas.height);
         context.restore();
         presentedPageId = activePageId;
+        presentedRevision = revision;
         presentedSurfaceWidth = canvas.width;
         presentedSurfaceHeight = canvas.height;
         cachePresentedFrame(previewCanvas, renderedViewport, renderedSurfaceWidth, renderedSurfaceHeight);
@@ -5222,27 +8605,37 @@ function render(
         return;
       }
       cachePresentedFrame(stagingCanvas, renderedViewport, renderedSurfaceWidth, renderedSurfaceHeight);
+      markPresentedScene();
       completedProgressivePaintKey = progressiveRequestKey;
+      compositeSurfaceLimitReported = false;
       finishProgressivePaint();
       reportRemoteProgress?.("render-finalize");
       renderPerformance.record({
         totalMs: performance.now() - startedAt,
         cullingMs,
         gpuPrepareMs,
+        gpuIslandMs,
+        canvasIslandMs,
         overlayMs: performance.now() - overlayStartedAt,
         imageBitmapMs,
         compositeMs,
         candidateNodes: candidateNodes.length,
         visibleNodes: visibleNodes.length,
         gpuUploadBytes,
+        canvasReadbackBytes: frameRenderCost.canvasReadbackBytes,
+        gpuCoverageUpperBoundPixels,
+        canvasFallbackCoverageUpperBoundPixels,
+        compositeSurfaceBytes: allocatedCompositeSurfaceBytes(),
         rendersPerInputFrame,
       });
+      if (activeFrameRenderCost === frameRenderCost) activeFrameRenderCost = undefined;
       emit({
         type: "frame-ready",
         revision,
         pageId: activePageId,
         quality: "settled",
       });
+      emitFrameHashEvidence();
       maybeSimulateGpuLoss();
     };
     const runPaintChunk = () => {
@@ -5255,7 +8648,10 @@ function render(
     };
     scheduleProgressivePaint(runPaintChunk);
     return;
-  } else if (pageHasFrameChildren || pageHasAlphaMasks || pageHasTransformGroupRepeat)
+  } else if (orderedBackendIslandsRendered) {
+    // The ordered island executor already painted every document layer. The
+    // remaining work in this function is grid and interaction overlays.
+  } else if (pageHasFrameChildren || pageHasAlphaMasks || pageHasTransformGroupRepeat || pageHasSubtreeComposition)
     renderFrameClippedTree(
       context!,
       structuralRenderNodes,
@@ -5269,10 +8665,34 @@ function render(
               total,
             })
         : undefined,
+      gpuRenderedNodeIds,
     );
   else {
     const booleanOperandIds = renderedBooleanOperandIds(renderOrderedNodes);
-    renderOrderedNodes.forEach((node) => { if (!gpuRenderedNodeIds?.has(node.id) && !booleanOperandIds.has(node.id)) renderNode(context!, node); });
+    const dirtyBounds = useDirtyRegionReplay
+      ? dirtyReplayRects.map((rect) => ({
+          x: rect.worldBounds.left,
+          y: rect.worldBounds.top,
+          width: rect.worldBounds.right - rect.worldBounds.left,
+          height: rect.worldBounds.bottom - rect.worldBounds.top,
+        }))
+      : undefined;
+    const semanticBounds = useDirtyRegionReplay
+      ? new Map(compiledScene?.scene.semanticNodes.map((node) => [node.nodeId, node.effectBounds ?? node.worldBounds]))
+      : undefined;
+    renderOrderedNodes.forEach((node) => {
+      if (gpuRenderedNodeIds?.has(node.id) || booleanOperandIds.has(node.id)) return;
+      const sceneBounds = semanticBounds?.get(node.id);
+      const replayBounds = sceneBounds
+        ? { x: sceneBounds.left, y: sceneBounds.top, width: sceneBounds.right - sceneBounds.left, height: sceneBounds.bottom - sceneBounds.top }
+        : nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node);
+      if (dirtyBounds && !dirtyBounds.some((bounds) => boundsIntersect(replayBounds, bounds))) return;
+      renderNode(context!, node);
+    });
+  }
+  if (!orderedBackendIslandsRendered) {
+    canvasIslandMs += performance.now() - canvasFallbackStartedAt;
+    canvasFallbackCoverageUpperBoundPixels = clippedNodeCoverageUpperBound(structuralRenderNodes);
   }
   reportRemoteProgress?.("render-finalize");
   visibleNodes.forEach((node) => renderFrameName(context!, node));
@@ -5299,24 +8719,65 @@ function render(
   // Multi-selection geometry is an overlay, so construct it from the same
   // visible subset instead of expanding the outline around fully clipped
   // layers that remain selected in the Layers panel.
-  const multiSelection = resolveMultiResizeSelection(nodes, visibleSelected.map((node) => node.id));
+  const paddingOverlay = !drag || drag.mode === "auto-layout-padding"
+    ? autoLayoutPaddingOverlay(nodes, selectedIds, hoveredAutoLayoutPadding, worldTransformById)
+    : undefined;
+  if (paddingOverlay) renderAutoLayoutPadding(context!, paddingOverlay, toScreen);
+  if (selectedIds.length === 1 && visibleSelected.length === 1 && !frameDropTarget && drag?.mode !== "draw") {
+    const relationship = selectionParentRelationship(nodes, selectedIds, worldTransformById);
+    if (relationship) renderParentRelationship(context!, relationship, toScreen);
+  }
+  const multiSelection = resolveMultiResizeSelection(nodes, visibleSelected.map((node) => node.id), {
+    repeatBoundsForNode: materializedRepeatResizeBounds,
+  });
   const renderedMultiSelection = renderMultiResizeSelection(context!, multiSelection);
+  if (!renderedMultiSelection) visibleSelected.forEach((node) => renderConstraintGuides(context!, node));
   if (!renderedMultiSelection) visibleSelected.forEach((node) => renderSelection(context!, node));
   if (!renderedMultiSelection) visibleSelected.forEach((node) => renderVectorAnchorOverlay(context!, node));
   if (visibleSelected.length) renderSelectionLabel(context, multiSelection);
   renderPenDraftPreview(context!);
   renderMarquee(context);
+  // The grid is a deterministic function of the already-fenced viewport. In
+  // a dirty replay this call remains inside the screen-space clip, restoring
+  // exactly the cleared grid pixels without repainting the rest of the canvas.
   renderGrid(context);
-  presentedPageId = activePageId;
-  presentedSurfaceWidth = canvas.width;
-  presentedSurfaceHeight = canvas.height;
-  renderPerformance.record({ totalMs: performance.now() - startedAt, cullingMs, gpuPrepareMs, overlayMs: performance.now() - overlayStartedAt, imageBitmapMs, compositeMs, candidateNodes: candidateNodes.length, visibleNodes: visibleNodes.length, gpuUploadBytes, rendersPerInputFrame });
+  if (useDirtyRegionReplay) {
+    context.restore();
+    const signature = `${activePageId}:${revision}:${sceneResourceGeneration}:${dirtyReplayRects.map((rect) => `${rect.x},${rect.y},${rect.width},${rect.height}`).join(";")}`;
+    if (signature !== lastDirtyRegionReplaySignature) {
+      lastDirtyRegionReplaySignature = signature;
+      diagnostics.record({ category: "renderer", code: "DIRTY_REGION_REPLAY", documentRevision: revision });
+    }
+  }
+  markPresentedScene();
+  cacheCurrentPresentedFrameForInteraction();
+  compositeSurfaceLimitReported = false;
+  renderPerformance.record({
+    totalMs: performance.now() - startedAt,
+    cullingMs,
+    gpuPrepareMs,
+    gpuIslandMs,
+    canvasIslandMs,
+    overlayMs: performance.now() - overlayStartedAt,
+    imageBitmapMs,
+    compositeMs,
+    candidateNodes: candidateNodes.length,
+    visibleNodes: visibleNodes.length,
+    gpuUploadBytes,
+    canvasReadbackBytes: frameRenderCost.canvasReadbackBytes,
+    gpuCoverageUpperBoundPixels,
+    canvasFallbackCoverageUpperBoundPixels,
+    compositeSurfaceBytes: allocatedCompositeSurfaceBytes(),
+    rendersPerInputFrame,
+  });
+  if (activeFrameRenderCost === frameRenderCost) activeFrameRenderCost = undefined;
   emit({
     type: "frame-ready",
     revision,
     pageId: activePageId,
     quality: "settled",
   });
+  emitFrameHashEvidence();
   maybeSimulateGpuLoss();
 }
 async function pasteClipboard() {
@@ -5398,7 +8859,7 @@ async function pasteClipboard() {
 
 function dispatch(command: EditorCommand) {
   command = withResolvedTextAutoSize(command);
-  if (command.type === "update") command = { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
+  if (command.type === "update" || command.type === "resizeWithoutConstraints") command = { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
   command = withResolvedLayerPosition(command);
   if (command.type === "arrange") {
     const arranged = resolveArrangeCommand(nodes, command);
@@ -5426,7 +8887,11 @@ function dispatch(command: EditorCommand) {
     const boolean = nodes.find((node) => node.id === command.id);
     const path = boolean && canonicalBooleanPath(boolean);
     if (!path) { emitError(undefined, "INVALID_COMMAND"); return; }
-    const flattened = resolveFlattenBooleanBatch(nodes, command.id, path, createId);
+    const flattened = resolveFlattenBooleanBatch(nodes, command.id, path, createId, command.replacementId, {
+      parentId: command.parentId,
+      pageId: command.pageId,
+      index: command.index,
+    });
     if (!flattened) { emitError(undefined, "INVALID_COMMAND"); return; }
     const { batch, replacement } = flattened;
     const replacementId = replacement.id;
@@ -5521,6 +8986,7 @@ function dispatch(command: EditorCommand) {
       restorePageSelection(activePageId);
       editingTextNodeId = undefined;
       hoveredId = undefined;
+      hoveredAutoLayoutPadding = undefined;
       // Publish navigation before the potentially expensive first paint of a
       // complex page so the page row and Layers panel acknowledge the click.
       emitViewState(true);
@@ -5566,11 +9032,12 @@ function dispatch(command: EditorCommand) {
       break;
     }
     case "update": commit(() => { nodes = nodes.map((node) => node.id === command.id ? { ...node, ...command.patch } : node); }, appliedByWasm, appliedByWasm ? { type: "update", id: command.id, patch: command.patch } : undefined, baseRevision, true, command); break;
+    case "resizeWithoutConstraints": commit(() => { nodes = nodes.map((node) => node.id === command.id ? { ...node, ...command.patch } : node); }, appliedByWasm, appliedByWasm ? command : undefined, baseRevision, true, command); break;
     case "reposition": commit(() => {
       const positions = new Map(command.positionIds.map(({ id, positionId }) => [id, positionId]));
       nodes = nodes.map((node) => positions.has(node.id) ? { ...node, positionId: positions.get(node.id)! } : node);
     }, appliedByWasm, appliedByWasm ? { type: "reposition", positionIds: command.positionIds } : undefined, baseRevision, true, command); break;
-    case "select": selectedIds = command.ids; storeActivePageSelection(); render(); emitViewState(); break;
+    case "select": selectedIds = command.ids; hoveredAutoLayoutPadding = undefined; storeActivePageSelection(); render(); emitViewState(); break;
     case "delete": commit(() => { nodes = nodes.filter((node) => !command.ids.includes(node.id)); selectedIds = []; }, appliedByWasm, appliedByWasm ? { type: "delete", ids: command.ids } : undefined, baseRevision, true, command); break;
     case "duplicate": {
       if (!wasmDocument) {
@@ -5708,7 +9175,15 @@ function dispatch(command: EditorCommand) {
         viewport = command.snapshot.viewport;
         render();
         emitSnapshot();
-        void loadDocumentBridge(undefined, ephemeralBenchmarkProjection, seedAssets, command.requestId);
+        void loadDocumentBridge(
+          undefined,
+          ephemeralBenchmarkProjection,
+          seedAssets,
+          command.requestId,
+          command.snapshot.format === "benchmark-projection-v1"
+            ? command.snapshot.benchmark
+            : undefined,
+        );
       }
       break;
     }
@@ -5759,7 +9234,11 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     const command = transaction.commands[0];
     const boolean = nodes.find((node) => node.id === command.id);
     const path = boolean && canonicalBooleanPath(boolean);
-    const flattened = path && resolveFlattenBooleanBatch(nodes, command.id, path, createId);
+    const flattened = path && resolveFlattenBooleanBatch(nodes, command.id, path, createId, command.replacementId, {
+      parentId: command.parentId,
+      pageId: command.pageId,
+      index: command.index,
+    });
     if (!flattened) {
       emitError(undefined, "INVALID_COMMAND", transaction.id);
       emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
@@ -5839,23 +9318,16 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
   const normalizationPatches = transaction.commands.some((command) => command.type === "arrange")
     ? autoLayoutProjectionNormalizationPatches(nodes)
     : [];
-  const mergedUpdates = new Map<string, Partial<CanvasNode>>();
-  for (const normalization of normalizationPatches) mergedUpdates.set(normalization.id, normalization.patch);
-  const nonUpdates: EditorCommand[] = [];
-  for (const command of concreteCommands) {
-    if (command.type !== "update") { nonUpdates.push(command); continue; }
-    mergedUpdates.set(command.id, { ...(mergedUpdates.get(command.id) ?? {}), ...command.patch });
-  }
-  const pageScopedCommands = [
-    ...normalizationPatches.map(({ id }) => ({ type: "update" as const, id, patch: mergedUpdates.get(id)! })),
-    ...concreteCommands
-      .filter((command): command is Extract<EditorCommand, { type: "update" }> => command.type === "update" && !normalizationPatches.some((normalization) => normalization.id === command.id))
-      .map((command) => ({ type: "update" as const, id: command.id, patch: mergedUpdates.get(command.id)! })),
-    ...nonUpdates,
-  ].map((command) => {
+  const pageScopedCommands = coalesceAdjacentNodeUpdates([
+    ...normalizationPatches.map(({ id, patch }) => ({ type: "update" as const, id, patch })),
+    ...concreteCommands,
+  ]).map((command) => {
     if (command.type === "create") return { ...command, node: { ...command.node, pageId: command.node.pageId ?? activePageId } };
-    if (command.type === "update") return { ...command, patch: withManualAutoLayoutSizing(nodes, command.id, command.patch) };
     return command;
+  }).map((command) => {
+    const resolvedText = withResolvedTextAutoSize(command);
+    if (resolvedText.type === "update" || resolvedText.type === "resizeWithoutConstraints") return { ...resolvedText, patch: withManualAutoLayoutSizing(nodes, resolvedText.id, resolvedText.patch) };
+    return resolvedText;
   });
   const resolved = resolveCoreBatch(nodes, pageScopedCommands);
   if (!resolved) {
@@ -5966,8 +9438,9 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       penDraft.previewWorld = undefined;
       render();
     }
-    if (!drag && hoveredId !== undefined) {
+    if (!drag && (hoveredId !== undefined || hoveredAutoLayoutPadding !== undefined)) {
       hoveredId = undefined;
+      hoveredAutoLayoutPadding = undefined;
       render();
     }
     return;
@@ -6017,6 +9490,28 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       drag = { mode: "draw", startX: snapped.x, startY: snapped.y, node };
       return;
     }
+    const paddingOverlay = !event.readOnly && context
+      ? autoLayoutPaddingOverlay(nodes, selectedIds, hoveredAutoLayoutPadding, worldTransformById)
+      : undefined;
+    if (paddingOverlay && context && isPointInAutoLayoutPaddingBadge(
+      autoLayoutPaddingBadgeBounds(context, paddingOverlay, toScreen),
+      { x: event.x, y: event.y },
+    )) {
+      const frame = nodes.find((node) => node.id === paddingOverlay.frameId);
+      const layout = normalizeAutoLayout(frame?.autoLayout);
+      if (frame && layout) {
+        drag = {
+          mode: "auto-layout-padding",
+          id: frame.id,
+          side: paddingOverlay.side,
+          startX: event.x,
+          startY: event.y,
+          layout,
+          before: cloneDocument(),
+        };
+        return;
+      }
+    }
     const vectorHandle = !event.readOnly && vectorHandleAtScreen(event.x, event.y);
     if (vectorHandle) {
       drag = { mode: "vector-handle", ...vectorHandle, before: cloneDocument() };
@@ -6052,7 +9547,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     }
     const resize = !event.readOnly && resizeHandleAtScreen(event.x, event.y);
     if (resize) {
-      drag = { mode: "resize", id: resize.node.id, handle: resize.handle, start: world, node: structuredClone(resize.node), before: cloneDocument() };
+      drag = { mode: "resize", id: resize.node.id, handle: resize.handle, start: world, node: structuredClone(resize.node), before: cloneDocument(), ignoreConstraints: Boolean(event.ignoreConstraints), previewTransactionId: createId() };
       return;
     }
     const lineResize = !event.readOnly && lineEndpointHandleAtScreen(event.x, event.y);
@@ -6098,8 +9593,14 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         return;
       }
       const nextHoveredId = hoverHit(world.x, world.y)?.id;
-      if (nextHoveredId !== hoveredId) {
+      const nextPaddingHover = tool === "select"
+        ? autoLayoutPaddingSideAtWorldPoint(nodes, selectedIds, world, viewport.zoom, worldTransformById)
+        : undefined;
+      if (nextHoveredId !== hoveredId
+        || nextPaddingHover?.frameId !== hoveredAutoLayoutPadding?.frameId
+        || nextPaddingHover?.side !== hoveredAutoLayoutPadding?.side) {
         hoveredId = nextHoveredId;
+        hoveredAutoLayoutPadding = nextPaddingHover;
         render();
       }
     }
@@ -6109,7 +9610,7 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   if (event.readOnly && activeDrag.mode !== "pan" && activeDrag.mode !== "select") {
     // A lease can expire mid-drag. Restore the pre-drag projection instead of
     // leaving an uncommitted visual move in a follower tab.
-    if ((activeDrag.mode === "move" || activeDrag.mode === "resize" || activeDrag.mode === "line-resize" || activeDrag.mode === "vector-point" || activeDrag.mode === "vector-handle" || activeDrag.mode === "multi-resize" || activeDrag.mode === "rotate") && activeDrag.before) {
+    if ((activeDrag.mode === "move" || activeDrag.mode === "resize" || activeDrag.mode === "line-resize" || activeDrag.mode === "auto-layout-padding" || activeDrag.mode === "vector-point" || activeDrag.mode === "vector-handle" || activeDrag.mode === "multi-resize" || activeDrag.mode === "rotate") && activeDrag.before) {
       nodes = activeDrag.before;
       transientSceneVersion += 1;
       rebuildNodeIndex();
@@ -6119,6 +9620,9 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
     if (activeDrag.mode === "pen-point") cancelPenDraft();
     if (event.event === "up") drag = undefined;
     return;
+  }
+  if (activeDrag.mode === "resize") {
+    activeDrag.ignoreConstraints = Boolean(event.ignoreConstraints);
   }
   if (event.event === "move") {
     if (activeDrag.mode === "pan") { viewport.x += (event.x - activeDrag.startX) / viewport.zoom; viewport.y += (event.y - activeDrag.startY) / viewport.zoom; activeDrag.startX = event.x; activeDrag.startY = event.y; activateInteractiveRenderQuality(); render(); emitInteractiveViewState(); }
@@ -6133,6 +9637,17 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       updateMarqueeSelection(activeDrag, world.x, world.y);
       render();
       emitViewState();
+    }
+    if (activeDrag.mode === "auto-layout-padding") {
+      const delta = autoLayoutPaddingDragDelta(
+        { x: activeDrag.startX, y: activeDrag.startY },
+        { x: event.x, y: event.y },
+      );
+      const autoLayout = autoLayoutWithDraggedPadding(activeDrag.layout, activeDrag.side, delta);
+      nodes = activeDrag.before.map((node) => node.id === activeDrag.id ? { ...node, autoLayout } : node);
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      render();
     }
     if (activeDrag.mode === "draw" && activeDrag.node) {
       const end = snapCanvasPoint(world);
@@ -6194,7 +9709,8 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         const vectorPath = activeDrag.node.kind === "vector" && activeDrag.node.vectorPath && activeDrag.node.width > 0 && activeDrag.node.height > 0
           ? scaleVectorPath(activeDrag.node.vectorPath, geometry.width / activeDrag.node.width, geometry.height / activeDrag.node.height)
           : undefined;
-        nodes = nodes.map((node) => node.id === activeDrag.id ? { ...node, ...geometry, ...(vectorPath ? { vectorPath } : {}) } : node);
+        nodes = coreResizePreview(activeDrag, geometry)
+          ?? activeDrag.before.map((node) => node.id === activeDrag.id ? { ...node, ...geometry, ...(vectorPath ? { vectorPath } : {}) } : node);
         transientSceneVersion += 1;
         rebuildNodeIndex();
         render();
@@ -6302,6 +9818,18 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       return;
     }
     if (activeDrag.mode === "draw" && activeDrag.node) { dispatch({ type: "create", node: activeDrag.node }); }
+    if (activeDrag.mode === "auto-layout-padding") {
+      const autoLayout = nodes.find((node) => node.id === activeDrag.id)?.autoLayout;
+      nodes = activeDrag.before;
+      transientSceneVersion += 1;
+      rebuildNodeIndex();
+      if (autoLayout && JSON.stringify(autoLayout.padding) !== JSON.stringify(activeDrag.layout.padding)) {
+        dispatch({ type: "update", id: activeDrag.id, patch: { autoLayout } });
+      } else {
+        render();
+        emitViewState();
+      }
+    }
     if (activeDrag.mode === "move" && activeDrag.before) {
       // Resolve every moved node against the immutable pre-drag document. Legacy
       // nodes yield an x/y patch; a Relative-v1 node (grouped child, ungrouped
@@ -6395,7 +9923,9 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
       nodes = activeDrag.before;
       transientSceneVersion += 1;
       rebuildNodeIndex();
-      if (geometry && (hasCommittedResize(before, geometry) || activeDrag.node.rotation !== geometry.rotation || JSON.stringify(activeDrag.node.relativeTransform) !== JSON.stringify(geometry.relativeTransform))) dispatch({ type: "update", id: activeDrag.id, patch: geometry });
+      if (geometry && (hasCommittedResize(before, geometry) || activeDrag.node.rotation !== geometry.rotation || JSON.stringify(activeDrag.node.relativeTransform) !== JSON.stringify(geometry.relativeTransform))) dispatch(activeDrag.ignoreConstraints
+        ? { type: "resizeWithoutConstraints", id: activeDrag.id, patch: geometry }
+        : { type: "update", id: activeDrag.id, patch: geometry });
       else { render(); emitViewState(); }
     }
     if (activeDrag.mode === "line-resize") {
@@ -6549,7 +10079,7 @@ function recordInputToRenderLatency(occurredAt: number | undefined) {
 }
 self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
   try {
-    if (data.type === "init") { documentId = data.documentId ?? documentId; canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
+    if (data.type === "init") { documentId = data.documentId ?? documentId; canvas = data.canvas; rendererPreference = data.rendererPreference; simulatedGpuLossesRequested = Math.min(2, Math.max(0, data.simulateGpuLosses)); simulateGpuLossAfterImage = data.simulateGpuLossAfterImage; simulatedGpuFault = data.simulateGpuFault; simulatedGpuFaultReported = false; captureFrameHash = data.captureFrameHash === true; captureFrameSamples = data.captureFrameSamples ?? []; capturedFrameHashKey = ""; context = canvas.getContext("2d"); setRenderSurface(data.width, data.height, data.dpr); diagnostics.record({ category: "lifecycle", code: "ENGINE_WORKER_READY" }); render(); emit({ type: "ready" }); emitSnapshot(); void loadDocumentBridge(); void probeGpuDevice(); }
     else if (data.type === "resize") { if (setRenderSurface(data.width, data.height, data.dpr)) render(); }
     else if (data.type === "visibility") {
       renderVisible = data.visible;
@@ -6580,6 +10110,7 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
     else if (data.type === "register-asset") registerAsset(data.transactionId, data.asset);
     else if (data.type === "import-figma-rest-plan") importFigmaRestPlan(data);
     else if (data.type === "bind-figma-rest-assets") bindFigmaRestAssets(data);
+    else if (data.type === "cancel-figma-rest-assets") cancelFigmaRestAssets(data);
     else if (data.type === "set-clipboard") {
       if (validateClipboardCapture(data.clipboard, documentSchemaVersion)) emitError(undefined, "INVALID_COMMAND");
       else {
@@ -6590,7 +10121,12 @@ self.onmessage = ({ data }: MessageEvent<MainToWorker>) => {
     else if (data.type === "asset-bytes") seedAssetBytes(data.assetId, data.mediaType, data.bytes, data.decodedBitmap);
     else if (data.type === "load-font") void ensureFontFace(data.assetId);
     else if (data.type === "editing-text") { editingTextNodeId = data.nodeId; render(); }
+    else if (data.type === "auto-layout-padding-hover") {
+      hoveredAutoLayoutPadding = data.nodeId && data.side ? { frameId: data.nodeId, side: data.side } : undefined;
+      render();
+    }
     else if (data.type === "text-caret-layout") void emitRustTextCaretLayout(data);
+    else if (data.type === "runtime-export-boolean-paths") emitRuntimeExportBooleanPaths(data);
     else if (data.type === "simulate-crash") {
       setTimeout(() => { throw new Error("Development-only Engine Worker crash simulation"); }, 0);
     }

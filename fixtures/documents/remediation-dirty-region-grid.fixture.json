@@ -1,0 +1,55 @@
+{
+  "format": "makefigma-remediation-dirty-region-grid-v1",
+  "name": "W06-DIRTY-REGION-VISIBLE-GRID",
+  "viewport": { "x": 0, "y": 0, "zoom": 5 },
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000911",
+      "name": "Grid dirty replay target",
+      "kind": "rectangle",
+      "x": -50,
+      "y": -30,
+      "width": 40,
+      "height": 40,
+      "rotation": 0,
+      "fill": "#2563eb",
+      "stroke": "#172554",
+      "strokeWidth": 3,
+      "radius": 8,
+      "opacity": 1,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000912",
+      "name": "Grid overlapping replay control",
+      "kind": "ellipse",
+      "x": -20,
+      "y": -10,
+      "width": 35,
+      "height": 30,
+      "rotation": 0,
+      "fill": "#f97316",
+      "stroke": "#7c2d12",
+      "strokeWidth": 2,
+      "radius": 0,
+      "opacity": 0.85,
+      "visible": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000913",
+      "name": "Grid unchanged distant control",
+      "kind": "rectangle",
+      "x": 50,
+      "y": -25,
+      "width": 30,
+      "height": 30,
+      "rotation": 12,
+      "fill": "#16a34a",
+      "stroke": "#14532d",
+      "strokeWidth": 2,
+      "radius": 5,
+      "opacity": 1,
+      "visible": true
+    }
+  ]
+}

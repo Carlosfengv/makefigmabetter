@@ -2,6 +2,7 @@ import type { CanvasNode, Viewport } from "./editor-protocol";
 import { closedShapeStrokeLocalBounds } from "./closed-shape-stroke-bounds";
 import { colorToSrgbBytes, colorToSrgbCss } from "./color-rendering";
 import { isGpuDropShadowEffectNode, isGpuInnerShadowEffectNode, isGpuLayerBlurEffectNode, isGpuSimpleEffectNode } from "./gpu-layer-prefix";
+import { normalizedNodeEffects } from "./normalized-node-view";
 import { resolveInsideRoundedRect } from "./rounded-rect";
 
 const FLOATS_PER_VERTEX = 16;
@@ -59,13 +60,15 @@ export interface WebGpuSceneRenderInput {
   /** Decoded, worker-owned resources for the Image pass. Missing entries retain
    * the Canvas placeholder rather than allocating an untrusted GPU texture. */
   imageBitmaps?: ReadonlyMap<string, ImageBitmap>;
-  /** Rasterized alpha masks produced by the Rust text boundary. Only explicit
-   * single-face LTR runs opt into this pass; all other text remains Canvas. */
+  /** Rasterized alpha masks produced by the Rust text boundary. Horizontal
+   * Text and path-tangent TextPath runs may select a distinct font resource,
+   * raster scale and rotation per glyph; unsupported paint semantics remain Canvas. */
   textGlyphs?: readonly WebGpuTextGlyph[];
 }
 
 export interface WebGpuTextGlyph {
-  /** Cache identity includes the immutable font resource, glyph id and size. */
+  /** Cache identity includes the immutable font resource, face/axes, synthetic
+   * weight/italic style, glyph id and raster size. */
   textureKey: string;
   nodeId: string;
   x: number;
@@ -73,6 +76,9 @@ export interface WebGpuTextGlyph {
   width: number;
   height: number;
   rotation: number;
+  /** Optional normalized-quad → world transform. When present, WebGPU maps
+   * the glyph mask's unit square through this complete affine. */
+  quadTransform?: Readonly<{ a: number; b: number; c: number; d: number; e: number; f: number }>;
   fill: string;
   opacity: number;
   maskWidth: number;
@@ -116,8 +122,8 @@ export interface WebGpuImageTextureStats {
  * deliberately absent so a viewport change cannot invalidate this scene data. */
 export const GPU_INSTANCE_FLOATS = 16;
 export const GPU_IMAGE_INSTANCE_FLOATS = 10;
-/** position/size, rotation, color and glyph-atlas UV rectangle. */
-export const GPU_TEXT_INSTANCE_FLOATS = 13;
+/** normalized-quad origin/bases, color and glyph-atlas UV rectangle. */
+export const GPU_TEXT_INSTANCE_FLOATS = 14;
 export const GPU_CAMERA_UNIFORM_BYTES = 32;
 export const GPU_SCENE_INSTANCE_BYTES_PER_NODE = GPU_INSTANCE_FLOATS * BYTES_PER_FLOAT;
 export const GPU_IMAGE_INSTANCE_BYTES_PER_NODE = GPU_IMAGE_INSTANCE_FLOATS * BYTES_PER_FLOAT;
@@ -360,12 +366,33 @@ function padTextureRows(pixels: Uint8ClampedArray, rowBytes: number, bytesPerRow
 }
 
 function isValidTextGlyph(glyph: WebGpuTextGlyph) {
+  const affine = glyph.quadTransform;
   return Boolean(glyph.textureKey && glyph.nodeId)
     && Number.isSafeInteger(glyph.maskWidth) && glyph.maskWidth > 0
     && Number.isSafeInteger(glyph.maskHeight) && glyph.maskHeight > 0
     && glyph.alphaMask.byteLength === glyph.maskWidth * glyph.maskHeight
     && [glyph.x, glyph.y, glyph.width, glyph.height, glyph.rotation, glyph.opacity].every(Number.isFinite)
+    && (!affine || [affine.a, affine.b, affine.c, affine.d, affine.e, affine.f].every(Number.isFinite))
     && glyph.width > 0 && glyph.height > 0;
+}
+
+/** Converts the compatibility rectangle into the same unit-quad affine used
+ * by native TextPath projection. */
+function textGlyphQuadTransform(glyph: WebGpuTextGlyph) {
+  if (glyph.quadTransform) return glyph.quadTransform;
+  const radians = glyph.rotation * Math.PI / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const centerX = glyph.width / 2;
+  const centerY = glyph.height / 2;
+  return {
+    a: cosine * glyph.width,
+    b: sine * glyph.width,
+    c: -sine * glyph.height,
+    d: cosine * glyph.height,
+    e: glyph.x + centerX - cosine * centerX + sine * centerY,
+    f: glyph.y + centerY - sine * centerX - cosine * centerY,
+  };
 }
 
 export type GpuSceneResourceAdmission =
@@ -654,7 +681,7 @@ export class WebGpuSceneRenderer {
    * Canvas paints the entire node instead of a partial effect stack. */
   private prepareDropShadowEffects(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
     if (!isGpuDropShadowEffectNode(node)) return undefined;
-    const stack = node.effectStack?.length ? node.effectStack : (node.dropShadow ? [{ dropShadow: node.dropShadow }] : []);
+    const stack = normalizedNodeEffects(node);
     const shadows = stack.flatMap((effect) => {
       const shadow = effect.dropShadow;
       return shadow?.visible && shadow.color.alpha > 0 ? [shadow] : [];
@@ -720,7 +747,7 @@ export class WebGpuSceneRenderer {
    * to Canvas until the GPU graph can represent every intermediate source. */
   private prepareLayerBlurEffect(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
     if (!isGpuLayerBlurEffectNode(node)) return undefined;
-    const blur = node.effectStack?.[0]?.layerBlur;
+    const blur = normalizedNodeEffects(node)[0]?.layerBlur;
     if (!blur) return undefined;
     const originalInstances = buildWebGpuInstances([node]).instances;
     if (originalInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
@@ -772,7 +799,7 @@ export class WebGpuSceneRenderer {
    * merge without allocating a third intermediate surface. */
   private prepareInnerShadowEffect(node: CanvasNode, input: WebGpuSceneRenderInput, pixelWidth: number, pixelHeight: number) {
     if (!isGpuInnerShadowEffectNode(node)) return undefined;
-    const shadow = node.effectStack?.[0]?.innerShadow;
+    const shadow = normalizedNodeEffects(node)[0]?.innerShadow;
     if (!shadow) return undefined;
     const originalInstances = buildWebGpuInstances([node]).instances;
     if (originalInstances.length !== GPU_INSTANCE_FLOATS) return undefined;
@@ -849,7 +876,6 @@ export class WebGpuSceneRenderer {
     const instances: number[] = [];
     const draws: Array<{ bindGroup: GpuBindGroup; offset: number }> = [];
     const renderedNodeIds = new Set<string>();
-    const requiredAssets = new Set<string>();
     let uploadBytes = 0;
     let cacheHits = 0;
     let uploads = 0;
@@ -857,7 +883,6 @@ export class WebGpuSceneRenderer {
       if (node.kind !== "image" || node.visible === false || !node.assetId) continue;
       const bitmap = imageBitmaps?.get(node.assetId);
       if (!bitmap || bitmap.width <= 0 || bitmap.height <= 0) continue;
-      requiredAssets.add(node.assetId);
       const texture = this.ensureImageTexture(node.assetId, bitmap);
       if (texture.uploaded) {
         uploadBytes += bitmap.width * bitmap.height * RGBA8_BYTES_PER_PIXEL;
@@ -870,7 +895,11 @@ export class WebGpuSceneRenderer {
     }
     let releases = 0;
     for (const [assetId, entry] of this.imageTextures) {
-      if (!requiredAssets.has(assetId)) {
+      // A multi-island frame supplies the complete retained asset set on each
+      // call even though this bitmap draws only one ordered island. Releasing
+      // against that frame set prevents shape/image interleaving from
+      // destroying and re-uploading the same texture between adjacent passes.
+      if (!imageBitmaps?.has(assetId)) {
         entry.texture.destroy?.();
         this.imageTextures.delete(assetId);
         releases += 1;
@@ -966,8 +995,9 @@ export class WebGpuSceneRenderer {
           uploads += 1;
         } else cacheHits += 1;
         const offset = (instances.length + nodeInstances.length) * BYTES_PER_FLOAT;
+        const quad = textGlyphQuadTransform(glyph);
         nodeInstances.push(
-          glyph.x, glyph.y, glyph.width, glyph.height, glyph.rotation, ...color,
+          quad.e, quad.f, quad.a, quad.b, quad.c, quad.d, ...color,
           atlas.entry.x / GPU_GLYPH_ATLAS_DIMENSION,
           atlas.entry.y / GPU_GLYPH_ATLAS_DIMENSION,
           atlas.entry.width / GPU_GLYPH_ATLAS_DIMENSION,
@@ -1186,7 +1216,7 @@ function isGpuRenderable(node: CanvasNode): boolean {
   // Images must enter only the texture-backed Image pass. Rendering their
   // fallback fill in the solid-shape batch would suppress Canvas's placeholder
   // before a trusted bitmap has decoded.
-  return node.visible !== false && node.kind !== "text" && node.kind !== "image" && !node.fillGradient && !node.strokeGradient
+  return node.visible !== false && node.kind !== "text" && node.kind !== "textPath" && node.kind !== "image" && !node.fillGradient && !node.strokeGradient
     && !(node.kind === "ellipse" && Boolean(node.arcData))
     && !((node.kind === "frame" || node.kind === "rectangle") && (Boolean(node.strokeWeights?.length) || Boolean(node.cornerRadii?.length) || Boolean(node.cornerSmoothing)));
 }
@@ -1301,10 +1331,11 @@ function createTextPipeline(device: GpuDevice, format: string): GpuRenderPipelin
         arrayStride: GPU_TEXT_INSTANCE_FLOATS * BYTES_PER_FLOAT,
         stepMode: "instance",
         attributes: [
-          { shaderLocation: 1, offset: 0, format: "float32x4" },
-          { shaderLocation: 2, offset: 4 * BYTES_PER_FLOAT, format: "float32" },
-          { shaderLocation: 3, offset: 5 * BYTES_PER_FLOAT, format: "float32x4" },
-          { shaderLocation: 4, offset: 9 * BYTES_PER_FLOAT, format: "float32x4" },
+          { shaderLocation: 1, offset: 0, format: "float32x2" },
+          { shaderLocation: 2, offset: 2 * BYTES_PER_FLOAT, format: "float32x2" },
+          { shaderLocation: 3, offset: 4 * BYTES_PER_FLOAT, format: "float32x2" },
+          { shaderLocation: 4, offset: 6 * BYTES_PER_FLOAT, format: "float32x4" },
+          { shaderLocation: 5, offset: 10 * BYTES_PER_FLOAT, format: "float32x4" },
         ],
       }],
     },
@@ -1429,8 +1460,9 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: v
 
 const TEXT_WGSL = /* wgsl */ `
 struct VertexInput {
-  @location(0) local: vec2<f32>, @location(1) position_size: vec4<f32>,
-  @location(2) rotation_degrees: f32, @location(3) color: vec4<f32>, @location(4) atlas_uv_rect: vec4<f32>,
+  @location(0) local: vec2<f32>, @location(1) origin: vec2<f32>,
+  @location(2) basis_x: vec2<f32>, @location(3) basis_y: vec2<f32>,
+  @location(4) color: vec4<f32>, @location(5) atlas_uv_rect: vec4<f32>,
 };
 struct Camera { first: vec4<f32>, second: vec4<f32>, };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -1439,12 +1471,7 @@ struct Camera { first: vec4<f32>, second: vec4<f32>, };
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) color: vec4<f32>, };
 @vertex fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
-  let size = input.position_size.zw;
-  let center = size * 0.5;
-  let radians = input.rotation_degrees * 0.01745329252;
-  let cosine = cos(radians); let sine = sin(radians);
-  let local_point = input.local * size - center;
-  let world = input.position_size.xy + center + vec2<f32>(local_point.x * cosine - local_point.y * sine, local_point.x * sine + local_point.y * cosine);
+  let world = input.origin + input.local.x * input.basis_x + input.local.y * input.basis_y;
   let screen = (world + camera.first.xy) * camera.first.z + vec2<f32>(camera.first.w * 0.5, camera.second.x * 0.5);
   output.position = vec4<f32>(screen.x / camera.first.w * 2.0 - 1.0, 1.0 - screen.y / camera.second.x * 2.0, 0.0, 1.0);
   output.uv = input.atlas_uv_rect.xy + input.local * input.atlas_uv_rect.zw; output.color = input.color;

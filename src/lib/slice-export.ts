@@ -65,19 +65,22 @@ export function admitSliceRasterBatch(regions: readonly Readonly<{ width: number
   return { accepted: true, width, height, pixelCount, rgbaBytes: pixelCount * 4 };
 }
 
-export async function rasterizeSvgToPng(svg: string, width: number, height: number, scale = 1, background: SliceExportBackground = "transparent"): Promise<Blob> {
+export async function rasterizeSvgToPng(svg: string, width: number, height: number, scale = 1, background: SliceExportBackground = "transparent", signal?: AbortSignal): Promise<Blob> {
+  throwIfExportAborted(signal);
   const admission = admitSliceRasterExport(width, height, scale);
   if (!admission.accepted) throw new SliceExportError(admission.reason);
-  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, sliceExportBackgroundColor(background));
-  const blob = await canvasBlob(canvas, "image/png");
+  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, sliceExportBackgroundColor(background), signal);
+  const blob = await canvasBlob(canvas, "image/png", undefined, signal);
+  throwIfExportAborted(signal);
   return blob;
 }
 
-export async function rasterizeSvgToJpeg(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "#ffffff"): Promise<Blob> {
+export async function rasterizeSvgToJpeg(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "#ffffff", signal?: AbortSignal): Promise<Blob> {
+  throwIfExportAborted(signal);
   const admission = admitSliceRasterExport(width, height, scale);
   if (!admission.accepted) throw new SliceExportError(admission.reason);
-  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, pdfExportBackgroundColor(background));
-  return canvasBlob(canvas, "image/jpeg", .92);
+  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, pdfExportBackgroundColor(background), signal);
+  return canvasBlob(canvas, "image/jpeg", .92, signal);
 }
 
 export type PdfRgbaPage = Readonly<{
@@ -91,10 +94,12 @@ export type PdfRgbaPage = Readonly<{
 /** Renders the same frozen SVG input as PNG/PDF. PDF receives raw RGBA pixels
  * so its PDF 1.4 soft mask preserves transparency instead of flattening it
  * into a JPEG matte. */
-export async function rasterizeSvgToPdfPage(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "transparent"): Promise<PdfRgbaPage> {
+export async function rasterizeSvgToPdfPage(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "transparent", signal?: AbortSignal): Promise<PdfRgbaPage> {
+  throwIfExportAborted(signal);
   const admission = admitSliceRasterExport(width, height, scale);
   if (!admission.accepted) throw new SliceExportError(admission.reason);
-  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, pdfExportBackgroundColor(background));
+  const canvas = await renderSvgToCanvas(svg, admission.width, admission.height, pdfExportBackgroundColor(background), signal);
+  throwIfExportAborted(signal);
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new SliceExportError("RASTERIZATION_FAILED");
   return {
@@ -109,8 +114,8 @@ export async function rasterizeSvgToPdfPage(svg: string, width: number, height: 
 /** PDF export remains a raster fallback for effects the portable SVG source
  * cannot represent, but uses a PDF 1.4 `/SMask` so transparent exports keep
  * their alpha in conforming readers. */
-export async function rasterizeSvgToPdf(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "#ffffff"): Promise<Blob> {
-  return pdfFromRgbaPages([await rasterizeSvgToPdfPage(svg, width, height, scale, background)]);
+export async function rasterizeSvgToPdf(svg: string, width: number, height: number, scale = 1, background: PdfExportBackground = "#ffffff", signal?: AbortSignal): Promise<Blob> {
+  return pdfFromRgbaPages([await rasterizeSvgToPdfPage(svg, width, height, scale, background, signal)], signal);
 }
 
 export class SliceExportError extends Error {
@@ -120,15 +125,30 @@ export class SliceExportError extends Error {
   }
 }
 
-async function renderSvgToCanvas(svg: string, width: number, height: number, background?: string): Promise<HTMLCanvasElement> {
+async function renderSvgToCanvas(svg: string, width: number, height: number, background?: string, signal?: AbortSignal): Promise<HTMLCanvasElement> {
+  throwIfExportAborted(signal);
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
       const value = new Image();
-      value.onload = () => resolve(value);
-      value.onerror = () => reject(new SliceExportError("RASTERIZATION_FAILED"));
+      const cleanup = () => signal?.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        value.onload = null;
+        value.onerror = null;
+        value.src = "";
+        cleanup();
+        reject(exportAbortReason(signal));
+      };
+      value.onload = () => { cleanup(); resolve(value); };
+      value.onerror = () => { cleanup(); reject(new SliceExportError("RASTERIZATION_FAILED")); };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
       value.src = url;
     });
+    throwIfExportAborted(signal);
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -145,8 +165,19 @@ async function renderSvgToCanvas(svg: string, width: number, height: number, bac
   }
 }
 
-async function canvasBlob(canvas: HTMLCanvasElement, type: "image/png" | "image/jpeg", quality?: number): Promise<Blob> {
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+async function canvasBlob(canvas: HTMLCanvasElement, type: "image/png" | "image/jpeg", quality?: number, signal?: AbortSignal): Promise<Blob> {
+  throwIfExportAborted(signal);
+  const blob = await new Promise<Blob | null>((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const onAbort = () => { cleanup(); reject(exportAbortReason(signal)); };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    canvas.toBlob((value) => { cleanup(); resolve(value); }, type, quality);
+  });
+  throwIfExportAborted(signal);
   if (!blob) throw new SliceExportError("RASTERIZATION_FAILED");
   return blob;
 }
@@ -202,12 +233,14 @@ export async function pdfFromJpegs(pages: readonly Readonly<{ jpeg: Blob; pageWi
 /** Encodes a PDF 1.4 image XObject plus a grayscale soft mask for every page.
  * The input is already admitted by the raster budget at the caller boundary;
  * revalidate it here because this is a public export primitive. */
-export async function pdfFromRgbaPages(pages: readonly PdfRgbaPage[]): Promise<Blob> {
+export async function pdfFromRgbaPages(pages: readonly PdfRgbaPage[], signal?: AbortSignal): Promise<Blob> {
+  throwIfExportAborted(signal);
   if (!pages.length || pages.length > MAX_SLICE_BATCH_EXPORTS) throw new SliceExportError("RESOURCE_LIMIT");
   const totalPixels = pages.reduce((total, page) => total + Math.ceil(page.imageWidth) * Math.ceil(page.imageHeight), 0);
   if (!Number.isSafeInteger(totalPixels) || totalPixels > MAX_SLICE_EXPORT_PIXELS) throw new SliceExportError("RESOURCE_LIMIT");
   const encoded = [] as Array<PdfRgbaPage & { rgb: Uint8Array; alpha: Uint8Array }>;
   for (const page of pages) {
+    throwIfExportAborted(signal);
     if (![page.pageWidth, page.pageHeight, page.imageWidth, page.imageHeight].every(Number.isFinite) || page.pageWidth <= 0 || page.pageHeight <= 0 || page.imageWidth <= 0 || page.imageHeight <= 0 || page.rgba.length !== Math.ceil(page.imageWidth) * Math.ceil(page.imageHeight) * 4) throw new SliceExportError("INVALID_SIZE");
     const rgb = new Uint8Array(Math.ceil(page.imageWidth) * Math.ceil(page.imageHeight) * 3);
     const alpha = new Uint8Array(Math.ceil(page.imageWidth) * Math.ceil(page.imageHeight));
@@ -217,7 +250,11 @@ export async function pdfFromRgbaPages(pages: readonly PdfRgbaPage[]): Promise<B
       rgb[color + 2] = page.rgba[source + 2];
       alpha[mask] = page.rgba[source + 3];
     }
-    encoded.push({ ...page, rgb: await deflate(rgb), alpha: await deflate(alpha) });
+    const compressedRgb = await deflate(rgb);
+    throwIfExportAborted(signal);
+    const compressedAlpha = await deflate(alpha);
+    throwIfExportAborted(signal);
+    encoded.push({ ...page, rgb: compressedRgb, alpha: compressedAlpha });
   }
   const encoder = new TextEncoder();
   const objects: Uint8Array[] = [
@@ -238,6 +275,16 @@ export async function pdfFromRgbaPages(pages: readonly PdfRgbaPage[]): Promise<B
     );
   }
   return pdfBlobFromObjects(objects);
+}
+
+function throwIfExportAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw exportAbortReason(signal);
+}
+
+function exportAbortReason(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The export was cancelled.", "AbortError");
 }
 
 function streamObject(content: Uint8Array) {

@@ -62,7 +62,12 @@ export function validateClipboardCapture(clipboard: EditorClipboard, expectedSch
   if (clipboard.nodes.some((node) => rootIds.has(node.id) && node.parentId && capturedIds.has(node.parentId))) return "INVALID_TREE";
   const actualAssetIds = [...new Set(clipboard.nodes.flatMap((node) => [
     ...(node.kind === "image" && node.assetId ? [node.assetId] : []),
+    ...(node.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+    ...(node.strokeStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),
+    ...(node.textProperties?.baseStyle?.font ? [node.textProperties.baseStyle.font.assetId] : []),
+    ...(node.textProperties?.runs.flatMap((run) => run.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []) ?? []),
+    ...(node.textProperties?.baseStyle?.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.fallbackFonts?.map((font) => font.assetId) ?? []),
   ]))].sort();
   const declaredAssetIds = [...new Set(clipboard.assetIds)].sort();
@@ -156,6 +161,8 @@ function fontReferences(nodes: readonly CanvasNode[]) {
   const result = new Map<string, { assetId: string; faceIndex: number }>();
   for (const node of nodes) {
     for (const run of node.textProperties?.runs ?? []) if (run.font) result.set(`${run.font.assetId}:${run.font.faceIndex}`, { assetId: run.font.assetId, faceIndex: run.font.faceIndex });
+    const baseFont = node.textProperties?.baseStyle?.font;
+    if (baseFont) result.set(`${baseFont.assetId}:${baseFont.faceIndex}`, { assetId: baseFont.assetId, faceIndex: baseFont.faceIndex });
     for (const font of node.textProperties?.fallbackFonts ?? []) result.set(`${font.assetId}:${font.faceIndex}`, { assetId: font.assetId, faceIndex: font.faceIndex });
   }
   return result.values();

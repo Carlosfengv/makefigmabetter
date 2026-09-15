@@ -1,7 +1,8 @@
 import { RuntimeContainerNodeProxy } from "./container-node-proxy";
-import { RuntimeNodeProxy } from "./node-proxy";
+import { RUNTIME_MIXED, RuntimeNodeProxy } from "./node-proxy";
 import { RuntimeSession, type RuntimeAvailableFont, type RuntimeImage, type RuntimeTaskOptions } from "./runtime-session";
-import type { DocumentFontReference } from "../lib/editor-protocol";
+import type { DocumentFontReference, DocumentTransformModifier } from "../lib/editor-protocol";
+import type { RuntimeFontName } from "./runtime-font-name";
 import { RuntimeTask } from "./runtime-task";
 import { PrototypePlayer, type PrototypePlayerOptions } from "./prototype-player";
 import type { RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
@@ -10,6 +11,9 @@ import type { RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runti
  * lifecycle/transaction details remain explicitly named `runtime.*` APIs. */
 export class FigmaCompatibleRuntime {
   constructor(readonly session: RuntimeSession) {}
+
+  /** Figma-compatible identity sentinel for mixed projected property values. */
+  get mixed(): typeof RUNTIME_MIXED { return RUNTIME_MIXED; }
 
   get root(): RuntimeContainerNodeProxy { return this.session.root; }
   get currentPage(): RuntimeContainerNodeProxy { return this.session.currentPage; }
@@ -23,9 +27,40 @@ export class FigmaCompatibleRuntime {
   createSection(): RuntimeContainerNodeProxy { return this.session.createSection(); }
   createRectangle(): RuntimeNodeProxy { return this.session.createRectangle(); }
   createEllipse(): RuntimeNodeProxy { return this.session.createEllipse(); }
+  createPolygon(): RuntimeNodeProxy { return this.session.createPolygon(); }
+  createStar(): RuntimeNodeProxy { return this.session.createStar(); }
+  createVector(): RuntimeNodeProxy { return this.session.createVector(); }
   createLine(): RuntimeNodeProxy { return this.session.createLine(); }
   createText(): RuntimeNodeProxy { return this.session.createText(); }
+  createConnector(): RuntimeNodeProxy { return this.session.createConnector(); }
+  createShapeWithText(): RuntimeNodeProxy { return this.session.createShapeWithText(); }
+  createTextPath(vector: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
+    return this.session.createTextPath(vector, startSegment, startPosition);
+  }
+  transformGroup(
+    nodes: readonly RuntimeNodeProxy[],
+    parent: RuntimeContainerNodeProxy,
+    index: number,
+    modifiers: readonly DocumentTransformModifier[],
+  ): RuntimeContainerNodeProxy {
+    return this.session.transformGroup(nodes, parent, index, modifiers);
+  }
   createImageNode(image: RuntimeImage): RuntimeNodeProxy { return this.session.createImageNode(image); }
+  union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
+    return this.session.union(nodes, parent, index);
+  }
+  subtract(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
+    return this.session.subtract(nodes, parent, index);
+  }
+  intersect(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
+    return this.session.intersect(nodes, parent, index);
+  }
+  exclude(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
+    return this.session.exclude(nodes, parent, index);
+  }
+  flatten(nodes: readonly RuntimeNodeProxy[], parent?: RuntimeContainerNodeProxy, index?: number): RuntimeNodeProxy {
+    return this.session.flatten(nodes, parent, index);
+  }
 
   loadAllPagesAsync(): Promise<void> { return this.session.loadAllPagesAsync(); }
 
@@ -38,7 +73,7 @@ export class FigmaCompatibleRuntime {
   }
 
   /** Loads an Asset-Service-admitted font before a text mutation can use it. */
-  loadFontAsync(font: DocumentFontReference, timeoutMs?: number): Promise<void> {
+  loadFontAsync(font: RuntimeFontName | DocumentFontReference, timeoutMs?: number): Promise<void> {
     return this.session.loadFontAsync(font, timeoutMs);
   }
 

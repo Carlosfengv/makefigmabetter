@@ -1,4 +1,5 @@
 import type { CanvasNode } from "./editor-protocol";
+import { normalizedNodeTransform } from "./normalized-node-view";
 
 /** Canonical 2D affine matrix, using the Canvas/Figma convention:
  * x' = ax + cy + e, y' = bx + dy + f. The module intentionally has no DOM
@@ -42,9 +43,9 @@ export function transformPoint(matrix: AffineMatrix, point: TransformPoint): Tra
  * properties. Closed nodes rotate around their visual centre. A Line instead
  * uses its first endpoint as local origin, matching Canvas line painting and
  * Figma's endpoint-editing semantics. */
-export function nodeRelativeTransform(node: Pick<CanvasNode, "kind" | "x" | "y" | "width" | "height" | "rotation">): AffineMatrix | undefined {
-  const explicit = (node as Pick<CanvasNode, "relativeTransform">).relativeTransform;
-  if (explicit) return isInvertibleAffine(explicit) ? explicit : undefined;
+export function nodeRelativeTransform(node: Pick<CanvasNode, "kind" | "x" | "y" | "width" | "height" | "rotation" | "relativeTransform">): AffineMatrix | undefined {
+  const normalized = normalizedNodeTransform(node);
+  if (normalized.source === "relative-v1") return isInvertibleAffine(normalized.value) ? normalized.value : undefined;
   if (![node.x, node.y, node.width, node.height, node.rotation].every(Number.isFinite) || node.width < 0 || node.height < 0) return undefined;
   const radians = node.rotation * Math.PI / 180;
   const cosine = Math.cos(radians);

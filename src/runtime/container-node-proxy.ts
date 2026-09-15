@@ -3,7 +3,6 @@ import { RuntimeNodeProxy, type M1NodeType, type RuntimeNodeHost } from "./node-
 import type { RuntimeNodeHandle } from "./node-registry";
 
 export interface RuntimeContainerHost extends RuntimeNodeHost {
-  childrenOf(parentId: string): readonly RuntimeNodeProxy[];
   reparent(nodeId: string, parentId: string, index: number): void;
   findDescendants(parentId: string): readonly RuntimeNodeProxy[];
   assertCanQueryDescendants(parentId: string): void;
@@ -30,6 +29,7 @@ export class RuntimeContainerNodeProxy extends RuntimeNodeProxy {
 
   insertChild(index: number, node: RuntimeNodeProxy): RuntimeNodeProxy {
     this.assertLive();
+    this.assertMutable();
     if (!Number.isInteger(index) || index < 0 || index > this.children.length) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     if (node.handle.sessionId !== this.handle.sessionId || node.removed || node.id === this.id) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: node.handle.nodeId });

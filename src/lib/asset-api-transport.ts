@@ -26,6 +26,7 @@ export type UploadedAsset = {
   mediaType: string;
   byteLength: number;
   deduplicated: boolean;
+  fontFaces: readonly { faceIndex: number; family: string; style: string }[];
 };
 
 type UploadProgress = { sessionId: string; acceptedByteLength: number };
@@ -70,7 +71,7 @@ export class AssetApiTransport {
     throwIfAborted(input.signal);
     const complete = await this.request(`/v1/assets/uploads/${encodeURIComponent(input.sessionId)}/complete`, { method: "POST", signal: input.signal });
     if (!complete.ok) throw new Error("ASSET_UPLOAD_COMPLETE_FAILED");
-    return complete.json() as Promise<UploadedAsset>;
+    return uploadedAsset(await complete.json());
   }
 
   async attachToDocument(documentId: string, assetId: string): Promise<void> {
@@ -160,6 +161,30 @@ export class AssetApiTransport {
     headers.set("x-makefigma-dev-actor-id", this.config.actorId);
     return this.fetch(`${this.config.baseUrl.replace(/\/$/, "")}${path}`, { ...init, headers });
   }
+}
+
+function uploadedAsset(value: unknown): UploadedAsset {
+  if (!value || typeof value !== "object") throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+  const candidate = value as Partial<UploadedAsset> & { fontFaces?: unknown };
+  const rawFaces = candidate.fontFaces ?? [];
+  if (!Array.isArray(rawFaces) || rawFaces.length > 16) throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+  const fontFaces = rawFaces.map((value, index) => {
+    if (!value || typeof value !== "object") throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+    const face = value as { faceIndex?: unknown; family?: unknown; style?: unknown };
+    if (face.faceIndex !== index || !validFontNamePart(face.family) || !validFontNamePart(face.style)) {
+      throw new TypeError("ASSET_UPLOAD_RESPONSE_INVALID");
+    }
+    return { faceIndex: index, family: face.family, style: face.style };
+  });
+  return { ...(candidate as UploadedAsset), fontFaces };
+}
+
+function validFontNamePart(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && new TextEncoder().encode(value).byteLength <= 256
+    && value.trim() === value
+    && !/\p{Cc}/u.test(value);
 }
 
 const CHUNK_BYTES = 1024 * 1024;

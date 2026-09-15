@@ -12,9 +12,9 @@ export function resolveCanvasObjectSelection(selectedIds: readonly string[], tar
   return selectedIds.includes(targetId) ? [...selectedIds] : [targetId];
 }
 
-/** Frames and Groups are Figma's canvas selection boundaries. Repeated presses
- * advance through exactly one boundary; Command/Ctrl-click bypasses them and
- * selects the painted descendant directly. */
+/** Frames, Groups and TransformGroups are Figma canvas selection boundaries.
+ * Repeated presses advance through exactly one boundary; Command/Ctrl-click
+ * bypasses them and selects the painted descendant directly. */
 export function resolveNestedSelectionTarget(
   nodes: readonly CanvasNode[],
   hitId: string,
@@ -35,7 +35,7 @@ export function resolveNestedSelectionTarget(
     visited.add(parentId);
     const parent = byId.get(parentId);
     if (!parent) break;
-    if ((parent.kind === "frame" || parent.kind === "group") && parent.visible !== false && !isEffectivelyLocked(byId, parent.id)) containers.push(parent);
+    if ((parent.kind === "frame" || parent.kind === "group" || parent.kind === "transformGroup") && parent.visible !== false && !isEffectivelyLocked(byId, parent.id)) containers.push(parent);
     parentId = parent.parentId;
   }
   containers.reverse();
@@ -68,7 +68,7 @@ export function resolveNestedKeyboardTarget(
     const parent = selected.parentId ? byId.get(selected.parentId) : undefined;
     return parent && parent.visible !== false && !isEffectivelyLocked(byId, parent.id) ? parent : undefined;
   }
-  if (selected.kind !== "frame" && selected.kind !== "group") return undefined;
+  if (selected.kind !== "frame" && selected.kind !== "group" && selected.kind !== "transformGroup") return undefined;
   const children = nodes.filter((node) => node.parentId === selected.id && node.visible !== false && !isEffectivelyLocked(byId, node.id));
   return sortNodesByLayerOrder(children).at(-1);
 }

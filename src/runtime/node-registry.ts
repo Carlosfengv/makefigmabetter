@@ -56,4 +56,12 @@ export class NodeRegistry<TProxy> {
   generation(nodeId: string): number | undefined {
     return this.entries.get(nodeId)?.generation;
   }
+
+  /** Rebuilds the public proxy after an in-place Figma node type conversion
+   * without changing canonical identity or invalidating existing handles. */
+  refreshProxy(nodeId: string): void {
+    const entry = this.entries.get(nodeId);
+    if (!entry?.live) throw runtimeError("NODE_NOT_FOUND", { nodeId });
+    entry.proxy = undefined;
+  }
 }
