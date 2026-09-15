@@ -2,7 +2,24 @@ import { describe, expect, it } from "vitest";
 import { parseZoomPerformanceRun, summarizeZoomPerformanceRuns } from "./write-zoom-performance-summary.mjs";
 
 const run = ({ frameP95Ms = 16, dpr = 2 } = {}) => ({
-  worker: { samples: 90, p50Ms: 2, p95Ms: 8, maxMs: 9, cullingP95Ms: 1, gpuUploadBytesP95: 32, rendersPerInputFrameMax: 1 },
+  worker: {
+    samples: 90,
+    p50Ms: 2,
+    p95Ms: 8,
+    maxMs: 9,
+    cullingP95Ms: 1,
+    gpuPrepareP95Ms: 1.5,
+    gpuIslandP95Ms: 2,
+    canvasIslandP95Ms: 3,
+    overlayP95Ms: 0.5,
+    compositeP95Ms: 0.75,
+    gpuUploadBytesP95: 32,
+    canvasReadbackBytesP95: 64,
+    gpuCoverageUpperBoundPixelsP95: 8_000,
+    canvasFallbackCoverageUpperBoundPixelsP95: 2_000,
+    compositeSurfaceBytesP95: 4_096,
+    rendersPerInputFrameMax: 1,
+  },
   frames: { samples: 90, p50Ms: 8, p95Ms: frameP95Ms, maxMs: 18 },
   longTasks: { count: 0, totalDurationMs: 0, maxDurationMs: 0 },
   inputBacklog: { samples: 90, p50Ms: 8, p95Ms: 16, maxMs: 18 },
@@ -13,8 +30,14 @@ describe("zoom performance evidence summary", () => {
   it("parses CLI-framed result JSON and evaluates all final gates", () => {
     const encoded = `### Result\n${JSON.stringify(JSON.stringify(run()))}\n### Ran Playwright code`;
     expect(parseZoomPerformanceRun(encoded)).toMatchObject({ worker: { p95Ms: 8 } });
-    const summary = summarizeZoomPerformanceRuns([1, 2, 3].map(() => ({ file: "run.json", metrics: run() })), { dpr: 2, webgpuActive: true });
+    const summary = summarizeZoomPerformanceRuns(
+      [1, 2, 3].map(() => ({ file: "run.json", metrics: run() })),
+      { dpr: 2, webgpuActive: true },
+      { warmupSeconds: 30, renderer: "auto" },
+    );
     expect(summary.checks).toMatchObject({ workerP95Under12Ms: true, frameP95Under20Ms: true, inputBacklogP95Under32Ms: true, noMainThreadLongTasks: true, oneRenderPerInputFrame: true, cameraUniformUploadAtMost256Bytes: true, dynamicDprReduced: true, dynamicDprRestored: true });
+    expect(summary.median).toMatchObject({ gpuIslandP95Ms: 2, canvasIslandP95Ms: 3, canvasReadbackBytesP95: 64, gpuCoverageUpperBoundPixelsP95: 8_000, canvasFallbackCoverageUpperBoundPixelsP95: 2_000, compositeSurfaceBytesP95: 4_096 });
+    expect(summary.environment).toEqual({ warmupSeconds: 30, renderer: "auto" });
   });
 
   it("reports a failed frame gate rather than hiding the slowest median", () => {

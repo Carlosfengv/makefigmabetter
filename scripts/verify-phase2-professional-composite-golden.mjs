@@ -78,7 +78,7 @@ function isExpectedCapture(capture) {
 }
 function failed(reason, details) { return { status: "fail", reason, ...details }; }
 
-function comparePngPixels(baselineBytes, captureBytes, pixelTolerance) {
+export function comparePngPixels(baselineBytes, captureBytes, pixelTolerance) {
   const baseline = decodePngRgba(baselineBytes);
   const capture = decodePngRgba(captureBytes);
   if (baseline.width !== capture.width || baseline.height !== capture.height) {
@@ -167,7 +167,7 @@ function crc32(bytes) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-function decodePngRgba(bytes) {
+export function decodePngRgba(bytes) {
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   if (bytes.length < signature.length || !bytes.subarray(0, signature.length).equals(signature)) throw new Error("Golden comparison requires PNG screenshots");
   let offset = signature.length;
