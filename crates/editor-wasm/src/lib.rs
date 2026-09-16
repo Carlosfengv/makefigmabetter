@@ -7,17 +7,18 @@ use editor_core::{
     ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
-    FontReference, GridAutoTracks, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId,
-    PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
-    TextWrapStyle, Transaction, TransactionId, VariableCollectionResource, VariableMode,
-    VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
-    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    FontReference, GridAutoTracks, GridChildAlignment, GridItemsPositioning, GridTrack,
+    HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
+    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
+    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -936,7 +937,14 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=74).contains(&snapshot.schema_version)
+    if !(1..=75).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 75
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout.grid_child_horizontal_align.is_some()
+                        || layout.grid_child_vertical_align.is_some()
+                })
+            }))
         || (snapshot.schema_version < 74
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout
@@ -1666,6 +1674,10 @@ struct ProjectionAutoLayout {
     grid_column_anchor: Option<u32>,
     #[serde(default)]
     grid_auto_tracks: Option<String>,
+    #[serde(default)]
+    grid_child_horizontal_align: Option<String>,
+    #[serde(default)]
+    grid_child_vertical_align: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2403,6 +2415,12 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            let layout = self.document.auto_layout_for_node(node.id);
+            layout.grid_child_horizontal_align != GridChildAlignment::Auto
+                || layout.grid_child_vertical_align != GridChildAlignment::Auto
+        }) {
+            75
+        } else if self.document.nodes().any(|node| {
             self.document.auto_layout_for_node(node.id).grid_auto_tracks == GridAutoTracks::Rows
         }) {
             74
@@ -7193,7 +7211,22 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
         grid_row_anchor: layout.grid_row_anchor,
         grid_column_anchor: layout.grid_column_anchor,
         grid_auto_tracks: (layout.grid_auto_tracks == GridAutoTracks::Rows).then(|| "rows".into()),
+        grid_child_horizontal_align: projection_grid_child_alignment(
+            layout.grid_child_horizontal_align,
+        ),
+        grid_child_vertical_align: projection_grid_child_alignment(
+            layout.grid_child_vertical_align,
+        ),
     })
+}
+
+fn projection_grid_child_alignment(value: GridChildAlignment) -> Option<String> {
+    match value {
+        GridChildAlignment::Auto => None,
+        GridChildAlignment::Min => Some("min".into()),
+        GridChildAlignment::Center => Some("center".into()),
+        GridChildAlignment::Max => Some("max".into()),
+    }
 }
 
 fn projection_grid_track(track: GridTrack) -> ProjectionGridTrack {
@@ -7270,6 +7303,13 @@ fn auto_layout_from_projection(
         Some("rows") => GridAutoTracks::Rows,
         Some(_) => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     };
+    let grid_child_alignment = |raw: Option<&str>| match raw {
+        None | Some("auto") => Ok(GridChildAlignment::Auto),
+        Some("min") => Ok(GridChildAlignment::Min),
+        Some("center") => Ok(GridChildAlignment::Center),
+        Some("max") => Ok(GridChildAlignment::Max),
+        Some(_) => Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
+    };
     let layout = AutoLayout {
         mode,
         padding: value.padding,
@@ -7305,6 +7345,12 @@ fn auto_layout_from_projection(
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks,
+        grid_child_horizontal_align: grid_child_alignment(
+            value.grid_child_horizontal_align.as_deref(),
+        )?,
+        grid_child_vertical_align: grid_child_alignment(
+            value.grid_child_vertical_align.as_deref(),
+        )?,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -11770,6 +11816,37 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 73;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v75_round_trips_grid_child_alignment_and_v74_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let child = existing_rect(NodeId(0x75));
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, child.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            grid_child_horizontal_align: GridChildAlignment::Center,
+            grid_child_vertical_align: GridChildAlignment::Max,
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(child.id, layout.clone())
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":75"));
+        assert!(snapshot.contains("\"gridChildHorizontalAlign\":\"center\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(child.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 74;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

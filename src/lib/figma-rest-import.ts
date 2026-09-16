@@ -1474,6 +1474,12 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const rawGridColumnSpan = finite(node.gridColumnSpan);
   const rawGridRowAnchor = finite(node.gridRowAnchorIndex);
   const rawGridColumnAnchor = finite(node.gridColumnAnchorIndex);
+  const rawGridChildHorizontalAlign = string(node.gridChildHorizontalAlign);
+  const rawGridChildVerticalAlign = string(node.gridChildVerticalAlign);
+  const hasGridChildAlignment = node.gridChildHorizontalAlign !== undefined || node.gridChildVerticalAlign !== undefined;
+  const validGridChildAlignment = (value: string | undefined) => value === undefined || value === "AUTO" || value === "MIN" || value === "CENTER" || value === "MAX";
+  const gridChildAlignmentsValid = validGridChildAlignment(rawGridChildHorizontalAlign)
+    && validGridChildAlignment(rawGridChildVerticalAlign);
   const validGridSpan = (value: number | undefined) => value === undefined || (Number.isInteger(value) && value >= 1 && value <= 128);
   const hasGridSpan = node.gridRowSpan !== undefined || node.gridColumnSpan !== undefined;
   const validGridSpanField = (source: unknown, value: number | undefined) =>
@@ -1493,7 +1499,11 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     extensions["figma.rest.grid-child.v1"] = jsonBytes({ gridRowAnchorIndex: node.gridRowAnchorIndex, gridColumnAnchorIndex: node.gridColumnAnchorIndex });
     issues.push({ sourceId, capability: "grid-child-placement", outcome: "preserved-extension", reason: "Manual Grid anchors must be paired zero-based integers from 0 to 127." });
   }
-  if (!horizontal && !vertical && !grid && !absolute && !alignSelf && !hasGridSpan && !hasGridAnchor) {
+  if (hasGridChildAlignment && !gridChildAlignmentsValid) {
+    extensions["figma.rest.grid-child.v1"] = jsonBytes({ gridChildHorizontalAlign: node.gridChildHorizontalAlign, gridChildVerticalAlign: node.gridChildVerticalAlign });
+    issues.push({ sourceId, capability: "grid-child-alignment", outcome: "preserved-extension", reason: "Grid child alignment must be AUTO, MIN, CENTER or MAX." });
+  }
+  if (!horizontal && !vertical && !grid && !absolute && !alignSelf && !hasGridSpan && !hasGridAnchor && !hasGridChildAlignment) {
     return undefined;
   }
   const mappedMode = horizontal ? "horizontal" : vertical ? "vertical" : grid ? "grid" : "none";
@@ -1630,6 +1640,8 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     gridColumnSpan: gridSpansValid && rawGridColumnSpan !== undefined && rawGridColumnSpan !== 1 ? rawGridColumnSpan : undefined,
     gridItemsPositioning: grid && gridItemsPositioning === "MANUAL" ? "manual" : undefined,
     gridAutoTracks: grid && automaticRows ? "rows" : undefined,
+    gridChildHorizontalAlign: gridChildAlignmentsValid && rawGridChildHorizontalAlign !== "AUTO" ? rawGridChildHorizontalAlign?.toLowerCase() as "min" | "center" | "max" | undefined : undefined,
+    gridChildVerticalAlign: gridChildAlignmentsValid && rawGridChildVerticalAlign !== "AUTO" ? rawGridChildVerticalAlign?.toLowerCase() as "min" | "center" | "max" | undefined : undefined,
     gridRowAnchor: gridAnchorsValid ? rawGridRowAnchor : undefined,
     gridColumnAnchor: gridAnchorsValid ? rawGridColumnAnchor : undefined,
   };

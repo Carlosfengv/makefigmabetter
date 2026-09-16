@@ -152,6 +152,8 @@ export interface DocumentAutoLayout {
   /** Omission means an explicit row matrix. `rows` stores one authored first
    * row and derives later FLEX rows from row-auto-flow placement. */
   gridAutoTracks?: "rows";
+  gridChildHorizontalAlign?: "min" | "center" | "max";
+  gridChildVerticalAlign?: "min" | "center" | "max";
   gridRowAnchor?: number;
   gridColumnAnchor?: number;
 }

@@ -3285,6 +3285,8 @@ describe("M1 RuntimeSession", () => {
 
     first.gridRowSpan = 2;
     first.gridColumnSpan = 2;
+    first.gridChildHorizontalAlign = "CENTER";
+    first.gridChildVerticalAlign = "MAX";
     third.gridColumnSpan = 2;
 
     expect([first.gridRowAnchorIndex, first.gridColumnAnchorIndex]).toEqual([0, 0]);
@@ -3292,6 +3294,11 @@ describe("M1 RuntimeSession", () => {
     expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([2, 0]);
     expect(first.gridRowSpan).toBe(2);
     expect(first.gridColumnSpan).toBe(2);
+    expect(first.gridChildHorizontalAlign).toBe("CENTER");
+    expect(first.gridChildVerticalAlign).toBe("MAX");
+    first.gridChildHorizontalAlign = "AUTO";
+    expect(first.gridChildHorizontalAlign).toBe("AUTO");
+    first.gridChildHorizontalAlign = "CENTER";
     expect(isRuntimeError(captureError(() => { second.gridRowSpan = 4; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => { first.setGridChildPosition(1, 1); }), "INVALID_ARGUMENT")).toBe(true);
 
@@ -3300,7 +3307,7 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({
         type: "update",
         nodeId: first.id,
-        patch: { autoLayout: expect.objectContaining({ gridRowSpan: 2, gridColumnSpan: 2 }) },
+        patch: { autoLayout: expect.objectContaining({ gridRowSpan: 2, gridColumnSpan: 2, gridChildHorizontalAlign: "center", gridChildVerticalAlign: "max" }) },
       }),
       expect.objectContaining({
         type: "update",

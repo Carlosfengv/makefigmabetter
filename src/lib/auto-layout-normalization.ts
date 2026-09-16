@@ -80,6 +80,8 @@ export function normalizeAutoLayout(
     gridColumnSpan: optionalGridSpan(source.gridColumnSpan),
     gridItemsPositioning: mode === "grid" && source.gridItemsPositioning === "manual" ? "manual" : undefined,
     gridAutoTracks: mode === "grid" && source.gridAutoTracks === "rows" ? "rows" : undefined,
+    gridChildHorizontalAlign: source.gridChildHorizontalAlign === "min" || source.gridChildHorizontalAlign === "center" || source.gridChildHorizontalAlign === "max" ? source.gridChildHorizontalAlign : undefined,
+    gridChildVerticalAlign: source.gridChildVerticalAlign === "min" || source.gridChildVerticalAlign === "center" || source.gridChildVerticalAlign === "max" ? source.gridChildVerticalAlign : undefined,
     gridRowAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? rowAnchor : undefined,
     gridColumnAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? columnAnchor : undefined,
   };

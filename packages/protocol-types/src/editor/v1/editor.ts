@@ -218,6 +218,15 @@ export enum GridAutoTracks {
   UNRECOGNIZED = -1,
 }
 
+export enum GridChildAlignment {
+  GRID_CHILD_ALIGNMENT_UNSPECIFIED = 0,
+  GRID_CHILD_ALIGNMENT_AUTO = 1,
+  GRID_CHILD_ALIGNMENT_MIN = 2,
+  GRID_CHILD_ALIGNMENT_CENTER = 3,
+  GRID_CHILD_ALIGNMENT_MAX = 4,
+  UNRECOGNIZED = -1,
+}
+
 export enum ColorSpace {
   COLOR_SPACE_UNSPECIFIED = 0,
   COLOR_SPACE_SRGB = 1,
@@ -623,7 +632,12 @@ export interface AutoLayout {
    * canonical writers; ROWS stores one authored row template and derives the
    * effective row count from row-auto-flow placement.
    */
-  gridAutoTracks?: GridAutoTracks | undefined;
+  gridAutoTracks?:
+    | GridAutoTracks
+    | undefined;
+  /** Direct-child cell alignment requires semantics 61. AUTO is omitted. */
+  gridChildHorizontalAlign?: GridChildAlignment | undefined;
+  gridChildVerticalAlign?: GridChildAlignment | undefined;
 }
 
 export interface Color {
@@ -2893,6 +2907,8 @@ function createBaseAutoLayout(): AutoLayout {
     gridRowAnchor: undefined,
     gridColumnAnchor: undefined,
     gridAutoTracks: undefined,
+    gridChildHorizontalAlign: undefined,
+    gridChildVerticalAlign: undefined,
   };
 }
 
@@ -2984,6 +3000,12 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.gridAutoTracks !== undefined) {
       writer.uint32(232).int32(message.gridAutoTracks);
+    }
+    if (message.gridChildHorizontalAlign !== undefined) {
+      writer.uint32(240).int32(message.gridChildHorizontalAlign);
+    }
+    if (message.gridChildVerticalAlign !== undefined) {
+      writer.uint32(248).int32(message.gridChildVerticalAlign);
     }
     return writer;
   },
@@ -3227,6 +3249,22 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.gridAutoTracks = reader.int32() as any;
           continue;
         }
+        case 30: {
+          if (tag !== 240) {
+            break;
+          }
+
+          message.gridChildHorizontalAlign = reader.int32() as any;
+          continue;
+        }
+        case 31: {
+          if (tag !== 248) {
+            break;
+          }
+
+          message.gridChildVerticalAlign = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3270,6 +3308,8 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.gridRowAnchor = object.gridRowAnchor ?? undefined;
     message.gridColumnAnchor = object.gridColumnAnchor ?? undefined;
     message.gridAutoTracks = object.gridAutoTracks ?? undefined;
+    message.gridChildHorizontalAlign = object.gridChildHorizontalAlign ?? undefined;
+    message.gridChildVerticalAlign = object.gridChildVerticalAlign ?? undefined;
     return message;
   },
 };

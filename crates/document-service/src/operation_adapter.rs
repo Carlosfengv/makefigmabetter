@@ -4,15 +4,15 @@
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridItemsPositioning,
-    GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
-    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page,
-    PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
-    TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridChildAlignment,
+    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
     VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
     color::{
@@ -40,6 +40,13 @@ pub fn commands_from_payload_with_semantics(
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
+    }
+    if engine_semantics_version < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| matches!(operation.kind.as_ref(),
+            Some(v1::resolved_operation::Kind::SetAutoLayout(update)) if update.auto_layout.as_ref().is_some_and(|layout|
+                layout.grid_child_horizontal_align.is_some() || layout.grid_child_vertical_align.is_some())))
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported { minimum: makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION });
     }
     if engine_semantics_version
         < makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
@@ -2245,6 +2252,17 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
             }
         }
     };
+    let grid_child_alignment = |raw: Option<i32>| match raw
+        .map(v1::GridChildAlignment::try_from)
+        .transpose()
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        None | Some(v1::GridChildAlignment::Auto) => Ok(GridChildAlignment::Auto),
+        Some(v1::GridChildAlignment::Min) => Ok(GridChildAlignment::Min),
+        Some(v1::GridChildAlignment::Center) => Ok(GridChildAlignment::Center),
+        Some(v1::GridChildAlignment::Max) => Ok(GridChildAlignment::Max),
+        Some(v1::GridChildAlignment::Unspecified) => Err(ServiceError::InvalidEnvelope),
+    };
     let layout = AutoLayout {
         mode,
         padding: [
@@ -2285,6 +2303,8 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks,
+        grid_child_horizontal_align: grid_child_alignment(value.grid_child_horizontal_align)?,
+        grid_child_vertical_align: grid_child_alignment(value.grid_child_vertical_align)?,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -3653,6 +3673,8 @@ mod tests {
             grid_row_anchor: None,
             grid_column_anchor: None,
             grid_auto_tracks: None,
+            grid_child_horizontal_align: None,
+            grid_child_vertical_align: None,
         }
     }
 

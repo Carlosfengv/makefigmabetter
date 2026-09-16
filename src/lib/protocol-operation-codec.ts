@@ -19,6 +19,7 @@ import {
   GridTrackType as ProtoGridTrackType,
   GridItemsPositioning as ProtoGridItemsPositioning,
   GridAutoTracks as ProtoGridAutoTracks,
+  GridChildAlignment as ProtoGridChildAlignment,
   LineHeightUnit as ProtoLineHeightUnit,
   LeadingTrim as ProtoLeadingTrim,
   TextListType as ProtoTextListType,
@@ -444,6 +445,8 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
     gridRowSpan: gridSpan(value.gridRowSpan), gridColumnSpan: gridSpan(value.gridColumnSpan),
     gridItemsPositioning: value.gridItemsPositioning === "manual" ? ProtoGridItemsPositioning.GRID_ITEMS_POSITIONING_MANUAL : undefined,
     gridAutoTracks: value.gridAutoTracks === "rows" ? ProtoGridAutoTracks.GRID_AUTO_TRACKS_ROWS : undefined,
+    gridChildHorizontalAlign: value.gridChildHorizontalAlign === "center" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_CENTER : value.gridChildHorizontalAlign === "max" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_MAX : value.gridChildHorizontalAlign === "min" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_MIN : undefined,
+    gridChildVerticalAlign: value.gridChildVerticalAlign === "center" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_CENTER : value.gridChildVerticalAlign === "max" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_MAX : value.gridChildVerticalAlign === "min" ? ProtoGridChildAlignment.GRID_CHILD_ALIGNMENT_MIN : undefined,
     gridRowAnchor, gridColumnAnchor,
   };
 }

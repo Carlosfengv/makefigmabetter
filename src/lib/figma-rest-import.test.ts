@@ -171,6 +171,7 @@ describe("Figma REST import planning", () => {
         children: [{
           id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 170, height: 110 },
           gridRowSpan: 2, gridColumnSpan: 2,
+          gridChildHorizontalAlign: "CENTER", gridChildVerticalAlign: "MAX",
         }, {
           id: "1:3", type: "RECTANGLE", relativeTransform: [[1, 0, 180], [0, 1, 0]], absoluteBoundingBox: { x: 180, y: 0, width: 20, height: 20 },
         }, {
@@ -182,7 +183,7 @@ describe("Figma REST import planning", () => {
 
     expect(plan.issues).toEqual([]);
     expect(plan.nodes[0]?.autoLayout?.mode).toBe("grid");
-    expect(plan.nodes[1]?.autoLayout).toMatchObject({ gridRowSpan: 2, gridColumnSpan: 2 });
+    expect(plan.nodes[1]?.autoLayout).toMatchObject({ gridRowSpan: 2, gridColumnSpan: 2, gridChildHorizontalAlign: "center", gridChildVerticalAlign: "max" });
     expect(plan.nodes[2]?.autoLayout?.gridRowSpan).toBeUndefined();
     expect(plan.nodes[3]?.autoLayout).toMatchObject({ gridColumnSpan: 2 });
   });

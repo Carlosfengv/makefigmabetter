@@ -394,6 +394,15 @@ pub enum GridAutoTracks {
     Rows,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridChildAlignment {
+    #[default]
+    Auto,
+    Min,
+    Center,
+    Max,
+}
+
 /// Container and child inputs live in a separate canonical table, which keeps
 /// legacy Node snapshots byte-compatible while still making layout semantic.
 #[derive(Debug, Clone, PartialEq)]
@@ -436,6 +445,8 @@ pub struct AutoLayout {
     /// later FLEX rows are derived from child placement and never enter hash or
     /// history as reflow side effects.
     pub grid_auto_tracks: GridAutoTracks,
+    pub grid_child_horizontal_align: GridChildAlignment,
+    pub grid_child_vertical_align: GridChildAlignment,
     /// Direct-child manual Grid anchors. Both values are present together and
     /// are interpreted only while the parent Grid uses manual positioning.
     pub grid_row_anchor: Option<u32>,
@@ -469,6 +480,8 @@ impl Default for AutoLayout {
             grid_column_span: None,
             grid_items_positioning: GridItemsPositioning::RowAutoFlow,
             grid_auto_tracks: GridAutoTracks::None,
+            grid_child_horizontal_align: GridChildAlignment::Auto,
+            grid_child_vertical_align: GridChildAlignment::Auto,
             grid_row_anchor: None,
             grid_column_anchor: None,
         }
@@ -6385,8 +6398,26 @@ impl Document {
                             rotation: child.rotation,
                         };
                         let after = Geometry {
-                            x: normalize_layout_number(frame.x + left + column_offsets[column]),
-                            y: normalize_layout_number(frame.y + top + row_offsets[row]),
+                            x: normalize_layout_number(
+                                frame.x
+                                    + left
+                                    + column_offsets[column]
+                                    + match child_layout.grid_child_horizontal_align {
+                                        GridChildAlignment::Auto | GridChildAlignment::Min => 0.0,
+                                        GridChildAlignment::Center => (cell_width - width) / 2.0,
+                                        GridChildAlignment::Max => cell_width - width,
+                                    },
+                            ),
+                            y: normalize_layout_number(
+                                frame.y
+                                    + top
+                                    + row_offsets[row]
+                                    + match child_layout.grid_child_vertical_align {
+                                        GridChildAlignment::Auto | GridChildAlignment::Min => 0.0,
+                                        GridChildAlignment::Center => (cell_height - height) / 2.0,
+                                        GridChildAlignment::Max => cell_height - height,
+                                    },
+                            ),
                             width: normalize_layout_number(width),
                             height: normalize_layout_number(height),
                             rotation: child.rotation,
@@ -9485,6 +9516,22 @@ fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
     }
     if layout.grid_auto_tracks == GridAutoTracks::Rows {
         hasher.update(b"makefigma/editor-core/grid-auto-rows-v1");
+    }
+    if layout.grid_child_horizontal_align != GridChildAlignment::Auto
+        || layout.grid_child_vertical_align != GridChildAlignment::Auto
+    {
+        hasher.update(b"makefigma/editor-core/grid-child-alignment-v1");
+        for alignment in [
+            layout.grid_child_horizontal_align,
+            layout.grid_child_vertical_align,
+        ] {
+            hasher.update([match alignment {
+                GridChildAlignment::Auto => 0,
+                GridChildAlignment::Min => 1,
+                GridChildAlignment::Center => 2,
+                GridChildAlignment::Max => 3,
+            }]);
+        }
     }
 }
 
@@ -13010,6 +13057,61 @@ mod tests {
         assert_eq!(document.canonical_hash(), hash);
         assert_eq!(document.node(NodeId(4)).map(|node| node.y), Some(100.0));
         assert_eq!(document.auto_layout_for_node(frame.id).grid_rows.len(), 1);
+    }
+
+    #[test]
+    fn grid_child_alignment_offsets_fixed_children_within_spanning_cells() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 210.0;
+        frame.height = 210.0;
+        let mut child = node(2);
+        child.parent_id = Some(frame.id);
+        child.width = 20.0;
+        child.height = 40.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(child.clone()),
+                        Command::SetAutoLayout {
+                            id: child.id,
+                            layout: AutoLayout {
+                                grid_column_span: Some(2),
+                                grid_child_horizontal_align: GridChildAlignment::Center,
+                                grid_child_vertical_align: GridChildAlignment::Max,
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Grid,
+                                grid_rows: vec![GridTrack::Fixed(100.0), GridTrack::Fixed(100.0)],
+                                grid_columns: vec![
+                                    GridTrack::Fixed(100.0),
+                                    GridTrack::Fixed(100.0),
+                                ],
+                                grid_row_gap: Some(10.0),
+                                grid_column_gap: Some(10.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(child.id).map(|node| (node.x, node.y)),
+            Some((95.0, 60.0))
+        );
+        let hash = document.canonical_hash();
+        document.undo().unwrap();
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), hash);
     }
 
     #[test]

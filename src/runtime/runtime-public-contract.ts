@@ -318,6 +318,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void gridFrame.reorderColumns({ fromIndices: [0], insertionIndex: 1 });
   gridChild.gridRowSpan = 2;
   gridChild.gridColumnSpan = 2;
+  gridChild.gridChildHorizontalAlign = "CENTER";
+  gridChild.gridChildVerticalAlign = "MAX";
   void gridChild.gridRowAnchorIndex;
   void gridChild.gridColumnAnchorIndex;
   const connector = runtime.createConnector();

@@ -6,15 +6,15 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridItemsPositioning,
-    GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
-    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page,
-    PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
-    TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridChildAlignment,
+    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
     VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment, can_parent_contain_child,
     color::{
@@ -86,8 +86,9 @@ pub const GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION: u32 = 57;
 pub const GRID_SPAN_ENGINE_SEMANTICS_VERSION: u32 = 58;
 pub const GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION: u32 = 59;
 pub const GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION: u32 = 60;
+pub const GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION: u32 = 61;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -121,6 +122,15 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.grid_child_horizontal_align != GridChildAlignment::Auto
+                || layout.grid_child_vertical_align != GridChildAlignment::Auto
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             document.auto_layout_for_node(node.id).grid_auto_tracks == GridAutoTracks::Rows
@@ -713,6 +723,23 @@ pub fn document_from_snapshot_with_engine_semantics(
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version < GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.grid_child_horizontal_align.is_some()
+                            || layout.grid_child_vertical_align.is_some()
+                    })
+            })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
         && snapshot
             .page_chunks
@@ -1948,6 +1975,33 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks: (value.grid_auto_tracks == GridAutoTracks::Rows)
             .then_some(v1::GridAutoTracks::Rows as i32),
+        grid_child_horizontal_align: grid_child_alignment_to_proto(
+            value.grid_child_horizontal_align,
+        ),
+        grid_child_vertical_align: grid_child_alignment_to_proto(value.grid_child_vertical_align),
+    }
+}
+fn grid_child_alignment_to_proto(value: GridChildAlignment) -> Option<i32> {
+    match value {
+        GridChildAlignment::Auto => None,
+        GridChildAlignment::Min => Some(v1::GridChildAlignment::Min as i32),
+        GridChildAlignment::Center => Some(v1::GridChildAlignment::Center as i32),
+        GridChildAlignment::Max => Some(v1::GridChildAlignment::Max as i32),
+    }
+}
+fn grid_child_alignment_from_proto(
+    value: Option<i32>,
+) -> Result<GridChildAlignment, SnapshotError> {
+    match value
+        .map(v1::GridChildAlignment::try_from)
+        .transpose()
+        .map_err(|_| SnapshotError::Invalid)?
+    {
+        None | Some(v1::GridChildAlignment::Auto) => Ok(GridChildAlignment::Auto),
+        Some(v1::GridChildAlignment::Min) => Ok(GridChildAlignment::Min),
+        Some(v1::GridChildAlignment::Center) => Ok(GridChildAlignment::Center),
+        Some(v1::GridChildAlignment::Max) => Ok(GridChildAlignment::Max),
+        Some(v1::GridChildAlignment::Unspecified) => Err(SnapshotError::Invalid),
     }
 }
 fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
@@ -2084,6 +2138,12 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks,
+        grid_child_horizontal_align: grid_child_alignment_from_proto(
+            value.grid_child_horizontal_align,
+        )?,
+        grid_child_vertical_align: grid_child_alignment_from_proto(
+            value.grid_child_vertical_align,
+        )?,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -4411,6 +4471,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.auto_layout_for_node(frame.id), layout);
+    }
+
+    #[test]
+    fn grid_child_alignment_requires_semantics_sixty_one() {
+        let mut document = Document::with_id(DocumentId(82));
+        let child = node(12, NodeKind::Rectangle, None);
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, child.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            grid_child_horizontal_align: GridChildAlignment::Center,
+            grid_child_vertical_align: GridChildAlignment::Max,
+            ..AutoLayout::default()
+        };
+        document.seed_auto_layout(child.id, layout.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bytes = snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot(
+            &bytes,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.auto_layout_for_node(child.id), layout);
     }
 
     #[test]

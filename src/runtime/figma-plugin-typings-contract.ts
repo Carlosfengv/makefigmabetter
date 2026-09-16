@@ -286,6 +286,8 @@ export function assertFigmaPluginTypingsContract(
     frame.gridAutoTracks = "NONE";
     frame.gridItemsPositioning = "MANUAL";
     frame.appendChildAt(rectangle, 0, 0);
+    rectangle.gridChildHorizontalAlign = "CENTER";
+    rectangle.gridChildVerticalAlign = "MAX";
     void frame.reorderRows({ fromIndices: [0], insertionIndex: 1 });
     void frame.reorderColumns({ fromIndices: [0], insertionIndex: 1 });
   }

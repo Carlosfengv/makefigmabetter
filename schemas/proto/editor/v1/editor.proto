@@ -268,6 +268,14 @@ enum GridAutoTracks {
   GRID_AUTO_TRACKS_ROWS = 2;
 }
 
+enum GridChildAlignment {
+  GRID_CHILD_ALIGNMENT_UNSPECIFIED = 0;
+  GRID_CHILD_ALIGNMENT_AUTO = 1;
+  GRID_CHILD_ALIGNMENT_MIN = 2;
+  GRID_CHILD_ALIGNMENT_CENTER = 3;
+  GRID_CHILD_ALIGNMENT_MAX = 4;
+}
+
 message GridTrack {
   GridTrackType type = 1;
   // FLEX uses fractional units; FIXED uses logical pixels; HUG ignores value.
@@ -321,6 +329,9 @@ message AutoLayout {
   // canonical writers; ROWS stores one authored row template and derives the
   // effective row count from row-auto-flow placement.
   optional GridAutoTracks grid_auto_tracks = 29;
+  // Direct-child cell alignment requires semantics 61. AUTO is omitted.
+  optional GridChildAlignment grid_child_horizontal_align = 30;
+  optional GridChildAlignment grid_child_vertical_align = 31;
 }
 
 enum ColorSpace {

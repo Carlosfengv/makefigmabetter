@@ -6,16 +6,16 @@ use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
     Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
-    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
-    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
-    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -478,6 +478,16 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.grid_child_horizontal_align != GridChildAlignment::Auto
+                || layout.grid_child_vertical_align != GridChildAlignment::Auto
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version < makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             document.auto_layout_for_node(node.id).grid_auto_tracks == GridAutoTracks::Rows
@@ -1074,6 +1084,24 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.grid_child_horizontal_align.is_some()
+                            || layout.grid_child_vertical_align.is_some()
+                    })
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if declared_engine_semantics_version
         < makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
         && snapshot
@@ -2205,6 +2233,33 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks: (value.grid_auto_tracks == GridAutoTracks::Rows)
             .then_some(v1::GridAutoTracks::Rows as i32),
+        grid_child_horizontal_align: grid_child_alignment_to_proto(
+            value.grid_child_horizontal_align,
+        ),
+        grid_child_vertical_align: grid_child_alignment_to_proto(value.grid_child_vertical_align),
+    }
+}
+
+fn grid_child_alignment_to_proto(value: GridChildAlignment) -> Option<i32> {
+    match value {
+        GridChildAlignment::Auto => None,
+        GridChildAlignment::Min => Some(v1::GridChildAlignment::Min as i32),
+        GridChildAlignment::Center => Some(v1::GridChildAlignment::Center as i32),
+        GridChildAlignment::Max => Some(v1::GridChildAlignment::Max as i32),
+    }
+}
+
+fn grid_child_alignment_from_proto(value: Option<i32>) -> Result<GridChildAlignment, ServiceError> {
+    match value
+        .map(v1::GridChildAlignment::try_from)
+        .transpose()
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        None | Some(v1::GridChildAlignment::Auto) => Ok(GridChildAlignment::Auto),
+        Some(v1::GridChildAlignment::Min) => Ok(GridChildAlignment::Min),
+        Some(v1::GridChildAlignment::Center) => Ok(GridChildAlignment::Center),
+        Some(v1::GridChildAlignment::Max) => Ok(GridChildAlignment::Max),
+        Some(v1::GridChildAlignment::Unspecified) => Err(ServiceError::ReducerRejected),
     }
 }
 
@@ -2351,6 +2406,12 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
         grid_auto_tracks,
+        grid_child_horizontal_align: grid_child_alignment_from_proto(
+            value.grid_child_horizontal_align,
+        )?,
+        grid_child_vertical_align: grid_child_alignment_from_proto(
+            value.grid_child_vertical_align,
+        )?,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)

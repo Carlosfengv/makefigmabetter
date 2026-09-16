@@ -196,6 +196,8 @@ type RuntimeAutoLayout = Readonly<{
   gridColumnSpan?: number;
   gridItemsPositioning?: "manual";
   gridAutoTracks?: "rows";
+  gridChildHorizontalAlign?: "min" | "center" | "max";
+  gridChildVerticalAlign?: "min" | "center" | "max";
   gridRowAnchor?: number;
   gridColumnAnchor?: number;
 }>;
@@ -3511,6 +3513,22 @@ export class RuntimeNodeProxy {
   set gridRowSpan(value: number) { this.writeGridSpan("row", value); }
   get gridColumnSpan(): number { this.parentGridFrame(); return this.autoLayout().gridColumnSpan ?? 1; }
   set gridColumnSpan(value: number) { this.writeGridSpan("column", value); }
+  get gridChildHorizontalAlign(): "MIN" | "CENTER" | "MAX" | "AUTO" {
+    this.parentGridFrame();
+    const value = this.autoLayout().gridChildHorizontalAlign;
+    return value === "center" ? "CENTER" : value === "max" ? "MAX" : value === "min" ? "MIN" : "AUTO";
+  }
+  set gridChildHorizontalAlign(value: "MIN" | "CENTER" | "MAX" | "AUTO") {
+    this.writeGridChildAlignment("horizontal", value);
+  }
+  get gridChildVerticalAlign(): "MIN" | "CENTER" | "MAX" | "AUTO" {
+    this.parentGridFrame();
+    const value = this.autoLayout().gridChildVerticalAlign;
+    return value === "center" ? "CENTER" : value === "max" ? "MAX" : value === "min" ? "MIN" : "AUTO";
+  }
+  set gridChildVerticalAlign(value: "MIN" | "CENTER" | "MAX" | "AUTO") {
+    this.writeGridChildAlignment("vertical", value);
+  }
   setGridChildPosition(rowIndex: number, columnIndex: number): void {
     const parent = this.parentGridFrame();
     if (parent.gridItemsPositioning !== "MANUAL" || !Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)
@@ -4428,6 +4446,17 @@ export class RuntimeNodeProxy {
     this.writeAutoLayout(axis === "row"
       ? { gridRowSpan: value === 1 ? undefined : value }
       : { gridColumnSpan: value === 1 ? undefined : value });
+  }
+
+  private writeGridChildAlignment(axis: "horizontal" | "vertical", value: "MIN" | "CENTER" | "MAX" | "AUTO"): void {
+    this.parentGridFrame();
+    if (value !== "MIN" && value !== "CENTER" && value !== "MAX" && value !== "AUTO") {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    }
+    const canonical = value === "AUTO" ? undefined : value.toLowerCase() as "min" | "center" | "max";
+    this.writeAutoLayout(axis === "horizontal"
+      ? { gridChildHorizontalAlign: canonical }
+      : { gridChildVerticalAlign: canonical });
   }
 
   private parentAutoLayout(): RuntimeAutoLayout | undefined {
