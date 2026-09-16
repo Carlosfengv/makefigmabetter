@@ -1692,8 +1692,9 @@ export class RuntimeNodeProxy {
   }
 
   get componentPropertyDefinitions(): DocumentComponentMetadata["componentPropertyDefinitions"] {
-    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
-    return structuredClone(this.componentMetadata().componentPropertyDefinitions);
+    if (this.type === "COMPONENT") return structuredClone(this.componentMetadata().componentPropertyDefinitions);
+    if (this.type === "COMPONENT_SET") return structuredClone(this.componentSetMetadata().componentPropertyDefinitions);
+    throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
   }
 
   /** Canonical currently stores the exact values but not every Figma property

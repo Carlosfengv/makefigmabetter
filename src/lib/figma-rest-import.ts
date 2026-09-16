@@ -2504,23 +2504,7 @@ function componentMetadata(
   sourceId: string,
   issues: FigmaImportIssue[],
 ): NonNullable<CanvasNode["componentMetadata"]> {
-  const rawDefinitions = record(node.componentPropertyDefinitions);
-  const definitions: NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"] = {};
-  let preservedDefinition = false;
-  for (const [name, raw] of Object.entries(rawDefinitions ?? {})) {
-    const definition = record(raw);
-    const type = string(definition?.type);
-    const defaultValue = definition?.defaultValue;
-    if (!definition || !["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"].includes(type ?? "") || (defaultValue !== undefined && typeof defaultValue !== "string" && typeof defaultValue !== "boolean")) {
-      preservedDefinition = true;
-      continue;
-    }
-    definitions[name] = {
-      type: type as NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["type"],
-      ...(defaultValue === undefined ? {} : { defaultValue }),
-      ...(string(definition.description) === undefined ? {} : { description: string(definition.description) }),
-    };
-  }
+  const { definitions, preserved: preservedDefinition } = componentPropertyDefinitions(node.componentPropertyDefinitions);
   if (preservedDefinition) {
     extensions["figma.rest.component-properties.v1"] = jsonBytes(node.componentPropertyDefinitions);
     issues.push({ sourceId, capability: "component-properties", outcome: "preserved-extension", reason: "Unsupported Component property definitions were retained without inventing editable values." });
@@ -2533,6 +2517,36 @@ function componentMetadata(
     documentationLinks: documentationLinks(catalog?.documentationLinks ?? node.documentationLinks),
     componentPropertyDefinitions: definitions,
   };
+}
+
+function componentPropertyDefinitions(value: unknown): Readonly<{
+  definitions: NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"];
+  preserved: boolean;
+}> {
+  const rawDefinitions = record(value);
+  const definitions: NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"] = {};
+  let preserved = false;
+  for (const [name, raw] of Object.entries(rawDefinitions ?? {})) {
+    const definition = record(raw);
+    const type = string(definition?.type);
+    const defaultValue = definition?.defaultValue;
+    if (!definition || !["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"].includes(type ?? "") || (defaultValue !== undefined && typeof defaultValue !== "string" && typeof defaultValue !== "boolean")) {
+      preserved = true;
+      continue;
+    }
+    const variantOptions = array(definition.variantOptions);
+    if (variantOptions !== undefined && !variantOptions.every((option) => typeof option === "string")) {
+      preserved = true;
+      continue;
+    }
+    definitions[name] = {
+      type: type as NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["type"],
+      ...(defaultValue === undefined ? {} : { defaultValue }),
+      ...(string(definition.description) === undefined ? {} : { description: string(definition.description) }),
+      ...(variantOptions === undefined ? {} : { variantOptions: variantOptions as string[] }),
+    };
+  }
+  return { definitions, preserved };
 }
 
 function componentSetMetadata(
@@ -2554,9 +2568,11 @@ function componentSetMetadata(
     }
     variants[name] = { values: values as string[] };
   }
-  if (preservedVariant || node.componentPropertyDefinitions !== undefined) {
-    extensions["figma.rest.component-set-properties.v1"] = jsonBytes({ variantGroupProperties: rawVariants, componentPropertyDefinitions: node.componentPropertyDefinitions });
-    issues.push({ sourceId, capability: "component-set-properties", outcome: "preserved-extension", reason: "The supported variant value list was mapped; remaining ComponentSet property definitions stay preserved metadata." });
+  const rawDefinitions = catalog?.componentPropertyDefinitions ?? node.componentPropertyDefinitions;
+  const { definitions, preserved: preservedDefinition } = componentPropertyDefinitions(rawDefinitions);
+  if (preservedVariant || preservedDefinition) {
+    extensions["figma.rest.component-set-properties.v1"] = jsonBytes({ variantGroupProperties: rawVariants, componentPropertyDefinitions: rawDefinitions });
+    issues.push({ sourceId, capability: "component-set-properties", outcome: "preserved-extension", reason: "Supported ComponentSet property definitions and variant values were mapped; unsupported entries remain preserved metadata." });
   }
   return {
     key: string(catalog?.key) ?? string(node.key) ?? canonicalId,
@@ -2564,6 +2580,7 @@ function componentSetMetadata(
     description: string(catalog?.description) ?? string(node.description) ?? "",
     descriptionMarkdown: string(catalog?.descriptionMarkdown) ?? string(node.descriptionMarkdown) ?? "",
     documentationLinks: documentationLinks(catalog?.documentationLinks ?? node.documentationLinks),
+    componentPropertyDefinitions: definitions,
     variantGroupProperties: variants,
   };
 }

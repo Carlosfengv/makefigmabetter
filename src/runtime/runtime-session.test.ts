@@ -154,6 +154,7 @@ describe("M1 RuntimeSession", () => {
             description: "Variants",
             descriptionMarkdown: "Variants",
             documentationLinks: [],
+            componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } },
             variantGroupProperties: { State: { values: ["Default", "Hover"] } },
           },
         },
@@ -173,10 +174,10 @@ describe("M1 RuntimeSession", () => {
     expect(instance.scaleFactor).toBe(1.25);
     expect(instance.isExposedInstance).toBe(true);
     expect(set.variantGroupProperties).toEqual({ State: { values: ["Default", "Hover"] } });
+    expect(set.componentPropertyDefinitions).toEqual({ State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } });
     expect(isRuntimeError(captureError(() => { component.name = "Changed"; }), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => component.remove()), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => component.createInstance()), "UNSUPPORTED_FEATURE")).toBe(true);
-    expect(isRuntimeError(captureError(() => set.componentPropertyDefinitions), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => instance.getInstancesAsync()), "UNSUPPORTED_PROPERTY")).toBe(true);
 
     instance.removeOverrides();
@@ -398,7 +399,7 @@ describe("M1 RuntimeSession", () => {
           y: 40,
           width: 200,
           height: 100,
-          componentSetMetadata: { key: "set-key", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} },
+          componentSetMetadata: { key: "set-key", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} },
         },
         { id: "variant", type: "COMPONENT", name: "State=Default", parentId: "set", siblingIndex: 0, width: 100, height: 40, componentMetadata },
         { id: "variant-child", type: "RECTANGLE", name: "Surface", parentId: "variant", siblingIndex: 0, width: 100, height: 40 },
@@ -774,6 +775,10 @@ describe("M1 RuntimeSession", () => {
     expect(set).toBeInstanceOf(RuntimeContainerNodeProxy);
     expect(set).toMatchObject({ type: "COMPONENT_SET", name: "Component set", x: 120, y: 40, width: 240, height: 60, parent: session.currentPage });
     expect(set.variantGroupProperties).toEqual({ State: { values: ["Default", "Hover"] }, Size: { values: ["Medium"] } });
+    expect(set.componentPropertyDefinitions).toEqual({
+      State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] },
+      Size: { type: "VARIANT", defaultValue: "Medium", variantOptions: ["Medium"] },
+    });
     expect(set.children).toEqual([base, hover]);
     expect(base).toMatchObject({ parent: set, x: 0, y: 0 });
     expect(hover).toMatchObject({ parent: set, x: 140, y: 0 });

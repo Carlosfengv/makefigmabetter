@@ -60,4 +60,43 @@ describe("canvasNodeFromWasmProjection", () => {
     expect(normalized?.baseStyle?.fillStack).toBeUndefined();
     expect(normalized?.baseStyle?.textCase).toBeUndefined();
   });
+
+  it("hydrates ComponentSet property definitions and defaults old metadata to an empty definition map", () => {
+    const current = coreProjectionNode({
+      ...createNode("componentSet", 0, 0),
+      componentSetMetadata: {
+        key: "button-set",
+        remote: false,
+        description: "Buttons",
+        descriptionMarkdown: "",
+        documentationLinks: [],
+        componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } },
+        variantGroupProperties: { State: { values: ["Default", "Hover"] } },
+      },
+    });
+    expect(canvasNodeFromWasmProjection(current).componentSetMetadata?.componentPropertyDefinitions).toEqual({
+      State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] },
+    });
+
+    const legacyMetadata = {
+      key: "legacy-set",
+      remote: false,
+      description: "Legacy",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      variantGroupProperties: { State: { values: ["Default"] } },
+    };
+    const legacy = {
+      ...current,
+      extensions: {
+        ...current.extensions,
+        "figma.component-set.metadata.v1": [...new TextEncoder().encode(JSON.stringify(legacyMetadata))],
+      },
+    };
+    expect(canvasNodeFromWasmProjection(legacy).componentSetMetadata).toMatchObject({
+      key: "legacy-set",
+      componentPropertyDefinitions: {},
+      variantGroupProperties: { State: { values: ["Default"] } },
+    });
+  });
 });

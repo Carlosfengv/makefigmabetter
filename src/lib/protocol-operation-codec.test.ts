@@ -547,7 +547,7 @@ describe("protocol operation codec", () => {
   });
 
   it("serializes ComponentSet with its dedicated node kind and variant metadata", () => {
-    const node = { ...createNode("componentSet", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", componentSetMetadata: { key: "set", remote: false, description: "Variants", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: { State: { values: ["Default"] } } } };
+    const node = { ...createNode("componentSet", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", componentSetMetadata: { key: "set", remote: false, description: "Variants", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { State: { type: "VARIANT" as const, defaultValue: "Default", variantOptions: ["Default"] } }, variantGroupProperties: { State: { values: ["Default"] } } } };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
     expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_COMPONENT_SET, clipsContent: true });
     expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.component-set.metadata.v1"])).toContain("State");

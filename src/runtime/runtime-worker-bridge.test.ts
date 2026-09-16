@@ -332,7 +332,7 @@ describe("RuntimeWorkerBridge", () => {
       ...base,
       nodes: [
         ...base.nodes,
-        { id: setId, pageId: "page", kind: "componentSet", name: "Button", x: 0, y: 0, width: 200, height: 80, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentSetMetadata: { key: "button-set", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} } },
+        { id: setId, pageId: "page", kind: "componentSet", name: "Button", x: 0, y: 0, width: 200, height: 80, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentSetMetadata: { key: "button-set", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} } },
         { id: variantId, pageId: "page", parentId: setId, kind: "component", name: "State=Default", x: 0, y: 0, width: 100, height: 40, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { key: "button-default", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } },
         { id: childId, pageId: "page", parentId: variantId, kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 40, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
       ],
@@ -678,7 +678,10 @@ describe("RuntimeWorkerBridge", () => {
       type: "componentSet",
       id: componentSet.id,
       ids: [baseId, hoverId],
-      metadata: expect.objectContaining({ variantGroupProperties: { State: { values: ["Default", "Hover"] } } }),
+      metadata: expect.objectContaining({
+        componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } },
+        variantGroupProperties: { State: { values: ["Default", "Hover"] } },
+      }),
     }));
     const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
     expect(resolved?.nextNodes).toEqual(expect.arrayContaining([

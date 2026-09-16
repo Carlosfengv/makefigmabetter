@@ -425,6 +425,7 @@ describe("Core transaction batch resolution", () => {
       description: "",
       descriptionMarkdown: "",
       documentationLinks: [],
+      componentPropertyDefinitions: { State: { type: "VARIANT" as const, defaultValue: "Default", variantOptions: ["Default", "Hover"] } },
       variantGroupProperties: { State: { values: ["Default", "Hover"] } },
     };
     const resolved = resolveCoreBatch([first, second], [{

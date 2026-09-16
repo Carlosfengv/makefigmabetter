@@ -1365,7 +1365,7 @@ export class RuntimeSession implements RuntimeContainerHost {
         description: "",
         descriptionMarkdown: "",
         documentationLinks: [],
-        variantGroupProperties: runtimeVariantGroupProperties(orderedSelected),
+        ...runtimeVariantMetadata(orderedSelected),
       },
     };
     const childPositions: Readonly<Record<string, unknown>>[] = [];
@@ -2303,9 +2303,9 @@ function runtimeSlotPropertyName(node: RuntimeProjectionNode): string | undefine
   return typeof name === "string" ? name : undefined;
 }
 
-function runtimeVariantGroupProperties(
+function runtimeVariantMetadata(
   components: readonly RuntimeProjectionNode[],
-): DocumentComponentSetMetadata["variantGroupProperties"] {
+): Pick<DocumentComponentSetMetadata, "componentPropertyDefinitions" | "variantGroupProperties"> {
   const values = new Map<string, string[]>();
   components.forEach((component) => {
     const name = typeof component.name === "string" ? component.name : "";
@@ -2319,7 +2319,13 @@ function runtimeVariantGroupProperties(
       values.set(property, variants);
     });
   });
-  return Object.fromEntries([...values].map(([property, variants]) => [property, { values: variants }]));
+  const variantGroupProperties = Object.fromEntries([...values].map(([property, variants]) => [property, { values: variants }]));
+  const componentPropertyDefinitions = Object.fromEntries([...values].map(([property, variants]) => [property, {
+    type: "VARIANT" as const,
+    defaultValue: variants[0]!,
+    variantOptions: [...variants],
+  }]));
+  return { componentPropertyDefinitions, variantGroupProperties };
 }
 
 function runtimeNodeHasAncestorIn(

@@ -730,7 +730,10 @@ function validateComponentSetOperation(
     new Set(operation.childIds).size !== operation.childIds.length ||
     operation.childPatches.length !== operation.childIds.length ||
     !operation.node.componentSetMetadata ||
-    typeof operation.node.componentSetMetadata !== "object"
+    typeof operation.node.componentSetMetadata !== "object" ||
+    !("componentPropertyDefinitions" in operation.node.componentSetMetadata) ||
+    !operation.node.componentSetMetadata.componentPropertyDefinitions ||
+    typeof operation.node.componentSetMetadata.componentPropertyDefinitions !== "object"
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
   operation.childIds.forEach((nodeId, siblingIndex) => {
     const node = read(nodeId);

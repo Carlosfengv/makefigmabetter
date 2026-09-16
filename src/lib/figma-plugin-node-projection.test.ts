@@ -71,10 +71,10 @@ describe("Figma Plugin API node projection", () => {
   });
 
   it("projects ComponentSet publication data, variant groups, and its top-left default component", () => {
-    const set = { ...createNode("componentSet", 0, 0), id: "set", componentSetMetadata: { key: "set-key", remote: false, description: "Buttons", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: { State: { values: ["Default", "Hover"] } } } };
+    const set = { ...createNode("componentSet", 0, 0), id: "set", componentSetMetadata: { key: "set-key", remote: false, description: "Buttons", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { State: { type: "VARIANT" as const, defaultValue: "Default", variantOptions: ["Default", "Hover"] } }, variantGroupProperties: { State: { values: ["Default", "Hover"] } } } };
     const hover = { ...createNode("component", 80, 20), id: "hover", parentId: set.id };
     const base = { ...createNode("component", 20, 10), id: "base", parentId: set.id };
-    expect(projectFigmaPluginNode([set, hover, base], set)).toMatchObject({ type: "COMPONENT_SET", key: "set-key", description: "Buttons", variantGroupProperties: { State: { values: ["Default", "Hover"] } }, defaultVariantId: "base" });
+    expect(projectFigmaPluginNode([set, hover, base], set)).toMatchObject({ type: "COMPONENT_SET", key: "set-key", description: "Buttons", componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } }, variantGroupProperties: { State: { values: ["Default", "Hover"] } }, defaultVariantId: "base" });
   });
 
   it("projects Instance's component link, properties, overrides, and scale", () => {

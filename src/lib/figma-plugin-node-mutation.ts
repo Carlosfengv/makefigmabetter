@@ -255,7 +255,7 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
       if (has("documentationLinks")) { if (!validDocumentationLinks(write.documentationLinks)) return rejected("documentationLinks must contain valid absolute HTTP(S) URLs."); metadata.documentationLinks = write.documentationLinks; }
       patch.componentMetadata = metadata;
     } else {
-      const metadata = structuredClone(node.componentSetMetadata ?? { key: node.id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} });
+      const metadata = structuredClone(node.componentSetMetadata ?? { key: node.id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} });
       if (metadata.remote) return rejected("remote COMPONENT_SET nodes are read-only.");
       if (has("description")) { if (typeof write.description !== "string") return rejected("description must be a string."); metadata.description = write.description; }
       if (has("descriptionMarkdown")) { if (typeof write.descriptionMarkdown !== "string") return rejected("descriptionMarkdown must be a string."); metadata.descriptionMarkdown = write.descriptionMarkdown; }

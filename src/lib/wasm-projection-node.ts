@@ -92,9 +92,16 @@ function componentSetMetadataFromExtensions(extensions: CanvasNode["extensions"]
   const bytes = extensions?.["figma.component-set.metadata.v1"];
   try {
     const value = bytes && JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes))) as Partial<NonNullable<CanvasNode["componentSetMetadata"]>>;
-    if (value && typeof value.key === "string" && typeof value.remote === "boolean" && typeof value.description === "string" && typeof value.descriptionMarkdown === "string" && Array.isArray(value.documentationLinks) && value.variantGroupProperties && typeof value.variantGroupProperties === "object") return value as NonNullable<CanvasNode["componentSetMetadata"]>;
+    if (value && typeof value.key === "string" && typeof value.remote === "boolean" && typeof value.description === "string" && typeof value.descriptionMarkdown === "string" && Array.isArray(value.documentationLinks) && value.variantGroupProperties && typeof value.variantGroupProperties === "object") {
+      return {
+        ...value,
+        componentPropertyDefinitions: value.componentPropertyDefinitions && typeof value.componentPropertyDefinitions === "object"
+          ? value.componentPropertyDefinitions
+          : {},
+      } as NonNullable<CanvasNode["componentSetMetadata"]>;
+    }
   } catch { /* malformed forward metadata uses a safe local fallback */ }
-  return { key, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} };
+  return { key, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} };
 }
 
 function connectorMetadataFromExtensions(extensions: CanvasNode["extensions"]): CanvasNode["connectorMetadata"] {

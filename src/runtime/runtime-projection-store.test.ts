@@ -88,7 +88,7 @@ describe("RuntimeProjectionStore", () => {
           type: "COMPONENT_SET",
           parentId: "page",
           siblingIndex: 0,
-          componentSetMetadata: { key: "button", remote: false, variantGroupProperties: { State: { values: ["Default", "Hover"] } } },
+          componentSetMetadata: { key: "button", remote: false, componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } }, variantGroupProperties: { State: { values: ["Default", "Hover"] } } },
         },
         childIds: ["default", "hover"],
         childPatches: [

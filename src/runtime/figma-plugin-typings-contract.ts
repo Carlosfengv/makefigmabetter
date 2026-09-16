@@ -182,6 +182,7 @@ export function assertFigmaPluginTypingsContract(
   void instance.getMainComponentAsync();
   instance.removeOverrides();
   void componentSet.variantGroupProperties;
+  void componentSet.componentPropertyDefinitions;
   const polygon: PolygonNode = figma.createPolygon();
   polygon.pointCount = polygon.pointCount;
   const star: StarNode = figma.createStar();

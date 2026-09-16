@@ -159,7 +159,7 @@ describe("Figma REST import planning", () => {
     const plan = planFigmaRestImport({
       version: "component-fixture",
       components: { "1:1": { key: "card-key", name: "Card", description: "Reusable card" } },
-      componentSets: { "1:5": { key: "set-key", name: "Cards", variantGroupProperties: { State: { values: ["Default", "Hover"] } } } },
+      componentSets: { "1:5": { key: "set-key", name: "Cards", variantGroupProperties: { State: { values: ["Default", "Hover"] } }, componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } } } },
       document: { children: [{ id: "0:1", type: "CANVAS", children: [
         {
           id: "1:1", type: "COMPONENT", name: "Card", clipsContent: true,
@@ -208,7 +208,12 @@ describe("Figma REST import planning", () => {
       isExposedInstance: true,
     });
     expect(nestedInstance.instanceMetadata?.mainComponentId).toBe(setComponent.id);
-    expect(set.componentSetMetadata).toMatchObject({ key: "set-key", variantGroupProperties: { State: { values: ["Default", "Hover"] } } });
+    expect(set.componentSetMetadata).toMatchObject({
+      key: "set-key",
+      componentPropertyDefinitions: { State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] } },
+      variantGroupProperties: { State: { values: ["Default", "Hover"] } },
+    });
+    expect(plan.issues).not.toEqual(expect.arrayContaining([expect.objectContaining({ capability: "component-set-properties" })]));
     expect(resolveFigmaRestImportBatch(plan)).toBeDefined();
   });
 

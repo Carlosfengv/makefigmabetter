@@ -94,7 +94,7 @@ describe("Figma Plugin API node mutation adapter", () => {
   it("writes ComponentSet publication metadata with the same remote protection", () => {
     const set = { ...createNode("componentSet", 0, 0), id: "set" };
     expect(writeFigmaPluginNode(set, { description: "Variants" })).toMatchObject({ ok: true, commands: [{ type: "update", id: set.id, patch: { componentSetMetadata: expect.objectContaining({ description: "Variants" }) } }] });
-    const remote = { ...set, componentSetMetadata: { key: "remote", remote: true, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} } };
+    const remote = { ...set, componentSetMetadata: { key: "remote", remote: true, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} } };
     expect(writeFigmaPluginNode(remote, { description: "Nope" })).toEqual({ ok: false, reason: "remote COMPONENT_SET nodes are read-only." });
   });
 

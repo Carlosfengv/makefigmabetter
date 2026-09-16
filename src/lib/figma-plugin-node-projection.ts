@@ -404,9 +404,9 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     projection.clipsContent = node.clipsContent !== false;
   }
   if (node.kind === "componentSet") {
-    const metadata = node.componentSetMetadata ?? { key: node.id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} };
+    const metadata = node.componentSetMetadata ?? { key: node.id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} };
     projection.description = metadata.description; projection.descriptionMarkdown = metadata.descriptionMarkdown; projection.documentationLinks = metadata.documentationLinks;
-    projection.key = metadata.key; projection.remote = metadata.remote; projection.variantGroupProperties = metadata.variantGroupProperties;
+    projection.key = metadata.key; projection.remote = metadata.remote; projection.componentPropertyDefinitions = metadata.componentPropertyDefinitions; projection.variantGroupProperties = metadata.variantGroupProperties;
     projection.defaultVariantId = defaultVariantId(nodes, node.id);
   }
   if (node.kind === "instance" && node.instanceMetadata) {

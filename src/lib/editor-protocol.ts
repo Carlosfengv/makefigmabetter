@@ -12,6 +12,12 @@ export type NodeKind = "frame" | "group" | "section" | "rectangle" | "ellipse" |
 /** Figma may append languages without a Plugin API major-version change, so
  * source is retained as an open string rather than an exhaustively closed enum. */
 export type CodeBlockLanguage = string;
+export type DocumentComponentPropertyDefinition = {
+  type: "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT";
+  defaultValue?: string | boolean;
+  description?: string;
+  variantOptions?: string[];
+};
 export interface DocumentComponentMetadata {
   /** Local keys default to the Canonical NodeId. Imported remote keys stay
    * visible but mutating APIs reject the remote record. */
@@ -22,7 +28,7 @@ export interface DocumentComponentMetadata {
   documentationLinks: Array<{ uri: string; name?: string }>;
   /** Mirrors Figma's readonly componentPropertyDefinitions; mutation methods
    * are added together with INSTANCE and SLOT semantics. */
-  componentPropertyDefinitions: Record<string, { type: "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT"; defaultValue?: string | boolean; description?: string }>;
+  componentPropertyDefinitions: Record<string, DocumentComponentPropertyDefinition>;
 }
 export interface DocumentInstanceMetadata {
   mainComponentId: string;
@@ -32,7 +38,7 @@ export interface DocumentInstanceMetadata {
   isExposedInstance: boolean;
 }
 export interface DocumentSlotMetadata { propertyName: string; sourceSlotId?: string; }
-export interface DocumentComponentSetMetadata extends Omit<DocumentComponentMetadata, "componentPropertyDefinitions"> {
+export interface DocumentComponentSetMetadata extends DocumentComponentMetadata {
   variantGroupProperties: Record<string, { values: string[] }>;
 }
 export interface DocumentEmbedMetadata { srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null; }
@@ -1113,5 +1119,5 @@ export function createNode(kind: NodeKind, x: number, y: number): CanvasNode {
   const vectorPath = kind === "vector" || kind === "highlight" || kind === "textPath" ? { fillRule: "nonZero" as const, subpaths: [{ closed: kind !== "textPath", points: [{ id: createId(), x: 0, y: kind === "textPath" ? 50 : 0, pointType: "corner" as const }, { id: createId(), x: 160, y: kind === "highlight" ? 20 : kind === "textPath" ? 50 : 120, pointType: "corner" as const }, { id: createId(), x: 0, y: kind === "highlight" ? 20 : 120, pointType: "corner" as const }] }] } : undefined;
   const booleanOperation = kind === "booleanOperation" ? "union" as const : undefined;
   const id = createId();
-  return { id, kind, x, y, rotation: 0, strokeWidth: kind === "slice" ? 0 : 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, blendMode: "normal", visible: true, ...preset, codeLanguage: kind === "codeBlock" ? "PLAINTEXT" : undefined, componentMetadata: kind === "component" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } : undefined, componentSetMetadata: kind === "componentSet" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} } : undefined, connectorMetadata: kind === "connector" ? { lineType: "STRAIGHT", start: { x: 0, y: 0, magnet: "AUTO" }, end: { x: preset.width, y: 0, magnet: "AUTO" }, startStrokeCap: "NONE", endStrokeCap: "NONE", text: "" } : undefined, embedMetadata: kind === "embed" ? { srcUrl: "https://example.com", canonicalUrl: null, title: null, provider: null } : undefined, highlightHandleMirroring: kind === "highlight" ? "NONE" : undefined, interactiveSlideElementType: kind === "interactiveSlideElement" ? "POLL" : undefined, linkUnfurlMetadata: kind === "linkUnfurl" ? { url: "https://example.com", title: null, description: null, provider: null } : undefined, mediaMetadata: kind === "media" ? { hash: id } : undefined, shapeWithTextType: kind === "shapeWithText" ? "ROUNDED_RECTANGLE" : undefined, slideMetadata: kind === "slide" ? { isSkippedSlide: false, transition: { style: "NONE", duration: .3, curve: "EASE_IN", timing: { type: "ON_CLICK" } } } : undefined, stickyMetadata: kind === "sticky" ? { authorVisible: true, authorName: "", isWideWidth: false } : undefined, textPathMetadata: kind === "textPath" ? { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "TOP" } : undefined, widgetMetadata: kind === "widget" ? { widgetId: id, syncedState: {}, syncedMap: {} } : undefined, parametricShape, vectorPath, booleanOperation, fillColor: documentColorFromCssHex(preset.fill) };
+  return { id, kind, x, y, rotation: 0, strokeWidth: kind === "slice" ? 0 : 1, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10, strokeDashPattern: [], strokeAlign: "inside", opacity: 1, blendMode: "normal", visible: true, ...preset, codeLanguage: kind === "codeBlock" ? "PLAINTEXT" : undefined, componentMetadata: kind === "component" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } : undefined, componentSetMetadata: kind === "componentSet" ? { key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {}, variantGroupProperties: {} } : undefined, connectorMetadata: kind === "connector" ? { lineType: "STRAIGHT", start: { x: 0, y: 0, magnet: "AUTO" }, end: { x: preset.width, y: 0, magnet: "AUTO" }, startStrokeCap: "NONE", endStrokeCap: "NONE", text: "" } : undefined, embedMetadata: kind === "embed" ? { srcUrl: "https://example.com", canonicalUrl: null, title: null, provider: null } : undefined, highlightHandleMirroring: kind === "highlight" ? "NONE" : undefined, interactiveSlideElementType: kind === "interactiveSlideElement" ? "POLL" : undefined, linkUnfurlMetadata: kind === "linkUnfurl" ? { url: "https://example.com", title: null, description: null, provider: null } : undefined, mediaMetadata: kind === "media" ? { hash: id } : undefined, shapeWithTextType: kind === "shapeWithText" ? "ROUNDED_RECTANGLE" : undefined, slideMetadata: kind === "slide" ? { isSkippedSlide: false, transition: { style: "NONE", duration: .3, curve: "EASE_IN", timing: { type: "ON_CLICK" } } } : undefined, stickyMetadata: kind === "sticky" ? { authorVisible: true, authorName: "", isWideWidth: false } : undefined, textPathMetadata: kind === "textPath" ? { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT", textAlignVertical: "TOP" } : undefined, widgetMetadata: kind === "widget" ? { widgetId: id, syncedState: {}, syncedMap: {} } : undefined, parametricShape, vectorPath, booleanOperation, fillColor: documentColorFromCssHex(preset.fill) };
 }
