@@ -22,6 +22,17 @@ export function assertFigmaPluginTypingsContract(
   void figma.variables.getLocalVariablesAsync();
   void figma.variables.getLocalVariableCollectionsAsync();
   void figma.variables.getVariableByIdAsync("V:spacing");
+  if (false) {
+    const style = figma.getLocalTextStyles()[0];
+    if (style) {
+      void style.getPluginData("key");
+      style.setPluginData("key", "value");
+      void style.getPluginDataKeys();
+      void style.getSharedPluginData("namespace", "key");
+      style.setSharedPluginData("namespace", "key", "value");
+      void style.getSharedPluginDataKeys("namespace");
+    }
+  }
   const createdComponent: ComponentNode = figma.createComponent();
   const convertedComponent: ComponentNode = figma.createComponentFromNode(figma.createFrame());
   const createdSlice: SliceNode = figma.createSlice();

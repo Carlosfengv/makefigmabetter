@@ -36,6 +36,12 @@ describe("M0 runtime capability matrix", () => {
       property: "getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys|getRelaunchData|setRelaunchData",
       errorCode: "PERMISSION_DENIED",
     });
+    expect(runtimeCapability("style.plugin-data-runtime")).toMatchObject({
+      status: "partial",
+      surface: "plugin",
+      property: "TextStyle|PaintStyle:getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys",
+      errorCode: "PERMISSION_DENIED",
+    });
     expect(runtimeCapability("component.instance-properties-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("setProperties"),

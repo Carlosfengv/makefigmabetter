@@ -6,6 +6,12 @@ import { runtimeError } from "./runtime-errors";
 export type RuntimeTextStyleHost = Readonly<{
   fontNameForStyle(style: DocumentTextStyleResource): RuntimeFontName;
   consumersForTextStyle(styleId: string): readonly RuntimeNodeProxy[];
+  getPluginData(styleId: string, key: string): string;
+  setPluginData(styleId: string, key: string, value: string): void;
+  getPluginDataKeys(styleId: string): readonly string[];
+  getSharedPluginData(styleId: string, namespace: string, key: string): string;
+  setSharedPluginData(styleId: string, namespace: string, key: string, value: string): void;
+  getSharedPluginDataKeys(styleId: string, namespace: string): readonly string[];
 }>;
 
 /** Read projection of one canonical TextStyle resource. Resource mutation is
@@ -91,12 +97,12 @@ export class RuntimeTextStyle {
   }
 
   remove(): never { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  getPluginData(key: string): string { void key; return ""; }
-  setPluginData(key: string, value: string): never { void key; void value; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  getPluginDataKeys(): string[] { return []; }
-  getSharedPluginData(namespace: string, key: string): string { void namespace; void key; return ""; }
-  setSharedPluginData(namespace: string, key: string, value: string): never { void namespace; void key; void value; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  getSharedPluginDataKeys(namespace: string): string[] { void namespace; return []; }
+  getPluginData(key: string): string { return this.host.getPluginData(this.id, key); }
+  setPluginData(key: string, value: string): void { this.host.setPluginData(this.id, key, value); }
+  getPluginDataKeys(): readonly string[] { return this.host.getPluginDataKeys(this.id); }
+  getSharedPluginData(namespace: string, key: string): string { return this.host.getSharedPluginData(this.id, namespace, key); }
+  setSharedPluginData(namespace: string, key: string, value: string): void { this.host.setSharedPluginData(this.id, namespace, key, value); }
+  getSharedPluginDataKeys(namespace: string): readonly string[] { return this.host.getSharedPluginDataKeys(this.id, namespace); }
   setBoundVariable(field: string, variable: unknown): never { void field; void variable; throw runtimeError("UNSUPPORTED_FEATURE"); }
 
   private consumerRecords(): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly ["textStyleId"] }>[] {

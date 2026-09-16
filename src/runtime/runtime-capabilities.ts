@@ -95,7 +95,17 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     property: "getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys|getRelaunchData|setRelaunchData",
     surface: "plugin",
     status: "partial",
-    limitation: "A RuntimeSession with an explicit validated pluginId reads, writes, lists and deletes only that plugin's private node data in the Canonical figma.plugin-data.v1 extension namespace; unscoped private reads fail with PERMISSION_DENIED. SharedPluginData uses a separately validated public namespace and can round-trip across differently scoped or unscoped sessions. Both paths are immediate in PendingProjection and cross the ordinary atomic transaction fence; keys are sorted, UTF-8 values round-trip, empty values delete, and each private scope or shared namespace/node is bounded to 64 entries and 64 KiB. Relaunch data is likewise plugin-scoped, atomically replaces the current command map, enforces Figma's 1000-character description limit, and preserves other plugins' maps. Style plugin-data methods remain staged.",
+    limitation: "A RuntimeSession with an explicit validated pluginId reads, writes, lists and deletes only that plugin's private node data in the Canonical figma.plugin-data.v1 extension namespace; unscoped private reads fail with PERMISSION_DENIED. SharedPluginData uses a separately validated public namespace and can round-trip across differently scoped or unscoped sessions. Both paths are immediate in PendingProjection and cross the ordinary atomic transaction fence; keys are sorted, UTF-8 values round-trip, empty values delete, and each private scope or shared namespace/node is bounded to 64 entries and 64 KiB. Relaunch data is likewise plugin-scoped, atomically replaces the current command map, enforces Figma's 1000-character description limit, and preserves other plugins' maps.",
+    errorCode: "PERMISSION_DENIED",
+  },
+  {
+    id: "style.plugin-data-runtime",
+    editorTypes: ["figma"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    property: "TextStyle|PaintStyle:getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys",
+    surface: "plugin",
+    status: "partial",
+    limitation: "TextStyle and PaintStyle private data is isolated by the validated RuntimeSession pluginId, while shared data is isolated by an explicit validated namespace. Both use bounded Canonical document-root extension namespaces keyed by style kind and encoded style identity, project writes immediately, persist through the ordinary atomic transaction fence, sort keys, preserve UTF-8, delete empty values, and retain data belonging to other styles and plugins. Each scope is bounded to 64 entries and 64 KiB rather than Figma's 100 kB per-entry ceiling; style creation, visual mutation and removal remain separate staged capabilities.",
     errorCode: "PERMISSION_DENIED",
   },
   {

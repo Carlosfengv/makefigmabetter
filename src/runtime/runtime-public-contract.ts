@@ -11,6 +11,17 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getLocalVariablesAsync();
   void runtime.variables.getLocalVariableCollectionsAsync();
   void runtime.variables.getVariableByIdAsync("V:spacing");
+  if (false) {
+    const style = runtime.getLocalTextStyles()[0];
+    if (style) {
+      void style.getPluginData("key");
+      style.setPluginData("key", "value");
+      void style.getPluginDataKeys();
+      void style.getSharedPluginData("namespace", "key");
+      style.setSharedPluginData("namespace", "key", "value");
+      void style.getSharedPluginDataKeys("namespace");
+    }
+  }
   const component = runtime.createComponent();
   const propertyLayer = runtime.createRectangle();
   component.appendChild(propertyLayer);

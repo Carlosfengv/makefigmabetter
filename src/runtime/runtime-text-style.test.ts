@@ -36,7 +36,7 @@ const projection: RuntimeProjection = {
 
 describe("TextStyle resource runtime", () => {
   it("queries complete canonical styles and reports linked consumers", async () => {
-    const session = new RuntimeSession({ sessionId: "styles", projection, transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
+    const session = new RuntimeSession({ sessionId: "styles", pluginId: "com.example.styles", projection, transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
     const figma = new FigmaCompatibleRuntime(session);
     const style = await figma.getStyleByIdAsync("S:body");
 
@@ -54,6 +54,41 @@ describe("TextStyle resource runtime", () => {
   it("keeps deprecated synchronous style reads behind full-document access", () => {
     const dynamic = new RuntimeSession({ sessionId: "styles-dynamic", projection, transport: new ReadOnlyTransport(), documentAccess: "dynamic-page", scheduleMicrotask: () => {} });
     expect(isRuntimeError(capture(() => dynamic.getStyleById("S:body")), "PAGE_NOT_LOADED")).toBe(true);
+  });
+
+  it("persists scoped private and shared plugin data on styles", async () => {
+    const alphaTransport = new StyleTransport(projection);
+    const alpha = new RuntimeSession({ sessionId: "style-data-a", pluginId: "com.example.alpha", projection, transport: alphaTransport, scheduleMicrotask: () => {} });
+    const alphaStyle = await alpha.getStyleByIdAsync("S:body");
+    if (!alphaStyle) throw new Error("Missing TextStyle fixture");
+
+    alphaStyle.setPluginData("z-key", "last");
+    alphaStyle.setPluginData("a-key", "first 😀");
+    alphaStyle.setSharedPluginData("com.example.tokens", "role", "body");
+    expect(alphaStyle.getPluginData("a-key")).toBe("first 😀");
+    expect(alphaStyle.getPluginDataKeys()).toEqual(["a-key", "z-key"]);
+    expect(alphaStyle.getSharedPluginData("com.example.tokens", "role")).toBe("body");
+    expect(alphaStyle.getSharedPluginDataKeys("com.example.tokens")).toEqual(["role"]);
+    const transactionId = alpha.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = alpha.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(capture(() => alphaStyle.setPluginData("", "invalid")), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => alphaStyle.setSharedPluginData("bad/namespace", "key", "invalid")), "INVALID_ARGUMENT")).toBe(true);
+    expect(alpha.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+    await alpha.commitAsync();
+
+    const betaProjection = alphaTransport.currentProjection();
+    const beta = new RuntimeSession({ sessionId: "style-data-b", pluginId: "com.example.beta", projection: betaProjection, transport: new StyleTransport(betaProjection), scheduleMicrotask: () => {} });
+    const betaStyle = await beta.getStyleByIdAsync("S:body");
+    if (!betaStyle) throw new Error("Missing TextStyle fixture");
+    expect(betaStyle.getPluginData("a-key")).toBe("");
+    expect(betaStyle.getPluginDataKeys()).toEqual([]);
+    expect(betaStyle.getSharedPluginData("com.example.tokens", "role")).toBe("body");
+
+    const unscoped = new RuntimeSession({ sessionId: "style-data-none", projection: betaProjection, transport: new StyleTransport(betaProjection), scheduleMicrotask: () => {} });
+    const unscopedStyle = await unscoped.getStyleByIdAsync("S:body");
+    if (!unscopedStyle) throw new Error("Missing TextStyle fixture");
+    expect(isRuntimeError(capture(() => unscopedStyle.getPluginData("a-key")), "PERMISSION_DENIED")).toBe(true);
+    expect(unscopedStyle.getSharedPluginData("com.example.tokens", "role")).toBe("body");
   });
 
   it("applies and unlinks a complete TextStyle value atomically", async () => {
@@ -185,6 +220,8 @@ class StyleTransport implements RuntimeTransactionTransport {
   constructor(projection: RuntimeProjection) {
     this.projection = structuredClone(projection);
   }
+
+  currentProjection(): RuntimeProjection { return structuredClone(this.projection); }
 
   async submit(transaction: PendingProjectionTransaction): Promise<RuntimeTransactionResult> {
     this.submitted.push(transaction);

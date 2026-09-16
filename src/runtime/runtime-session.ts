@@ -96,6 +96,8 @@ const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
 const RUNTIME_PLUGIN_DATA_PREFIX = "figma.plugin-data.v1/";
 const RUNTIME_SHARED_PLUGIN_DATA_PREFIX = "figma.shared-plugin-data.v1/";
 const RUNTIME_RELAUNCH_DATA_PREFIX = "figma.relaunch-data.v1/";
+const RUNTIME_STYLE_PLUGIN_DATA_PREFIX = "figma.style-plugin-data.v1/";
+const RUNTIME_STYLE_SHARED_PLUGIN_DATA_PREFIX = "figma.style-shared-plugin-data.v1/";
 const MAX_RUNTIME_PLUGIN_DATA_ENTRIES = 64;
 const MAX_RUNTIME_PLUGIN_DATA_BYTES = 64 * 1024;
 const MAX_RUNTIME_RELAUNCH_DESCRIPTION_LENGTH = 1000;
@@ -521,6 +523,12 @@ export class RuntimeSession implements RuntimeContainerHost {
           return fields.length ? { node: this.proxyFor(node.id), fields: Object.freeze(fields) } : undefined;
         })
         .filter((consumer): consumer is { node: RuntimeNodeProxy; fields: readonly string[] } => consumer !== undefined)),
+      getPluginData: (styleId: string, key: string): string => this.getStylePluginData("paint", styleId, key),
+      setPluginData: (styleId: string, key: string, value: string): void => this.setStylePluginData("paint", styleId, key, value),
+      getPluginDataKeys: (styleId: string): readonly string[] => this.getStylePluginDataKeys("paint", styleId),
+      getSharedPluginData: (styleId: string, namespace: string, key: string): string => this.getStyleSharedPluginData("paint", styleId, namespace, key),
+      setSharedPluginData: (styleId: string, namespace: string, key: string, value: string): void => this.setStyleSharedPluginData("paint", styleId, namespace, key, value),
+      getSharedPluginDataKeys: (styleId: string, namespace: string): readonly string[] => this.getStyleSharedPluginDataKeys("paint", styleId, namespace),
     };
   }
 
@@ -533,6 +541,12 @@ export class RuntimeSession implements RuntimeContainerHost {
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node) && runtimeNodeUsesTextStyle(node, styleId))
         .map((node) => this.proxyFor(node.id)),
+      getPluginData: (styleId: string, key: string): string => this.getStylePluginData("text", styleId, key),
+      setPluginData: (styleId: string, key: string, value: string): void => this.setStylePluginData("text", styleId, key, value),
+      getPluginDataKeys: (styleId: string): readonly string[] => this.getStylePluginDataKeys("text", styleId),
+      getSharedPluginData: (styleId: string, namespace: string, key: string): string => this.getStyleSharedPluginData("text", styleId, namespace, key),
+      setSharedPluginData: (styleId: string, namespace: string, key: string, value: string): void => this.setStyleSharedPluginData("text", styleId, namespace, key, value),
+      getSharedPluginDataKeys: (styleId: string, namespace: string): readonly string[] => this.getStyleSharedPluginDataKeys("text", styleId, namespace),
     };
   }
 
@@ -2562,86 +2576,62 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   getPluginData(nodeId: string, key: string): string {
     const node = this.runtimePluginDataNode(nodeId);
-    const storageKey = this.runtimePluginDataStorageKey(key);
-    const bytes = node.extensions && typeof node.extensions === "object"
-      ? (node.extensions as Record<string, unknown>)[storageKey]
-      : undefined;
-    return Array.isArray(bytes) && bytes.every(validRuntimeExtensionByte)
-      ? new TextDecoder().decode(Uint8Array.from(bytes))
-      : "";
+    return this.runtimeExtensionDataValue(node, this.runtimePluginDataPrefix(), key);
   }
 
   setPluginData(nodeId: string, key: string, value: string): void {
     const node = this.runtimePluginDataNode(nodeId);
-    const storageKey = this.runtimePluginDataStorageKey(key);
-    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
-    const encoded = [...new TextEncoder().encode(value)];
-    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
-    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
-      ? structuredClone(node.extensions as Record<string, number[]>)
-      : {};
-    if (value) extensions[storageKey] = encoded;
-    else delete extensions[storageKey];
-    const prefix = this.runtimePluginDataPrefix();
-    const pluginEntries = Object.entries(extensions).filter(([entryKey]) => entryKey.startsWith(prefix));
-    if (pluginEntries.some(([, bytes]) => !Array.isArray(bytes) || !bytes.every(validRuntimeExtensionByte))) {
-      throw runtimeError("INVALID_ARGUMENT", { nodeId });
-    }
-    if (pluginEntries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || pluginEntries.reduce((total, [, bytes]) => total + bytes.length, 0) > MAX_RUNTIME_PLUGIN_DATA_BYTES) {
-      throw runtimeError("RESOURCE_LIMIT", { nodeId });
-    }
-    this.enqueueUpdate(nodeId, { extensions });
+    this.setRuntimeExtensionData(nodeId, node, this.runtimePluginDataPrefix(), key, value);
   }
 
   getPluginDataKeys(nodeId: string): readonly string[] {
     const node = this.runtimePluginDataNode(nodeId);
-    const prefix = this.runtimePluginDataPrefix();
-    return Object.keys(node.extensions ?? {})
-      .filter((entryKey) => entryKey.startsWith(prefix))
-      .map((entryKey) => entryKey.slice(prefix.length))
-      .filter(validRuntimePluginDataPart)
-      .sort((left, right) => left.localeCompare(right));
+    return this.runtimeExtensionDataKeys(node, this.runtimePluginDataPrefix());
   }
 
   getSharedPluginData(nodeId: string, namespace: string, key: string): string {
     const node = this.runtimeDataNode(nodeId);
-    const storageKey = `${this.runtimeSharedPluginDataPrefix(namespace)}${this.validRuntimePluginDataKey(key)}`;
-    const bytes = node.extensions && typeof node.extensions === "object"
-      ? (node.extensions as Record<string, unknown>)[storageKey]
-      : undefined;
-    return Array.isArray(bytes) && bytes.every(validRuntimeExtensionByte)
-      ? new TextDecoder().decode(Uint8Array.from(bytes))
-      : "";
+    return this.runtimeExtensionDataValue(node, this.runtimeSharedPluginDataPrefix(namespace), key);
   }
 
   setSharedPluginData(nodeId: string, namespace: string, key: string, value: string): void {
     const node = this.runtimeDataNode(nodeId);
-    const prefix = this.runtimeSharedPluginDataPrefix(namespace);
-    const storageKey = `${prefix}${this.validRuntimePluginDataKey(key)}`;
-    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
-    const encoded = [...new TextEncoder().encode(value)];
-    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
-    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
-      ? structuredClone(node.extensions as Record<string, number[]>)
-      : {};
-    if (value) extensions[storageKey] = encoded;
-    else delete extensions[storageKey];
-    const entries = Object.entries(extensions).filter(([entryKey]) => entryKey.startsWith(prefix));
-    if (entries.some(([, bytes]) => !Array.isArray(bytes) || !bytes.every(validRuntimeExtensionByte))) throw runtimeError("INVALID_ARGUMENT", { nodeId });
-    if (entries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || entries.reduce((total, [, bytes]) => total + bytes.length, 0) > MAX_RUNTIME_PLUGIN_DATA_BYTES) {
-      throw runtimeError("RESOURCE_LIMIT", { nodeId });
-    }
-    this.enqueueUpdate(nodeId, { extensions });
+    this.setRuntimeExtensionData(nodeId, node, this.runtimeSharedPluginDataPrefix(namespace), key, value);
   }
 
   getSharedPluginDataKeys(nodeId: string, namespace: string): readonly string[] {
     const node = this.runtimeDataNode(nodeId);
-    const prefix = this.runtimeSharedPluginDataPrefix(namespace);
-    return Object.keys(node.extensions ?? {})
-      .filter((entryKey) => entryKey.startsWith(prefix))
-      .map((entryKey) => entryKey.slice(prefix.length))
-      .filter(validRuntimePluginDataPart)
-      .sort((left, right) => left.localeCompare(right));
+    return this.runtimeExtensionDataKeys(node, this.runtimeSharedPluginDataPrefix(namespace));
+  }
+
+  private getStylePluginData(kind: "text" | "paint", styleId: string, key: string): string {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    return this.runtimeExtensionDataValue(node, this.runtimeStylePluginDataPrefix(kind, styleId), key);
+  }
+
+  private setStylePluginData(kind: "text" | "paint", styleId: string, key: string, value: string): void {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStylePluginDataPrefix(kind, styleId), key, value);
+  }
+
+  private getStylePluginDataKeys(kind: "text" | "paint", styleId: string): readonly string[] {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    return this.runtimeExtensionDataKeys(node, this.runtimeStylePluginDataPrefix(kind, styleId));
+  }
+
+  private getStyleSharedPluginData(kind: "text" | "paint", styleId: string, namespace: string, key: string): string {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    return this.runtimeExtensionDataValue(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key);
+  }
+
+  private setStyleSharedPluginData(kind: "text" | "paint", styleId: string, namespace: string, key: string, value: string): void {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key, value);
+  }
+
+  private getStyleSharedPluginDataKeys(kind: "text" | "paint", styleId: string, namespace: string): readonly string[] {
+    const node = this.runtimeStyleDataNode(kind, styleId);
+    return this.runtimeExtensionDataKeys(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace));
   }
 
   getRelaunchData(nodeId: string): Readonly<Record<string, string>> {
@@ -2708,10 +2698,6 @@ export class RuntimeSession implements RuntimeContainerHost {
     return `${RUNTIME_PLUGIN_DATA_PREFIX}${this.pluginId}/`;
   }
 
-  private runtimePluginDataStorageKey(key: string): string {
-    return `${this.runtimePluginDataPrefix()}${this.validRuntimePluginDataKey(key)}`;
-  }
-
   private runtimeSharedPluginDataPrefix(namespace: string): string {
     if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
     return `${RUNTIME_SHARED_PLUGIN_DATA_PREFIX}${namespace}/`;
@@ -2720,6 +2706,61 @@ export class RuntimeSession implements RuntimeContainerHost {
   private runtimeRelaunchDataStorageKey(): string {
     if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
     return `${RUNTIME_RELAUNCH_DATA_PREFIX}${this.pluginId}`;
+  }
+
+  private runtimeStyleDataNode(kind: "text" | "paint", styleId: string): RuntimeProjectionNode {
+    this.assertOpen();
+    const style = kind === "text" ? this.textStyleResource(styleId) : this.paintStyleResource(styleId);
+    if (!style) throw runtimeError("RESOURCE_UNAVAILABLE");
+    return this.runtimeDataNode(this.rootNodeId);
+  }
+
+  private runtimeStylePluginDataPrefix(kind: "text" | "paint", styleId: string): string {
+    if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
+    return `${RUNTIME_STYLE_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${this.pluginId}/`;
+  }
+
+  private runtimeStyleSharedPluginDataPrefix(kind: "text" | "paint", styleId: string, namespace: string): string {
+    if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
+    return `${RUNTIME_STYLE_SHARED_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${namespace}/`;
+  }
+
+  private runtimeExtensionDataValue(node: RuntimeProjectionNode, prefix: string, key: string): string {
+    const storageKey = `${prefix}${this.validRuntimePluginDataKey(key)}`;
+    const bytes = node.extensions && typeof node.extensions === "object"
+      ? (node.extensions as Record<string, unknown>)[storageKey]
+      : undefined;
+    return Array.isArray(bytes) && bytes.length <= MAX_RUNTIME_PLUGIN_DATA_BYTES && bytes.every(validRuntimeExtensionByte)
+      ? new TextDecoder().decode(Uint8Array.from(bytes))
+      : "";
+  }
+
+  private setRuntimeExtensionData(nodeId: string, node: RuntimeProjectionNode, prefix: string, key: string, value: string): void {
+    const storageKey = `${prefix}${this.validRuntimePluginDataKey(key)}`;
+    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const encoded = [...new TextEncoder().encode(value)];
+    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+      ? structuredClone(node.extensions as Record<string, number[]>)
+      : {};
+    if (value) extensions[storageKey] = encoded;
+    else delete extensions[storageKey];
+    const entries = Object.entries(extensions).filter(([entryKey]) => entryKey.startsWith(prefix));
+    if (entries.some(([, bytes]) => !Array.isArray(bytes) || !bytes.every(validRuntimeExtensionByte))) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    if (entries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || entries.reduce((total, [, bytes]) => total + bytes.length, 0) > MAX_RUNTIME_PLUGIN_DATA_BYTES) {
+      throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    }
+    this.enqueueUpdate(nodeId, { extensions });
+  }
+
+  private runtimeExtensionDataKeys(node: RuntimeProjectionNode, prefix: string): readonly string[] {
+    return Object.keys(node.extensions ?? {})
+      .filter((entryKey) => entryKey.startsWith(prefix))
+      .map((entryKey) => entryKey.slice(prefix.length))
+      .filter(validRuntimePluginDataPart)
+      .sort((left, right) => left.localeCompare(right));
   }
 
   private validRuntimePluginDataKey(key: string): string {
@@ -3929,6 +3970,18 @@ function validRuntimePluginId(value: unknown): value is string {
 
 function validRuntimePluginDataPart(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f]/u.test(value);
+}
+
+function runtimeStyleDataId(value: unknown): string {
+  if (typeof value !== "string" || !value) throw runtimeError("INVALID_ARGUMENT");
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(value);
+  } catch {
+    throw runtimeError("INVALID_ARGUMENT");
+  }
+  if (encoded.length > 1024) throw runtimeError("RESOURCE_LIMIT");
+  return encoded;
 }
 
 function validRuntimeExtensionByte(value: unknown): value is number {

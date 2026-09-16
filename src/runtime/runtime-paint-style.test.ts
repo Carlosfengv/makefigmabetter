@@ -51,6 +51,20 @@ describe("PaintStyle resource runtime", () => {
     expect(isRuntimeError(capture(() => session.getLocalPaintStyles()), "PAGE_NOT_LOADED")).toBe(true);
   });
 
+  it("reads and writes PaintStyle plugin data through the style host", async () => {
+    const session = new RuntimeSession({ sessionId: "paint-style-data", pluginId: "com.example.paint", projection, transport: new StyleTransport(projection), scheduleMicrotask: () => {} });
+    const style = await session.getStyleByIdAsync("S:brand-fill");
+    if (!style || style.type !== "PAINT") throw new Error("Missing PaintStyle fixture");
+
+    style.setPluginData("owner", "design-system");
+    style.setSharedPluginData("com.example.tokens", "token", "brand.primary");
+    expect(style.getPluginData("owner")).toBe("design-system");
+    expect(style.getPluginDataKeys()).toEqual(["owner"]);
+    expect(style.getSharedPluginData("com.example.tokens", "token")).toBe("brand.primary");
+    style.setPluginData("owner", "");
+    expect(style.getPluginDataKeys()).toEqual([]);
+  });
+
   it("applies, reports, and unlinks complete PaintStyle values", async () => {
     const styledProjection: RuntimeProjection = {
       ...projection,
