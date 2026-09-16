@@ -16,7 +16,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   if (runtimeVariable) {
     rectangle.setBoundVariable("opacity", runtimeVariable);
     rectangle.setBoundVariable("width", runtimeVariable);
+    rectangle.setBoundVariable("cornerRadius", runtimeVariable);
   }
+  void rectangle.cornerRadius;
+  rectangle.topLeftRadius = rectangle.topLeftRadius;
   void rectangle.boundVariables;
   const runtimeCollection = runtime.variables.getLocalVariableCollections()[0];
   if (runtimeCollection) rectangle.setExplicitVariableModeForCollection(runtimeCollection, runtimeCollection.defaultModeId);

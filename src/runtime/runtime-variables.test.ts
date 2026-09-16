@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FigmaCompatibleRuntime } from "./figma-compatible-runtime";
+import { RUNTIME_MIXED } from "./node-proxy";
 import { isRuntimeError } from "./runtime-errors";
 import type { PendingProjectionTransaction, RuntimeProjection } from "./runtime-projection-store";
 import { RuntimeSession } from "./runtime-session";
@@ -74,6 +75,7 @@ describe("Variables resource runtime", () => {
     rectangle.setBoundVariable("strokeWeight", spacing);
     rectangle.setBoundVariable("width", width);
     rectangle.setBoundVariable("height", height);
+    rectangle.setBoundVariable("cornerRadius", spacing);
     text.setBoundVariable("characters", label);
     frame.setBoundVariable("itemSpacing", spacing);
     frame.setBoundVariable("paddingTop", spacing);
@@ -94,6 +96,9 @@ describe("Variables resource runtime", () => {
     expect(rectangle.strokeWeight).toBe(8);
     expect(rectangle.width).toBe(120);
     expect(rectangle.height).toBe(60);
+    expect(rectangle.cornerRadius).toBe(8);
+    expect(rectangle.boundVariables).not.toHaveProperty("cornerRadius");
+    expect(rectangle.boundVariables).toMatchObject({ topLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, topRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" } });
     expect(text.characters).toBe("Light");
     expect(frame).toMatchObject({ itemSpacing: 8, paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8, counterAxisSpacing: 8 });
     expect(frame).toMatchObject({ strokeTopWeight: 8, strokeRightWeight: 8, strokeBottomWeight: 8, strokeLeftWeight: 8 });
@@ -113,6 +118,7 @@ describe("Variables resource runtime", () => {
     expect(rectangle.strokeWeight).toBe(12);
     expect(rectangle.width).toBe(180);
     expect(rectangle.height).toBe(90);
+    expect(rectangle.cornerRadius).toBe(12);
     expect(text.characters).toBe("Dark");
     expect(frame).toMatchObject({ itemSpacing: 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12, paddingLeft: 12, counterAxisSpacing: 12 });
     expect(frame).toMatchObject({ strokeTopWeight: 12, strokeRightWeight: 12, strokeBottomWeight: 12, strokeLeftWeight: 12 });
@@ -131,6 +137,16 @@ describe("Variables resource runtime", () => {
     expect(rectangle.boundVariables).not.toHaveProperty("width");
     expect(rectangle.boundVariables).not.toHaveProperty("height");
     expect(text.boundVariables).toBeUndefined();
+
+    rectangle.topLeftRadius = 5;
+    expect(rectangle.cornerRadius).toBe(RUNTIME_MIXED);
+    expect(rectangle.boundVariables).not.toHaveProperty("topLeftRadius");
+    expect(rectangle.boundVariables).toHaveProperty("topRightRadius");
+    rectangle.cornerRadius = 6;
+    expect(rectangle.cornerRadius).toBe(6);
+    expect(rectangle.boundVariables).not.toHaveProperty("topRightRadius");
+    expect(rectangle.boundVariables).not.toHaveProperty("bottomRightRadius");
+    expect(rectangle.boundVariables).not.toHaveProperty("bottomLeftRadius");
 
     frame.itemSpacing = 4;
     frame.paddingTop = 1;

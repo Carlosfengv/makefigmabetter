@@ -30,7 +30,10 @@ export function assertFigmaPluginTypingsContract(
   if (floatVariable) {
     rectangle.setBoundVariable("opacity", floatVariable);
     rectangle.setBoundVariable("width", floatVariable);
+    rectangle.setBoundVariable("cornerRadius", floatVariable);
   }
+  void rectangle.cornerRadius;
+  rectangle.topLeftRadius = rectangle.topLeftRadius;
   const stringVariable = figma.variables.getLocalVariables("STRING")[0];
   if (stringVariable) text.setBoundVariable("characters", stringVariable);
   void rectangle.boundVariables;

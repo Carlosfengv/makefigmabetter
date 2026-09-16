@@ -200,6 +200,11 @@ const RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS = [
   "maxHeight",
   "counterAxisSpacing",
   "visible",
+  "cornerRadius",
+  "topLeftRadius",
+  "topRightRadius",
+  "bottomRightRadius",
+  "bottomLeftRadius",
   "strokeWeight",
   "strokeTopWeight",
   "strokeRightWeight",
@@ -221,6 +226,16 @@ const RUNTIME_STROKE_SIDE_INDEX: Readonly<Record<RuntimeVariableBindableStrokeSi
 };
 function isRuntimeStrokeSideField(value: RuntimeVariableBindableNodeField): value is RuntimeVariableBindableStrokeSideField {
   return Object.hasOwn(RUNTIME_STROKE_SIDE_INDEX, value);
+}
+type RuntimeVariableBindableCornerField = "topLeftRadius" | "topRightRadius" | "bottomRightRadius" | "bottomLeftRadius";
+const RUNTIME_CORNER_INDEX: Readonly<Record<RuntimeVariableBindableCornerField, number>> = {
+  topLeftRadius: 0,
+  topRightRadius: 1,
+  bottomRightRadius: 2,
+  bottomLeftRadius: 3,
+};
+function isRuntimeCornerField(value: RuntimeVariableBindableNodeField): value is RuntimeVariableBindableCornerField {
+  return Object.hasOwn(RUNTIME_CORNER_INDEX, value);
 }
 function isRuntimeLineHeight(value: unknown): value is RuntimeLineHeight {
   if (!value || typeof value !== "object" || !("unit" in value)) return false;
@@ -1385,7 +1400,17 @@ export class RuntimeNodeProxy {
     const node = this.read();
     const bindings = { ...variableBindingsFromExtensions(node.extensions) };
     if (variable === null) {
-      delete bindings[field];
+      if (field === "cornerRadius") {
+        this.assertCornerProperties();
+        delete bindings.cornerRadius;
+        delete bindings.topLeftRadius;
+        delete bindings.topRightRadius;
+        delete bindings.bottomRightRadius;
+        delete bindings.bottomLeftRadius;
+      } else {
+        if (isRuntimeCornerField(field)) this.assertCornerProperties();
+        delete bindings[field];
+      }
       this.write({ extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
       return;
     }
@@ -1393,7 +1418,16 @@ export class RuntimeNodeProxy {
     if (!variableId || !this.host.variableResource(variableId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
     const resolved = this.host.resolveVariableValue(variableId, this.id);
     const patch = this.variableFieldPatch(field, resolved.value, resolved.resolvedType);
-    if (field === "strokeWeight") {
+    if (field === "cornerRadius") {
+      delete bindings.cornerRadius;
+      bindings.topLeftRadius = variableId;
+      bindings.topRightRadius = variableId;
+      bindings.bottomRightRadius = variableId;
+      bindings.bottomLeftRadius = variableId;
+    } else if (isRuntimeCornerField(field)) {
+      delete bindings.cornerRadius;
+      bindings[field] = variableId;
+    } else if (field === "strokeWeight") {
       delete bindings.strokeTopWeight;
       delete bindings.strokeRightWeight;
       delete bindings.strokeBottomWeight;
@@ -1401,7 +1435,7 @@ export class RuntimeNodeProxy {
     } else if (isRuntimeStrokeSideField(field)) {
       delete bindings.strokeWeight;
     }
-    bindings[field] = variableId;
+    if (field !== "cornerRadius" && !isRuntimeCornerField(field)) bindings[field] = variableId;
     this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
   }
   get explicitVariableModes(): Readonly<Record<string, string>> {
@@ -1644,6 +1678,27 @@ export class RuntimeNodeProxy {
     }
     this.write({ parametricShape: { kind: "star", pointCount: this.pointCount, innerRatio: value } });
   }
+
+  get cornerRadius(): number | typeof RUNTIME_MIXED {
+    const radii = this.cornerRadii();
+    return radii.every((radius) => radius === radii[0]) ? radii[0] : RUNTIME_MIXED;
+  }
+  set cornerRadius(value: number) {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.assertCornerProperties();
+    this.writeUnboundVariableFields(["cornerRadius", "topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"], {
+      cornerRadius: value,
+      cornerRadii: [value, value, value, value],
+    });
+  }
+  get topLeftRadius(): number { return this.cornerRadii()[0]; }
+  set topLeftRadius(value: number) { this.writeCornerRadius("topLeftRadius", 0, value); }
+  get topRightRadius(): number { return this.cornerRadii()[1]; }
+  set topRightRadius(value: number) { this.writeCornerRadius("topRightRadius", 1, value); }
+  get bottomRightRadius(): number { return this.cornerRadii()[2]; }
+  set bottomRightRadius(value: number) { this.writeCornerRadius("bottomRightRadius", 2, value); }
+  get bottomLeftRadius(): number { return this.cornerRadii()[3]; }
+  set bottomLeftRadius(value: number) { this.writeCornerRadius("bottomLeftRadius", 3, value); }
 
   get strokeWeight(): number | typeof RUNTIME_MIXED {
     this.assertGeometry();
@@ -3047,6 +3102,20 @@ export class RuntimeNodeProxy {
       if (value <= 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       return { [field]: value };
     }
+    if (field === "cornerRadius") {
+      this.assertCornerProperties();
+      if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { cornerRadius: value, cornerRadii: [value, value, value, value] };
+    }
+    if (isRuntimeCornerField(field)) {
+      if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const stagedRadii = Array.isArray(stagedPatch?.cornerRadii) && stagedPatch.cornerRadii.length === 4
+        ? stagedPatch.cornerRadii as readonly number[]
+        : this.cornerRadii();
+      const radii = [...stagedRadii] as [number, number, number, number];
+      radii[RUNTIME_CORNER_INDEX[field]] = value;
+      return { cornerRadii: radii };
+    }
     const layout = stagedPatch?.autoLayout && typeof stagedPatch.autoLayout === "object"
       ? stagedPatch.autoLayout as RuntimeAutoLayout
       : this.autoLayout();
@@ -3099,6 +3168,27 @@ export class RuntimeNodeProxy {
 
   private assertGeometry(): void {
     if (!GEOMETRY_NODE_TYPES.has(this.type)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+  }
+
+  private assertCornerProperties(): void {
+    if (!CORNER_PROPERTY_NODE_TYPES.has(this.type)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+  }
+
+  private cornerRadii(): [number, number, number, number] {
+    this.assertCornerProperties();
+    const value = this.read().cornerRadii;
+    if (Array.isArray(value) && value.length === 4 && value.every((radius) => typeof radius === "number" && Number.isFinite(radius) && radius >= 0)) {
+      return [...value] as [number, number, number, number];
+    }
+    const uniform = this.number("cornerRadius");
+    return [uniform, uniform, uniform, uniform];
+  }
+
+  private writeCornerRadius(field: RuntimeVariableBindableCornerField, index: number, value: number): void {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const radii = this.cornerRadii();
+    radii[index] = value;
+    this.writeUnboundVariableFields([field, "cornerRadius"], { cornerRadii: radii });
   }
 
   private individualStrokeWeights(): [number, number, number, number] {
@@ -3479,6 +3569,7 @@ function runtimeStyleNumberForRange<K extends "fontSize" | "fontWeight" | "lette
 }
 
 const GEOMETRY_NODE_TYPES = new Set<M1NodeType>(["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE"]);
+const CORNER_PROPERTY_NODE_TYPES = new Set<M1NodeType>(["FRAME", "COMPONENT", "INSTANCE", "RECTANGLE", "SECTION"]);
 const CONSTRAINT_UNSUPPORTED_TYPES = new Set<M1NodeType>(["DOCUMENT", "PAGE", "GROUP", "BOOLEAN_OPERATION", "SECTION", "SLIDE"]);
 const CONSTRAINTS: Readonly<Record<RuntimeConstraintType, DocumentConstraints["horizontal"]>> = {
   MIN: "min",
