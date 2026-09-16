@@ -8,10 +8,12 @@ import type {
   BlendMode,
   CanvasNode,
   DocumentConnectorMetadata,
+  DocumentColor,
   DocumentConstraints,
   DocumentFontReference,
   DocumentInstanceMetadata,
   DocumentPaintStyleResource,
+  DocumentPaintStack,
   DocumentTextProperties,
   DocumentTextStyleResource,
   DocumentTextPathMetadata,
@@ -42,9 +44,10 @@ import { canonicalConnectorEndpoint, isFigmaConnectorStrokeCap, projectFigmaConn
 import { fontsForRuntimeTextRange, patchRuntimeParagraphIndent, patchRuntimeParagraphIndentation, patchRuntimeParagraphLineHeight, patchRuntimeParagraphListSpacing, patchRuntimeParagraphListType, patchRuntimeParagraphSpacing, patchRuntimeParagraphTextWrapStyle, patchRuntimeTextRange, replaceRuntimeTextRangeWithStyles, runtimeParagraphIndentationsForRange, runtimeParagraphIndentsForRange, runtimeParagraphLineHeightsForRange, runtimeParagraphListSpacingsForRange, runtimeParagraphListTypesForRange, runtimeParagraphSpacingsForRange, runtimeParagraphTextWrapStylesForRange, runtimeTextRange, runtimeTextStylesForRange, sameRuntimeLineHeight, updateRuntimeText, type RuntimeParagraphLineHeight, type RuntimeTextInsertionStyle, type RuntimeTextStylePatch } from "./runtime-text";
 import { DEFAULT_RUNTIME_FONT_NAME, sameRuntimeFontName, type RuntimeFontName } from "./runtime-font-name";
 import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextCase } from "../lib/text-case";
+import { colorToSrgbCss } from "../lib/color-rendering";
 import type { RuntimeImage } from "./runtime-session";
 import type { RuntimeVariable, RuntimeVariableCollection } from "./runtime-variables";
-import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, variableAliases, variableBindingsFromExtensions } from "./runtime-variable-bindings";
+import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, VARIABLE_PAINT_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
 import {
   documentPaintStackFromRuntime,
   documentTextDecorationColorFromRuntime,
@@ -54,6 +57,7 @@ import {
   runtimeTextDecorationColorFromDocument,
   type RuntimeBlendMode,
   type RuntimePaint,
+  type RuntimeSolidPaint,
   type RuntimeTextDecorationColor,
 } from "./runtime-paint";
 import { type PrototypeMetadata, type PrototypeReaction, validatePrototypeMetadata, validatePrototypeReactions } from "./prototype-contract";
@@ -1390,9 +1394,18 @@ export class RuntimeNodeProxy {
     if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.writeUnboundVariableField("visible", { visible: value });
   }
-  get boundVariables(): Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }>>> | undefined {
-    const aliases = variableAliases(variableBindingsFromExtensions(this.read().extensions));
-    return Object.keys(aliases).length ? aliases : undefined;
+  get boundVariables(): Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[]>> | undefined {
+    const node = this.read();
+    const aliases: Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[]> = { ...variableAliases(variableBindingsFromExtensions(node.extensions)) };
+    const paintBindings = variablePaintBindingsFromExtensions(node.extensions);
+    for (const usage of ["fill", "stroke"] as const) {
+      const values = Object.entries(paintBindings)
+        .flatMap(([key, id]) => key.startsWith(`${usage}:`) && Number.isInteger(Number(key.slice(usage.length + 1))) ? [{ index: Number(key.slice(usage.length + 1)), id }] : [])
+        .sort((a, b) => a.index - b.index)
+        .map(({ id }) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id }));
+      if (values.length) aliases[`${usage}s`] = Object.freeze(values);
+    }
+    return Object.keys(aliases).length ? Object.freeze(aliases) : undefined;
   }
   setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
     if (!isRuntimeVariableBindableNodeField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
@@ -1517,7 +1530,7 @@ export class RuntimeNodeProxy {
     if (this.type === "TEXT" || this.type === "TEXT_PATH") {
       return this.getRangeFills(0, this.characters.length);
     }
-    return structuredClone(runtimePaintsFromNode(this.read() as Readonly<Record<string, unknown>>, "fill"));
+    return this.runtimePaintsWithVariableBindings("fill");
   }
   set fills(value: readonly RuntimePaint[]) {
     this.assertPaintsSupported("fill");
@@ -1525,8 +1538,7 @@ export class RuntimeNodeProxy {
       this.setRangeFills(0, this.characters.length, value);
       return;
     }
-    const fillStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.write({ fillStack, fillStyleId: undefined, backgroundStyleId: undefined });
+    this.writeNodePaints("fill", value);
   }
   get fillStyleId(): string | typeof RUNTIME_MIXED {
     this.assertPaintsSupported("fill");
@@ -1554,12 +1566,11 @@ export class RuntimeNodeProxy {
   }
   get strokes(): readonly RuntimePaint[] {
     this.assertPaintsSupported("stroke");
-    return structuredClone(runtimePaintsFromNode(this.read() as Readonly<Record<string, unknown>>, "stroke"));
+    return this.runtimePaintsWithVariableBindings("stroke");
   }
   set strokes(value: readonly RuntimePaint[]) {
     this.assertPaintsSupported("stroke");
-    const strokeStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.write({ strokeStack, strokeStyleId: undefined });
+    this.writeNodePaints("stroke", value);
   }
   get strokeStyleId(): string {
     this.assertPaintsSupported("stroke");
@@ -3075,7 +3086,30 @@ export class RuntimeNodeProxy {
     if (layout && ((layout.minWidth ?? 0) > (layout.maxWidth ?? Number.POSITIVE_INFINITY) || (layout.minHeight ?? 0) > (layout.maxHeight ?? Number.POSITIVE_INFINITY))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
+    Object.assign(patch, this.paintVariableValuePatch(override));
     return patch;
+  }
+
+  private paintVariableValuePatch(override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, unknown>> {
+    const node = this.read();
+    const bindings = variablePaintBindingsFromExtensions(node.extensions);
+    const stacks = new Map<"fill" | "stroke", DocumentPaintStack>();
+    for (const [key, variableId] of Object.entries(bindings)) {
+      const match = /^(fill|stroke):(\d+)$/.exec(key);
+      if (!match) continue;
+      const usage = match[1] as "fill" | "stroke";
+      const index = Number(match[2]);
+      if (!Number.isInteger(index) || index < 0 || index >= 16) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const source = node[`${usage}Stack`] as DocumentPaintStack | undefined;
+      const stack = stacks.get(usage) ?? (source ? structuredClone(source) : undefined);
+      const layer = stack?.layers[index];
+      if (!stack || !layer?.paint || layer.paint.gradient || layer.paint.gradientPaint || layer.image) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const resolved = this.host.resolveVariableValue(variableId, this.id, override);
+      if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      layer.paint = { css: colorToSrgbCss(resolved.value), color: structuredClone(resolved.value) };
+      stacks.set(usage, stack);
+    }
+    return Object.fromEntries([...stacks].map(([usage, stack]) => [`${usage}Stack`, stack]));
   }
 
   private variableFieldPatch(field: RuntimeVariableBindableNodeField, value: DocumentVariableValue, type: DocumentVariableResolvedType, stagedPatch?: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
@@ -3360,6 +3394,68 @@ export class RuntimeNodeProxy {
     }
   }
 
+  private runtimePaintsWithVariableBindings(usage: "fill" | "stroke"): readonly RuntimePaint[] {
+    const node = this.read();
+    const bindings = variablePaintBindingsFromExtensions(node.extensions);
+    const stack = node[`${usage}Stack`] as DocumentPaintStack | undefined;
+    return runtimePaintsFromNode(node as Readonly<Record<string, unknown>>, usage).map((paint, index) => {
+      const variableId = bindings[`${usage}:${index}`];
+      if (!variableId || paint.type !== "SOLID") return structuredClone(paint);
+      return {
+        ...structuredClone(paint),
+        ...(stack?.layers[index] ? { opacity: stack.layers[index]!.opacity } : {}),
+        boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: variableId }) }),
+      } satisfies RuntimeSolidPaint;
+    });
+  }
+
+  private writeNodePaints(usage: "fill" | "stroke", value: readonly RuntimePaint[]): void {
+    const node = this.read();
+    const bindings = { ...variablePaintBindingsFromExtensions(node.extensions) };
+    const prefix = `${usage}:`;
+    const hadBindings = Object.keys(bindings).some((key) => key.startsWith(prefix));
+    for (const key of Object.keys(bindings)) if (key.startsWith(prefix)) delete bindings[key];
+    const colors = new Map<number, DocumentColor>();
+    const paints = value.map((paint, index): RuntimePaint => {
+      const alias = paint.boundVariables?.color;
+      const { boundVariables: _boundVariables, ...base } = paint;
+      void _boundVariables;
+      if (!alias) return base as RuntimePaint;
+      if (paint.type !== "SOLID" || alias.type !== "VARIABLE_ALIAS") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: this.handle.nodeId });
+      const resource = this.host.variableResource(alias.id);
+      if (!resource || resource.resolvedType !== "COLOR") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+      const resolved = this.host.resolveVariableValue(resource.id, this.id);
+      if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      bindings[`${usage}:${index}`] = resource.id;
+      colors.set(index, structuredClone(resolved.value));
+      return base as RuntimePaint;
+    });
+    const stack = documentPaintStackFromRuntime(paints, (hash) => this.host.hasImageHash(hash));
+    for (const [index, color] of colors) {
+      const layer = stack.layers[index];
+      if (!layer?.paint) throw runtimeError("INTERNAL_ERROR", { nodeId: this.handle.nodeId });
+      layer.paint = { css: colorToSrgbCss(color), color };
+    }
+    const hasBindings = Object.keys(bindings).some((key) => key.startsWith(prefix));
+    this.write({
+      [`${usage}Stack`]: stack,
+      ...(usage === "fill" ? { fillStyleId: undefined, backgroundStyleId: undefined } : { strokeStyleId: undefined }),
+      ...((hadBindings || hasBindings) ? { extensions: extensionsWithVariableMap(node.extensions, VARIABLE_PAINT_BINDINGS_EXTENSION, bindings) } : {}),
+    });
+  }
+
+  private writeWithClearedPaintBindings(usage: "fill" | "stroke", patch: Readonly<Record<string, unknown>>): void {
+    const node = this.read();
+    const bindings = { ...variablePaintBindingsFromExtensions(node.extensions) };
+    const prefix = `${usage}:`;
+    const keys = Object.keys(bindings).filter((key) => key.startsWith(prefix));
+    for (const key of keys) delete bindings[key];
+    this.write({
+      ...patch,
+      ...(keys.length ? { extensions: extensionsWithVariableMap(node.extensions, VARIABLE_PAINT_BINDINGS_EXTENSION, bindings) } : {}),
+    });
+  }
+
   private applyPaintStyle(usage: "fill" | "stroke" | "background", styleId: string): void {
     if (typeof styleId !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     if (usage === "background") this.assertBackgroundStyleSupported();
@@ -3373,11 +3469,12 @@ export class RuntimeNodeProxy {
     const resource = this.host.paintStyleResource(styleId);
     if (!resource || resource.id !== styleId) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
     const paints = structuredClone(resource.paints);
-    this.write(usage === "stroke"
+    const patch = usage === "stroke"
       ? { strokeStack: paints, strokeStyleId: styleId }
       : usage === "background"
         ? { fillStack: paints, fillStyleId: styleId, backgroundStyleId: styleId }
-        : { fillStack: paints, fillStyleId: styleId, backgroundStyleId: undefined });
+        : { fillStack: paints, fillStyleId: styleId, backgroundStyleId: undefined };
+    this.writeWithClearedPaintBindings(usage === "stroke" ? "stroke" : "fill", patch);
   }
 
   private assertTextCharacters(): void {
@@ -3570,6 +3667,9 @@ function runtimeStyleNumberForRange<K extends "fontSize" | "fontWeight" | "lette
 
 const GEOMETRY_NODE_TYPES = new Set<M1NodeType>(["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE"]);
 const CORNER_PROPERTY_NODE_TYPES = new Set<M1NodeType>(["FRAME", "COMPONENT", "INSTANCE", "RECTANGLE", "SECTION"]);
+function isDocumentVariableColor(value: DocumentVariableValue): value is DocumentColor {
+  return typeof value === "object" && value !== null && "space" in value && "components" in value && "alpha" in value;
+}
 const CONSTRAINT_UNSUPPORTED_TYPES = new Set<M1NodeType>(["DOCUMENT", "PAGE", "GROUP", "BOOLEAN_OPERATION", "SECTION", "SLIDE"]);
 const CONSTRAINTS: Readonly<Record<RuntimeConstraintType, DocumentConstraints["horizontal"]>> = {
   MIN: "min",

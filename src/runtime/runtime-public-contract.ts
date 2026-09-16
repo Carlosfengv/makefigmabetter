@@ -40,6 +40,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const text = runtime.createText();
   const runtimeStringVariable = runtime.variables.getLocalVariables("STRING")[0];
   if (runtimeStringVariable) text.setBoundVariable("characters", runtimeStringVariable);
+  const runtimeColorVariable = runtime.variables.getLocalVariables("COLOR")[0];
+  if (runtimeColorVariable) rectangle.fills = [runtime.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 0, b: 0 } }, "color", runtimeColorVariable)];
   text.textAutoResize = "HEIGHT";
   text.textTruncation = "ENDING";
   text.maxLines = 2;

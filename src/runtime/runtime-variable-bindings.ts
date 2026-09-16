@@ -3,11 +3,13 @@ import { runtimeError } from "./runtime-errors";
 
 export const VARIABLE_BINDINGS_EXTENSION = "makefigma.variables.bindings.v1";
 export const VARIABLE_MODES_EXTENSION = "makefigma.variables.modes.v1";
+export const VARIABLE_PAINT_BINDINGS_EXTENSION = "makefigma.variables.paint-bindings.v1";
 const MAX_EXTENSION_ENTRIES = 64;
 const MAX_EXTENSION_BYTES = 32 * 1024;
 
 export type RuntimeVariableBindings = Readonly<Record<string, string>>;
 export type RuntimeVariableModes = Readonly<Record<string, string>>;
+export type RuntimeVariablePaintBindings = Readonly<Record<string, string>>;
 
 function decodeMap(value: unknown): Record<string, string> {
   if (!Array.isArray(value) || value.length > MAX_EXTENSION_BYTES || value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) return {};
@@ -32,11 +34,16 @@ export function variableModesFromExtensions(extensions: unknown): RuntimeVariabl
   return Object.freeze(decodeMap((extensions as Record<string, unknown>)[VARIABLE_MODES_EXTENSION]));
 }
 
+export function variablePaintBindingsFromExtensions(extensions: unknown): RuntimeVariablePaintBindings {
+  if (!extensions || typeof extensions !== "object") return Object.freeze({});
+  return Object.freeze(decodeMap((extensions as Record<string, unknown>)[VARIABLE_PAINT_BINDINGS_EXTENSION]));
+}
+
 export function variableAliases(bindings: RuntimeVariableBindings): Readonly<Record<string, DocumentVariableAlias>> {
   return Object.freeze(Object.fromEntries(Object.entries(bindings).map(([field, id]) => [field, Object.freeze({ type: "VARIABLE_ALIAS" as const, id })])));
 }
 
-export function extensionsWithVariableMap(extensions: unknown, key: typeof VARIABLE_BINDINGS_EXTENSION | typeof VARIABLE_MODES_EXTENSION, values: Readonly<Record<string, string>>): Record<string, number[]> {
+export function extensionsWithVariableMap(extensions: unknown, key: typeof VARIABLE_BINDINGS_EXTENSION | typeof VARIABLE_MODES_EXTENSION | typeof VARIABLE_PAINT_BINDINGS_EXTENSION, values: Readonly<Record<string, string>>): Record<string, number[]> {
   const next: Record<string, number[]> = {};
   if (extensions && typeof extensions === "object") {
     for (const [entryKey, value] of Object.entries(extensions as Record<string, unknown>)) {

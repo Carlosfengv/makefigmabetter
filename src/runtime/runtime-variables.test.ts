@@ -65,10 +65,15 @@ describe("Variables resource runtime", () => {
     const collection = (await session.variables.getVariableCollectionByIdAsync("VC:theme"))!;
     const opacity = (await session.variables.getVariableByIdAsync("V:opacity"))!;
     const visible = (await session.variables.getVariableByIdAsync("V:visible"))!;
+    const surface = (await session.variables.getVariableByIdAsync("V:surface"))!;
     const spacing = (await session.variables.getVariableByIdAsync("V:spacing"))!;
     const width = (await session.variables.getVariableByIdAsync("V:width"))!;
     const height = (await session.variables.getVariableByIdAsync("V:height"))!;
     const label = (await session.variables.getVariableByIdAsync("V:label"))!;
+    const boundPaint = session.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: .5 }, "color", surface);
+    expect(boundPaint.boundVariables).toEqual({ color: { type: "VARIABLE_ALIAS", id: "V:surface" } });
+    expect(session.variables.setBoundVariableForPaint(boundPaint, "color", null).boundVariables).toBeUndefined();
+    expect(isRuntimeError(capture(() => session.variables.setBoundVariableForPaint(boundPaint, "color", spacing)), "INVALID_ARGUMENT")).toBe(true);
 
     rectangle.setBoundVariable("opacity", opacity);
     rectangle.setBoundVariable("visible", visible);
@@ -76,6 +81,8 @@ describe("Variables resource runtime", () => {
     rectangle.setBoundVariable("width", width);
     rectangle.setBoundVariable("height", height);
     rectangle.setBoundVariable("cornerRadius", spacing);
+    rectangle.fills = [boundPaint];
+    rectangle.strokes = [boundPaint];
     text.setBoundVariable("characters", label);
     frame.setBoundVariable("itemSpacing", spacing);
     frame.setBoundVariable("paddingTop", spacing);
@@ -98,6 +105,9 @@ describe("Variables resource runtime", () => {
     expect(rectangle.height).toBe(60);
     expect(rectangle.cornerRadius).toBe(8);
     expect(rectangle.boundVariables).not.toHaveProperty("cornerRadius");
+    expect(rectangle.boundVariables).toMatchObject({ fills: [{ type: "VARIABLE_ALIAS", id: "V:surface" }], strokes: [{ type: "VARIABLE_ALIAS", id: "V:surface" }] });
+    expect(rectangle.fills).toMatchObject([{ type: "SOLID", opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
+    expect(rectangle.strokes).toMatchObject([{ type: "SOLID", opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
     expect(rectangle.boundVariables).toMatchObject({ topLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, topRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" } });
     expect(text.characters).toBe("Light");
     expect(frame).toMatchObject({ itemSpacing: 8, paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8, counterAxisSpacing: 8 });
@@ -119,11 +129,15 @@ describe("Variables resource runtime", () => {
     expect(rectangle.width).toBe(180);
     expect(rectangle.height).toBe(90);
     expect(rectangle.cornerRadius).toBe(12);
+    expect(rectangle.fills).toMatchObject([{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
+    expect(rectangle.strokes).toMatchObject([{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
     expect(text.characters).toBe("Dark");
     expect(frame).toMatchObject({ itemSpacing: 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12, paddingLeft: 12, counterAxisSpacing: 12 });
     expect(frame).toMatchObject({ strokeTopWeight: 12, strokeRightWeight: 12, strokeBottomWeight: 12, strokeLeftWeight: 12 });
     expect(rectangle).toMatchObject({ minWidth: 180, maxWidth: 180, minHeight: 12, maxHeight: 90 });
     expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
+    await session.commitAsync();
+    expect(rectangle.boundVariables).toMatchObject({ fills: [{ type: "VARIABLE_ALIAS", id: "V:surface" }], strokes: [{ type: "VARIABLE_ALIAS", id: "V:surface" }] });
 
     rectangle.setExplicitVariableModeForCollection(collection, "light");
     expect(rectangle.opacity).toBe(.5);
@@ -147,6 +161,11 @@ describe("Variables resource runtime", () => {
     expect(rectangle.boundVariables).not.toHaveProperty("topRightRadius");
     expect(rectangle.boundVariables).not.toHaveProperty("bottomRightRadius");
     expect(rectangle.boundVariables).not.toHaveProperty("bottomLeftRadius");
+
+    rectangle.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }];
+    rectangle.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 1 } }];
+    expect(rectangle.boundVariables).not.toHaveProperty("fills");
+    expect(rectangle.boundVariables).not.toHaveProperty("strokes");
 
     frame.itemSpacing = 4;
     frame.paddingTop = 1;
@@ -172,7 +191,7 @@ describe("Variables resource runtime", () => {
     expect(rectangle.opacity).toBe(.7);
     expect(rectangle.boundVariables).toEqual({ strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" } });
     await session.commitAsync();
-    expect(transport.submitted).toHaveLength(1);
+    expect(transport.submitted).toHaveLength(2);
   });
 });
 

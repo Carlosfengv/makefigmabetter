@@ -10,6 +10,7 @@ import {
   type DocumentPaintLayer,
   type DocumentPaintStack,
   type DocumentTextDecorationColor,
+  type DocumentVariableAlias,
   type RelativeTransform,
 } from "../lib/editor-protocol";
 import { colorToSrgbComponents } from "../lib/color-rendering";
@@ -28,7 +29,8 @@ export type RuntimeImageFilters = Readonly<{
   highlights?: number;
   shadows?: number;
 }>;
-type RuntimePaintBase = Readonly<{ visible?: boolean; opacity?: number; blendMode?: RuntimeBlendMode }>;
+export type RuntimePaintBoundVariables = Readonly<{ color?: DocumentVariableAlias }>;
+type RuntimePaintBase = Readonly<{ visible?: boolean; opacity?: number; blendMode?: RuntimeBlendMode; boundVariables?: RuntimePaintBoundVariables }>;
 export type RuntimeSolidPaint = RuntimePaintBase & Readonly<{ type: "SOLID"; color: RuntimeRGB }>;
 export type RuntimeGradientPaint = RuntimePaintBase & Readonly<{
   type: "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND";
@@ -223,6 +225,7 @@ function runtimePaintFromLayer(layer: DocumentPaintLayer): RuntimePaint {
 
 function documentLayerFromRuntime(paint: RuntimePaint, hasImageHash: (hash: string) => boolean): DocumentPaintLayer {
   if (!paint || typeof paint !== "object") throw runtimeError("INVALID_ARGUMENT");
+  if (paint.boundVariables !== undefined) throw runtimeError("UNSUPPORTED_FEATURE");
   const visible = paint.visible ?? true;
   const opacity = paint.opacity ?? 1;
   const blendMode = paint.blendMode === undefined ? "normal" : BLEND_TO_CANONICAL[paint.blendMode];

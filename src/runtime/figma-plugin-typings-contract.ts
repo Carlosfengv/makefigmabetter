@@ -36,6 +36,8 @@ export function assertFigmaPluginTypingsContract(
   rectangle.topLeftRadius = rectangle.topLeftRadius;
   const stringVariable = figma.variables.getLocalVariables("STRING")[0];
   if (stringVariable) text.setBoundVariable("characters", stringVariable);
+  const colorVariable = figma.variables.getLocalVariables("COLOR")[0];
+  if (colorVariable) rectangle.fills = [figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 0, b: 0 } }, "color", colorVariable)];
   void rectangle.boundVariables;
   const variableCollection = figma.variables.getLocalVariableCollections()[0];
   if (variableCollection) rectangle.setExplicitVariableModeForCollection(variableCollection, variableCollection.defaultModeId);
