@@ -658,11 +658,54 @@ describe("M1 RuntimeSession", () => {
     expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
   });
 
+  it("rebuilds referenced nested Instances when a VariableAlias swap default changes", async () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      variableCollections: [{ id: "collection", key: "", name: "Properties", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Default" }], defaultModeId: "default" }],
+      variables: [{ id: "swap-variable", key: "", name: "Swap", description: "", remote: false, hiddenFromPublishing: false, collectionId: "collection", resolvedType: "STRING", valuesByMode: { default: "unbound" }, scopes: ["ALL_SCOPES"] }],
+    };
+    const session = new RuntimeSession({ sessionId: "component-property-swap-alias", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const component = session.createComponent();
+    const alternate = session.createComponent();
+    const oldShape = session.createRectangle();
+    alternate.appendChild(oldShape);
+    const replacement = session.createComponent();
+    const newShape = session.createEllipse();
+    replacement.appendChild(newShape);
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: alternate.id } });
+    const swap = component.addComponentProperty("Swap", "INSTANCE_SWAP", { type: "VARIABLE_ALIAS", id: "swap-variable" });
+    const nested = alternate.createInstance();
+    component.appendChild(nested);
+    nested.componentPropertyReferences = { mainComponent: swap };
+    const instance = component.createInstance();
+    const instanceNested = instance.children[0]!;
+
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: replacement.id } });
+
+    expect(component.componentPropertyDefinitions[swap]).toEqual({
+      type: "INSTANCE_SWAP",
+      defaultValue: replacement.id,
+      boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "swap-variable" } },
+    });
+    expect(instance.componentPropertyValues[swap]).toBe(replacement.id);
+    expect((await nested.getMainComponentAsync())?.id).toBe(replacement.id);
+    expect(nested.children).toEqual([expect.objectContaining({ type: "ELLIPSE" })]);
+    expect((await instanceNested.getMainComponentAsync())?.id).toBe(replacement.id);
+    expect(instanceNested.children).toEqual([expect.objectContaining({ type: "ELLIPSE" })]);
+  });
+
   it("authors component property references and applies Instance values to linked sublayers", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
     const component = session.createComponent();
     const alternate = session.createComponent();
+    const alternateChild = session.createRectangle();
+    alternateChild.name = "Old icon";
+    alternate.appendChild(alternateChild);
+    const replacement = session.createComponent();
+    const replacementChild = session.createEllipse();
+    replacementChild.name = "New icon";
+    replacement.appendChild(replacementChild);
     const surface = session.createRectangle();
     const label = session.createText();
     const nested = alternate.createInstance();
@@ -687,11 +730,18 @@ describe("M1 RuntimeSession", () => {
     expect(instanceSurface).toMatchObject({ visible: false, componentPropertyReferences: { visible: enabled } });
     expect(instanceLabel).toMatchObject({ characters: "Continue", componentPropertyReferences: { characters: title } });
     expect((await instanceNested.getMainComponentAsync())?.id).toBe(alternate.id);
+    expect(instanceNested.children).toEqual([expect.objectContaining({ type: "RECTANGLE", name: "Old icon" })]);
 
-    instance.setProperties({ [enabled]: true, [title]: "Save", [swap]: alternate.id });
+    instance.setProperties({ [enabled]: true, [title]: "Save", [swap]: replacement.id });
     expect(instanceSurface.visible).toBe(true);
     expect(instanceLabel.characters).toBe("Save");
-    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [title]: "Save", [swap]: alternate.id });
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [title]: "Save", [swap]: replacement.id });
+    expect((await instanceNested.getMainComponentAsync())?.id).toBe(replacement.id);
+    expect(instanceNested.children).toEqual([expect.objectContaining({ type: "ELLIPSE", name: "New icon" })]);
+
+    component.editComponentProperty(swap, { defaultValue: replacement.id });
+    expect((await nested.getMainComponentAsync())?.id).toBe(replacement.id);
+    expect(nested.children).toEqual([expect.objectContaining({ type: "ELLIPSE", name: "New icon" })]);
 
     const renamedEnabled = component.editComponentProperty(enabled, { name: "Shown" });
     expect(surface.componentPropertyReferences).toEqual({ visible: renamedEnabled });
@@ -712,6 +762,8 @@ describe("M1 RuntimeSession", () => {
     expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "update", nodeId: instance.id, patch: { instanceMetadata: expect.objectContaining({ componentProperties: expect.objectContaining({ [enabled]: true, [title]: "Save" }) }) } }),
       expect.objectContaining({ type: "update", nodeId: instanceLabel.id, patch: expect.objectContaining({ characters: "Save" }) }),
+      expect.objectContaining({ type: "update", nodeId: instanceNested.id, patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: replacement.id }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: instanceNested.id, type: "ELLIPSE", name: "New icon" }) }),
     ]));
   });
 

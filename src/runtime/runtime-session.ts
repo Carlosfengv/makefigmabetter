@@ -1146,17 +1146,16 @@ export class RuntimeSession implements RuntimeContainerHost {
       runtimeComponentPropertyReferences(node)?.["characters"] === propertyName ||
       runtimeComponentPropertyReferences(node)?.["mainComponent"] === propertyName);
     if (referenceNodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
-    referenceNodes.forEach((node) => {
+    const replacedReferenceRoots = new Set<string>();
+    this.componentPropertyReferenceOrder(referenceNodes).forEach((node) => {
+      if (runtimeNodeHasAncestorIn(node, replacedReferenceRoots, (id) => this.projectionStore.getNode(id))) return;
       const owner = referenceRoots.find((root) => runtimeNodeHasAncestorIn(node, new Set([root.id]), (id) => this.projectionStore.getNode(id)));
       if (!owner) return;
       const references = runtimeComponentPropertyReferences(node)!;
       const renamedReferences = Object.fromEntries(Object.entries(references).map(([field, name]) => [field, name === propertyName ? nextName : name])) as DocumentComponentPropertyReferences;
       const values = owner.id === componentId ? sourceValues : linkedValues.get(owner.id) ?? {};
-      operations.push({
-        type: "update",
-        nodeId: node.id,
-        patch: { componentPropertyReferences: renamedReferences, ...this.componentPropertyReferenceValuePatch(node, renamedReferences, values, definitions) },
-      });
+      if (this.componentPropertyReferenceReplacesSubtree(node, renamedReferences, values, definitions)) replacedReferenceRoots.add(node.id);
+      operations.push(...this.componentPropertyReferenceOperations(node, renamedReferences, values, definitions, { componentPropertyReferences: renamedReferences }));
     });
     if (existing.type === "SLOT" && nextName !== propertyName) {
       const roots = new Set([...context.components.map((component) => component.id), ...linkedInstances.map((instance) => instance.id)]);
@@ -1210,14 +1209,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     const context = this.componentPropertyReferenceContext(node);
     const references = validateRuntimeComponentPropertyReferences(value, node, context.definitions, nodeId);
     const operations: PendingProjectionOperation[] = [];
-    const sourcePatch = references
-      ? this.componentPropertyReferenceValuePatch(node, references, context.values, context.definitions)
-      : {};
-    operations.push({
-      type: "update",
-      nodeId,
-      patch: { componentPropertyReferences: references, ...sourcePatch },
-    });
+    operations.push(...(references
+      ? this.componentPropertyReferenceOperations(node, references, context.values, context.definitions, { componentPropertyReferences: references })
+      : [{ type: "update" as const, nodeId, patch: { componentPropertyReferences: undefined } }]));
     if (context.owner.type === "COMPONENT") {
       const linkedInstances = this.projectionStore.listLiveNodes().filter((candidate) =>
         candidate.type === "INSTANCE" && instanceMainComponentId(candidate) === context.owner.id);
@@ -1226,14 +1220,9 @@ export class RuntimeSession implements RuntimeContainerHost {
         const values = (instance.instanceMetadata as { componentProperties?: Record<string, string | boolean> } | undefined)?.componentProperties ?? {};
         this.projectionStore.listLiveNodes()
           .filter((candidate) => runtimeNodeHasAncestorIn(candidate, new Set([instance.id]), (id) => this.projectionStore.getNode(id)) && runtimeInstanceSourceNodeId(candidate) === nodeId)
-          .forEach((candidate) => operations.push({
-            type: "update",
-            nodeId: candidate.id,
-            patch: {
-              componentPropertyReferences: references,
-              ...(references ? this.componentPropertyReferenceValuePatch(candidate, references, values, context.definitions) : {}),
-            },
-          }));
+          .forEach((candidate) => operations.push(...(references
+            ? this.componentPropertyReferenceOperations(candidate, references, values, context.definitions, { componentPropertyReferences: references })
+            : [{ type: "update" as const, nodeId: candidate.id, patch: { componentPropertyReferences: undefined } }])));
       });
     }
     if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId });
@@ -1263,11 +1252,12 @@ export class RuntimeSession implements RuntimeContainerHost {
     const descendants = this.projectionStore.listLiveNodes().filter((node) =>
       node.id !== instanceId && runtimeNodeHasAncestorIn(node, new Set([instanceId]), (id) => this.projectionStore.getNode(id)));
     if (descendants.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
-    descendants.forEach((descendant) => {
-      const references = runtimeComponentPropertyReferences(descendant);
-      if (!references) return;
-      const patch = this.componentPropertyReferenceValuePatch(descendant, references, componentProperties, definitions);
-      if (Object.keys(patch).length) operations.push({ type: "update", nodeId: descendant.id, patch });
+    const replacedReferenceRoots = new Set<string>();
+    this.componentPropertyReferenceOrder(descendants.filter((descendant) => runtimeComponentPropertyReferences(descendant))).forEach((descendant) => {
+      if (runtimeNodeHasAncestorIn(descendant, replacedReferenceRoots, (id) => this.projectionStore.getNode(id))) return;
+      const references = runtimeComponentPropertyReferences(descendant)!;
+      if (this.componentPropertyReferenceReplacesSubtree(descendant, references, componentProperties, definitions)) replacedReferenceRoots.add(descendant.id);
+      operations.push(...this.componentPropertyReferenceOperations(descendant, references, componentProperties, definitions));
     });
     if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
     this.enqueueOperations(operations);
@@ -1347,6 +1337,77 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     return patch;
+  }
+
+  private componentPropertyReferenceOperations(
+    node: RuntimeProjectionNode,
+    references: DocumentComponentPropertyReferences,
+    values: Readonly<Record<string, string | boolean>>,
+    definitions: DocumentComponentMetadata["componentPropertyDefinitions"],
+    extraPatch: Readonly<Record<string, unknown>> = {},
+  ): PendingProjectionOperation[] {
+    const patch = { ...extraPatch, ...this.componentPropertyReferenceValuePatch(node, references, values, definitions) };
+    const operations: PendingProjectionOperation[] = Object.keys(patch).length
+      ? [{ type: "update", nodeId: node.id, patch }]
+      : [];
+    const target = this.componentPropertyReferenceTarget(node, references, values, definitions);
+    if (!target || instanceMainComponentId(node) === target.id) return operations;
+    const targetMetadata = target.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!targetMetadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: node.id });
+    const targetValues = Object.fromEntries(Object.entries(targetMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
+      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    operations.push(...this.replaceRuntimeSubtreeOperations(target, node, (_source, clone) => {
+      const nestedReferences = runtimeComponentPropertyReferences(clone);
+      return nestedReferences
+        ? { ...clone, ...this.componentPropertyReferenceValuePatch(clone, nestedReferences, targetValues, targetMetadata.componentPropertyDefinitions) }
+        : clone;
+    }));
+    return operations;
+  }
+
+  private componentPropertyReferenceReplacesSubtree(
+    node: RuntimeProjectionNode,
+    references: DocumentComponentPropertyReferences,
+    values: Readonly<Record<string, string | boolean>>,
+    definitions: DocumentComponentMetadata["componentPropertyDefinitions"],
+  ): boolean {
+    const target = this.componentPropertyReferenceTarget(node, references, values, definitions);
+    return Boolean(target && instanceMainComponentId(node) !== target.id);
+  }
+
+  private componentPropertyReferenceTarget(
+    node: RuntimeProjectionNode,
+    references: DocumentComponentPropertyReferences,
+    values: Readonly<Record<string, string | boolean>>,
+    definitions: DocumentComponentMetadata["componentPropertyDefinitions"],
+  ): RuntimeProjectionNode | undefined {
+    if (node.type !== "INSTANCE" || !references.mainComponent) return undefined;
+    const targetId = values[references.mainComponent] ?? definitions[references.mainComponent]?.defaultValue;
+    const target = typeof targetId === "string" ? this.projectionStore.getNode(targetId) : undefined;
+    return target?.type === "COMPONENT" && target.removed !== true ? target : undefined;
+  }
+
+  private componentPropertyReferenceOrder(nodes: readonly RuntimeProjectionNode[]): RuntimeProjectionNode[] {
+    const depths = new Map<string, number>();
+    const depth = (node: RuntimeProjectionNode): number => {
+      const chain: RuntimeProjectionNode[] = [];
+      const visited = new Set<string>();
+      let current: RuntimeProjectionNode | undefined = node;
+      while (current && !depths.has(current.id) && !visited.has(current.id)) {
+        visited.add(current.id);
+        chain.push(current);
+        current = typeof current.parentId === "string" ? this.projectionStore.getNode(current.parentId) : undefined;
+      }
+      let result = current ? depths.get(current.id) ?? 0 : -1;
+      chain.reverse().forEach((candidate) => {
+        result += 1;
+        depths.set(candidate.id, result);
+      });
+      return depths.get(node.id) ?? 0;
+    };
+    return nodes.map((node) => ({ node, depth: depth(node) }))
+      .sort((left, right) => left.depth - right.depth)
+      .map(({ node }) => node);
   }
   createTextPath(vectorProxy: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
     this.assertOpen();
@@ -2567,13 +2628,16 @@ export class RuntimeSession implements RuntimeContainerHost {
       });
       const roots = [...context.components, ...context.linkedInstances];
       const sourceValues = Object.fromEntries(Object.entries(definitions).flatMap(([name, definition]) => definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
-      liveNodes.filter((node) => Object.values(runtimeComponentPropertyReferences(node) ?? {}).some((name) => changes.has(name))).forEach((node) => {
+      const referenceNodes = liveNodes.filter((node) => Object.values(runtimeComponentPropertyReferences(node) ?? {}).some((name) => changes.has(name)));
+      const replacedReferenceRoots = new Set<string>();
+      this.componentPropertyReferenceOrder(referenceNodes).forEach((node) => {
+        if (runtimeNodeHasAncestorIn(node, replacedReferenceRoots, (id) => this.projectionStore.getNode(id))) return;
         const root = roots.find((candidate) => runtimeNodeHasAncestorIn(node, new Set([candidate.id]), (id) => this.projectionStore.getNode(id)));
         if (!root) return;
         const references = runtimeComponentPropertyReferences(node)!;
         const values = context.components.some((component) => component.id === root.id) ? sourceValues : linkedValues.get(root.id) ?? {};
-        const patch = this.componentPropertyReferenceValuePatch(node, references, values, definitions);
-        if (Object.keys(patch).length) operations.push({ type: "update", nodeId: node.id, patch });
+        if (this.componentPropertyReferenceReplacesSubtree(node, references, values, definitions)) replacedReferenceRoots.add(node.id);
+        operations.push(...this.componentPropertyReferenceOperations(node, references, values, definitions));
       });
       if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: owner.id });
     }

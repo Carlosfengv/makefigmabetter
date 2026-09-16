@@ -710,6 +710,63 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("rebuilds a referenced nested Instance through the same Core transaction", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000000d1";
+    const sourceNestedId = "00000000-0000-4000-8000-0000000000d2";
+    const instanceId = "00000000-0000-4000-8000-0000000000d3";
+    const nestedId = "00000000-0000-4000-8000-0000000000d4";
+    const oldChildId = "00000000-0000-4000-8000-0000000000d5";
+    const alternateId = "00000000-0000-4000-8000-0000000000d6";
+    const alternateChildId = "00000000-0000-4000-8000-0000000000d7";
+    const replacementId = "00000000-0000-4000-8000-0000000000d8";
+    const replacementChildId = "00000000-0000-4000-8000-0000000000d9";
+    const propertyName = "Swap";
+    const references = { mainComponent: propertyName };
+    const referenceExtension = { "figma.component-property-references.v1": [...new TextEncoder().encode(JSON.stringify(references))] };
+    const sourceExtension = (sourceId: string) => ({ "figma.instance.source-node.v1": [...new TextEncoder().encode(sourceId)] });
+    const componentMetadata = (id: string, definitions = {}) => ({ key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: definitions });
+    const instanceMetadata = (mainComponentId: string, componentProperties = {}) => ({ mainComponentId, scaleFactor: 1, componentProperties, overrides: [], isExposedInstance: false });
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: componentMetadata(componentId, { [propertyName]: { type: "INSTANCE_SWAP", defaultValue: alternateId } }) },
+        { id: sourceNestedId, pageId: "page", parentId: componentId, kind: "instance", name: "Icon", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentPropertyReferences: references, extensions: referenceExtension, instanceMetadata: instanceMetadata(alternateId) },
+        { id: alternateId, pageId: "page", kind: "component", name: "Old icon", x: 120, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: componentMetadata(alternateId) },
+        { id: alternateChildId, pageId: "page", parentId: alternateId, kind: "rectangle", name: "Old shape", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#000", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: replacementId, pageId: "page", kind: "component", name: "New icon", x: 160, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: componentMetadata(replacementId) },
+        { id: replacementChildId, pageId: "page", parentId: replacementId, kind: "ellipse", name: "New shape", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 0, y: 100, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: instanceMetadata(componentId, { [propertyName]: alternateId }) },
+        { id: nestedId, pageId: "page", parentId: instanceId, kind: "instance", name: "Icon", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentPropertyReferences: references, extensions: { ...referenceExtension, ...sourceExtension(sourceNestedId) }, instanceMetadata: instanceMetadata(alternateId) },
+        { id: oldChildId, pageId: "page", parentId: nestedId, kind: "rectangle", name: "Old shape", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#000", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, extensions: sourceExtension(alternateChildId) },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "component-swap-reference-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    instance.setProperties({ [propertyName]: replacementId });
+    const newChildId = session.projectionStore.listLiveNodes().find((node) => node.parentId === nestedId)!.id;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: newChildId, parentId: nestedId, kind: "ellipse", name: "New shape" }) }),
+      expect.objectContaining({ type: "update", id: instanceId, patch: { instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: replacementId } }) } }),
+      expect.objectContaining({ type: "update", id: nestedId, patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: replacementId }) }) }),
+      { type: "delete", ids: [oldChildId] },
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: nestedId, instanceMetadata: expect.objectContaining({ mainComponentId: replacementId }) }),
+      expect.objectContaining({ id: newChildId, parentId: nestedId, kind: "ellipse", name: "New shape" }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => node.id === oldChildId)).toBe(false);
+    bridge.close();
+    await commit;
+  });
+
   it("writes Component property definitions and linked Instance defaults through Core", async () => {
     const componentId = "00000000-0000-4000-8000-000000000046";
     const instanceId = "00000000-0000-4000-8000-000000000047";
