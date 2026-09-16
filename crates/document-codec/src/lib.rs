@@ -77,9 +77,10 @@ pub const VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION: u32 = 49;
 pub const STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION: u32 = 50;
 pub const STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 51;
 pub const TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 52;
+pub const TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 53;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
 pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION;
+    TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -113,6 +114,13 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && document
+            .text_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
         && document
             .text_styles()
@@ -680,20 +688,18 @@ pub fn document_from_snapshot_with_engine_semantics(
     {
         return Err(SnapshotError::Invalid);
     }
-    for style in snapshot.text_styles {
-        document
-            .seed_text_style(text_style_resource_from_proto(style)?)
-            .map_err(|_| SnapshotError::Invalid)?;
+    if declared_engine_semantics_version < TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .text_styles
+            .iter()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(SnapshotError::Invalid);
     }
     if declared_engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
     {
         return Err(SnapshotError::Invalid);
-    }
-    for style in snapshot.paint_styles {
-        document
-            .seed_paint_style(paint_style_resource_from_proto(style)?)
-            .map_err(|_| SnapshotError::Invalid)?;
     }
     if declared_engine_semantics_version < VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && (!snapshot.variable_collections.is_empty() || !snapshot.variables.is_empty())
@@ -718,6 +724,16 @@ pub fn document_from_snapshot_with_engine_semantics(
     document
         .validate_variable_catalog()
         .map_err(|_| SnapshotError::Invalid)?;
+    for style in snapshot.text_styles {
+        document
+            .seed_text_style(text_style_resource_from_proto(style)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    for style in snapshot.paint_styles {
+        document
+            .seed_paint_style(paint_style_resource_from_proto(style)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
     let mut page_hashes = BTreeMap::new();
     let mut decoded_nodes = BTreeMap::new();
     for chunk in snapshot.page_chunks {
@@ -2450,6 +2466,14 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
         letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
             TextStyleLetterSpacingUnit::Percent => v1::TextStyleLetterSpacingUnit::Percent as i32,
         }),
+        variable_bindings: resource
+            .variable_bindings
+            .iter()
+            .map(|(field, variable_id)| v1::StyleVariableBinding {
+                field: field.clone(),
+                variable_id: variable_id.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -2472,6 +2496,15 @@ fn paint_style_proto_has_publishable_metadata(resource: &v1::PaintStyleResource)
 fn text_style_resource_from_proto(
     resource: v1::TextStyleResource,
 ) -> Result<TextStyleResource, SnapshotError> {
+    let variable_binding_count = resource.variable_bindings.len();
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if variable_bindings.len() != variable_binding_count {
+        return Err(SnapshotError::Invalid);
+    }
     let properties = text_properties_from_proto(v1::TextProperties {
         runs: Vec::new(),
         paragraph: resource.paragraph,
@@ -2504,6 +2537,7 @@ fn text_style_resource_from_proto(
                 },
             )
             .transpose()?,
+        variable_bindings,
         remote: resource.remote,
         style: properties.base_style.ok_or(SnapshotError::Invalid)?,
         paragraph: properties.paragraph,
@@ -6158,6 +6192,7 @@ mod tests {
                 paint_style_id: None,
             },
             letter_spacing_unit: None,
+            variable_bindings: BTreeMap::new(),
             paragraph,
         };
         document.seed_text_style(style.clone()).unwrap();
@@ -6189,7 +6224,7 @@ mod tests {
         );
 
         let mut percent_document = Document::with_id(DocumentId(177));
-        let mut percent_style = style;
+        let mut percent_style = style.clone();
         percent_style.id = "S:tracking".into();
         percent_style.style.letter_spacing = 10.0;
         percent_style.letter_spacing_unit = Some(TextStyleLetterSpacingUnit::Percent);
@@ -6230,6 +6265,93 @@ mod tests {
                 177_u128.to_be_bytes(),
                 percent_hash,
                 TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut bound_document = Document::with_id(DocumentId(178));
+        bound_document
+            .seed_variable_collection(VariableCollectionResource {
+                id: "VC:typography".into(),
+                key: String::new(),
+                name: "Typography".into(),
+                remote: false,
+                hidden_from_publishing: false,
+                modes: vec![VariableMode {
+                    id: "default".into(),
+                    name: "Default".into(),
+                }],
+                default_mode_id: "default".into(),
+            })
+            .unwrap();
+        bound_document
+            .seed_variable(VariableResource {
+                id: "V:font-size".into(),
+                key: String::new(),
+                name: "Font size".into(),
+                description: String::new(),
+                remote: false,
+                hidden_from_publishing: false,
+                collection_id: "VC:typography".into(),
+                resolved_type: VariableResolvedType::Float,
+                values_by_mode: [("default".into(), VariableValue::Float(16.0))].into(),
+                scopes: vec!["FONT_SIZE".into()],
+                code_syntax: BTreeMap::new(),
+            })
+            .unwrap();
+        let mut bound_style = style;
+        bound_style.id = "S:bound".into();
+        bound_style
+            .variable_bindings
+            .insert("fontSize".into(), "V:font-size".into());
+        bound_document.seed_text_style(bound_style.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &bound_document,
+                TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bound_hash = bound_document.canonical_hash();
+        let bound_snapshot = snapshot_from_document(
+            &bound_document,
+            TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let bound_restored = document_from_snapshot_with_engine_semantics(
+            &bound_snapshot,
+            178_u128.to_be_bytes(),
+            bound_hash,
+            TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(bound_restored.text_style("S:bound"), Some(&bound_style));
+        let mut bound_mislabeled = v1::DocumentSnapshot::decode(bound_snapshot.as_slice()).unwrap();
+        bound_mislabeled.engine_semantics_version =
+            TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &bound_mislabeled.encode_to_vec(),
+                178_u128.to_be_bytes(),
+                bound_hash,
+                TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut duplicate = v1::DocumentSnapshot::decode(bound_snapshot.as_slice()).unwrap();
+        duplicate.text_styles[0]
+            .variable_bindings
+            .push(v1::StyleVariableBinding {
+                field: "fontSize".into(),
+                variable_id: "V:font-size".into(),
+            });
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &duplicate.encode_to_vec(),
+                178_u128.to_be_bytes(),
+                bound_hash,
+                TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );
@@ -6313,6 +6435,7 @@ mod tests {
                 paint_style_id: None,
             },
             letter_spacing_unit: None,
+            variable_bindings: BTreeMap::new(),
             paragraph: TextProperties::default().paragraph,
         };
         let paint_style = PaintStyleResource {

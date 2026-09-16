@@ -48,7 +48,7 @@ import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
 import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
-import { RuntimeTextStyle } from "./runtime-text-style";
+import { RuntimeTextStyle, textStyleVariableValuePatch } from "./runtime-text-style";
 import { RuntimePaintStyle } from "./runtime-paint-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
@@ -413,8 +413,10 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   setVariable(variable: DocumentVariableResource): void {
-    const operations = this.componentPropertyVariableOperations(new Map([[variable.id, variable]]));
-    this.enqueueOperations([{ type: "setVariable", variable }, ...operations]);
+    const variableOverrides = new Map([[variable.id, variable]]);
+    const styleOperations = this.textStyleVariableOperations(variableOverrides);
+    const operations = this.componentPropertyVariableOperations(variableOverrides);
+    this.enqueueOperations([{ type: "setVariable", variable }, ...styleOperations, ...operations]);
   }
 
   deleteVariable(id: string): void {
@@ -422,7 +424,8 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   variableIsBound(id: string): boolean {
-    return this.projectionStore.listLiveNodes().some((node) => {
+    return this.projectionStore.listTextStyles().some((style) => Object.values(style.variableBindings ?? {}).includes(id))
+      || this.projectionStore.listLiveNodes().some((node) => {
       const definitions = node.type === "COMPONENT"
         ? (node.componentMetadata as DocumentComponentMetadata | undefined)?.componentPropertyDefinitions
         : node.type === "COMPONENT_SET"
@@ -439,8 +442,10 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
     const variableOverrides = new Map(variables.map((variable) => [variable.id, variable]));
-    const operations = this.componentPropertyVariableOperations(variableOverrides, new Map([[collection.id, collection]]));
-    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...operations]);
+    const collectionOverrides = new Map([[collection.id, collection]]);
+    const styleOperations = this.textStyleVariableOperations(variableOverrides, collectionOverrides);
+    const operations = this.componentPropertyVariableOperations(variableOverrides, collectionOverrides);
+    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...styleOperations, ...operations]);
   }
 
   deleteVariableCollection(id: string): void {
@@ -633,6 +638,8 @@ export class RuntimeSession implements RuntimeContainerHost {
         ? this.fontNameForReference(style.style.font)
         : DEFAULT_RUNTIME_FONT_NAME,
       resolveFontName: (fontName: RuntimeFontName) => this.resolveFontName(fontName),
+      variableResource: (variableId: string) => this.variableResource(variableId),
+      resolveVariableValue: (variableId: string) => this.resolveVariableValue(variableId),
       consumersForTextStyle: (styleId: string): readonly RuntimeNodeProxy[] => this.projectionStore
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node) && runtimeNodeUsesTextStyle(node, styleId))
@@ -3665,6 +3672,43 @@ export class RuntimeSession implements RuntimeContainerHost {
       });
     }
     return operations;
+  }
+
+  private textStyleVariableOperations(
+    variableOverrides: ReadonlyMap<string, DocumentVariableResource>,
+    collectionOverrides: ReadonlyMap<string, DocumentVariableCollectionResource> = new Map(),
+  ): PendingProjectionOperation[] {
+    const styles = this.projectionStore
+      .listTextStyles()
+      .filter((style) => Object.keys(style.variableBindings ?? {}).length > 0);
+    if (styles.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
+    return styles.flatMap((style) => {
+      let next = structuredClone(style);
+      for (const [field, variableId] of Object.entries(style.variableBindings ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+        const resolved = this.resolveVariableValueFromResources(
+          variableId,
+          undefined,
+          undefined,
+          variableOverrides,
+          collectionOverrides,
+        );
+        next = {
+          ...next,
+          ...textStyleVariableValuePatch(
+            next,
+            field,
+            resolved.value,
+            (candidate) => candidate.style.font
+              ? this.fontNameForReference(candidate.style.font)
+              : DEFAULT_RUNTIME_FONT_NAME,
+            (fontName) => this.resolveFontName(fontName),
+          ),
+        };
+      }
+      return JSON.stringify(next) === JSON.stringify(style)
+        ? []
+        : [{ type: "setTextStyle" as const, style: next }];
+    });
   }
 
   private componentPropertyVariableOperations(

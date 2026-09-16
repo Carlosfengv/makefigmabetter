@@ -37,6 +37,7 @@ use editor_core::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -934,7 +935,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=66).contains(&snapshot.schema_version)
+    if !(1..=67).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 67
+            && snapshot.text_styles.as_ref().is_some_and(|styles| {
+                styles
+                    .iter()
+                    .any(|style| !style.variable_bindings.is_empty())
+            }))
         || (snapshot.schema_version < 66
             && snapshot.text_styles.as_ref().is_some_and(|styles| {
                 styles
@@ -1756,6 +1763,8 @@ struct ProjectionTextStyleResource {
     style: ProjectionTextStyle,
     #[serde(default)]
     letter_spacing_unit: Option<ProjectionTextStyleLetterSpacingUnit>,
+    #[serde(default)]
+    variable_bindings: BTreeMap<String, String>,
     paragraph: ProjectionParagraphStyle,
 }
 
@@ -2289,6 +2298,12 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self
+            .document
+            .text_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+        {
+            67
+        } else if self
             .document
             .text_styles()
             .any(|style| style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent))
@@ -2977,16 +2992,6 @@ impl DocumentEngine {
                 .seed_asset(asset_from_projection(asset)?)
                 .map_err(core_error)?;
         }
-        for style in snapshot.text_styles.clone().unwrap_or_default() {
-            document
-                .seed_text_style(text_style_resource_from_projection(&style)?)
-                .map_err(core_error)?;
-        }
-        for style in snapshot.paint_styles.clone().unwrap_or_default() {
-            document
-                .seed_paint_style(paint_style_resource_from_projection(&style)?)
-                .map_err(core_error)?;
-        }
         for collection in snapshot.variable_collections.clone().unwrap_or_default() {
             document
                 .seed_variable_collection(variable_collection_from_projection(&collection)?)
@@ -2998,6 +3003,16 @@ impl DocumentEngine {
                 .map_err(core_error)?;
         }
         document.validate_variable_catalog().map_err(core_error)?;
+        for style in snapshot.text_styles.clone().unwrap_or_default() {
+            document
+                .seed_text_style(text_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
+        for style in snapshot.paint_styles.clone().unwrap_or_default() {
+            document
+                .seed_paint_style(paint_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -6136,6 +6151,7 @@ fn projection_text_style_resource(resource: &TextStyleResource) -> ProjectionTex
         letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
             TextStyleLetterSpacingUnit::Percent => ProjectionTextStyleLetterSpacingUnit::Percent,
         }),
+        variable_bindings: resource.variable_bindings.clone(),
         paragraph: projected.paragraph,
     }
 }
@@ -6173,6 +6189,7 @@ fn text_style_resource_from_projection(
         letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
             ProjectionTextStyleLetterSpacingUnit::Percent => TextStyleLetterSpacingUnit::Percent,
         }),
+        variable_bindings: resource.variable_bindings.clone(),
         paragraph: properties.paragraph,
     })
 }
@@ -11055,6 +11072,94 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 65;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v67_round_trips_text_style_variable_bindings_and_v66_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([
+            {
+                "type": "registerVariableCollection",
+                "collection": {
+                    "id": "VC:typography",
+                    "key": "",
+                    "name": "Typography",
+                    "remote": false,
+                    "hiddenFromPublishing": false,
+                    "modes": [{ "modeId": "default", "name": "Default" }],
+                    "defaultModeId": "default"
+                }
+            },
+            {
+                "type": "registerVariable",
+                "variable": {
+                    "id": "V:font-size",
+                    "key": "",
+                    "name": "Font size",
+                    "description": "",
+                    "remote": false,
+                    "hiddenFromPublishing": false,
+                    "collectionId": "VC:typography",
+                    "resolvedType": "FLOAT",
+                    "valuesByMode": { "default": 16.0 },
+                    "scopes": ["FONT_SIZE"]
+                }
+            },
+            {
+                "type": "registerTextStyle",
+                "style": {
+                    "id": "S:bound",
+                    "key": "",
+                    "name": "Bound",
+                    "description": "",
+                    "remote": false,
+                    "style": {
+                        "fontSize": 16.0,
+                        "fontWeight": 400,
+                        "italic": false,
+                        "letterSpacing": 0.0
+                    },
+                    "variableBindings": { "fontSize": "V:font-size" },
+                    "paragraph": {
+                        "alignment": "left",
+                        "lineHeight": 24.0,
+                        "paragraphSpacing": 0.0
+                    }
+                }
+            }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000067",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":67"));
+        assert!(snapshot.contains("\"variableBindings\":{\"fontSize\":\"V:font-size\"}"));
+        let hash = engine.canonical_hash();
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), hash);
+        assert_eq!(
+            restored
+                .document
+                .text_style("S:bound")
+                .unwrap()
+                .variable_bindings
+                .get("fontSize")
+                .map(String::as_str),
+            Some("V:font-size")
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 66;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

@@ -157,6 +157,89 @@ describe("TextStyle resource runtime", () => {
     expect((reopenedProjection.nodes.find((node) => node.id === "text")?.textProperties as { baseStyle?: { textStyleId?: string } }).baseStyle?.textStyleId).toBeUndefined();
   });
 
+  it("binds typed variables to TextStyle fields and unlinks fields on direct writes", async () => {
+    const variableProjection: RuntimeProjection = {
+      ...projection,
+      variableCollections: [{
+        id: "VC:typography",
+        key: "",
+        name: "Typography",
+        remote: false,
+        hiddenFromPublishing: false,
+        modes: [{ modeId: "default", name: "Default" }],
+        defaultModeId: "default",
+      }],
+      variables: [
+        {
+          id: "V:size",
+          key: "",
+          name: "Size",
+          description: "",
+          remote: false,
+          hiddenFromPublishing: false,
+          collectionId: "VC:typography",
+          resolvedType: "FLOAT",
+          valuesByMode: { default: 18 },
+          scopes: ["FONT_SIZE"],
+        },
+        {
+          id: "V:family",
+          key: "",
+          name: "Family",
+          description: "",
+          remote: false,
+          hiddenFromPublishing: false,
+          collectionId: "VC:typography",
+          resolvedType: "STRING",
+          valuesByMode: { default: "Inter" },
+          scopes: ["FONT_FAMILY"],
+        },
+      ],
+    };
+    const transport = new StyleTransport(variableProjection);
+    const session = new RuntimeSession({ sessionId: "text-style-variables", projection: variableProjection, transport, scheduleMicrotask: () => {} });
+    const style = await session.getStyleByIdAsync("S:body");
+    const size = await session.variables.getVariableByIdAsync("V:size");
+    const family = await session.variables.getVariableByIdAsync("V:family");
+    if (!style || style.type !== "TEXT" || !size || !family) throw new Error("Missing variable style fixtures");
+
+    style.setBoundVariable("fontSize", size);
+    style.setBoundVariable("letterSpacing", size);
+    style.setBoundVariable("paragraphSpacing", size);
+    expect(style.fontSize).toBe(18);
+    expect(style.letterSpacing).toEqual({ value: 18, unit: "PIXELS" });
+    expect(style.paragraphSpacing).toBe(18);
+    expect(style.boundVariables).toEqual({
+      fontSize: { type: "VARIABLE_ALIAS", id: "V:size" },
+      letterSpacing: { type: "VARIABLE_ALIAS", id: "V:size" },
+      paragraphSpacing: { type: "VARIABLE_ALIAS", id: "V:size" },
+    });
+    size.setValueForMode("default", 22);
+    expect(style.fontSize).toBe(22);
+    expect(style.letterSpacing).toEqual({ value: 22, unit: "PIXELS" });
+    expect(style.paragraphSpacing).toBe(22);
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "setVariable", variable: expect.objectContaining({ id: "V:size", valuesByMode: { default: 22 } }) }),
+      expect.objectContaining({ type: "setTextStyle", style: expect.objectContaining({ id: "S:body", style: expect.objectContaining({ fontSize: 22 }) }) }),
+    ]));
+    expect(isRuntimeError(capture(() => style.setBoundVariable("fontSize", family)), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => style.setBoundVariable("textCase", size)), "UNSUPPORTED_PROPERTY")).toBe(true);
+    expect(isRuntimeError(capture(() => size.remove()), "INVALID_ARGUMENT")).toBe(true);
+
+    style.fontSize = 20;
+    expect(style.boundVariables).not.toHaveProperty("fontSize");
+    expect(style.boundVariables).toHaveProperty("letterSpacing");
+    style.letterSpacing = { value: 2, unit: "PIXELS" };
+    style.paragraphSpacing = 4;
+    expect(style.boundVariables).toBeUndefined();
+    style.setBoundVariable("fontSize", size);
+    style.setBoundVariable("fontSize", null);
+    expect(style.boundVariables).toBeUndefined();
+
+    await session.commitAsync();
+    expect(transport.currentProjection().textStyles?.find((candidate) => candidate.id === style.id)?.variableBindings).toBeUndefined();
+  });
+
   it("keeps deprecated synchronous style reads behind full-document access", () => {
     const dynamic = new RuntimeSession({ sessionId: "styles-dynamic", projection, transport: new ReadOnlyTransport(), documentAccess: "dynamic-page", scheduleMicrotask: () => {} });
     expect(isRuntimeError(capture(() => dynamic.getStyleById("S:body")), "PAGE_NOT_LOADED")).toBe(true);
@@ -345,6 +428,7 @@ class StyleTransport implements RuntimeTransactionTransport {
     this.submitted.push(transaction);
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
     const textStyles = new Map((this.projection.textStyles ?? []).map((style) => [style.id, structuredClone(style)]));
+    const variables = new Map((this.projection.variables ?? []).map((variable) => [variable.id, structuredClone(variable)]));
     for (const operation of transaction.operations) {
       if (operation.type === "registerTextStyle") {
         textStyles.set(operation.style.id, structuredClone(operation.style));
@@ -358,11 +442,19 @@ class StyleTransport implements RuntimeTransactionTransport {
         textStyles.delete(operation.id);
         continue;
       }
+      if (operation.type === "setVariable" || operation.type === "registerVariable") {
+        variables.set(operation.variable.id, structuredClone(operation.variable));
+        continue;
+      }
+      if (operation.type === "deleteVariable") {
+        variables.delete(operation.id);
+        continue;
+      }
       if (operation.type !== "update") continue;
       const node = nodes.get(operation.nodeId);
       if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
     }
-    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], textStyles: [...textStyles.values()] };
+    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], textStyles: [...textStyles.values()], variables: [...variables.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
 }

@@ -478,6 +478,14 @@ pub fn snapshot_from_document(
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
     if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && document
+            .text_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
         && document
             .text_styles()
@@ -1054,21 +1062,20 @@ pub fn document_from_snapshot(
     {
         return Err(ServiceError::ReducerRejected);
     }
-    for style in snapshot.text_styles {
-        document
-            .seed_text_style(text_style_resource_from_proto(style)?)
-            .map_err(|_| ServiceError::ReducerRejected)?;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .text_styles
+            .iter()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(ServiceError::ReducerRejected);
     }
     if declared_engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
     {
         return Err(ServiceError::ReducerRejected);
-    }
-    for style in snapshot.paint_styles {
-        document
-            .seed_paint_style(paint_style_resource_from_proto(style)?)
-            .map_err(|_| ServiceError::ReducerRejected)?;
     }
     if declared_engine_semantics_version
         < makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
@@ -1089,6 +1096,16 @@ pub fn document_from_snapshot(
     document
         .validate_variable_catalog()
         .map_err(|_| ServiceError::ReducerRejected)?;
+    for style in snapshot.text_styles {
+        document
+            .seed_text_style(text_style_resource_from_proto(style)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    for style in snapshot.paint_styles {
+        document
+            .seed_paint_style(paint_style_resource_from_proto(style)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
     let mut page_hashes = Vec::new();
     for chunk in snapshot.page_chunks {
         if chunk.format_version != SNAPSHOT_FORMAT_VERSION {
@@ -2725,12 +2742,29 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
         letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
             TextStyleLetterSpacingUnit::Percent => v1::TextStyleLetterSpacingUnit::Percent as i32,
         }),
+        variable_bindings: resource
+            .variable_bindings
+            .iter()
+            .map(|(field, variable_id)| v1::StyleVariableBinding {
+                field: field.clone(),
+                variable_id: variable_id.clone(),
+            })
+            .collect(),
     }
 }
 
 fn text_style_resource_from_proto(
     resource: v1::TextStyleResource,
 ) -> Result<TextStyleResource, ServiceError> {
+    let variable_binding_count = resource.variable_bindings.len();
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if variable_bindings.len() != variable_binding_count {
+        return Err(ServiceError::ReducerRejected);
+    }
     let properties = text_properties_from_proto(v1::TextProperties {
         runs: Vec::new(),
         paragraph: resource.paragraph,
@@ -2763,6 +2797,7 @@ fn text_style_resource_from_proto(
                 },
             )
             .transpose()?,
+        variable_bindings,
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::ReducerRejected)?,
         paragraph: properties.paragraph,

@@ -993,6 +993,11 @@ export interface DocumentationLink {
   uri: string;
 }
 
+export interface StyleVariableBinding {
+  field: string;
+  variableId: string;
+}
+
 export interface TextStyleResource {
   id: string;
   key: string;
@@ -1004,6 +1009,7 @@ export interface TextStyleResource {
   descriptionMarkdown: string;
   documentationLinks: DocumentationLink[];
   letterSpacingUnit?: TextStyleLetterSpacingUnit | undefined;
+  variableBindings: StyleVariableBinding[];
 }
 
 export interface PaintStyleResource {
@@ -5999,6 +6005,64 @@ export const DocumentationLink: MessageFns<DocumentationLink> = {
   },
 };
 
+function createBaseStyleVariableBinding(): StyleVariableBinding {
+  return { field: "", variableId: "" };
+}
+
+export const StyleVariableBinding: MessageFns<StyleVariableBinding> = {
+  encode(message: StyleVariableBinding, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.field !== "") {
+      writer.uint32(10).string(message.field);
+    }
+    if (message.variableId !== "") {
+      writer.uint32(18).string(message.variableId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): StyleVariableBinding {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStyleVariableBinding();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.field = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.variableId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<StyleVariableBinding>, I>>(base?: I): StyleVariableBinding {
+    return StyleVariableBinding.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<StyleVariableBinding>, I>>(object: I): StyleVariableBinding {
+    const message = createBaseStyleVariableBinding();
+    message.field = object.field ?? "";
+    message.variableId = object.variableId ?? "";
+    return message;
+  },
+};
+
 function createBaseTextStyleResource(): TextStyleResource {
   return {
     id: "",
@@ -6011,6 +6075,7 @@ function createBaseTextStyleResource(): TextStyleResource {
     descriptionMarkdown: "",
     documentationLinks: [],
     letterSpacingUnit: undefined,
+    variableBindings: [],
   };
 }
 
@@ -6045,6 +6110,9 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
     }
     if (message.letterSpacingUnit !== undefined) {
       writer.uint32(80).int32(message.letterSpacingUnit);
+    }
+    for (const v of message.variableBindings) {
+      StyleVariableBinding.encode(v!, writer.uint32(90).fork()).join();
     }
     return writer;
   },
@@ -6136,6 +6204,14 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
           message.letterSpacingUnit = reader.int32() as any;
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.variableBindings.push(StyleVariableBinding.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6164,6 +6240,7 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
     message.descriptionMarkdown = object.descriptionMarkdown ?? "";
     message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
     message.letterSpacingUnit = object.letterSpacingUnit ?? undefined;
+    message.variableBindings = object.variableBindings?.map((e) => StyleVariableBinding.fromPartial(e)) || [];
     return message;
   },
 };

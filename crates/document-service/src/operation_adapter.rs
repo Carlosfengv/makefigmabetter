@@ -23,6 +23,7 @@ use editor_core::{
 };
 use makefigma_protocol::v1;
 use prost::Message;
+use std::collections::BTreeMap;
 
 use crate::ServiceError;
 
@@ -102,6 +103,17 @@ pub fn commands_from_payload_with_semantics(
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum:
                 makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            operation_text_style(operation).is_some_and(|style| !style.variable_bindings.is_empty())
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum:
+                makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version
@@ -2441,6 +2453,15 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
 fn text_style_resource_from_proto(
     resource: v1::TextStyleResource,
 ) -> Result<TextStyleResource, ServiceError> {
+    let variable_binding_count = resource.variable_bindings.len();
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if variable_bindings.len() != variable_binding_count {
+        return Err(ServiceError::InvalidEnvelope);
+    }
     let properties = text_properties_from_proto(v1::TextProperties {
         runs: Vec::new(),
         paragraph: resource.paragraph,
@@ -2473,6 +2494,7 @@ fn text_style_resource_from_proto(
                 },
             )
             .transpose()?,
+        variable_bindings,
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
         paragraph: properties.paragraph,
@@ -5199,6 +5221,7 @@ mod tests {
             description_markdown: String::new(),
             documentation_links: Vec::new(),
             letter_spacing_unit: None,
+            variable_bindings: Vec::new(),
             remote: true,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5287,6 +5310,7 @@ mod tests {
                 uri: "https://example.com/styles/body".into(),
             }],
             letter_spacing_unit: None,
+            variable_bindings: Vec::new(),
             remote: false,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5347,6 +5371,59 @@ mod tests {
                 if style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent)
                     && style.style.letter_spacing == 10.0
         ));
+
+        let mut bound_batch = percent_batch;
+        let Some(v1::resolved_operation::Kind::SetTextStyle(value)) =
+            bound_batch.operations[0].kind.as_mut()
+        else {
+            panic!("expected set TextStyle operation");
+        };
+        value
+            .style
+            .as_mut()
+            .unwrap()
+            .variable_bindings
+            .push(v1::StyleVariableBinding {
+                field: "fontSize".into(),
+                variable_id: "V:font-size".into(),
+            });
+        let bound_payload = bound_batch.encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&bound_payload, makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &bound_payload,
+                makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextStyle { style }]
+                if style.variable_bindings.get("fontSize").map(String::as_str) == Some("V:font-size")
+        ));
+
+        let mut duplicate_batch = bound_batch;
+        let Some(v1::resolved_operation::Kind::SetTextStyle(value)) =
+            duplicate_batch.operations[0].kind.as_mut()
+        else {
+            panic!("expected set TextStyle operation");
+        };
+        value
+            .style
+            .as_mut()
+            .unwrap()
+            .variable_bindings
+            .push(v1::StyleVariableBinding {
+                field: "fontSize".into(),
+                variable_id: "V:other".into(),
+            });
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &duplicate_batch.encode_to_vec(),
+                makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(ServiceError::InvalidEnvelope)
+        ));
     }
 
     #[test]
@@ -5359,6 +5436,7 @@ mod tests {
             description_markdown: String::new(),
             documentation_links: Vec::new(),
             letter_spacing_unit: None,
+            variable_bindings: Vec::new(),
             remote: false,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,

@@ -920,6 +920,7 @@ pub struct TextStyleResource {
     pub style: TextStyleRun,
     /// Absence preserves the legacy PIXELS unit and existing resource hashes.
     pub letter_spacing_unit: Option<TextStyleLetterSpacingUnit>,
+    pub variable_bindings: BTreeMap<String, String>,
     pub paragraph: ParagraphStyle,
 }
 
@@ -2693,6 +2694,13 @@ impl Document {
         }) {
             return Err(CommandError::InvalidVariable);
         }
+        if self
+            .text_styles
+            .values()
+            .any(|style| style.variable_bindings.values().any(|value| value == id))
+        {
+            return Err(CommandError::InvalidVariable);
+        }
         self.variables.remove(id);
         self.variable_catalog_bytes = self
             .variable_catalog_bytes
@@ -2787,6 +2795,14 @@ impl Document {
                 && candidate.values_by_mode.values().any(
                     |value| matches!(value, VariableValue::Alias(target_id) if removed_ids.contains(target_id.as_str())),
                 )
+        }) {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        if self.text_styles.values().any(|style| {
+            style
+                .variable_bindings
+                .values()
+                .any(|value| removed_ids.contains(value.as_str()))
         }) {
             return Err(CommandError::InvalidVariableCollection);
         }
@@ -2967,6 +2983,7 @@ impl Document {
             || style.style.hyperlink.is_some()
             || (style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent)
                 && !(-100.0..=10_000.0).contains(&style.style.letter_spacing))
+            || !self.valid_text_style_variable_bindings(&style.variable_bindings)
             || !self.valid_text_properties("", &properties)
         {
             return Err(CommandError::InvalidTextStyle);
@@ -8482,6 +8499,11 @@ impl TextStyleResource {
                 .iter()
                 .map(String::len)
                 .sum::<usize>()
+            + self
+                .variable_bindings
+                .iter()
+                .map(|(field, id)| field.len() + id.len())
+                .sum::<usize>()
             + properties.estimated_bytes()
     }
 }
@@ -8512,6 +8534,23 @@ fn valid_style_documentation_links(links: &[String]) -> bool {
                 && !uri.bytes().any(|byte| byte.is_ascii_whitespace())
                 && (uri.starts_with("https://") || uri.starts_with("http://"))
         })
+}
+
+impl Document {
+    fn valid_text_style_variable_bindings(&self, bindings: &BTreeMap<String, String>) -> bool {
+        bindings.len() <= 8
+            && bindings.iter().all(|(field, id)| {
+                let expected = match field.as_str() {
+                    "fontFamily" | "fontStyle" => VariableResolvedType::String,
+                    "fontSize" | "fontWeight" | "letterSpacing" | "lineHeight"
+                    | "paragraphSpacing" | "paragraphIndent" => VariableResolvedType::Float,
+                    _ => return false,
+                };
+                self.variables
+                    .get(id)
+                    .is_some_and(|variable| variable.resolved_type == expected)
+            })
+    }
 }
 
 impl VariableCollectionResource {
@@ -9240,6 +9279,14 @@ fn hash_text_style_resource(hasher: &mut Sha256, resource: &TextStyleResource) {
     hash_text_properties(hasher, &properties);
     if resource.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent) {
         hasher.update(b"makefigma/editor-core/text-style-letter-spacing-percent-v1");
+    }
+    if !resource.variable_bindings.is_empty() {
+        hasher.update(b"makefigma/editor-core/text-style-variable-bindings-v1");
+        hash_len(hasher, resource.variable_bindings.len());
+        for (field, id) in &resource.variable_bindings {
+            hash_text(hasher, field);
+            hash_text(hasher, id);
+        }
     }
     hash_style_publishable_metadata(
         hasher,
@@ -11687,6 +11734,7 @@ mod tests {
                 paint_style_id: None,
             },
             letter_spacing_unit: None,
+            variable_bindings: BTreeMap::new(),
             paragraph: TextProperties::default().paragraph,
         }
     }
@@ -23386,6 +23434,122 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash(), after);
         assert_eq!(document.variable(&variable.id), Some(&variable));
+    }
+
+    #[test]
+    fn text_style_variable_bindings_are_typed_hashed_and_protect_variables() {
+        let mut document = Document::with_id(DocumentId(921));
+        let collection = VariableCollectionResource {
+            id: "VC:typography".into(),
+            key: String::new(),
+            name: "Typography".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let font_size = VariableResource {
+            id: "V:font-size".into(),
+            key: String::new(),
+            name: "Font size".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(16.0))].into(),
+            scopes: vec!["FONT_SIZE".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        let font_family = VariableResource {
+            id: "V:font-family".into(),
+            key: String::new(),
+            name: "Font family".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::String,
+            values_by_mode: [("default".into(), VariableValue::String("Inter".into()))].into(),
+            scopes: vec!["FONT_FAMILY".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        document.seed_variable(font_size.clone()).unwrap();
+        document.seed_variable(font_family.clone()).unwrap();
+
+        let baseline = document.canonical_hash();
+        let mut style = text_style_resource("S:body");
+        style.variable_bindings = [
+            ("fontFamily".into(), font_family.id.clone()),
+            ("fontSize".into(), font_size.id.clone()),
+        ]
+        .into();
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::RegisterTextStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let bound_hash = document.canonical_hash();
+        assert_ne!(bound_hash, baseline);
+        assert_eq!(document.text_style(&style.id), Some(&style));
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), bound_hash);
+
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariable {
+                        id: font_size.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariable)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariableCollection {
+                        id: collection.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariableCollection)
+        );
+
+        let mut wrong_type = text_style_resource("S:wrong-type");
+        wrong_type
+            .variable_bindings
+            .insert("fontFamily".into(), font_size.id.clone());
+        assert_eq!(
+            document.seed_text_style(wrong_type),
+            Err(CommandError::InvalidTextStyle)
+        );
+        let mut missing = text_style_resource("S:missing-variable");
+        missing
+            .variable_bindings
+            .insert("fontSize".into(), "V:missing".into());
+        assert_eq!(
+            document.seed_text_style(missing),
+            Err(CommandError::InvalidTextStyle)
+        );
     }
 
     #[test]

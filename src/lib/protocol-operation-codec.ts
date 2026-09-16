@@ -280,6 +280,9 @@ function textStyleResourceProto(resource: DocumentTextStyleResource) {
     letterSpacingUnit: resource.letterSpacingUnit === "percent"
       ? TextStyleLetterSpacingUnit.TEXT_STYLE_LETTER_SPACING_UNIT_PERCENT
       : undefined,
+    variableBindings: Object.entries(resource.variableBindings ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([field, variableId]) => ({ field, variableId })),
   };
 }
 

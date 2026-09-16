@@ -38,6 +38,7 @@ describe("protocol operation codec", () => {
         remote: true,
         style: { fontSize: 16, fontWeight: 450, italic: false, letterSpacing: .25, textCase: "smallCaps" },
         letterSpacingUnit: "percent",
+        variableBindings: { paragraphSpacing: "V:space", fontSize: "V:size" },
         paragraph: { alignment: "left", lineHeight: 150, lineHeightUnit: "percent", paragraphSpacing: 6 },
       },
     }]));
@@ -53,6 +54,10 @@ describe("protocol operation codec", () => {
       remote: true,
       style: { fontSize: 16, fontWeight: 450, letterSpacing: .25, textCase: TextCase.TEXT_CASE_SMALL_CAPS },
       letterSpacingUnit: TextStyleLetterSpacingUnit.TEXT_STYLE_LETTER_SPACING_UNIT_PERCENT,
+      variableBindings: [
+        { field: "fontSize", variableId: "V:size" },
+        { field: "paragraphSpacing", variableId: "V:space" },
+      ],
       paragraph: { alignment: TextAlignment.TEXT_ALIGNMENT_LEFT, lineHeight: 150, lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_PERCENT, paragraphSpacing: 6 },
     });
   });

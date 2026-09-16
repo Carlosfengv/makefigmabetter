@@ -341,7 +341,8 @@ function validateResourceOperations(
       const value = operation.style;
       if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
         || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
-        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)
+        || !validTextStyleVariableBindings(value, variables)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       textStyles.set(value.id, value);
@@ -350,7 +351,8 @@ function validateResourceOperations(
       const before = textStyles.get(value.id);
       if (!before || before.remote || !validPendingStyleIdentity(value) || value.remote || before.key !== value.key
         || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
-        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)
+        || !validTextStyleVariableBindings(value, variables)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       textStyles.set(value.id, value);
@@ -399,7 +401,9 @@ function validateResourceOperations(
       variables.set(value.id, value);
       validateVariableAliases(variables, transactionId);
     } else if (operation.type === "deleteVariable") {
-      if (variables.get(operation.id)?.remote !== false || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
+      if (variables.get(operation.id)?.remote !== false
+        || [...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).includes(operation.id))
+        || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       variables.delete(operation.id);
@@ -417,7 +421,8 @@ function validateResourceOperations(
       const collection = collections.get(operation.id);
       if (!collection || collection.remote) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       const removed = new Set([...variables.values()].filter((value) => value.collectionId === operation.id).map((value) => value.id));
-      if ([...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      if ([...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).some((id) => removed.has(id)))
+        || [...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       removed.forEach((id) => variables.delete(id));
       collections.delete(operation.id);
     }
@@ -440,6 +445,22 @@ function validTextStyleLetterSpacing(value: DocumentTextStyleResource): boolean 
       || (value.letterSpacingUnit === "percent"
         && value.style.letterSpacing >= -100
         && value.style.letterSpacing <= 10_000));
+}
+
+function validTextStyleVariableBindings(
+  value: DocumentTextStyleResource,
+  variables: ReadonlyMap<string, DocumentVariableResource>,
+): boolean {
+  const entries = Object.entries(value.variableBindings ?? {});
+  if (entries.length > 8) return false;
+  return entries.every(([field, id]) => {
+    const expected = field === "fontFamily" || field === "fontStyle"
+      ? "STRING"
+      : ["fontSize", "fontWeight", "letterSpacing", "lineHeight", "paragraphSpacing", "paragraphIndent"].includes(field)
+        ? "FLOAT"
+        : undefined;
+    return expected !== undefined && variables.get(id)?.resolvedType === expected;
+  });
 }
 
 function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariableResource>, transactionId: string): void {

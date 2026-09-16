@@ -371,6 +371,7 @@ export interface DocumentTextStyleResource {
   style: DocumentTextStyle;
   /** Omission preserves the legacy PIXELS representation. */
   letterSpacingUnit?: "percent";
+  variableBindings?: Readonly<Record<string, string>>;
   paragraph: DocumentTextProperties["paragraph"];
 }
 
