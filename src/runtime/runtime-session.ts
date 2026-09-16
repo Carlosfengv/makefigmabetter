@@ -950,50 +950,79 @@ export class RuntimeSession implements RuntimeContainerHost {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: instanceId });
     }
 
+    const detachedInstanceIds = new Set([instanceId]);
+    let rootInstance = instance;
+    let ancestor = this.projectionStore.getNode(instance.parentId);
+    const ancestorIds = new Set<string>();
+    while (ancestor) {
+      if (ancestorIds.has(ancestor.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+      ancestorIds.add(ancestor.id);
+      if (ancestor.type === "INSTANCE") {
+        detachedInstanceIds.add(ancestor.id);
+        rootInstance = ancestor;
+      }
+      ancestor = typeof ancestor.parentId === "string" ? this.projectionStore.getNode(ancestor.parentId) : undefined;
+    }
+    if (typeof rootInstance.parentId !== "string") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: instanceId });
+
     const subtree: RuntimeProjectionNode[] = [];
     const visited = new Set<string>();
     const visit = (node: RuntimeProjectionNode): void => {
       if (visited.has(node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
       visited.add(node.id);
       if (subtree.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
-      if (node.id !== instanceId && !RUNTIME_CLONE_DESCENDANT_TYPES.has(node.type as M1SceneNodeType)) {
+      if (node.id !== rootInstance.id && !RUNTIME_CLONE_DESCENDANT_TYPES.has(node.type as M1SceneNodeType)) {
         throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: node.id });
       }
       subtree.push(node);
       this.siblingsOf(node.id).forEach(visit);
     };
-    visit(instance);
+    visit(rootInstance);
 
-    const siblings = this.siblingsOf(instance.parentId);
-    const sourceIndex = siblings.findIndex((node) => node.id === instanceId);
-    if (sourceIndex < 0) throw runtimeError("NODE_NOT_FOUND", { nodeId: instanceId });
-    const remaining = siblings.filter((node) => node.id !== instanceId);
-    const finalPositionId = typeof instance.positionId === "string" && instance.positionId
-      ? instance.positionId
+    const siblings = this.siblingsOf(rootInstance.parentId);
+    const sourceIndex = siblings.findIndex((node) => node.id === rootInstance.id);
+    if (sourceIndex < 0) throw runtimeError("NODE_NOT_FOUND", { nodeId: rootInstance.id });
+    const remaining = siblings.filter((node) => node.id !== rootInstance.id);
+    const finalPositionId = typeof rootInstance.positionId === "string" && rootInstance.positionId
+      ? rootInstance.positionId
       : positionIdForLayerInsertion(remaining, sourceIndex);
-    if (!finalPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+    if (!finalPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: rootInstance.id });
 
     const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
-    const rootId = ids.get(instanceId)!;
+    const rootId = ids.get(rootInstance.id)!;
+    const retainedInstanceIds = new Set(subtree.flatMap((node) => node.type === "INSTANCE" && !detachedInstanceIds.has(node.id) ? [node.id] : []));
+    const belongsToRetainedInstance = (node: RuntimeProjectionNode): boolean => {
+      let current: RuntimeProjectionNode | undefined = node;
+      const seen = new Set<string>();
+      while (current && current.id !== rootInstance.id && !seen.has(current.id)) {
+        seen.add(current.id);
+        if (retainedInstanceIds.has(current.id)) return true;
+        current = typeof current.parentId === "string" ? this.projectionStore.getNode(current.parentId) : undefined;
+      }
+      return false;
+    };
     const replacements = subtree.map((source): RuntimeProjectionNode => {
-      const isRoot = source.id === instanceId;
+      const isRoot = source.id === rootInstance.id;
+      const isDetachedInstance = detachedInstanceIds.has(source.id);
       const clone: Record<string, unknown> = {
         ...structuredClone(source),
         id: ids.get(source.id)!,
-        type: isRoot ? "FRAME" : source.type,
+        type: isDetachedInstance ? "FRAME" : source.type,
         parentId: isRoot ? source.parentId : ids.get(source.parentId!),
         siblingIndex: source.siblingIndex,
         positionId: isRoot ? finalPositionId : source.positionId,
-        name: isRoot ? `${typeof source.name === "string" ? source.name : "Instance"} detached` : source.name,
-        instanceMetadata: undefined,
+        name: isDetachedInstance ? `${typeof source.name === "string" ? source.name : "Instance"} detached` : source.name,
         removed: false,
       };
-      delete clone.instanceMetadata;
+      if (isDetachedInstance) {
+        delete clone.instanceMetadata;
+        delete clone.componentPropertyReferences;
+      }
       const extensions = clone.extensions && typeof clone.extensions === "object" && !Array.isArray(clone.extensions)
         ? structuredClone(clone.extensions as Record<string, number[]>)
         : {};
-      delete extensions["figma.instance.metadata.v1"];
-      delete extensions[INSTANCE_SOURCE_NODE_EXTENSION];
+      if (isDetachedInstance) delete extensions["figma.instance.metadata.v1"];
+      if (!belongsToRetainedInstance(source)) delete extensions[INSTANCE_SOURCE_NODE_EXTENSION];
       clone.extensions = extensions;
       if (clone.vectorPath && typeof clone.vectorPath === "object") {
         const path = clone.vectorPath as DocumentVectorPath;
@@ -1013,13 +1042,13 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
     this.enqueueOperations([{
       type: "detachInstance",
-      sourceId: instanceId,
+      sourceId: rootInstance.id,
       sourceIds: subtree.map((node) => node.id),
       replacements,
       temporaryPositionId: runtimeTemporaryPositionId(rootId, finalPositionId),
       finalPositionId,
     }]);
-    return this.containerFor(rootId);
+    return this.containerFor(ids.get(instanceId)!);
   }
   createSlot(componentId: string): RuntimeContainerNodeProxy {
     this.assertOpen();

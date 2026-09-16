@@ -1190,6 +1190,67 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(detached.id))?.type).toBe("FRAME");
   });
 
+  it("detaches every Instance ancestor while preserving unrelated nested Instances", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const leaf = session.createComponent();
+    leaf.name = "Leaf";
+    leaf.appendChild(session.createRectangle());
+    const middle = session.createComponent();
+    middle.name = "Middle";
+    const firstLeaf = leaf.createInstance();
+    firstLeaf.name = "First leaf";
+    const secondLeaf = leaf.createInstance();
+    secondLeaf.name = "Second leaf";
+    middle.appendChild(firstLeaf);
+    middle.appendChild(secondLeaf);
+    const outer = session.createComponent();
+    outer.name = "Outer";
+    outer.appendChild(middle.createInstance());
+    const outerInstance = outer.createInstance();
+    await session.commitAsync();
+
+    const oldMiddle = outerInstance.children.find((node) => node.type === "INSTANCE")!;
+    const oldFirstLeaf = oldMiddle.children.find((node) => node.name === "First leaf")!;
+    const oldSecondLeaf = oldMiddle.children.find((node) => node.name === "Second leaf")!;
+    const oldSecondLeafChild = oldSecondLeaf.children[0]!;
+    const detachedLeaf = oldFirstLeaf.detachInstance();
+    const detachedMiddle = detachedLeaf.parent!;
+    const detachedOuter = detachedMiddle.parent!;
+    const retainedLeaf = detachedMiddle.children.find((node) => node.name === "Second leaf")!;
+
+    expect(detachedLeaf).toMatchObject({ type: "FRAME", name: "First leaf detached" });
+    expect(detachedMiddle).toMatchObject({ type: "FRAME", name: "Middle instance detached" });
+    expect(detachedOuter).toMatchObject({ type: "FRAME", name: "Outer instance detached", parent: session.currentPage });
+    expect(retainedLeaf).toMatchObject({ type: "INSTANCE", name: "Second leaf" });
+    expect(retainedLeaf.children).toHaveLength(1);
+    expect(session.projectionStore.getNode(retainedLeaf.id)).toHaveProperty("instanceMetadata");
+    expect(session.projectionStore.getNode(retainedLeaf.children[0]!.id)?.extensions).toHaveProperty("figma.instance.source-node.v1");
+    expect(session.projectionStore.getNode(detachedLeaf.id)).not.toHaveProperty("instanceMetadata");
+    expect(session.projectionStore.getNode(detachedMiddle.id)).not.toHaveProperty("instanceMetadata");
+    expect(session.projectionStore.getNode(detachedOuter.id)).not.toHaveProperty("instanceMetadata");
+    expect(outerInstance.removed).toBe(true);
+    expect(oldMiddle.removed).toBe(true);
+    expect(oldFirstLeaf.removed).toBe(true);
+    expect(oldSecondLeaf.removed).toBe(true);
+    expect(oldSecondLeafChild.removed).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.submitted[1]?.operations).toEqual([
+      expect.objectContaining({
+        type: "detachInstance",
+        sourceId: outerInstance.id,
+        sourceIds: expect.arrayContaining([outerInstance.id, oldMiddle.id, oldFirstLeaf.id, oldSecondLeaf.id, oldSecondLeafChild.id]),
+        replacements: expect.arrayContaining([
+          expect.objectContaining({ id: detachedOuter.id, type: "FRAME" }),
+          expect.objectContaining({ id: detachedMiddle.id, type: "FRAME", parentId: detachedOuter.id }),
+          expect.objectContaining({ id: detachedLeaf.id, type: "FRAME", parentId: detachedMiddle.id }),
+          expect.objectContaining({ id: retainedLeaf.id, type: "INSTANCE", parentId: detachedMiddle.id }),
+        ]),
+      }),
+    ]);
+  });
+
   it("combines local Components as variants while preserving world geometry and order", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
