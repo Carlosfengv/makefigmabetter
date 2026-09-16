@@ -100,10 +100,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     id: "variables.catalog-runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
-    property: "variables.getVariableByIdAsync|variables.getVariableCollectionByIdAsync|variables.getLocalVariablesAsync|variables.getLocalVariableCollectionsAsync|variables.createVariableAlias|Variable.resolveForConsumer|boundVariables|setBoundVariable",
+    property: "variables.getVariableByIdAsync|variables.getVariableCollectionByIdAsync|variables.getLocalVariablesAsync|variables.getLocalVariableCollectionsAsync|variables.createVariableAlias|Variable.resolveForConsumer|boundVariables|setBoundVariable|explicitVariableModes|resolvedVariableModes|setExplicitVariableModeForCollection|clearExplicitVariableModeForCollection",
     surface: "write",
     status: "partial",
-    limitation: "Document-owned variable collections, modes, BOOLEAN/COLOR/FLOAT/STRING values, scopes and aliases persist through semantics 48/local Snapshot v63. Runtime reads filter local resources, preserve remote identity, and resolve bounded alias chains through each collection's default mode. Scene nodes persist versioned opacity, visible and strokeWeight binding identities in their forward-compatible extension map, apply the resolved scalar through the ordinary Core mutation path, and unlink the corresponding binding on a direct property write. Explicit per-node modes, width/height and text fields, paint/effect bindings, EASING/TIMING, library import and catalog mutation remain staged.",
+    limitation: "Document-owned variable collections, modes, BOOLEAN/COLOR/FLOAT/STRING values, scopes and aliases persist through semantics 48/local Snapshot v63. Runtime reads filter local resources, preserve remote identity, and resolve bounded alias chains through the consumer's inherited mode. Scene nodes persist versioned opacity, visible and strokeWeight binding identities in their forward-compatible extension map, apply the resolved scalar through the ordinary Core mutation path, and unlink the corresponding binding on a direct property write. Explicit modes inherit through ancestors; set/clear preflights and atomically recomputes up to 10,000 bound nodes in the affected subtree while respecting closer descendant overrides. Width/height and text fields, paint/effect bindings, EASING/TIMING, library import and catalog mutation remain staged.",
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {

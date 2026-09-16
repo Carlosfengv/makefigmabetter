@@ -29,6 +29,10 @@ export function assertFigmaPluginTypingsContract(
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) rectangle.setBoundVariable("opacity", floatVariable);
   void rectangle.boundVariables;
+  const variableCollection = figma.variables.getLocalVariableCollections()[0];
+  if (variableCollection) rectangle.setExplicitVariableModeForCollection(variableCollection, variableCollection.defaultModeId);
+  void rectangle.explicitVariableModes;
+  void rectangle.resolvedVariableModes;
   rectangle.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5, blendMode: "MULTIPLY" }];
   rectangle.strokes = [{
     type: "GRADIENT_LINEAR",

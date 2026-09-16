@@ -284,7 +284,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     return variableModesFromExtensions(node.extensions);
   }
 
-  resolvedVariableModesForNode(nodeId: string): Readonly<Record<string, string>> {
+  resolvedVariableModesForNode(nodeId: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, string>> {
     this.assertOpen();
     const chain: RuntimeProjectionNode[] = [];
     const seen = new Set<string>();
@@ -296,13 +296,13 @@ export class RuntimeSession implements RuntimeContainerHost {
       node = typeof node.parentId === "string" ? this.projectionStore.getNode(node.parentId) : undefined;
     }
     const result: Record<string, string> = {};
-    for (const item of chain.reverse()) Object.assign(result, variableModesFromExtensions(item.extensions));
+    for (const item of chain.reverse()) Object.assign(result, item.id === override?.nodeId ? override.modes : variableModesFromExtensions(item.extensions));
     return Object.freeze(result);
   }
 
-  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> {
+  resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> {
     this.assertOpen();
-    const modes = nodeId ? this.resolvedVariableModesForNode(nodeId) : {};
+    const modes = nodeId ? this.resolvedVariableModesForNode(nodeId, override) : {};
     const seen = new Set<string>();
     let variable = this.variableResource(variableId);
     if (!variable) throw runtimeError("RESOURCE_UNAVAILABLE");

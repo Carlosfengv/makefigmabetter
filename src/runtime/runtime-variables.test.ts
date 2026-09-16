@@ -52,10 +52,12 @@ describe("Variables resource runtime", () => {
   });
 
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
-    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "page", siblingIndex: 0, opacity: 1, visible: true, strokeWidth: 1 }] };
+    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0 }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, opacity: 1, visible: true, strokeWidth: 1 }] };
     const transport = new UpdatingTransport(writable);
     const session = new RuntimeSession({ sessionId: "variable-bindings", projection: writable, transport, scheduleMicrotask: () => {} });
     const rectangle = (await session.getNodeByIdAsync("rect"))!;
+    const frame = (await session.getNodeByIdAsync("frame"))!;
+    const collection = (await session.variables.getVariableCollectionByIdAsync("VC:theme"))!;
     const opacity = (await session.variables.getVariableByIdAsync("V:opacity"))!;
     const visible = (await session.variables.getVariableByIdAsync("V:visible"))!;
     const spacing = (await session.variables.getVariableByIdAsync("V:spacing"))!;
@@ -68,6 +70,21 @@ describe("Variables resource runtime", () => {
     expect(rectangle.strokeWeight).toBe(8);
     expect(rectangle.boundVariables).toEqual({ opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" } });
     expect(isRuntimeError(capture(() => rectangle.setBoundVariable("opacity", visible)), "INVALID_ARGUMENT")).toBe(true);
+
+    frame.setExplicitVariableModeForCollection(collection, "dark");
+    expect(frame.explicitVariableModes).toEqual({ "VC:theme": "dark" });
+    expect(rectangle.resolvedVariableModes).toEqual({ "VC:theme": "dark" });
+    expect(rectangle.opacity).toBe(.8);
+    expect(rectangle.visible).toBe(true);
+    expect(rectangle.strokeWeight).toBe(12);
+    expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
+
+    rectangle.setExplicitVariableModeForCollection(collection, "light");
+    expect(rectangle.opacity).toBe(.5);
+    expect(rectangle.visible).toBe(false);
+    rectangle.clearExplicitVariableModeForCollection(collection);
+    expect(rectangle.opacity).toBe(.8);
+    expect(rectangle.resolvedVariableModes).toEqual({ "VC:theme": "dark" });
 
     rectangle.opacity = .7;
     expect(rectangle.opacity).toBe(.7);

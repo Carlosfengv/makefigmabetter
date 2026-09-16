@@ -43,8 +43,8 @@ import { fontsForRuntimeTextRange, patchRuntimeParagraphIndent, patchRuntimePara
 import { DEFAULT_RUNTIME_FONT_NAME, sameRuntimeFontName, type RuntimeFontName } from "./runtime-font-name";
 import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextCase } from "../lib/text-case";
 import type { RuntimeImage } from "./runtime-session";
-import type { RuntimeVariable } from "./runtime-variables";
-import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions } from "./runtime-variable-bindings";
+import type { RuntimeVariable, RuntimeVariableCollection } from "./runtime-variables";
+import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, variableAliases, variableBindingsFromExtensions } from "./runtime-variable-bindings";
 import {
   documentPaintStackFromRuntime,
   documentTextDecorationColorFromRuntime,
@@ -174,7 +174,9 @@ export interface RuntimeNodeHost {
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined;
   variableResource(id: string): DocumentVariableResource | undefined;
   variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined;
-  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
+  explicitVariableModesForNode(nodeId: string): Readonly<Record<string, string>>;
+  resolvedVariableModesForNode(nodeId: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, string>>;
+  resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   assertSynchronousDocumentAccess(): void;
   hasFontReference(font: DocumentFontReference): boolean;
   hasImageHash(hash: string): boolean;
@@ -202,6 +204,7 @@ const SHAPE_WITH_TEXT_DEFAULT_FILLS: readonly RuntimePaint[] = Object.freeze([{
   blendMode: "NORMAL",
 }]);
 const MAX_TEXT_HYPERLINK_BYTES = 2_048;
+const MAX_VARIABLE_MODE_SUBTREE_NODES = 10_000;
 
 function runtimeListOptionsForRange(
   text: string,
@@ -1348,6 +1351,33 @@ export class RuntimeNodeProxy {
     const patch = this.variableFieldPatch(field, resolved.value, resolved.resolvedType);
     bindings[field] = variableId;
     this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+  }
+  get explicitVariableModes(): Readonly<Record<string, string>> {
+    if (this.type === "DOCUMENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    return this.host.explicitVariableModesForNode(this.id);
+  }
+  get resolvedVariableModes(): Readonly<Record<string, string>> {
+    if (this.type === "DOCUMENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    return this.host.resolvedVariableModesForNode(this.id);
+  }
+  setExplicitVariableModeForCollection(collection: RuntimeVariableCollection | string, modeId: string): void {
+    if (this.type === "DOCUMENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (typeof collection === "string") this.host.assertSynchronousDocumentAccess();
+    const collectionId = typeof collection === "string" ? collection : collection?.id;
+    const resource = collectionId ? this.host.variableCollectionResource(collectionId) : undefined;
+    if (!resource || typeof modeId !== "string" || !resource.modes.some((mode) => mode.modeId === modeId)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    this.applyExplicitVariableModes({ ...this.explicitVariableModes, [resource.id]: modeId });
+  }
+  clearExplicitVariableModeForCollection(collection: RuntimeVariableCollection | string): void {
+    if (this.type === "DOCUMENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (typeof collection === "string") this.host.assertSynchronousDocumentAccess();
+    const collectionId = typeof collection === "string" ? collection : collection?.id;
+    if (!collectionId || !this.host.variableCollectionResource(collectionId)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const modes = { ...this.explicitVariableModes };
+    delete modes[collectionId];
+    this.applyExplicitVariableModes(modes);
   }
   get isMask(): boolean {
     const kind = nodeKindFromExternalType(this.type as ExternalNodeType);
@@ -2869,6 +2899,39 @@ export class RuntimeNodeProxy {
     }
     delete bindings[field];
     this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+  }
+
+  private applyExplicitVariableModes(modes: Readonly<Record<string, string>>): void {
+    const source = this.read();
+    const targets: RuntimeNodeProxy[] = [];
+    const queue: RuntimeNodeProxy[] = [this];
+    while (queue.length) {
+      const target = queue.shift()!;
+      targets.push(target);
+      if (targets.length > MAX_VARIABLE_MODE_SUBTREE_NODES) throw runtimeError("RESOURCE_LIMIT", { nodeId: this.handle.nodeId });
+      queue.push(...this.host.childrenOf(target.id));
+    }
+    const override = Object.freeze({ nodeId: this.id, modes });
+    const patches = targets.map((target) => [target, target.boundVariableValuePatch(override)] as const);
+    const sourcePatch = patches[0]![1];
+    this.write({
+      ...sourcePatch,
+      extensions: extensionsWithVariableMap(source.extensions, VARIABLE_MODES_EXTENSION, modes),
+    });
+    for (const [target, patch] of patches.slice(1)) {
+      if (Object.keys(patch).length) target.write(patch);
+    }
+  }
+
+  private boundVariableValuePatch(override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, unknown>> {
+    const bindings = variableBindingsFromExtensions(this.read().extensions);
+    const patch: Record<string, unknown> = {};
+    for (const [field, variableId] of Object.entries(bindings)) {
+      if (field !== "opacity" && field !== "visible" && field !== "strokeWeight") continue;
+      const resolved = this.host.resolveVariableValue(variableId, this.id, override);
+      Object.assign(patch, this.variableFieldPatch(field, resolved.value, resolved.resolvedType));
+    }
+    return patch;
   }
 
   private variableFieldPatch(field: "opacity" | "visible" | "strokeWeight", value: DocumentVariableValue, type: DocumentVariableResolvedType): Readonly<Record<string, unknown>> {

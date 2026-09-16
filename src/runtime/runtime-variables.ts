@@ -18,7 +18,7 @@ export type RuntimeVariableHost = Readonly<{
   variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined;
   localVariables(type?: DocumentVariableResolvedType): readonly DocumentVariableResource[];
   allVariableResources(): readonly DocumentVariableResource[];
-  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
+  resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   localVariableCollections(): readonly DocumentVariableCollectionResource[];
 }>;
 
