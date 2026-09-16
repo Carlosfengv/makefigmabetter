@@ -7,13 +7,13 @@ use editor_core::{
     FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
     LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
     NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -114,6 +114,18 @@ pub fn commands_from_payload_with_semantics(
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum:
                 makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            operation_paint_style(operation)
+                .is_some_and(|style| !style.variable_bindings.is_empty())
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum:
+                makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version
@@ -558,6 +570,15 @@ fn operation_text_style(operation: &v1::ResolvedOperation) -> Option<&v1::TextSt
     match operation.kind.as_ref()? {
         Kind::RegisterTextStyle(value) => value.style.as_ref(),
         Kind::SetTextStyle(value) => value.style.as_ref(),
+        _ => None,
+    }
+}
+
+fn operation_paint_style(operation: &v1::ResolvedOperation) -> Option<&v1::PaintStyleResource> {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref()? {
+        Kind::RegisterPaintStyle(value) => value.style.as_ref(),
+        Kind::SetPaintStyle(value) => value.style.as_ref(),
         _ => None,
     }
 }
@@ -2504,6 +2525,21 @@ fn text_style_resource_from_proto(
 fn paint_style_resource_from_proto(
     resource: v1::PaintStyleResource,
 ) -> Result<PaintStyleResource, ServiceError> {
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| PaintStyleVariableBinding {
+            paint_index: binding.paint_index,
+            stop_index: binding.stop_index,
+            variable_id: binding.variable_id,
+        })
+        .collect::<Vec<_>>();
+    if !variable_bindings
+        .windows(2)
+        .all(|pair| pair[0].target_key() < pair[1].target_key())
+    {
+        return Err(ServiceError::InvalidEnvelope);
+    }
     Ok(PaintStyleResource {
         id: resource.id,
         key: resource.key,
@@ -2517,6 +2553,7 @@ fn paint_style_resource_from_proto(
             .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::InvalidEnvelope)?)?,
+        variable_bindings,
     })
 }
 
@@ -5272,6 +5309,7 @@ mod tests {
             documentation_links: Vec::new(),
             remote: true,
             paints: Some(v1::PaintStack { layers: Vec::new() }),
+            variable_bindings: Vec::new(),
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![v1::ResolvedOperation {
@@ -5295,6 +5333,60 @@ mod tests {
                 if style.id == "S:brand-fill"
                     && style.key == "library-paint-key"
                     && style.paints.layers.is_empty()
+        ));
+
+        let mut bound_batch = v1::ResolvedOperationBatch::decode(payload.as_slice()).unwrap();
+        let Some(v1::resolved_operation::Kind::RegisterPaintStyle(value)) =
+            bound_batch.operations[0].kind.as_mut()
+        else {
+            panic!("expected register PaintStyle operation");
+        };
+        value
+            .style
+            .as_mut()
+            .unwrap()
+            .variable_bindings
+            .push(v1::PaintStyleVariableBinding {
+                paint_index: 0,
+                stop_index: None,
+                variable_id: "V:brand".into(),
+            });
+        let bound_payload = bound_batch.encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&bound_payload, makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &bound_payload,
+                makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::RegisterPaintStyle { style }]
+                if style.variable_bindings.first().is_some_and(|binding| binding.variable_id == "V:brand")
+        ));
+
+        let Some(v1::resolved_operation::Kind::RegisterPaintStyle(value)) =
+            bound_batch.operations[0].kind.as_mut()
+        else {
+            panic!("expected register PaintStyle operation");
+        };
+        value
+            .style
+            .as_mut()
+            .unwrap()
+            .variable_bindings
+            .push(v1::PaintStyleVariableBinding {
+                paint_index: 0,
+                stop_index: None,
+                variable_id: "V:other".into(),
+            });
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &bound_batch.encode_to_vec(),
+                makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(ServiceError::InvalidEnvelope)
         ));
     }
 
@@ -5458,6 +5550,7 @@ mod tests {
             documentation_links: Vec::new(),
             remote: false,
             paints: Some(v1::PaintStack { layers: Vec::new() }),
+            variable_bindings: Vec::new(),
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![

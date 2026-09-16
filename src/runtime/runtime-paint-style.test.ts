@@ -140,6 +140,84 @@ describe("PaintStyle resource runtime", () => {
     expect(reopenedProjection.nodes.find((node) => node.id === "rect")?.fillStyleId).toBeUndefined();
   });
 
+  it("persists solid and gradient-stop color bindings on PaintStyle resources", async () => {
+    const variableProjection: RuntimeProjection = {
+      ...projection,
+      variableCollections: [{
+        id: "VC:colors", key: "", name: "Colors", remote: false, hiddenFromPublishing: false,
+        modes: [{ modeId: "default", name: "Default" }], defaultModeId: "default",
+      }],
+      variables: [
+        {
+          id: "V:brand", key: "", name: "Brand", description: "", remote: false, hiddenFromPublishing: false,
+          collectionId: "VC:colors", resolvedType: "COLOR", valuesByMode: { default: { space: "srgb", components: [0.1, 0.2, 0.3], alpha: 1 } }, scopes: ["ALL_FILLS"],
+        },
+        {
+          id: "V:accent", key: "", name: "Accent", description: "", remote: false, hiddenFromPublishing: false,
+          collectionId: "VC:colors", resolvedType: "COLOR", valuesByMode: { default: { space: "srgb", components: [0.8, 0.7, 0.6], alpha: 0.5 } }, scopes: ["ALL_FILLS"],
+        },
+        {
+          id: "V:number", key: "", name: "Number", description: "", remote: false, hiddenFromPublishing: false,
+          collectionId: "VC:colors", resolvedType: "FLOAT", valuesByMode: { default: 8 }, scopes: ["ALL_SCOPES"],
+        },
+      ],
+    };
+    const transport = new StyleTransport(variableProjection);
+    const session = new RuntimeSession({ sessionId: "paint-style-variables", projection: variableProjection, transport, scheduleMicrotask: () => {} });
+    const style = await session.getStyleByIdAsync("S:brand-fill");
+    const brand = await session.variables.getVariableByIdAsync("V:brand");
+    const accent = await session.variables.getVariableByIdAsync("V:accent");
+    if (!style || style.type !== "PAINT" || !brand || !accent) throw new Error("Missing PaintStyle variable fixtures");
+    const brandAlias = session.variables.createVariableAlias(brand);
+    const accentAlias = session.variables.createVariableAlias(accent);
+
+    style.paints = [
+      { type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: 0.8, boundVariables: { color: brandAlias } },
+      {
+        type: "GRADIENT_LINEAR",
+        gradientTransform: [[1, 0, 0], [0, 1, 0]],
+        gradientStops: [
+          { position: 0, color: { r: 1, g: 1, b: 1, a: 1 }, boundVariables: { color: accentAlias } },
+          { position: 1, color: { r: 0, g: 0, b: 0, a: 1 } },
+        ],
+      },
+    ];
+    expect(style.boundVariables).toEqual({
+      paints: [
+        { type: "VARIABLE_ALIAS", id: "V:brand" },
+        { type: "VARIABLE_ALIAS", id: "V:accent" },
+      ],
+    });
+    expect(style.paints[0]).toMatchObject({ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 }, opacity: 0.8, boundVariables: { color: { id: "V:brand" } } });
+    expect(style.paints[1]).toMatchObject({
+      type: "GRADIENT_LINEAR",
+      gradientStops: [
+        { color: { r: 0.8, g: 0.7, b: 0.6, a: 0.5 }, boundVariables: { color: { id: "V:accent" } } },
+        { position: 1 },
+      ],
+    });
+    expect(isRuntimeError(capture(() => brand.remove()), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.paints = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:number" } } }]; }), "RESOURCE_UNAVAILABLE")).toBe(true);
+    await session.commitAsync();
+    expect(transport.currentProjection().paintStyles?.find((candidate) => candidate.id === style.id)?.variableBindings).toEqual([
+      { paintIndex: 0, variableId: "V:brand" },
+      { paintIndex: 1, stopIndex: 0, variableId: "V:accent" },
+    ]);
+
+    brand.setValueForMode("default", { r: 0.4, g: 0.5, b: 0.6, a: 1 });
+    expect(style.paints[0]).toMatchObject({ color: { r: 0.4, g: 0.5, b: 0.6 }, boundVariables: { color: { id: "V:brand" } } });
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "setVariable", variable: expect.objectContaining({ id: "V:brand" }) }),
+      expect.objectContaining({ type: "setPaintStyle", style: expect.objectContaining({ id: "S:brand-fill" }) }),
+    ]));
+
+    style.paints = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }];
+    expect(style.boundVariables).toBeUndefined();
+    expect(style.paints[0]).not.toHaveProperty("boundVariables");
+    await session.commitAsync();
+    expect(transport.currentProjection().paintStyles?.find((candidate) => candidate.id === style.id)?.variableBindings).toBeUndefined();
+  });
+
   it("keeps deprecated synchronous reads behind full-document access", () => {
     const session = new RuntimeSession({ sessionId: "paint-styles-dynamic", projection, transport: new ReadOnlyTransport(), documentAccess: "dynamic-page", scheduleMicrotask: () => {} });
     expect(isRuntimeError(capture(() => session.getLocalPaintStyles()), "PAGE_NOT_LOADED")).toBe(true);
@@ -313,6 +391,7 @@ class StyleTransport implements RuntimeTransactionTransport {
     this.submitted.push(transaction);
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
     const paintStyles = new Map((this.projection.paintStyles ?? []).map((style) => [style.id, structuredClone(style)]));
+    const variables = new Map((this.projection.variables ?? []).map((variable) => [variable.id, structuredClone(variable)]));
     for (const operation of transaction.operations) {
       if (operation.type === "registerPaintStyle") {
         paintStyles.set(operation.style.id, structuredClone(operation.style));
@@ -326,11 +405,19 @@ class StyleTransport implements RuntimeTransactionTransport {
         paintStyles.delete(operation.id);
         continue;
       }
+      if (operation.type === "setVariable" || operation.type === "registerVariable") {
+        variables.set(operation.variable.id, structuredClone(operation.variable));
+        continue;
+      }
+      if (operation.type === "deleteVariable") {
+        variables.delete(operation.id);
+        continue;
+      }
       if (operation.type !== "update") continue;
       const node = nodes.get(operation.nodeId);
       if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
     }
-    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], paintStyles: [...paintStyles.values()] };
+    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], paintStyles: [...paintStyles.values()], variables: [...variables.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
 }

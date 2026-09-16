@@ -941,6 +941,20 @@ pub struct PaintStyleResource {
     pub documentation_links: Vec<String>,
     pub remote: bool,
     pub paints: PaintStack,
+    pub variable_bindings: Vec<PaintStyleVariableBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaintStyleVariableBinding {
+    pub paint_index: u32,
+    pub stop_index: Option<u32>,
+    pub variable_id: String,
+}
+
+impl PaintStyleVariableBinding {
+    pub fn target_key(&self) -> (u32, Option<u32>) {
+        (self.paint_index, self.stop_index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2701,6 +2715,14 @@ impl Document {
         {
             return Err(CommandError::InvalidVariable);
         }
+        if self.paint_styles.values().any(|style| {
+            style
+                .variable_bindings
+                .iter()
+                .any(|binding| binding.variable_id == id)
+        }) {
+            return Err(CommandError::InvalidVariable);
+        }
         self.variables.remove(id);
         self.variable_catalog_bytes = self
             .variable_catalog_bytes
@@ -2803,6 +2825,14 @@ impl Document {
                 .variable_bindings
                 .values()
                 .any(|value| removed_ids.contains(value.as_str()))
+        }) {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        if self.paint_styles.values().any(|style| {
+            style
+                .variable_bindings
+                .iter()
+                .any(|binding| removed_ids.contains(binding.variable_id.as_str()))
         }) {
             return Err(CommandError::InvalidVariableCollection);
         }
@@ -2936,6 +2966,7 @@ impl Document {
         if !valid_identity
             || !style.paints.is_valid()
             || !valid_assets
+            || !self.valid_paint_style_variable_bindings(&style)
             || bytes > MAX_PAINT_STYLE_RESOURCE_BYTES
             || self.paint_styles.len() >= MAX_PAINT_STYLE_RESOURCES
             || self.paint_style_bytes.saturating_add(bytes) > MAX_PAINT_STYLE_CATALOG_BYTES
@@ -8521,6 +8552,13 @@ impl PaintStyleResource {
                 .iter()
                 .map(String::len)
                 .sum::<usize>()
+            + self
+                .variable_bindings
+                .iter()
+                .map(|binding| {
+                    std::mem::size_of::<PaintStyleVariableBinding>() + binding.variable_id.len()
+                })
+                .sum::<usize>()
             + self.paints.estimated_bytes()
     }
 }
@@ -8549,6 +8587,36 @@ impl Document {
                 self.variables
                     .get(id)
                     .is_some_and(|variable| variable.resolved_type == expected)
+            })
+    }
+
+    fn valid_paint_style_variable_bindings(&self, style: &PaintStyleResource) -> bool {
+        style.variable_bindings.len() <= 16 * color::MAX_GRADIENT_STOPS
+            && style
+                .variable_bindings
+                .windows(2)
+                .all(|pair| pair[0].target_key() < pair[1].target_key())
+            && style.variable_bindings.iter().all(|binding| {
+                let Some(layer) = style.paints.layers.get(binding.paint_index as usize) else {
+                    return false;
+                };
+                let target_exists = match (&layer.paint, binding.stop_index) {
+                    (PaintLayerKind::Solid(_), None) => true,
+                    (PaintLayerKind::LinearGradient(gradient), Some(index)) => {
+                        gradient.stops.get(index as usize).is_some()
+                    }
+                    (PaintLayerKind::Gradient(gradient), Some(index)) => {
+                        gradient.stops.get(index as usize).is_some()
+                    }
+                    _ => false,
+                };
+                target_exists
+                    && self
+                        .variables
+                        .get(&binding.variable_id)
+                        .is_some_and(|variable| {
+                            variable.resolved_type == VariableResolvedType::Color
+                        })
             })
     }
 }
@@ -9302,6 +9370,21 @@ fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource)
     hash_text(hasher, &resource.description);
     hasher.update([u8::from(resource.remote)]);
     hash_versioned_paint_stack(hasher, &resource.paints);
+    if !resource.variable_bindings.is_empty() {
+        hasher.update(b"makefigma/editor-core/paint-style-variable-bindings-v1");
+        hash_len(hasher, resource.variable_bindings.len());
+        for binding in &resource.variable_bindings {
+            hasher.update(binding.paint_index.to_be_bytes());
+            match binding.stop_index {
+                Some(index) => {
+                    hasher.update([1]);
+                    hasher.update(index.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+            hash_text(hasher, &binding.variable_id);
+        }
+    }
     hash_style_publishable_metadata(
         hasher,
         &resource.description_markdown,
@@ -11749,6 +11832,7 @@ mod tests {
             documentation_links: Vec::new(),
             remote: false,
             paints: PaintStack::default(),
+            variable_bindings: Vec::new(),
         }
     }
 
@@ -23549,6 +23633,112 @@ mod tests {
         assert_eq!(
             document.seed_text_style(missing),
             Err(CommandError::InvalidTextStyle)
+        );
+    }
+
+    #[test]
+    fn paint_style_variable_bindings_are_typed_ordered_and_protect_variables() {
+        let mut document = Document::with_id(DocumentId(922));
+        let collection = VariableCollectionResource {
+            id: "VC:colors".into(),
+            key: String::new(),
+            name: "Colors".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let color = VariableResource {
+            id: "V:brand".into(),
+            key: String::new(),
+            name: "Brand".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Color,
+            values_by_mode: [(
+                "default".into(),
+                VariableValue::Color(Color::from_srgb_u8([255, 0, 0], 255)),
+            )]
+            .into(),
+            scopes: vec!["ALL_FILLS".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        document.seed_variable(color.clone()).unwrap();
+
+        let baseline = document.canonical_hash();
+        let mut style = paint_style_resource("S:brand");
+        style.paints.layers.push(color::PaintLayer {
+            paint: PaintLayerKind::Solid(Color::from_srgb_u8([255, 0, 0], 255)),
+            visible: true,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+        });
+        style.variable_bindings.push(PaintStyleVariableBinding {
+            paint_index: 0,
+            stop_index: None,
+            variable_id: color.id.clone(),
+        });
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::RegisterPaintStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let bound_hash = document.canonical_hash();
+        assert_ne!(bound_hash, baseline);
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), bound_hash);
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariable {
+                        id: color.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariable)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariableCollection {
+                        id: collection.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariableCollection)
+        );
+
+        let mut invalid_target = paint_style_resource("S:invalid-target");
+        invalid_target
+            .variable_bindings
+            .push(PaintStyleVariableBinding {
+                paint_index: 0,
+                stop_index: None,
+                variable_id: color.id,
+            });
+        assert_eq!(
+            document.seed_paint_style(invalid_target),
+            Err(CommandError::InvalidPaintStyle)
         );
     }
 

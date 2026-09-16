@@ -9,13 +9,14 @@ use editor_core::{
     FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
     InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
     Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment, can_parent_contain_child,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -78,9 +79,10 @@ pub const STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION: u32 = 50;
 pub const STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 51;
 pub const TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 52;
 pub const TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 53;
+pub const PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 54;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
 pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
+    PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -114,6 +116,13 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && document
+            .paint_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && document
             .text_styles()
@@ -698,6 +707,14 @@ pub fn document_from_snapshot_with_engine_semantics(
     }
     if declared_engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    if declared_engine_semantics_version < PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .paint_styles
+            .iter()
+            .any(|style| !style.variable_bindings.is_empty())
     {
         return Err(SnapshotError::Invalid);
     }
@@ -2558,12 +2575,36 @@ fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyl
             .iter()
             .map(|uri| v1::DocumentationLink { uri: uri.clone() })
             .collect(),
+        variable_bindings: resource
+            .variable_bindings
+            .iter()
+            .map(|binding| v1::PaintStyleVariableBinding {
+                paint_index: binding.paint_index,
+                stop_index: binding.stop_index,
+                variable_id: binding.variable_id.clone(),
+            })
+            .collect(),
     }
 }
 
 fn paint_style_resource_from_proto(
     resource: v1::PaintStyleResource,
 ) -> Result<PaintStyleResource, SnapshotError> {
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| PaintStyleVariableBinding {
+            paint_index: binding.paint_index,
+            stop_index: binding.stop_index,
+            variable_id: binding.variable_id,
+        })
+        .collect::<Vec<_>>();
+    if !variable_bindings
+        .windows(2)
+        .all(|pair| pair[0].target_key() < pair[1].target_key())
+    {
+        return Err(SnapshotError::Invalid);
+    }
     Ok(PaintStyleResource {
         id: resource.id,
         key: resource.key,
@@ -2577,6 +2618,7 @@ fn paint_style_resource_from_proto(
             .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(SnapshotError::Invalid)?)?,
+        variable_bindings,
     })
 }
 
@@ -6369,6 +6411,7 @@ mod tests {
             documentation_links: Vec::new(),
             remote: true,
             paints: PaintStack::default(),
+            variable_bindings: Vec::new(),
         };
         document.seed_paint_style(style.clone()).unwrap();
         assert_eq!(
@@ -6395,6 +6438,112 @@ mod tests {
                 173_u128.to_be_bytes(),
                 hash,
                 PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut bound_document = Document::with_id(DocumentId(179));
+        bound_document
+            .seed_variable_collection(VariableCollectionResource {
+                id: "VC:colors".into(),
+                key: String::new(),
+                name: "Colors".into(),
+                remote: false,
+                hidden_from_publishing: false,
+                modes: vec![VariableMode {
+                    id: "default".into(),
+                    name: "Default".into(),
+                }],
+                default_mode_id: "default".into(),
+            })
+            .unwrap();
+        bound_document
+            .seed_variable(VariableResource {
+                id: "V:brand".into(),
+                key: String::new(),
+                name: "Brand".into(),
+                description: String::new(),
+                remote: false,
+                hidden_from_publishing: false,
+                collection_id: "VC:colors".into(),
+                resolved_type: VariableResolvedType::Color,
+                values_by_mode: [(
+                    "default".into(),
+                    VariableValue::Color(Color::from_srgb_u8([255, 0, 0], 255)),
+                )]
+                .into(),
+                scopes: vec!["ALL_FILLS".into()],
+                code_syntax: BTreeMap::new(),
+            })
+            .unwrap();
+        let mut bound_style = style;
+        bound_style.id = "S:bound-paint".into();
+        bound_style.paints.layers.push(PaintLayer {
+            paint: PaintLayerKind::Solid(Color::from_srgb_u8([255, 0, 0], 255)),
+            visible: true,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+        });
+        bound_style
+            .variable_bindings
+            .push(PaintStyleVariableBinding {
+                paint_index: 0,
+                stop_index: None,
+                variable_id: "V:brand".into(),
+            });
+        bound_document
+            .seed_paint_style(bound_style.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &bound_document,
+                PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bound_hash = bound_document.canonical_hash();
+        let bound_snapshot = snapshot_from_document(
+            &bound_document,
+            PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let bound_restored = document_from_snapshot_with_engine_semantics(
+            &bound_snapshot,
+            179_u128.to_be_bytes(),
+            bound_hash,
+            PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            bound_restored.paint_style("S:bound-paint"),
+            Some(&bound_style)
+        );
+        let mut bound_mislabeled = v1::DocumentSnapshot::decode(bound_snapshot.as_slice()).unwrap();
+        bound_mislabeled.engine_semantics_version =
+            PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &bound_mislabeled.encode_to_vec(),
+                179_u128.to_be_bytes(),
+                bound_hash,
+                PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+        let mut duplicate = v1::DocumentSnapshot::decode(bound_snapshot.as_slice()).unwrap();
+        duplicate.paint_styles[0]
+            .variable_bindings
+            .push(v1::PaintStyleVariableBinding {
+                paint_index: 0,
+                stop_index: None,
+                variable_id: "V:brand".into(),
+            });
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &duplicate.encode_to_vec(),
+                179_u128.to_be_bytes(),
+                bound_hash,
+                PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );
@@ -6447,6 +6596,7 @@ mod tests {
             documentation_links: vec!["https://example.com/styles/brand".into()],
             remote: false,
             paints: PaintStack::default(),
+            variable_bindings: Vec::new(),
         };
         document.seed_text_style(text_style.clone()).unwrap();
         document.seed_paint_style(paint_style.clone()).unwrap();

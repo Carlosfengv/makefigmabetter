@@ -49,7 +49,7 @@ import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
 import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
 import { RuntimeTextStyle, textStyleVariableValuePatch } from "./runtime-text-style";
-import { RuntimePaintStyle } from "./runtime-paint-style";
+import { RuntimePaintStyle, materializePaintStyleVariableValues } from "./runtime-paint-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
 import type { RuntimeWorkerViewState } from "./runtime-worker-bridge";
@@ -414,7 +414,7 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   setVariable(variable: DocumentVariableResource): void {
     const variableOverrides = new Map([[variable.id, variable]]);
-    const styleOperations = this.textStyleVariableOperations(variableOverrides);
+    const styleOperations = this.styleVariableOperations(variableOverrides);
     const operations = this.componentPropertyVariableOperations(variableOverrides);
     this.enqueueOperations([{ type: "setVariable", variable }, ...styleOperations, ...operations]);
   }
@@ -425,6 +425,7 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   variableIsBound(id: string): boolean {
     return this.projectionStore.listTextStyles().some((style) => Object.values(style.variableBindings ?? {}).includes(id))
+      || this.projectionStore.listPaintStyles().some((style) => style.variableBindings?.some((binding) => binding.variableId === id))
       || this.projectionStore.listLiveNodes().some((node) => {
       const definitions = node.type === "COMPONENT"
         ? (node.componentMetadata as DocumentComponentMetadata | undefined)?.componentPropertyDefinitions
@@ -443,7 +444,7 @@ export class RuntimeSession implements RuntimeContainerHost {
   setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
     const variableOverrides = new Map(variables.map((variable) => [variable.id, variable]));
     const collectionOverrides = new Map([[collection.id, collection]]);
-    const styleOperations = this.textStyleVariableOperations(variableOverrides, collectionOverrides);
+    const styleOperations = this.styleVariableOperations(variableOverrides, collectionOverrides);
     const operations = this.componentPropertyVariableOperations(variableOverrides, collectionOverrides);
     this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...styleOperations, ...operations]);
   }
@@ -608,6 +609,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       setPaintStyle: (style: DocumentPaintStyleResource): void => this.setPaintStyle(style),
       deletePaintStyle: (styleId: string): void => this.deletePaintStyle(styleId),
       hasImageHash: (hash: string): boolean => this.hasImageHash(hash),
+      variableResource: (variableId: string) => this.variableResource(variableId),
+      resolveVariableValue: (variableId: string) => this.resolveVariableValue(variableId),
       consumersForPaintStyle: (styleId: string) => Object.freeze(this.projectionStore
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node))
@@ -3674,15 +3677,18 @@ export class RuntimeSession implements RuntimeContainerHost {
     return operations;
   }
 
-  private textStyleVariableOperations(
+  private styleVariableOperations(
     variableOverrides: ReadonlyMap<string, DocumentVariableResource>,
     collectionOverrides: ReadonlyMap<string, DocumentVariableCollectionResource> = new Map(),
   ): PendingProjectionOperation[] {
     const styles = this.projectionStore
       .listTextStyles()
       .filter((style) => Object.keys(style.variableBindings ?? {}).length > 0);
-    if (styles.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
-    return styles.flatMap((style) => {
+    const paintStyles = this.projectionStore
+      .listPaintStyles()
+      .filter((style) => (style.variableBindings?.length ?? 0) > 0);
+    if (styles.length + paintStyles.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
+    const operations: PendingProjectionOperation[] = styles.flatMap((style) => {
       let next = structuredClone(style);
       for (const [field, variableId] of Object.entries(style.variableBindings ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
         const resolved = this.resolveVariableValueFromResources(
@@ -3709,6 +3715,17 @@ export class RuntimeSession implements RuntimeContainerHost {
         ? []
         : [{ type: "setTextStyle" as const, style: next }];
     });
+    for (const style of paintStyles) {
+      const next = materializePaintStyleVariableValues(style, (variableId) => this.resolveVariableValueFromResources(
+        variableId,
+        undefined,
+        undefined,
+        variableOverrides,
+        collectionOverrides,
+      ));
+      if (JSON.stringify(next) !== JSON.stringify(style)) operations.push({ type: "setPaintStyle", style: next });
+    }
+    return operations;
   }
 
   private componentPropertyVariableOperations(

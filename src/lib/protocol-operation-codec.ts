@@ -296,6 +296,9 @@ function paintStyleResourceProto(resource: DocumentPaintStyleResource) {
     documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
     remote: resource.remote,
     paints: versionedPaintStack(resource.paints),
+    variableBindings: [...(resource.variableBindings ?? [])]
+      .sort((left, right) => left.paintIndex - right.paintIndex || (left.stopIndex ?? -1) - (right.stopIndex ?? -1))
+      .map((binding) => ({ ...binding })),
   };
 }
 

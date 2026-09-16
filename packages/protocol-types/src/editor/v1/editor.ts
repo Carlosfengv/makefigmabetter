@@ -1021,6 +1021,13 @@ export interface PaintStyleResource {
   paints?: PaintStack | undefined;
   descriptionMarkdown: string;
   documentationLinks: DocumentationLink[];
+  variableBindings: PaintStyleVariableBinding[];
+}
+
+export interface PaintStyleVariableBinding {
+  paintIndex: number;
+  stopIndex?: number | undefined;
+  variableId: string;
 }
 
 export interface VariableMode {
@@ -6255,6 +6262,7 @@ function createBasePaintStyleResource(): PaintStyleResource {
     paints: undefined,
     descriptionMarkdown: "",
     documentationLinks: [],
+    variableBindings: [],
   };
 }
 
@@ -6283,6 +6291,9 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
     }
     for (const v of message.documentationLinks) {
       DocumentationLink.encode(v!, writer.uint32(66).fork()).join();
+    }
+    for (const v of message.variableBindings) {
+      PaintStyleVariableBinding.encode(v!, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -6358,6 +6369,14 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
           message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.variableBindings.push(PaintStyleVariableBinding.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6382,6 +6401,77 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
       : undefined;
     message.descriptionMarkdown = object.descriptionMarkdown ?? "";
     message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
+    message.variableBindings = object.variableBindings?.map((e) => PaintStyleVariableBinding.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBasePaintStyleVariableBinding(): PaintStyleVariableBinding {
+  return { paintIndex: 0, stopIndex: undefined, variableId: "" };
+}
+
+export const PaintStyleVariableBinding: MessageFns<PaintStyleVariableBinding> = {
+  encode(message: PaintStyleVariableBinding, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.paintIndex !== 0) {
+      writer.uint32(8).uint32(message.paintIndex);
+    }
+    if (message.stopIndex !== undefined) {
+      writer.uint32(16).uint32(message.stopIndex);
+    }
+    if (message.variableId !== "") {
+      writer.uint32(26).string(message.variableId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PaintStyleVariableBinding {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePaintStyleVariableBinding();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.paintIndex = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.stopIndex = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.variableId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PaintStyleVariableBinding>, I>>(base?: I): PaintStyleVariableBinding {
+    return PaintStyleVariableBinding.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PaintStyleVariableBinding>, I>>(object: I): PaintStyleVariableBinding {
+    const message = createBasePaintStyleVariableBinding();
+    message.paintIndex = object.paintIndex ?? 0;
+    message.stopIndex = object.stopIndex ?? undefined;
+    message.variableId = object.variableId ?? "";
     return message;
   },
 };

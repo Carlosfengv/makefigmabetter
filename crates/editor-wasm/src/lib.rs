@@ -10,13 +10,14 @@ use editor_core::{
     FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
     LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
     OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, Transaction, TransactionId, VariableCollectionResource,
-    VariableMode, VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
-    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -935,7 +936,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=67).contains(&snapshot.schema_version)
+    if !(1..=68).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 68
+            && snapshot.paint_styles.as_ref().is_some_and(|styles| {
+                styles
+                    .iter()
+                    .any(|style| !style.variable_bindings.is_empty())
+            }))
         || (snapshot.schema_version < 67
             && snapshot.text_styles.as_ref().is_some_and(|styles| {
                 styles
@@ -1790,6 +1797,17 @@ struct ProjectionPaintStyleResource {
     #[serde(default)]
     remote: bool,
     paints: ProjectionPaintStack,
+    #[serde(default)]
+    variable_bindings: Vec<ProjectionPaintStyleVariableBinding>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionPaintStyleVariableBinding {
+    paint_index: u32,
+    #[serde(default)]
+    stop_index: Option<u32>,
+    variable_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2298,6 +2316,12 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self
+            .document
+            .paint_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+        {
+            68
+        } else if self
             .document
             .text_styles()
             .any(|style| !style.variable_bindings.is_empty())
@@ -6208,12 +6232,36 @@ fn projection_paint_style_resource(resource: &PaintStyleResource) -> ProjectionP
             .collect(),
         remote: resource.remote,
         paints: projection_paint_stack(&resource.paints),
+        variable_bindings: resource
+            .variable_bindings
+            .iter()
+            .map(|binding| ProjectionPaintStyleVariableBinding {
+                paint_index: binding.paint_index,
+                stop_index: binding.stop_index,
+                variable_id: binding.variable_id.clone(),
+            })
+            .collect(),
     }
 }
 
 fn paint_style_resource_from_projection(
     resource: &ProjectionPaintStyleResource,
 ) -> Result<PaintStyleResource, JsValue> {
+    let variable_bindings = resource
+        .variable_bindings
+        .iter()
+        .map(|binding| PaintStyleVariableBinding {
+            paint_index: binding.paint_index,
+            stop_index: binding.stop_index,
+            variable_id: binding.variable_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !variable_bindings
+        .windows(2)
+        .all(|pair| pair[0].target_key() < pair[1].target_key())
+    {
+        return Err(JsValue::from_str("INVALID_PAINT_STYLE_RESOURCE"));
+    }
     Ok(PaintStyleResource {
         id: resource.id.clone(),
         key: resource.key.clone(),
@@ -6227,6 +6275,7 @@ fn paint_style_resource_from_projection(
             .collect(),
         remote: resource.remote,
         paints: paint_stack_from_projection(&resource.paints)?,
+        variable_bindings,
     })
 }
 
@@ -11160,6 +11209,74 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 66;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v68_round_trips_paint_style_variable_bindings_and_v67_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([
+            {
+                "type": "registerVariableCollection",
+                "collection": {
+                    "id": "VC:colors", "key": "", "name": "Colors", "remote": false,
+                    "hiddenFromPublishing": false,
+                    "modes": [{ "modeId": "default", "name": "Default" }],
+                    "defaultModeId": "default"
+                }
+            },
+            {
+                "type": "registerVariable",
+                "variable": {
+                    "id": "V:brand", "key": "", "name": "Brand", "description": "",
+                    "remote": false, "hiddenFromPublishing": false, "collectionId": "VC:colors",
+                    "resolvedType": "COLOR",
+                    "valuesByMode": { "default": { "space": "srgb", "components": [1.0, 0.0, 0.0], "alpha": 1.0 } },
+                    "scopes": ["ALL_FILLS"]
+                }
+            },
+            {
+                "type": "registerPaintStyle",
+                "style": {
+                    "id": "S:bound-paint", "key": "", "name": "Bound paint", "description": "", "remote": false,
+                    "paints": { "layers": [{
+                        "visible": true, "opacity": 1.0, "blendMode": "normal",
+                        "paint": { "css": "#ff0000", "color": { "space": "srgb", "components": [1.0, 0.0, 0.0], "alpha": 1.0 } }
+                    }] },
+                    "variableBindings": [{ "paintIndex": 0, "variableId": "V:brand" }]
+                }
+            }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000068",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":68"));
+        assert!(snapshot.contains("\"variableBindings\":[{\"paintIndex\":0,\"stopIndex\":null,\"variableId\":\"V:brand\"}]"));
+        let hash = engine.canonical_hash();
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), hash);
+        assert_eq!(
+            restored
+                .document
+                .paint_style("S:bound-paint")
+                .unwrap()
+                .variable_bindings[0]
+                .variable_id,
+            "V:brand"
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 67;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

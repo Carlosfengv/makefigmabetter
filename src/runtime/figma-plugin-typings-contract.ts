@@ -31,6 +31,7 @@ export function assertFigmaPluginTypingsContract(
     createdPaintStyle.name = createdPaintStyle.name;
     createdPaintStyle.description = createdPaintStyle.description;
     createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
+    void createdPaintStyle.boundVariables?.paints;
     createdTextStyle.remove();
     createdPaintStyle.remove();
     const style = figma.getLocalTextStyles()[0];

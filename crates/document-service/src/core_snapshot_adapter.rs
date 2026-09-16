@@ -8,13 +8,13 @@ use editor_core::{
     Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
     HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
     LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
-    PaintStyleResource, ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape,
-    PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
-    TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
-    TextDecorationThickness, TextListType, TextProperties, TextStyleLetterSpacingUnit,
-    TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VariableCollectionResource,
-    VariableMode, VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
-    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -477,6 +477,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && document
+            .paint_styles()
+            .any(|style| !style.variable_bindings.is_empty())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && document
@@ -1074,6 +1082,15 @@ pub fn document_from_snapshot(
     if declared_engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .paint_styles
+            .iter()
+            .any(|style| !style.variable_bindings.is_empty())
     {
         return Err(ServiceError::ReducerRejected);
     }
@@ -2818,12 +2835,36 @@ fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyl
             .iter()
             .map(|uri| v1::DocumentationLink { uri: uri.clone() })
             .collect(),
+        variable_bindings: resource
+            .variable_bindings
+            .iter()
+            .map(|binding| v1::PaintStyleVariableBinding {
+                paint_index: binding.paint_index,
+                stop_index: binding.stop_index,
+                variable_id: binding.variable_id.clone(),
+            })
+            .collect(),
     }
 }
 
 fn paint_style_resource_from_proto(
     resource: v1::PaintStyleResource,
 ) -> Result<PaintStyleResource, ServiceError> {
+    let variable_bindings = resource
+        .variable_bindings
+        .into_iter()
+        .map(|binding| PaintStyleVariableBinding {
+            paint_index: binding.paint_index,
+            stop_index: binding.stop_index,
+            variable_id: binding.variable_id,
+        })
+        .collect::<Vec<_>>();
+    if !variable_bindings
+        .windows(2)
+        .all(|pair| pair[0].target_key() < pair[1].target_key())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     Ok(PaintStyleResource {
         id: resource.id,
         key: resource.key,
@@ -2837,6 +2878,7 @@ fn paint_style_resource_from_proto(
             .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::ReducerRejected)?)?,
+        variable_bindings,
     })
 }
 

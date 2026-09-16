@@ -74,6 +74,7 @@ describe("protocol operation codec", () => {
         documentationLinks: [{ uri: "https://example.com/styles/brand" }],
         remote: true,
         paints: { layers: [{ visible: true, opacity: .75, blendMode: "multiply", paint: { css: "#ff0000ff", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
+        variableBindings: [{ paintIndex: 0, variableId: "V:brand" }],
       },
     }]));
 
@@ -87,6 +88,7 @@ describe("protocol operation codec", () => {
       documentationLinks: [{ uri: "https://example.com/styles/brand" }],
       remote: true,
       paints: { layers: [{ visible: true, opacity: .75, blendMode: BlendMode.BLEND_MODE_MULTIPLY, solid: { space: ColorSpace.COLOR_SPACE_SRGB, red: 1, green: 0, blue: 0, alpha: 1 } }] },
+      variableBindings: [{ paintIndex: 0, stopIndex: undefined, variableId: "V:brand" }],
     });
   });
 

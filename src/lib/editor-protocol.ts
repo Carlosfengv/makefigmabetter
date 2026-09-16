@@ -385,6 +385,13 @@ export interface DocumentPaintStyleResource {
   documentationLinks: Array<{ uri: string }>;
   remote: boolean;
   paints: DocumentPaintStack;
+  variableBindings?: readonly DocumentPaintStyleVariableBinding[];
+}
+
+export interface DocumentPaintStyleVariableBinding {
+  paintIndex: number;
+  stopIndex?: number;
+  variableId: string;
 }
 
 export type DocumentVariableResolvedType = "BOOLEAN" | "COLOR" | "FLOAT" | "STRING";

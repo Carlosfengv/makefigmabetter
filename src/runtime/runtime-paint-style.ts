@@ -1,4 +1,5 @@
-import type { DocumentPaintStyleResource } from "../lib/editor-protocol";
+import type { DocumentColor, DocumentPaintStyleResource, DocumentPaintStyleVariableBinding, DocumentVariableResource, DocumentVariableValue } from "../lib/editor-protocol";
+import { colorToSrgbCss } from "../lib/color-rendering";
 import { documentPaintStackFromRuntime, runtimePaintsFromDocumentStack, type RuntimePaint } from "./runtime-paint";
 import type { RuntimeNodeProxy } from "./node-proxy";
 import { runtimeError } from "./runtime-errors";
@@ -9,6 +10,8 @@ export type RuntimePaintStyleHost = Readonly<{
   setPaintStyle(style: DocumentPaintStyleResource): void;
   deletePaintStyle(styleId: string): void;
   hasImageHash(hash: string): boolean;
+  variableResource(variableId: string): DocumentVariableResource | undefined;
+  resolveVariableValue(variableId: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResource["resolvedType"] }>;
   consumersForPaintStyle(styleId: string): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly string[] }>[];
   getPluginData(styleId: string, key: string): string;
   setPluginData(styleId: string, key: string, value: string): void;
@@ -53,11 +56,22 @@ export class RuntimePaintStyle {
   set documentationLinks(value: readonly { readonly uri: string }[]) {
     this.write({ documentationLinks: runtimeStyleDocumentationLinks(value) });
   }
-  get paints(): readonly RuntimePaint[] { return Object.freeze([...runtimePaintsFromDocumentStack(this.current().paints)]); }
+  get paints(): readonly RuntimePaint[] { return paintStyleRuntimePaints(this.current()); }
   set paints(value: readonly RuntimePaint[]) {
-    this.write({ paints: documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash)) });
+    this.write(paintStyleValueFromRuntimePaints(
+      value,
+      (hash) => this.host.hasImageHash(hash),
+      (id) => this.host.variableResource(id),
+      (id) => this.host.resolveVariableValue(id),
+    ));
   }
-  get boundVariables(): undefined { return undefined; }
+  get boundVariables(): Readonly<{ paints: readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[] }> | undefined {
+    const bindings = this.current().variableBindings ?? [];
+    if (!bindings.length) return undefined;
+    return Object.freeze({
+      paints: Object.freeze(bindings.map((binding) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id: binding.variableId }))),
+    });
+  }
 
   get consumers(): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly string[] }>[] {
     return this.host.consumersForPaintStyle(this.id);
@@ -97,4 +111,127 @@ export class RuntimePaintStyle {
     if (resource.remote) throw runtimeError("UNSUPPORTED_FEATURE");
     this.host.setPaintStyle({ ...structuredClone(resource), ...patch });
   }
+}
+
+export function paintStyleRuntimePaints(resource: DocumentPaintStyleResource): readonly RuntimePaint[] {
+  const byTarget = new Map((resource.variableBindings ?? []).map((binding) => [paintStyleBindingKey(binding), binding.variableId]));
+  return Object.freeze(runtimePaintsFromDocumentStack(resource.paints).map((paint, paintIndex) => {
+    const variableId = byTarget.get(`${paintIndex}`);
+    if (paint.type === "SOLID") {
+      if (!variableId) return structuredClone(paint);
+      return {
+        ...structuredClone(paint),
+        ...(resource.paints.layers[paintIndex] ? { opacity: resource.paints.layers[paintIndex]!.opacity } : {}),
+        boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: variableId }) }),
+      };
+    }
+    if ("gradientStops" in paint) {
+      return {
+        ...structuredClone(paint),
+        gradientStops: paint.gradientStops.map((stop, stopIndex) => {
+          const stopVariableId = byTarget.get(`${paintIndex}:${stopIndex}`);
+          return stopVariableId
+            ? { ...structuredClone(stop), boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: stopVariableId }) }) }
+            : structuredClone(stop);
+        }),
+      } as RuntimePaint;
+    }
+    return structuredClone(paint);
+  }));
+}
+
+export function paintStyleValueFromRuntimePaints(
+  value: readonly RuntimePaint[],
+  hasImageHash: (hash: string) => boolean,
+  variableResource: (variableId: string) => DocumentVariableResource | undefined,
+  resolveVariableValue: (variableId: string) => Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResource["resolvedType"] }>,
+): Pick<DocumentPaintStyleResource, "paints" | "variableBindings"> {
+  const variableBindings: DocumentPaintStyleVariableBinding[] = [];
+  const colors = new Map<string, DocumentColor>();
+  const unboundPaints = value.map((paint, paintIndex): RuntimePaint => {
+    const alias = paint.boundVariables?.color;
+    const { boundVariables: _boundVariables, ...base } = paint;
+    void _boundVariables;
+    if ("gradientStops" in paint) {
+      if (alias) throw runtimeError("UNSUPPORTED_FEATURE");
+      return {
+        ...base,
+        gradientStops: paint.gradientStops.map((stop, stopIndex) => {
+          const stopAlias = stop.boundVariables?.color;
+          const { boundVariables: _stopBoundVariables, ...stopBase } = stop;
+          void _stopBoundVariables;
+          if (!stopAlias) return stopBase;
+          const color = resolvedPaintStyleColor(stopAlias, variableResource, resolveVariableValue);
+          variableBindings.push({ paintIndex, stopIndex, variableId: stopAlias.id });
+          colors.set(`${paintIndex}:${stopIndex}`, color);
+          return stopBase;
+        }),
+      } as RuntimePaint;
+    }
+    if (!alias) return base as RuntimePaint;
+    if (paint.type !== "SOLID") throw runtimeError("UNSUPPORTED_FEATURE");
+    const color = resolvedPaintStyleColor(alias, variableResource, resolveVariableValue);
+    variableBindings.push({ paintIndex, variableId: alias.id });
+    colors.set(`${paintIndex}`, color);
+    return base as RuntimePaint;
+  });
+  const paints = documentPaintStackFromRuntime(unboundPaints, hasImageHash);
+  variableBindings.forEach((binding) => applyPaintStyleBindingColor(paints, binding, colors.get(paintStyleBindingKey(binding))!));
+  return {
+    paints,
+    variableBindings: variableBindings.length ? variableBindings : undefined,
+  };
+}
+
+export function materializePaintStyleVariableValues(
+  resource: DocumentPaintStyleResource,
+  resolveVariableValue: (variableId: string) => Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResource["resolvedType"] }>,
+): DocumentPaintStyleResource {
+  if (!resource.variableBindings?.length) return resource;
+  const paints = structuredClone(resource.paints);
+  resource.variableBindings.forEach((binding) => {
+    const resolved = resolveVariableValue(binding.variableId);
+    if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT");
+    applyPaintStyleBindingColor(paints, binding, resolved.value);
+  });
+  return { ...structuredClone(resource), paints };
+}
+
+function resolvedPaintStyleColor(
+  alias: Readonly<{ type: "VARIABLE_ALIAS"; id: string }>,
+  variableResource: (variableId: string) => DocumentVariableResource | undefined,
+  resolveVariableValue: (variableId: string) => Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResource["resolvedType"] }>,
+): DocumentColor {
+  if (alias.type !== "VARIABLE_ALIAS") throw runtimeError("INVALID_ARGUMENT");
+  const variable = variableResource(alias.id);
+  if (!variable || variable.resolvedType !== "COLOR") throw runtimeError("RESOURCE_UNAVAILABLE");
+  const resolved = resolveVariableValue(alias.id);
+  if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT");
+  return structuredClone(resolved.value);
+}
+
+function applyPaintStyleBindingColor(
+  paints: DocumentPaintStyleResource["paints"],
+  binding: DocumentPaintStyleVariableBinding,
+  color: DocumentColor,
+): void {
+  const layer = paints.layers[binding.paintIndex];
+  if (!layer?.paint) throw runtimeError("INTERNAL_ERROR");
+  if (binding.stopIndex === undefined) {
+    if (!layer.paint.color || layer.paint.gradient || layer.paint.gradientPaint) throw runtimeError("INTERNAL_ERROR");
+    layer.paint = { css: colorToSrgbCss(color), color: structuredClone(color) };
+    return;
+  }
+  const stops = layer.paint.gradient?.stops ?? layer.paint.gradientPaint?.stops;
+  const stop = stops?.[binding.stopIndex];
+  if (!stop) throw runtimeError("INTERNAL_ERROR");
+  stop.color = structuredClone(color);
+}
+
+function paintStyleBindingKey(binding: Pick<DocumentPaintStyleVariableBinding, "paintIndex" | "stopIndex">): string {
+  return binding.stopIndex === undefined ? `${binding.paintIndex}` : `${binding.paintIndex}:${binding.stopIndex}`;
+}
+
+function isDocumentVariableColor(value: DocumentVariableValue): value is DocumentColor {
+  return Boolean(value && typeof value === "object" && "space" in value && "components" in value && Array.isArray(value.components));
 }

@@ -20,6 +20,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
     createdPaintStyle.name = createdPaintStyle.name;
     createdPaintStyle.description = createdPaintStyle.description;
     createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
+    void createdPaintStyle.boundVariables?.paints;
     createdTextStyle.remove();
     createdPaintStyle.remove();
     const style = runtime.getLocalTextStyles()[0];

@@ -362,7 +362,8 @@ function validateResourceOperations(
     } else if (operation.type === "registerPaintStyle") {
       const value = operation.style;
       if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
-        || !value.paints || !Array.isArray(value.paints.layers)) {
+        || !value.paints || !Array.isArray(value.paints.layers)
+        || !validPaintStyleVariableBindings(value, variables)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       paintStyles.set(value.id, value);
@@ -370,7 +371,8 @@ function validateResourceOperations(
       const value = operation.style;
       const before = paintStyles.get(value.id);
       if (!before || before.remote || !validPendingStyleIdentity(value) || value.remote || before.key !== value.key
-        || !value.paints || !Array.isArray(value.paints.layers)) {
+        || !value.paints || !Array.isArray(value.paints.layers)
+        || !validPaintStyleVariableBindings(value, variables)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       paintStyles.set(value.id, value);
@@ -403,6 +405,7 @@ function validateResourceOperations(
     } else if (operation.type === "deleteVariable") {
       if (variables.get(operation.id)?.remote !== false
         || [...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).includes(operation.id))
+        || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => binding.variableId === operation.id))
         || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
@@ -422,6 +425,7 @@ function validateResourceOperations(
       if (!collection || collection.remote) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       const removed = new Set([...variables.values()].filter((value) => value.collectionId === operation.id).map((value) => value.id));
       if ([...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).some((id) => removed.has(id)))
+        || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => removed.has(binding.variableId)))
         || [...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       removed.forEach((id) => variables.delete(id));
       collections.delete(operation.id);
@@ -460,6 +464,28 @@ function validTextStyleVariableBindings(
         ? "FLOAT"
         : undefined;
     return expected !== undefined && variables.get(id)?.resolvedType === expected;
+  });
+}
+
+function validPaintStyleVariableBindings(
+  value: DocumentPaintStyleResource,
+  variables: ReadonlyMap<string, DocumentVariableResource>,
+): boolean {
+  const bindings = value.variableBindings ?? [];
+  if (bindings.length > 16 * 16) return false;
+  return bindings.every((binding, index) => {
+    if (!Number.isInteger(binding.paintIndex) || binding.paintIndex < 0
+      || (binding.stopIndex !== undefined && (!Number.isInteger(binding.stopIndex) || binding.stopIndex < 0))
+      || variables.get(binding.variableId)?.resolvedType !== "COLOR") return false;
+    if (index > 0) {
+      const previous = bindings[index - 1]!;
+      if (previous.paintIndex > binding.paintIndex
+        || (previous.paintIndex === binding.paintIndex && (previous.stopIndex ?? -1) >= (binding.stopIndex ?? -1))) return false;
+    }
+    const layer = value.paints.layers[binding.paintIndex];
+    if (!layer?.paint) return false;
+    if (binding.stopIndex === undefined) return Boolean(layer.paint.color && !layer.paint.gradient && !layer.paint.gradientPaint);
+    return Boolean((layer.paint.gradient?.stops ?? layer.paint.gradientPaint?.stops)?.[binding.stopIndex]);
   });
 }
 
