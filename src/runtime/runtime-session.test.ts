@@ -28,12 +28,17 @@ describe("M1 RuntimeSession", () => {
     expect(frame.getPluginData("missing")).toBe("");
     frame.setPluginData("z-key", "last");
     frame.setPluginData("a-key", "first 😀");
+    frame.setSharedPluginData("com.example.tokens", "accent", "#ff0066");
+    frame.setSharedPluginData("com.example.tokens", "background", "#ffffff");
     expect(frame.getPluginData("a-key")).toBe("first 😀");
     expect(frame.getPluginDataKeys()).toEqual(["a-key", "z-key"]);
+    expect(frame.getSharedPluginData("com.example.tokens", "accent")).toBe("#ff0066");
+    expect(frame.getSharedPluginDataKeys("com.example.tokens")).toEqual(["accent", "background"]);
     const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
     const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
     expect(isRuntimeError(captureError(() => frame.setPluginData("", "invalid")), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => frame.setPluginData("large", "x".repeat(64 * 1024 + 1))), "RESOURCE_LIMIT")).toBe(true);
+    expect(isRuntimeError(captureError(() => frame.setSharedPluginData("bad/namespace", "key", "invalid")), "INVALID_ARGUMENT")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
 
     frame.setPluginData("z-key", "");
@@ -45,10 +50,13 @@ describe("M1 RuntimeSession", () => {
     const otherFrame = (await other.getNodeByIdAsync("frame"))!;
     expect(otherFrame.getPluginData("a-key")).toBe("");
     expect(otherFrame.getPluginDataKeys()).toEqual([]);
+    expect(otherFrame.getSharedPluginData("com.example.tokens", "accent")).toBe("#ff0066");
+    expect(otherFrame.getSharedPluginDataKeys("com.example.tokens")).toEqual(["accent", "background"]);
 
     const unscoped = new RuntimeSession({ sessionId: "plugin-data-none", projection: transport.currentProjection(), transport: new InMemoryTransport(transport.currentProjection()), scheduleMicrotask: () => {} });
     const unscopedFrame = (await unscoped.getNodeByIdAsync("frame"))!;
     expect(isRuntimeError(captureError(() => unscopedFrame.getPluginData("a-key")), "PERMISSION_DENIED")).toBe(true);
+    expect(unscopedFrame.getSharedPluginData("com.example.tokens", "background")).toBe("#ffffff");
   });
 
   it("projects Figma-shaped fill and stroke stacks before Ack and validates image hashes", async () => {

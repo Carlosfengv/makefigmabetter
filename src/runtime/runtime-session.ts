@@ -94,6 +94,7 @@ const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
   "componentMetadata", "componentSetMetadata", "instanceMetadata", "slotMetadata", "extensions",
 ]);
 const RUNTIME_PLUGIN_DATA_PREFIX = "figma.plugin-data.v1/";
+const RUNTIME_SHARED_PLUGIN_DATA_PREFIX = "figma.shared-plugin-data.v1/";
 const MAX_RUNTIME_PLUGIN_DATA_ENTRIES = 64;
 const MAX_RUNTIME_PLUGIN_DATA_BYTES = 64 * 1024;
 
@@ -2600,11 +2601,57 @@ export class RuntimeSession implements RuntimeContainerHost {
       .sort((left, right) => left.localeCompare(right));
   }
 
+  getSharedPluginData(nodeId: string, namespace: string, key: string): string {
+    const node = this.runtimeDataNode(nodeId);
+    const storageKey = `${this.runtimeSharedPluginDataPrefix(namespace)}${this.validRuntimePluginDataKey(key)}`;
+    const bytes = node.extensions && typeof node.extensions === "object"
+      ? (node.extensions as Record<string, unknown>)[storageKey]
+      : undefined;
+    return Array.isArray(bytes) && bytes.every(validRuntimeExtensionByte)
+      ? new TextDecoder().decode(Uint8Array.from(bytes))
+      : "";
+  }
+
+  setSharedPluginData(nodeId: string, namespace: string, key: string, value: string): void {
+    const node = this.runtimeDataNode(nodeId);
+    const prefix = this.runtimeSharedPluginDataPrefix(namespace);
+    const storageKey = `${prefix}${this.validRuntimePluginDataKey(key)}`;
+    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const encoded = [...new TextEncoder().encode(value)];
+    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+      ? structuredClone(node.extensions as Record<string, number[]>)
+      : {};
+    if (value) extensions[storageKey] = encoded;
+    else delete extensions[storageKey];
+    const entries = Object.entries(extensions).filter(([entryKey]) => entryKey.startsWith(prefix));
+    if (entries.some(([, bytes]) => !Array.isArray(bytes) || !bytes.every(validRuntimeExtensionByte))) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    if (entries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || entries.reduce((total, [, bytes]) => total + bytes.length, 0) > MAX_RUNTIME_PLUGIN_DATA_BYTES) {
+      throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    }
+    this.enqueueUpdate(nodeId, { extensions });
+  }
+
+  getSharedPluginDataKeys(nodeId: string, namespace: string): readonly string[] {
+    const node = this.runtimeDataNode(nodeId);
+    const prefix = this.runtimeSharedPluginDataPrefix(namespace);
+    return Object.keys(node.extensions ?? {})
+      .filter((entryKey) => entryKey.startsWith(prefix))
+      .map((entryKey) => entryKey.slice(prefix.length))
+      .filter(validRuntimePluginDataPart)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
   private runtimePluginDataNode(nodeId: string): RuntimeProjectionNode {
+    const node = this.runtimeDataNode(nodeId);
+    this.runtimePluginDataPrefix();
+    return node;
+  }
+
+  private runtimeDataNode(nodeId: string): RuntimeProjectionNode {
     this.assertOpen();
     const node = this.projectionStore.getNode(nodeId);
     if (!node || node.removed === true) throw runtimeError("NODE_REMOVED", { nodeId });
-    this.runtimePluginDataPrefix();
     return node;
   }
 
@@ -2614,8 +2661,17 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   private runtimePluginDataStorageKey(key: string): string {
+    return `${this.runtimePluginDataPrefix()}${this.validRuntimePluginDataKey(key)}`;
+  }
+
+  private runtimeSharedPluginDataPrefix(namespace: string): string {
+    if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
+    return `${RUNTIME_SHARED_PLUGIN_DATA_PREFIX}${namespace}/`;
+  }
+
+  private validRuntimePluginDataKey(key: string): string {
     if (!validRuntimePluginDataPart(key)) throw runtimeError("INVALID_ARGUMENT");
-    return `${this.runtimePluginDataPrefix()}${key}`;
+    return key;
   }
 
   cloneNode(nodeId: string): RuntimeNodeProxy {

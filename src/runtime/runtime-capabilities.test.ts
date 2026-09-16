@@ -33,7 +33,7 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("node.plugin-data-runtime")).toMatchObject({
       status: "partial",
       surface: "plugin",
-      property: "getPluginData|setPluginData|getPluginDataKeys",
+      property: "getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys",
       errorCode: "PERMISSION_DENIED",
     });
     expect(runtimeCapability("component.instance-properties-runtime")).toMatchObject({

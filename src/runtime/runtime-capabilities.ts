@@ -92,10 +92,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     editorTypes: RUNTIME_EDITOR_TYPES,
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
     nodeTypes: runtimeAllNodeTypes(),
-    property: "getPluginData|setPluginData|getPluginDataKeys",
+    property: "getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys",
     surface: "plugin",
     status: "partial",
-    limitation: "A RuntimeSession with an explicit validated pluginId reads, writes, lists and deletes only that plugin's node data in the Canonical figma.plugin-data.v1 extension namespace. Writes are immediate in PendingProjection and cross the ordinary atomic transaction fence; keys are sorted, UTF-8 values round-trip, empty values delete, and each plugin/node is bounded to 64 entries and 64 KiB. Unscoped sessions fail with PERMISSION_DENIED. Shared plugin data, relaunch data and style/document plugin-data methods remain staged.",
+    limitation: "A RuntimeSession with an explicit validated pluginId reads, writes, lists and deletes only that plugin's private node data in the Canonical figma.plugin-data.v1 extension namespace; unscoped private reads fail with PERMISSION_DENIED. SharedPluginData uses a separately validated public namespace and can round-trip across differently scoped or unscoped sessions. Both paths are immediate in PendingProjection and cross the ordinary atomic transaction fence; keys are sorted, UTF-8 values round-trip, empty values delete, and each private scope or shared namespace/node is bounded to 64 entries and 64 KiB. Relaunch data and style plugin-data methods remain staged.",
     errorCode: "PERMISSION_DENIED",
   },
   {

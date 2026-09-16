@@ -54,6 +54,9 @@ export function assertFigmaPluginTypingsContract(
   void rectangle.getPluginData("key");
   rectangle.setPluginData("key", "value");
   void rectangle.getPluginDataKeys();
+  void rectangle.getSharedPluginData("namespace", "key");
+  rectangle.setSharedPluginData("namespace", "key", "value");
+  void rectangle.getSharedPluginDataKeys("namespace");
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) {
     floatVariable.setVariableCodeSyntax("WEB", "--spacing");
