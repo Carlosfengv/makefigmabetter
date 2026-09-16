@@ -157,6 +157,8 @@ export enum LayoutMode {
   LAYOUT_MODE_NONE = 1,
   LAYOUT_MODE_HORIZONTAL = 2,
   LAYOUT_MODE_VERTICAL = 3,
+  /** LAYOUT_MODE_GRID - Presence requires engine semantics 56. */
+  LAYOUT_MODE_GRID = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -187,6 +189,17 @@ export enum WrapTrackAlignment {
   WRAP_TRACK_ALIGNMENT_UNSPECIFIED = 0,
   WRAP_TRACK_ALIGNMENT_AUTO = 1,
   WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2,
+  UNRECOGNIZED = -1,
+}
+
+/**
+ * W12-L's first Grid Auto Layout slice. HUG tracks, explicit child placement,
+ * spans and automatic row creation remain outside this versioned subset.
+ */
+export enum GridTrackType {
+  GRID_TRACK_TYPE_UNSPECIFIED = 0,
+  GRID_TRACK_TYPE_FLEX = 1,
+  GRID_TRACK_TYPE_FIXED = 2,
   UNRECOGNIZED = -1,
 }
 
@@ -517,6 +530,12 @@ export interface Constraints {
   vertical: ConstraintType;
 }
 
+export interface GridTrack {
+  type: GridTrackType;
+  /** FLEX uses fractional units; FIXED uses logical pixels. */
+  value: number;
+}
+
 export interface AutoLayout {
   mode: LayoutMode;
   paddingTop: number;
@@ -554,7 +573,14 @@ export interface AutoLayout {
    * Figma counterAxisAlignContent. Omission/default is AUTO; SPACE_BETWEEN is
    * valid only when wrap is true.
    */
-  wrapTrackAlignment?: WrapTrackAlignment | undefined;
+  wrapTrackAlignment?:
+    | WrapTrackAlignment
+    | undefined;
+  /** Grid fields require engine semantics 56. Non-GRID layouts must omit them. */
+  gridRows: GridTrack[];
+  gridColumns: GridTrack[];
+  gridRowGap?: number | undefined;
+  gridColumnGap?: number | undefined;
 }
 
 export interface Color {
@@ -2735,6 +2761,64 @@ export const Constraints: MessageFns<Constraints> = {
   },
 };
 
+function createBaseGridTrack(): GridTrack {
+  return { type: 0, value: 0 };
+}
+
+export const GridTrack: MessageFns<GridTrack> = {
+  encode(message: GridTrack, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.type !== 0) {
+      writer.uint32(8).int32(message.type);
+    }
+    if (message.value !== 0) {
+      writer.uint32(17).double(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GridTrack {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGridTrack();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.type = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.value = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GridTrack>, I>>(base?: I): GridTrack {
+    return GridTrack.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GridTrack>, I>>(object: I): GridTrack {
+    const message = createBaseGridTrack();
+    message.type = object.type ?? 0;
+    message.value = object.value ?? 0;
+    return message;
+  },
+};
+
 function createBaseAutoLayout(): AutoLayout {
   return {
     mode: 0,
@@ -2756,6 +2840,10 @@ function createBaseAutoLayout(): AutoLayout {
     alignSelf: undefined,
     trackSpacing: undefined,
     wrapTrackAlignment: undefined,
+    gridRows: [],
+    gridColumns: [],
+    gridRowGap: undefined,
+    gridColumnGap: undefined,
   };
 }
 
@@ -2817,6 +2905,18 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.wrapTrackAlignment !== undefined) {
       writer.uint32(152).int32(message.wrapTrackAlignment);
+    }
+    for (const v of message.gridRows) {
+      GridTrack.encode(v!, writer.uint32(162).fork()).join();
+    }
+    for (const v of message.gridColumns) {
+      GridTrack.encode(v!, writer.uint32(170).fork()).join();
+    }
+    if (message.gridRowGap !== undefined) {
+      writer.uint32(177).double(message.gridRowGap);
+    }
+    if (message.gridColumnGap !== undefined) {
+      writer.uint32(185).double(message.gridColumnGap);
     }
     return writer;
   },
@@ -2980,6 +3080,38 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.wrapTrackAlignment = reader.int32() as any;
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.gridRows.push(GridTrack.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 21: {
+          if (tag !== 170) {
+            break;
+          }
+
+          message.gridColumns.push(GridTrack.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 22: {
+          if (tag !== 177) {
+            break;
+          }
+
+          message.gridRowGap = reader.double();
+          continue;
+        }
+        case 23: {
+          if (tag !== 185) {
+            break;
+          }
+
+          message.gridColumnGap = reader.double();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3013,6 +3145,10 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.alignSelf = object.alignSelf ?? undefined;
     message.trackSpacing = object.trackSpacing ?? undefined;
     message.wrapTrackAlignment = object.wrapTrackAlignment ?? undefined;
+    message.gridRows = object.gridRows?.map((e) => GridTrack.fromPartial(e)) || [];
+    message.gridColumns = object.gridColumns?.map((e) => GridTrack.fromPartial(e)) || [];
+    message.gridRowGap = object.gridRowGap ?? undefined;
+    message.gridColumnGap = object.gridColumnGap ?? undefined;
     return message;
   },
 };

@@ -106,12 +106,13 @@ export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" 
 export type ConstraintType = "min" | "center" | "max" | "stretch" | "scale";
 export interface DocumentConstraints { horizontal: ConstraintType; vertical: ConstraintType; }
 /** Canonical Frame auto-layout configuration. Absence retains legacy manual positioning. */
-export type AutoLayoutMode = "none" | "horizontal" | "vertical";
+export type AutoLayoutMode = "none" | "horizontal" | "vertical" | "grid";
 /** `baseline` is valid only as a horizontal Frame's counter-axis alignment. */
 export type AutoLayoutAlignment = "start" | "center" | "end" | "spaceBetween" | "baseline";
 /** Figma counterAxisAlignContent's Phase 2 wrapped-track subset. */
 export type AutoLayoutTrackAlignment = "auto" | "spaceBetween";
 export type AutoLayoutSizing = "fixed" | "hug" | "fill";
+export type AutoLayoutGridTrack = Readonly<{ type: "flex" | "fixed"; value: number }>;
 export interface DocumentAutoLayout {
   mode: AutoLayoutMode;
   padding: [number, number, number, number];
@@ -133,6 +134,12 @@ export interface DocumentAutoLayout {
   minHeight?: number;
   maxHeight?: number;
   absolute: boolean;
+  /** Present only on a Grid container. The first supported subset places
+   * non-absolute children in document order using row-major auto-flow. */
+  gridRows?: AutoLayoutGridTrack[];
+  gridColumns?: AutoLayoutGridTrack[];
+  gridRowGap?: number;
+  gridColumnGap?: number;
 }
 export type AutoLayoutPaddingSide = "top" | "right" | "bottom" | "left";
 /** Stable line-height for text records that predate an explicit paragraph value. */

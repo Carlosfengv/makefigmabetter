@@ -298,6 +298,16 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   wrapFrame.counterAxisSpacing = 12;
   if (runtimeVariable) wrapFrame.setBoundVariable("counterAxisSpacing", runtimeVariable);
   wrapFrame.counterAxisAlignContent = "SPACE_BETWEEN";
+  const gridFrame = runtime.createFrame();
+  gridFrame.layoutMode = "GRID";
+  gridFrame.gridRowCount = 2;
+  gridFrame.gridColumnCount = 3;
+  gridFrame.gridRowGap = 12;
+  gridFrame.gridColumnGap = 16;
+  gridFrame.gridRowSizes[0]!.type = "FIXED";
+  gridFrame.gridRowSizes[0]!.value = 64;
+  void gridFrame.gridAutoTracks;
+  void gridFrame.gridItemsPositioning;
   const connector = runtime.createConnector();
   connector.connectorLineType = "ELBOWED";
   connector.reconnect({ position: { x: 0, y: 0 } }, { position: { x: 200, y: 80 } });

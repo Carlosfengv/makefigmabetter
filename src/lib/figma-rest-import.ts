@@ -1463,37 +1463,83 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const mode = string(node.layoutMode);
   const horizontal = mode === "HORIZONTAL";
   const vertical = mode === "VERTICAL";
+  const grid = mode === "GRID";
   const absolute = string(node.layoutPositioning) === "ABSOLUTE";
   const alignSelf = childAlignment(string(node.layoutAlign));
-  if (!horizontal && !vertical && !absolute && !alignSelf) {
-    if (mode === "GRID") {
-      extensions["figma.rest.layout-mode.v1"] = bytes(mode);
-      issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Figma GRID is outside Phase 2 and is not coerced into flex layout." });
-    }
+  if (!horizontal && !vertical && !grid && !absolute && !alignSelf) {
     return undefined;
   }
-  const mappedMode = horizontal ? "horizontal" : vertical ? "vertical" : "none";
-  if (kind !== "frame" && (horizontal || vertical)) {
+  const mappedMode = horizontal ? "horizontal" : vertical ? "vertical" : grid ? "grid" : "none";
+  if (kind !== "frame" && grid) {
+    extensions["figma.rest.layout-mode.v1"] = bytes(mode);
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Only Frame nodes may own Grid Auto Layout." });
+    return undefined;
+  }
+  if (kind !== "frame" && (horizontal || vertical || grid)) {
     issues.push({ sourceId, capability: "auto-layout", outcome: "rejected", reason: "Only Frame nodes may own an Auto Layout mode." });
+    return undefined;
+  }
+  const gridTrack = (value: unknown): { type: "flex" | "fixed"; value: number } | undefined => {
+    const track = record(value);
+    const type = string(track?.type);
+    const size = finite(track?.value);
+    if (type === "FLEX" && size !== undefined && size > 0) return { type: "flex", value: size };
+    if (type === "FIXED" && size !== undefined && size >= 0) return { type: "fixed", value: size };
+    return undefined;
+  };
+  const gridTracks = (value: unknown, countValue: unknown) => {
+    const source = array(value);
+    if (value !== undefined && !source) return undefined;
+    const explicit = (source ?? []).map(gridTrack);
+    if (explicit.length > 0) {
+      return explicit.length <= 128 && explicit.every(Boolean)
+        ? explicit as { type: "flex" | "fixed"; value: number }[]
+        : undefined;
+    }
+    if (countValue === undefined) return [{ type: "flex" as const, value: 1 }];
+    const count = finite(countValue);
+    return Number.isInteger(count) && count! >= 1 && count! <= 128
+      ? Array.from({ length: count! }, () => ({ type: "flex" as const, value: 1 }))
+      : undefined;
+  };
+  const gridRows = grid ? gridTracks(node.gridRowSizes, node.gridRowCount) : undefined;
+  const gridColumns = grid ? gridTracks(node.gridColumnSizes, node.gridColumnCount) : undefined;
+  const gridAutoTracks = string(node.gridAutoTracks);
+  const gridItemsPositioning = string(node.gridItemsPositioning);
+  const gridRowGap = grid ? finite(node.gridRowGap) ?? (node.gridRowGap === undefined ? 0 : undefined) : undefined;
+  const gridColumnGap = grid ? finite(node.gridColumnGap) ?? (node.gridColumnGap === undefined ? 0 : undefined) : undefined;
+  if (grid && (
+    !gridRows || !gridColumns || gridRowGap === undefined || gridColumnGap === undefined
+    || gridRowGap < 0 || gridColumnGap < 0
+    || gridRows.length * gridColumns.length > 4096
+    || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE")
+    || gridItemsPositioning !== "ROW_AUTO_FLOW"
+  )) {
+    extensions["figma.rest.grid-auto-layout.v1"] = jsonBytes({ gridRowCount: node.gridRowCount, gridColumnCount: node.gridColumnCount, gridRowSizes: node.gridRowSizes, gridColumnSizes: node.gridColumnSizes, gridRowGap: node.gridRowGap, gridColumnGap: node.gridColumnGap, gridAutoTracks: node.gridAutoTracks, gridItemsPositioning: node.gridItemsPositioning });
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
     return undefined;
   }
   return {
     mode: mappedMode,
     padding: [finite(node.paddingTop) ?? 0, finite(node.paddingRight) ?? 0, finite(node.paddingBottom) ?? 0, finite(node.paddingLeft) ?? 0],
     itemSpacing: finite(node.itemSpacing) ?? 0,
-    trackSpacing: finite(node.counterAxisSpacing) ?? undefined,
-    trackAlignment: string(node.counterAxisAlignContent) === "SPACE_BETWEEN" ? "spaceBetween" : undefined,
-    wrap: string(node.layoutWrap) === "WRAP",
-    primaryAlignment: alignment(string(node.primaryAxisAlignItems), false),
-    counterAlignment: alignment(string(node.counterAxisAlignItems), true),
-    primarySizing: sizing(horizontal ? string(node.layoutSizingHorizontal) : string(node.layoutSizingVertical)),
-    counterSizing: sizing(horizontal ? string(node.layoutSizingVertical) : string(node.layoutSizingHorizontal)),
+    trackSpacing: grid ? undefined : finite(node.counterAxisSpacing) ?? undefined,
+    trackAlignment: !grid && string(node.counterAxisAlignContent) === "SPACE_BETWEEN" ? "spaceBetween" : undefined,
+    wrap: !grid && string(node.layoutWrap) === "WRAP",
+    primaryAlignment: grid ? "start" : alignment(string(node.primaryAxisAlignItems), false),
+    counterAlignment: grid ? "start" : alignment(string(node.counterAxisAlignItems), true),
+    primarySizing: grid ? "fixed" : sizing(horizontal ? string(node.layoutSizingHorizontal) : string(node.layoutSizingVertical)),
+    counterSizing: grid ? "fixed" : sizing(horizontal ? string(node.layoutSizingVertical) : string(node.layoutSizingHorizontal)),
     alignSelf,
     minWidth: finite(node.minWidth) ?? undefined,
     maxWidth: finite(node.maxWidth) ?? undefined,
     minHeight: finite(node.minHeight) ?? undefined,
     maxHeight: finite(node.maxHeight) ?? undefined,
     absolute,
+    gridRows,
+    gridColumns,
+    gridRowGap,
+    gridColumnGap,
   };
 }
 

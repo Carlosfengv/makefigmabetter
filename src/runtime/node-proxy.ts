@@ -120,7 +120,9 @@ export type RuntimeNodeExportSetting =
 export type M1SceneNodeType = ExternalNodeType;
 export type M1NodeType = "DOCUMENT" | "PAGE" | M1SceneNodeType;
 export const M1_NODE_TYPES: readonly M1NodeType[] = Object.freeze(["DOCUMENT", "PAGE", ...EXTERNAL_NODE_TYPES]);
-export type RuntimeLayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL";
+export type RuntimeLayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
+export type RuntimeGridTrackType = "FLEX" | "FIXED";
+export type RuntimeGridTrackSize = { type: RuntimeGridTrackType; value: number };
 export type RuntimeLayoutSizing = "FIXED" | "HUG" | "FILL";
 export type RuntimeAxisSizingMode = "FIXED" | "AUTO";
 export type RuntimePrimaryAxisAlignment = "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
@@ -167,7 +169,7 @@ const NODE_BLEND_TO_CANONICAL: Readonly<Record<RuntimeNodeBlendMode, BlendMode>>
 };
 
 type RuntimeAutoLayout = Readonly<{
-  mode: "none" | "horizontal" | "vertical";
+  mode: "none" | "horizontal" | "vertical" | "grid";
   padding: [number, number, number, number];
   itemSpacing: number;
   trackSpacing?: number;
@@ -183,6 +185,10 @@ type RuntimeAutoLayout = Readonly<{
   minHeight?: number;
   maxHeight?: number;
   absolute: boolean;
+  gridRows?: readonly Readonly<{ type: "flex" | "fixed"; value: number }>[];
+  gridColumns?: readonly Readonly<{ type: "flex" | "fixed"; value: number }>[];
+  gridRowGap?: number;
+  gridColumnGap?: number;
 }>;
 
 export interface RuntimeNodeHost {
@@ -3387,22 +3393,54 @@ export class RuntimeNodeProxy {
     await this.host.commitAsync();
   }
 
-  /** W12-L's bounded Figma Auto Layout surface. GRID remains outside the
-   * Runtime contract; setters reject combinations that Canonical cannot lay out. */
+  /** W12-L's bounded Figma Auto Layout surface, including fixed-container,
+   * row-major Grid tracks. Setters reject combinations Canonical cannot lay out. */
   get layoutMode(): RuntimeLayoutMode {
     const mode = this.autoLayout().mode;
-    return mode === "horizontal" ? "HORIZONTAL" : mode === "vertical" ? "VERTICAL" : "NONE";
+    return mode === "horizontal" ? "HORIZONTAL" : mode === "vertical" ? "VERTICAL" : mode === "grid" ? "GRID" : "NONE";
   }
   set layoutMode(value: RuntimeLayoutMode) {
-    if (this.type !== "FRAME" || !["NONE", "HORIZONTAL", "VERTICAL"].includes(value)) {
+    if (this.type !== "FRAME" || !["NONE", "HORIZONTAL", "VERTICAL", "GRID"].includes(value)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const layout = this.autoLayout();
     if (value === "VERTICAL" && (layout.wrap || layout.counterAlignment === "baseline")) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    this.writeAutoLayout({ mode: value.toLowerCase() as RuntimeAutoLayout["mode"] });
+    const flowCount = this.host.childrenOf(this.id).filter((child) => !child.autoLayout().absolute).length;
+    if (value === "GRID" && flowCount > 4096) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const defaultGridColumnCount = Math.max(1, Math.min(128, Math.ceil(Math.sqrt(flowCount))));
+    const defaultGridRowCount = Math.max(1, Math.ceil(flowCount / defaultGridColumnCount));
+    this.writeAutoLayout(value === "GRID"
+      ? {
+          mode: "grid", wrap: false, trackSpacing: undefined, trackAlignment: undefined,
+          primaryAlignment: "start", counterAlignment: "start", primarySizing: "fixed", counterSizing: "fixed",
+          gridRows: layout.gridRows?.length ? layout.gridRows : Array.from({ length: defaultGridRowCount }, () => ({ type: "flex" as const, value: 1 })),
+          gridColumns: layout.gridColumns?.length ? layout.gridColumns : Array.from({ length: defaultGridColumnCount }, () => ({ type: "flex" as const, value: 1 })),
+          gridRowGap: layout.gridRowGap ?? 0, gridColumnGap: layout.gridColumnGap ?? 0,
+        }
+      : {
+          mode: value.toLowerCase() as RuntimeAutoLayout["mode"],
+          gridRows: undefined, gridColumns: undefined, gridRowGap: undefined, gridColumnGap: undefined,
+        });
   }
+
+  get gridRowCount(): number { return this.gridTracks("row").length; }
+  set gridRowCount(value: number) { this.resizeGridTracks("row", value); }
+  get gridColumnCount(): number { return this.gridTracks("column").length; }
+  set gridColumnCount(value: number) { this.resizeGridTracks("column", value); }
+  get gridRowGap(): number { this.assertGridFrame(); return this.autoLayout().gridRowGap ?? 0; }
+  set gridRowGap(value: number) { this.writeGridGap("row", value); }
+  get gridColumnGap(): number { this.assertGridFrame(); return this.autoLayout().gridColumnGap ?? 0; }
+  set gridColumnGap(value: number) { this.writeGridGap("column", value); }
+  get gridRowSizes(): RuntimeGridTrackSize[] { return this.gridTrackProxies("row"); }
+  get gridColumnSizes(): RuntimeGridTrackSize[] { return this.gridTrackProxies("column"); }
+  get gridAutoTracks(): "NONE" { this.assertGridFrame(); return "NONE"; }
+  set gridAutoTracks(value: "NONE") { this.assertGridFrame(); if (value !== "NONE") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
+  get gridItemsPositioning(): "ROW_AUTO_FLOW" { this.assertGridFrame(); return "ROW_AUTO_FLOW"; }
+  set gridItemsPositioning(value: "ROW_AUTO_FLOW") { this.assertGridFrame(); if (value !== "ROW_AUTO_FLOW") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
 
   get layoutWrap(): "NO_WRAP" | "WRAP" {
     this.assertActiveAutoLayoutFrame();
@@ -4004,6 +4042,68 @@ export class RuntimeNodeProxy {
     if (this.autoLayout().mode === "none") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
   }
 
+  private assertGridFrame(): void {
+    this.assertAutoLayoutFrame();
+    if (this.autoLayout().mode !== "grid") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+  }
+
+  private gridTracks(axis: "row" | "column"): readonly Readonly<{ type: "flex" | "fixed"; value: number }>[] {
+    this.assertGridFrame();
+    return axis === "row" ? (this.autoLayout().gridRows ?? []) : (this.autoLayout().gridColumns ?? []);
+  }
+
+  private resizeGridTracks(axis: "row" | "column", value: number): void {
+    this.assertGridFrame();
+    if (!Number.isInteger(value) || value < 1 || value > 128) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    const layout = this.autoLayout();
+    const rows = [...(layout.gridRows ?? [])];
+    const columns = [...(layout.gridColumns ?? [])];
+    const target = axis === "row" ? rows : columns;
+    const other = axis === "row" ? columns : rows;
+    const flowCount = this.host.childrenOf(this.id).filter((child) => !child.autoLayout().absolute).length;
+    if (value * other.length > 4096 || value * other.length < flowCount) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    target.length = Math.min(target.length, value);
+    while (target.length < value) target.push({ type: "flex", value: 1 });
+    this.writeAutoLayout(axis === "row" ? { gridRows: rows } : { gridColumns: columns });
+  }
+
+  private writeGridGap(axis: "row" | "column", value: number): void {
+    this.assertGridFrame();
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    this.writeAutoLayout(axis === "row" ? { gridRowGap: value } : { gridColumnGap: value });
+  }
+
+  private writeGridTrack(axis: "row" | "column", index: number, patch: Partial<{ type: "flex" | "fixed"; value: number }>): void {
+    const tracks = [...this.gridTracks(axis)];
+    const current = tracks[index];
+    if (!current) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    const next = { ...current, ...patch };
+    if (!Number.isFinite(next.value) || (next.type === "flex" ? next.value <= 0 : next.value < 0)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    }
+    tracks[index] = next;
+    this.writeAutoLayout(axis === "row" ? { gridRows: tracks } : { gridColumns: tracks });
+  }
+
+  private gridTrackProxies(axis: "row" | "column"): RuntimeGridTrackSize[] {
+    return this.gridTracks(axis).map((_track, index) => {
+      const nodeId = this.id;
+      const readTrack = () => this.gridTracks(axis)[index]!;
+      const writeTrack = (patch: Partial<{ type: "flex" | "fixed"; value: number }>) => this.writeGridTrack(axis, index, patch);
+      return {
+        get type(): RuntimeGridTrackType {
+          return readTrack().type === "fixed" ? "FIXED" : "FLEX";
+        },
+        set type(value: RuntimeGridTrackType) {
+          if (value !== "FLEX" && value !== "FIXED") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+          writeTrack({ type: value.toLowerCase() as "flex" | "fixed" });
+        },
+        get value(): number { return readTrack().value; },
+        set value(value: number) { writeTrack({ value }); },
+      };
+    });
+  }
+
   private parentAutoLayout(): RuntimeAutoLayout | undefined {
     const parentId = this.read().parentId;
     if (typeof parentId !== "string") return undefined;
@@ -4015,7 +4115,7 @@ export class RuntimeNodeProxy {
 
   private parentAutoLayoutMode(): Exclude<RuntimeLayoutMode, "NONE"> | undefined {
     const mode = this.parentAutoLayout()?.mode;
-    return mode === "horizontal" ? "HORIZONTAL" : mode === "vertical" ? "VERTICAL" : undefined;
+    return mode === "horizontal" ? "HORIZONTAL" : mode === "vertical" ? "VERTICAL" : mode === "grid" ? "GRID" : undefined;
   }
 
   private assertAutoLayoutChild(): Exclude<RuntimeLayoutMode, "NONE"> {
@@ -4032,6 +4132,7 @@ export class RuntimeNodeProxy {
   private physicalSizingKey(horizontal: boolean): "primarySizing" | "counterSizing" {
     const ownMode = this.type === "FRAME" ? this.layoutMode : "NONE";
     const mode = ownMode === "NONE" ? this.assertAutoLayoutChild() : ownMode;
+    if (mode === "GRID") return horizontal ? "primarySizing" : "counterSizing";
     return (mode === "HORIZONTAL") === horizontal ? "primarySizing" : "counterSizing";
   }
 
@@ -4430,6 +4531,8 @@ export class RuntimeNodeProxy {
       ...defaultAutoLayout(),
       ...layout,
       padding: [...padding] as [number, number, number, number],
+      gridRows: Array.isArray(layout.gridRows) ? layout.gridRows.map((track) => ({ ...track })) : undefined,
+      gridColumns: Array.isArray(layout.gridColumns) ? layout.gridColumns.map((track) => ({ ...track })) : undefined,
     };
   }
 

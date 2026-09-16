@@ -408,12 +408,15 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
   // zero-valued bounds, but omit non-numeric hydration sentinels.
   const bound = (candidate: unknown) => typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
   return {
-    mode: value.mode === "horizontal" ? ProtoLayoutMode.LAYOUT_MODE_HORIZONTAL : value.mode === "vertical" ? ProtoLayoutMode.LAYOUT_MODE_VERTICAL : ProtoLayoutMode.LAYOUT_MODE_NONE,
+    mode: value.mode === "horizontal" ? ProtoLayoutMode.LAYOUT_MODE_HORIZONTAL : value.mode === "vertical" ? ProtoLayoutMode.LAYOUT_MODE_VERTICAL : value.mode === "grid" ? ProtoLayoutMode.LAYOUT_MODE_GRID : ProtoLayoutMode.LAYOUT_MODE_NONE,
     paddingTop: value.padding[0], paddingRight: value.padding[1], paddingBottom: value.padding[2], paddingLeft: value.padding[3], itemSpacing: value.itemSpacing, trackSpacing: bound(value.trackSpacing), wrapTrackAlignment: value.trackAlignment === "spaceBetween" ? ProtoWrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN : undefined, wrap: value.wrap,
     primaryAlignment: layoutAlignment(value.primaryAlignment), counterAlignment: layoutAlignment(value.counterAlignment),
     primarySizing: layoutSizing(value.primarySizing), counterSizing: layoutSizing(value.counterSizing),
     minWidth: bound(value.minWidth), maxWidth: bound(value.maxWidth), minHeight: bound(value.minHeight), maxHeight: bound(value.maxHeight), absolute: value.absolute,
     alignSelf: value.alignSelf ? layoutAlignment(value.alignSelf) : undefined,
+    gridRows: (value.gridRows ?? []).map((track) => ({ type: track.type === "fixed" ? 2 : 1, value: track.value })),
+    gridColumns: (value.gridColumns ?? []).map((track) => ({ type: track.type === "fixed" ? 2 : 1, value: track.value })),
+    gridRowGap: bound(value.gridRowGap), gridColumnGap: bound(value.gridColumnGap),
   };
 }
 

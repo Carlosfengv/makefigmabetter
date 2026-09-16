@@ -3167,6 +3167,70 @@ describe("M1 RuntimeSession", () => {
     ]));
   });
 
+  it("exposes versioned Grid tracks and row-major positioning inputs synchronously", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    grid.gridRowCount = 2;
+    grid.gridColumnCount = 2;
+    grid.gridRowGap = 12;
+    grid.gridColumnGap = 20;
+    grid.gridRowSizes[0]!.type = "FIXED";
+    grid.gridRowSizes[0]!.value = 64;
+    grid.gridColumnSizes[1]!.type = "FIXED";
+    grid.gridColumnSizes[1]!.value = 80;
+
+    expect(grid.layoutMode).toBe("GRID");
+    expect(grid.gridRowCount).toBe(2);
+    expect(grid.gridColumnCount).toBe(2);
+    expect(grid.gridRowGap).toBe(12);
+    expect(grid.gridColumnGap).toBe(20);
+    expect(grid.gridRowSizes.map((track) => ({ type: track.type, value: track.value }))).toEqual([
+      { type: "FIXED", value: 64 },
+      { type: "FLEX", value: 1 },
+    ]);
+    expect(grid.gridColumnSizes.map((track) => ({ type: track.type, value: track.value }))).toEqual([
+      { type: "FLEX", value: 1 },
+      { type: "FIXED", value: 80 },
+    ]);
+    expect(grid.gridAutoTracks).toBe("NONE");
+    expect(grid.gridItemsPositioning).toBe("ROW_AUTO_FLOW");
+    expect(isRuntimeError(captureError(() => { grid.gridRowSizes[1]!.value = 0; }), "INVALID_ARGUMENT")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "update",
+        nodeId: grid.id,
+        patch: {
+          autoLayout: expect.objectContaining({
+            mode: "grid",
+            gridRows: [{ type: "fixed", value: 64 }, { type: "flex", value: 1 }],
+            gridColumns: [{ type: "flex", value: 1 }, { type: "fixed", value: 80 }],
+            gridRowGap: 12,
+            gridColumnGap: 20,
+          }),
+        },
+      }),
+    ]));
+  });
+
+  it("sizes default Grid tracks to hold existing flow children", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const grid = session.createFrame();
+    grid.appendChild(session.createRectangle());
+    grid.appendChild(session.createRectangle());
+    grid.appendChild(session.createRectangle());
+
+    grid.layoutMode = "GRID";
+
+    expect(grid.gridRowCount).toBe(2);
+    expect(grid.gridColumnCount).toBe(2);
+    await expect(session.commitAsync()).resolves.toBe(1);
+  });
+
   it("admits FILL, STRETCH and nested HUG children in a wrapped Frame", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, GridTrackType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -927,6 +927,25 @@ describe("protocol operation codec", () => {
     expect(created.operations[0].createNode?.node?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_HORIZONTAL, paddingTop: 4, paddingLeft: 16, itemSpacing: 10, trackSpacing: 14, wrapTrackAlignment: WrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN, wrap: true });
     expect(created.operations[1].setAutoLayout?.autoLayout).toMatchObject({ primaryAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN, counterAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_BASELINE, primarySizing: LayoutSizing.LAYOUT_SIZING_FIXED, minWidth: 120, maxHeight: 320, alignSelf: LayoutAlignment.LAYOUT_ALIGNMENT_END });
     expect(updated.operations.find((operation) => operation.setAutoLayout)?.setAutoLayout?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_VERTICAL, wrap: false });
+  });
+
+  it("serializes versioned Grid tracks and independent gaps", () => {
+    const autoLayout = {
+      mode: "grid" as const, padding: [8, 12, 16, 20] as [number, number, number, number], itemSpacing: 0, wrap: false,
+      primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false,
+      gridRows: [{ type: "fixed" as const, value: 64 }, { type: "flex" as const, value: 1 }],
+      gridColumns: [{ type: "flex" as const, value: 2 }, { type: "fixed" as const, value: 80 }],
+      gridRowGap: 12, gridColumnGap: 20,
+    };
+    const node = { ...createNode("frame", 10, 20), id, autoLayout };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0]?.createNode?.node?.autoLayout).toMatchObject({
+      mode: LayoutMode.LAYOUT_MODE_GRID,
+      gridRows: [{ type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 64 }, { type: GridTrackType.GRID_TRACK_TYPE_FLEX, value: 1 }],
+      gridColumns: [{ type: GridTrackType.GRID_TRACK_TYPE_FLEX, value: 2 }, { type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 80 }],
+      gridRowGap: 12,
+      gridColumnGap: 20,
+    });
   });
 
   it("serializes a flow child's align-self relationship as a durable operation", () => {

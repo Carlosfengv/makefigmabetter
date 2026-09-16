@@ -4408,7 +4408,7 @@ function runtimeOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
   const autoLayout = node.autoLayout;
   if (!autoLayout || typeof autoLayout !== "object") return false;
   const mode = (autoLayout as { mode?: unknown }).mode;
-  return mode === "horizontal" || mode === "vertical";
+  return mode === "horizontal" || mode === "vertical" || mode === "grid";
 }
 
 function runtimeBooleanHasImmutableAncestor(

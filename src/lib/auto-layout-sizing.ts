@@ -9,6 +9,7 @@ export type AutoLayoutSizingKey = "primarySizing" | "counterSizing";
  * keeps the same meaning when its parent uses the opposite direction.
  */
 export function autoLayoutSizingKeyForAxis(mode: Exclude<AutoLayoutMode, "none">, axis: AutoLayoutAxis): AutoLayoutSizingKey {
+  if (mode === "grid") return axis === "width" ? "primarySizing" : "counterSizing";
   return (mode === "horizontal") === (axis === "width") ? "primarySizing" : "counterSizing";
 }
 

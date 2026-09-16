@@ -528,7 +528,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if ("stroke" in command.patch) { node.strokeColor = documentColorFromCssHex(node.stroke); node.strokeGradient = undefined; }
       const enablesAutoLayout = isFrameLike(previous)
         && (previous.autoLayout?.mode ?? "none") === "none"
-        && (node.autoLayout?.mode === "horizontal" || node.autoLayout?.mode === "vertical");
+        && (node.autoLayout?.mode === "horizontal" || node.autoLayout?.mode === "vertical" || node.autoLayout?.mode === "grid");
       // Figma converts a Frame's ordinary children into layout children when
       // Auto Layout is added. Relative-v1 matrices are valid under a manual
       // Frame but intentionally invalid for a flow child, whose geometry is

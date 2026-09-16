@@ -6,12 +6,12 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridTrack, HyperlinkTarget,
+    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
+    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
+    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
     TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
     VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
@@ -81,9 +81,9 @@ pub const TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 52;
 pub const TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 53;
 pub const PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 54;
 pub const TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 55;
+pub const GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION: u32 = 56;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -117,6 +117,13 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| document.auto_layout_for_node(node.id).mode == LayoutMode::Grid)
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             document
@@ -665,6 +672,26 @@ pub fn document_from_snapshot_with_engine_semantics(
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version < GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.mode == v1::LayoutMode::Grid as i32
+                            || !layout.grid_rows.is_empty()
+                            || !layout.grid_columns.is_empty()
+                            || layout.grid_row_gap.is_some()
+                            || layout.grid_column_gap.is_some()
+                    })
+            })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     let mut document = Document::with_id(DocumentId(id(&snapshot.document_id)?));
     document.seed_color_profile(profile_from_proto(snapshot.document_color_profile)?);
     for asset in snapshot.resource_index {
@@ -1773,6 +1800,7 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
             LayoutMode::None => v1::LayoutMode::None,
             LayoutMode::Horizontal => v1::LayoutMode::Horizontal,
             LayoutMode::Vertical => v1::LayoutMode::Vertical,
+            LayoutMode::Grid => v1::LayoutMode::Grid,
         } as i32,
         padding_top: value.padding[0],
         padding_right: value.padding[1],
@@ -1799,6 +1827,27 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
                 WrapTrackAlignment::SpaceBetween => v1::WrapTrackAlignment::SpaceBetween,
             } as i32,
         ),
+        grid_rows: value.grid_rows.iter().map(grid_track_to_proto).collect(),
+        grid_columns: value.grid_columns.iter().map(grid_track_to_proto).collect(),
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
+    }
+}
+fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
+    let (r#type, value) = match value {
+        GridTrack::Flex(value) => (v1::GridTrackType::Flex, *value),
+        GridTrack::Fixed(value) => (v1::GridTrackType::Fixed, *value),
+    };
+    v1::GridTrack {
+        r#type: r#type as i32,
+        value,
+    }
+}
+fn grid_track_from_proto(value: v1::GridTrack) -> Result<GridTrack, SnapshotError> {
+    match v1::GridTrackType::try_from(value.r#type).map_err(|_| SnapshotError::Invalid)? {
+        v1::GridTrackType::Flex => Ok(GridTrack::Flex(value.value)),
+        v1::GridTrackType::Fixed => Ok(GridTrack::Fixed(value.value)),
+        v1::GridTrackType::Unspecified => Err(SnapshotError::Invalid),
     }
 }
 fn alignment_to_proto(value: LayoutAlignment) -> v1::LayoutAlignment {
@@ -1822,6 +1871,7 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
         v1::LayoutMode::None => LayoutMode::None,
         v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
         v1::LayoutMode::Vertical => LayoutMode::Vertical,
+        v1::LayoutMode::Grid => LayoutMode::Grid,
         v1::LayoutMode::Unspecified => return Err(SnapshotError::Invalid),
     };
     let alignment =
@@ -1879,6 +1929,18 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
         max_height: value.max_height,
         absolute: value.absolute,
         align_self,
+        grid_rows: value
+            .grid_rows
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_columns: value
+            .grid_columns
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -3653,6 +3715,38 @@ mod tests {
             clips_content: false,
             extensions: Default::default(),
         }
+    }
+
+    #[test]
+    fn grid_auto_layout_is_version_gated_and_round_trips() {
+        let mut document = Document::with_id(DocumentId(77));
+        let frame = node(7, NodeKind::Frame, None);
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            padding: [8.0, 12.0, 16.0, 20.0],
+            grid_rows: vec![GridTrack::Fixed(40.0), GridTrack::Flex(2.0)],
+            grid_columns: vec![GridTrack::Flex(1.0), GridTrack::Flex(3.0)],
+            grid_row_gap: Some(6.0),
+            grid_column_gap: Some(10.0),
+            ..AutoLayout::default()
+        };
+        document.seed_auto_layout(frame.id, layout.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bytes = snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot(
+            &bytes,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.auto_layout_for_node(frame.id), layout);
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
     }
 
     #[test]

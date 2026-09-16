@@ -34,7 +34,7 @@ export function normalizeAutoLayout(
     finiteNonNegative(rawPadding[2], finiteNonNegative(source.paddingBottom)),
     finiteNonNegative(rawPadding[3], finiteNonNegative(source.paddingLeft)),
   ];
-  const mode = source.mode === "horizontal" || source.mode === "vertical"
+  const mode = source.mode === "horizontal" || source.mode === "vertical" || source.mode === "grid"
     ? source.mode
     : "none";
   const alignment = (candidate: unknown, counter = false): DocumentAutoLayout["primaryAlignment"] =>
@@ -59,5 +59,21 @@ export function normalizeAutoLayout(
     minHeight: optionalFiniteNonNegative(source.minHeight),
     maxHeight: optionalFiniteNonNegative(source.maxHeight),
     absolute: source.absolute === true,
+    gridRows: mode === "grid" ? normalizeGridTracks(source.gridRows) : undefined,
+    gridColumns: mode === "grid" ? normalizeGridTracks(source.gridColumns) : undefined,
+    gridRowGap: mode === "grid" ? optionalFiniteNonNegative(source.gridRowGap) ?? 0 : undefined,
+    gridColumnGap: mode === "grid" ? optionalFiniteNonNegative(source.gridColumnGap) ?? 0 : undefined,
   };
+}
+
+function normalizeGridTracks(value: unknown): DocumentAutoLayout["gridRows"] {
+  if (!Array.isArray(value)) return [{ type: "flex", value: 1 }];
+  const tracks: NonNullable<DocumentAutoLayout["gridRows"]> = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const { type, value } = candidate as { type?: unknown; value?: unknown };
+    if (type === "fixed" && typeof value === "number" && Number.isFinite(value) && value >= 0) tracks.push({ type, value });
+    else if (type === "flex" && typeof value === "number" && Number.isFinite(value) && value > 0) tracks.push({ type, value });
+  }
+  return tracks.length ? tracks.slice(0, 128) : [{ type: "flex", value: 1 }];
 }

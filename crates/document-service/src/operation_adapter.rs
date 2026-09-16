@@ -4,9 +4,9 @@
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
-    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    FontFaceMetadata, FontNameAlias, FontReference, GridTrack, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
     PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
     ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
     TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
@@ -39,6 +39,26 @@ pub fn commands_from_payload_with_semantics(
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind.as_ref(),
+                Some(v1::resolved_operation::Kind::SetAutoLayout(update))
+                    if update.auto_layout.as_ref().is_some_and(|layout| {
+                        layout.mode == v1::LayoutMode::Grid as i32
+                            || !layout.grid_rows.is_empty()
+                            || !layout.grid_columns.is_empty()
+                            || layout.grid_row_gap.is_some()
+                            || layout.grid_column_gap.is_some()
+                    })
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION,
+        });
     }
     if engine_semantics_version
         < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
@@ -2102,6 +2122,7 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
             v1::LayoutMode::None => LayoutMode::None,
             v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
             v1::LayoutMode::Vertical => LayoutMode::Vertical,
+            v1::LayoutMode::Grid => LayoutMode::Grid,
             v1::LayoutMode::Unspecified => return Err(ServiceError::InvalidEnvelope),
         };
     let alignment = |value| match v1::LayoutAlignment::try_from(value)
@@ -2161,6 +2182,18 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         max_height: value.max_height,
         absolute: value.absolute,
         align_self,
+        grid_rows: value
+            .grid_rows
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_columns: value
+            .grid_columns
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -2171,6 +2204,14 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         return Err(ServiceError::InvalidEnvelope);
     }
     Ok(layout)
+}
+
+fn grid_track_from_proto(value: v1::GridTrack) -> Result<GridTrack, ServiceError> {
+    match v1::GridTrackType::try_from(value.r#type).map_err(|_| ServiceError::InvalidEnvelope)? {
+        v1::GridTrackType::Flex => Ok(GridTrack::Flex(value.value)),
+        v1::GridTrackType::Fixed => Ok(GridTrack::Fixed(value.value)),
+        v1::GridTrackType::Unspecified => Err(ServiceError::InvalidEnvelope),
+    }
 }
 
 fn arc_from_proto(arc: v1::ArcData) -> Result<ArcData, ServiceError> {
@@ -3510,6 +3551,10 @@ mod tests {
             align_self: align_self.map(|value| value as i32),
             track_spacing: None,
             wrap_track_alignment: None,
+            grid_rows: Vec::new(),
+            grid_columns: Vec::new(),
+            grid_row_gap: None,
+            grid_column_gap: None,
         }
     }
 
@@ -3762,6 +3807,55 @@ mod tests {
             None,
         ));
         assert!(commands_from_payload(&counter_space_between).is_err());
+    }
+
+    #[test]
+    fn grid_auto_layout_operation_requires_semantics_56() {
+        let mut layout = auto_layout(
+            v1::LayoutMode::Grid,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Start,
+            None,
+        );
+        layout.grid_rows = vec![v1::GridTrack {
+            r#type: v1::GridTrackType::Fixed as i32,
+            value: 64.0,
+        }];
+        layout.grid_columns = vec![v1::GridTrack {
+            r#type: v1::GridTrackType::Flex as i32,
+            value: 1.0,
+        }];
+        layout.grid_row_gap = Some(12.0);
+        layout.grid_column_gap = Some(20.0);
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAutoLayout(
+                    v1::AutoLayoutUpdate {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        auto_layout: Some(layout),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetAutoLayout { layout, .. }]
+                if layout.mode == editor_core::LayoutMode::Grid
+                    && layout.grid_rows == vec![editor_core::GridTrack::Fixed(64.0)]
+        ));
     }
 
     #[test]

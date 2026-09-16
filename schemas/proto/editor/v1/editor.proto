@@ -218,6 +218,8 @@ enum LayoutMode {
   LAYOUT_MODE_NONE = 1;
   LAYOUT_MODE_HORIZONTAL = 2;
   LAYOUT_MODE_VERTICAL = 3;
+  // Presence requires engine semantics 56.
+  LAYOUT_MODE_GRID = 4;
 }
 
 enum LayoutAlignment {
@@ -243,6 +245,20 @@ enum WrapTrackAlignment {
   WRAP_TRACK_ALIGNMENT_UNSPECIFIED = 0;
   WRAP_TRACK_ALIGNMENT_AUTO = 1;
   WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2;
+}
+
+// W12-L's first Grid Auto Layout slice. HUG tracks, explicit child placement,
+// spans and automatic row creation remain outside this versioned subset.
+enum GridTrackType {
+  GRID_TRACK_TYPE_UNSPECIFIED = 0;
+  GRID_TRACK_TYPE_FLEX = 1;
+  GRID_TRACK_TYPE_FIXED = 2;
+}
+
+message GridTrack {
+  GridTrackType type = 1;
+  // FLEX uses fractional units; FIXED uses logical pixels.
+  double value = 2;
 }
 
 message AutoLayout {
@@ -273,6 +289,11 @@ message AutoLayout {
   // Figma counterAxisAlignContent. Omission/default is AUTO; SPACE_BETWEEN is
   // valid only when wrap is true.
   optional WrapTrackAlignment wrap_track_alignment = 19;
+  // Grid fields require engine semantics 56. Non-GRID layouts must omit them.
+  repeated GridTrack grid_rows = 20;
+  repeated GridTrack grid_columns = 21;
+  optional double grid_row_gap = 22;
+  optional double grid_column_gap = 23;
 }
 
 enum ColorSpace {

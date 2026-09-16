@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
-    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
+    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridTrack, HyperlinkTarget,
     HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
     LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
     PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
@@ -477,6 +477,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| document.auto_layout_for_node(node.id).mode == LayoutMode::Grid)
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && document
@@ -1027,6 +1035,27 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.mode == v1::LayoutMode::Grid as i32
+                            || !layout.grid_rows.is_empty()
+                            || !layout.grid_columns.is_empty()
+                            || layout.grid_row_gap.is_some()
+                            || layout.grid_column_gap.is_some()
+                    })
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     let mut document = Document::with_id(DocumentId(id(&snapshot.document_id)?));
     document.seed_color_profile(profile_from_proto(snapshot.document_color_profile)?);
     for asset in snapshot.resource_index {
@@ -2026,6 +2055,7 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
             LayoutMode::None => v1::LayoutMode::None,
             LayoutMode::Horizontal => v1::LayoutMode::Horizontal,
             LayoutMode::Vertical => v1::LayoutMode::Vertical,
+            LayoutMode::Grid => v1::LayoutMode::Grid,
         } as i32,
         padding_top: value.padding[0],
         padding_right: value.padding[1],
@@ -2052,6 +2082,29 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         align_self: value
             .align_self
             .map(|value| alignment_to_proto(value) as i32),
+        grid_rows: value.grid_rows.iter().map(grid_track_to_proto).collect(),
+        grid_columns: value.grid_columns.iter().map(grid_track_to_proto).collect(),
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
+    }
+}
+
+fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
+    let (r#type, value) = match value {
+        GridTrack::Flex(value) => (v1::GridTrackType::Flex, *value),
+        GridTrack::Fixed(value) => (v1::GridTrackType::Fixed, *value),
+    };
+    v1::GridTrack {
+        r#type: r#type as i32,
+        value,
+    }
+}
+
+fn grid_track_from_proto(value: v1::GridTrack) -> Result<GridTrack, ServiceError> {
+    match v1::GridTrackType::try_from(value.r#type).map_err(|_| ServiceError::ReducerRejected)? {
+        v1::GridTrackType::Flex => Ok(GridTrack::Flex(value.value)),
+        v1::GridTrackType::Fixed => Ok(GridTrack::Fixed(value.value)),
+        v1::GridTrackType::Unspecified => Err(ServiceError::ReducerRejected),
     }
 }
 
@@ -2079,6 +2132,7 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
             v1::LayoutMode::None => LayoutMode::None,
             v1::LayoutMode::Horizontal => LayoutMode::Horizontal,
             v1::LayoutMode::Vertical => LayoutMode::Vertical,
+            v1::LayoutMode::Grid => LayoutMode::Grid,
             v1::LayoutMode::Unspecified => return Err(ServiceError::ReducerRejected),
         };
     let alignment = |value| match v1::LayoutAlignment::try_from(value)
@@ -2138,6 +2192,18 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         max_height: value.max_height,
         absolute: value.absolute,
         align_self,
+        grid_rows: value
+            .grid_rows
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_columns: value
+            .grid_columns
+            .into_iter()
+            .map(grid_track_from_proto)
+            .collect::<Result<_, _>>()?,
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)

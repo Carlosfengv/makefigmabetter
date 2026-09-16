@@ -7,12 +7,12 @@ use editor_core::{
     ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
-    FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
-    LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
-    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    FontReference, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks,
+    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
     TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
     Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
@@ -936,7 +936,17 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=69).contains(&snapshot.schema_version)
+    if !(1..=70).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 70
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout.mode == "grid"
+                        || !layout.grid_rows.is_empty()
+                        || !layout.grid_columns.is_empty()
+                        || layout.grid_row_gap.is_some()
+                        || layout.grid_column_gap.is_some()
+                })
+            }))
         || (snapshot.schema_version < 69
             && snapshot.nodes.iter().any(|node| {
                 node.text_properties.as_ref().is_some_and(|properties| {
@@ -1606,6 +1616,21 @@ struct ProjectionAutoLayout {
     absolute: bool,
     #[serde(default)]
     align_self: Option<String>,
+    #[serde(default)]
+    grid_rows: Vec<ProjectionGridTrack>,
+    #[serde(default)]
+    grid_columns: Vec<ProjectionGridTrack>,
+    #[serde(default)]
+    grid_row_gap: Option<f64>,
+    #[serde(default)]
+    grid_column_gap: Option<f64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionGridTrack {
+    r#type: String,
+    value: f64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2334,7 +2359,13 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.nodes().any(|node| {
+        let schema_version = if self
+            .document
+            .nodes()
+            .any(|node| self.document.auto_layout_for_node(node.id).mode == LayoutMode::Grid)
+        {
+            70
+        } else if self.document.nodes().any(|node| {
             self.document
                 .text_properties_for_node(node.id)
                 .is_some_and(|properties| {
@@ -7053,6 +7084,7 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
             LayoutMode::None => "none",
             LayoutMode::Horizontal => "horizontal",
             LayoutMode::Vertical => "vertical",
+            LayoutMode::Grid => "grid",
         }
         .into(),
         padding: layout.padding,
@@ -7074,7 +7106,40 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
             .align_self
             .map(format_layout_alignment)
             .map(str::to_owned),
+        grid_rows: layout
+            .grid_rows
+            .into_iter()
+            .map(projection_grid_track)
+            .collect(),
+        grid_columns: layout
+            .grid_columns
+            .into_iter()
+            .map(projection_grid_track)
+            .collect(),
+        grid_row_gap: layout.grid_row_gap,
+        grid_column_gap: layout.grid_column_gap,
     })
+}
+
+fn projection_grid_track(track: GridTrack) -> ProjectionGridTrack {
+    match track {
+        GridTrack::Flex(value) => ProjectionGridTrack {
+            r#type: "flex".into(),
+            value,
+        },
+        GridTrack::Fixed(value) => ProjectionGridTrack {
+            r#type: "fixed".into(),
+            value,
+        },
+    }
+}
+
+fn grid_track_from_projection(track: &ProjectionGridTrack) -> Result<GridTrack, JsValue> {
+    match track.r#type.as_str() {
+        "flex" => Ok(GridTrack::Flex(track.value)),
+        "fixed" => Ok(GridTrack::Fixed(track.value)),
+        _ => Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
+    }
 }
 
 fn auto_layout_from_projection(
@@ -7087,6 +7152,7 @@ fn auto_layout_from_projection(
         "none" => LayoutMode::None,
         "horizontal" => LayoutMode::Horizontal,
         "vertical" => LayoutMode::Vertical,
+        "grid" => LayoutMode::Grid,
         _ => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     };
     let align_self = value
@@ -7123,6 +7189,18 @@ fn auto_layout_from_projection(
         max_height: value.max_height,
         absolute: value.absolute,
         align_self,
+        grid_rows: value
+            .grid_rows
+            .iter()
+            .map(grid_track_from_projection)
+            .collect::<Result<_, _>>()?,
+        grid_columns: value
+            .grid_columns
+            .iter()
+            .map(grid_track_from_projection)
+            .collect::<Result<_, _>>()?,
+        grid_row_gap: value.grid_row_gap,
+        grid_column_gap: value.grid_column_gap,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -11413,6 +11491,43 @@ mod tests {
         );
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 68;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v70_round_trips_grid_auto_layout_and_v69_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let mut frame = existing_rect(NodeId(0x70));
+        frame.kind = NodeKind::Frame;
+        frame.width = 320.0;
+        frame.height = 200.0;
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Fixed(64.0), GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Flex(2.0), GridTrack::Fixed(80.0)],
+            grid_row_gap: Some(12.0),
+            grid_column_gap: Some(20.0),
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(frame.id, layout.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":70"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 69;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

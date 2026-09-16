@@ -86,6 +86,49 @@ describe("Figma REST import planning", () => {
     expect(target).toMatchObject({ parentId: frame?.id, x: 80, y: 30 });
   });
 
+  it("imports the bounded row-major Grid subset without coercing its tracks", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-v1",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 240 },
+        layoutMode: "GRID", gridRowCount: 2, gridColumnCount: 2, gridRowGap: 12, gridColumnGap: 20,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "FIXED", value: 64 }, { type: "FLEX", value: 1 }],
+        gridColumnSizes: [{ type: "FLEX", value: 2 }, { type: "FIXED", value: 80 }],
+        children: [],
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.nodes[0]?.autoLayout).toMatchObject({
+      mode: "grid",
+      primarySizing: "fixed",
+      counterSizing: "fixed",
+      gridRows: [{ type: "fixed", value: 64 }, { type: "flex", value: 1 }],
+      gridColumns: [{ type: "flex", value: 2 }, { type: "fixed", value: 80 }],
+      gridRowGap: 12,
+      gridColumnGap: 20,
+    });
+  });
+
+  it("preserves malformed Grid tracks instead of coercing them to defaults", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-invalid-track",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 240 },
+        layoutMode: "GRID", gridRowCount: 1, gridColumnCount: 1,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "HUG", value: 64 }],
+        gridColumnSizes: [{ type: "FLEX", value: 1 }],
+        children: [],
+      }] }] },
+    }, ids());
+
+    expect(plan.nodes[0]?.autoLayout).toBeUndefined();
+    expect(plan.nodes[0]?.extensions?.["figma.rest.grid-auto-layout.v1"]).toBeDefined();
+    expect(plan.issues).toContainEqual(expect.objectContaining({ capability: "grid-auto-layout", outcome: "preserved-extension" }));
+  });
+
   it("produces a stable byte-free compatibility report from planner outcomes", () => {
     const plan = planFigmaRestImport({
       version: "123",
