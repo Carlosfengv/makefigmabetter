@@ -7,6 +7,7 @@ import { RuntimeTask } from "./runtime-task";
 import { PrototypePlayer, type PrototypePlayerOptions } from "./prototype-player";
 import type { RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
 import type { RuntimeTextStyle } from "./runtime-text-style";
+import type { RuntimePaintStyle } from "./runtime-paint-style";
 
 /** Public M1 facade. Figma-compatible members stay here; project-specific
  * lifecycle/transaction details remain explicitly named `runtime.*` APIs. */
@@ -23,10 +24,12 @@ export class FigmaCompatibleRuntime {
     return this.session.getNodeByIdAsync(nodeId);
   }
 
-  getStyleById(styleId: string): RuntimeTextStyle | null { return this.session.getStyleById(styleId); }
-  getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | null> { return this.session.getStyleByIdAsync(styleId); }
+  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null { return this.session.getStyleById(styleId); }
+  getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | null> { return this.session.getStyleByIdAsync(styleId); }
   getLocalTextStyles(): readonly RuntimeTextStyle[] { return this.session.getLocalTextStyles(); }
   getLocalTextStylesAsync(): Promise<readonly RuntimeTextStyle[]> { return this.session.getLocalTextStylesAsync(); }
+  getLocalPaintStyles(): readonly RuntimePaintStyle[] { return this.session.getLocalPaintStyles(); }
+  getLocalPaintStylesAsync(): Promise<readonly RuntimePaintStyle[]> { return this.session.getLocalPaintStylesAsync(); }
 
   createFrame(): RuntimeContainerNodeProxy { return this.session.createFrame(); }
   createGroup(): RuntimeContainerNodeProxy { return this.session.createGroup(); }

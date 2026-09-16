@@ -79,6 +79,8 @@ message DocumentSnapshot {
   // Complete document-owned TextStyle values. IDs intentionally remain
   // strings because Figma style identities are not UUIDs.
   repeated TextStyleResource text_styles = 18;
+  // Complete document-owned PaintStyle values.
+  repeated PaintStyleResource paint_styles = 19;
 }
 
 enum NodeKind {
@@ -746,6 +748,15 @@ message TextStyleResource {
   ParagraphStyle paragraph = 7;
 }
 
+message PaintStyleResource {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  string description = 4;
+  bool remote = 5;
+  PaintStack paints = 6;
+}
+
 // M3 prototype vocabulary. These records are append-only and intentionally
 // separate from Player's transient navigation/overlay state. The current Core
 // also keeps an opaque extension mirror so older engines can preserve a newer
@@ -977,6 +988,10 @@ message RegisterTextStyle {
   TextStyleResource style = 1;
 }
 
+message RegisterPaintStyle {
+  PaintStyleResource style = 1;
+}
+
 // Assigns or clears an image fill on a Frame, Rectangle, Ellipse, or Image
 // node. The asset must already be a registered document resource.
 message ImageFillUpdate {
@@ -1116,6 +1131,7 @@ message ResolvedOperation {
     SetNodeExtensions set_node_extensions = 26;
     ConvertToTextPath convert_to_text_path = 27;
     RegisterTextStyle register_text_style = 28;
+    RegisterPaintStyle register_paint_style = 29;
   }
 }
 

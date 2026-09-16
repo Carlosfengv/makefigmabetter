@@ -482,6 +482,8 @@ export interface DocumentSnapshot {
    * strings because Figma style identities are not UUIDs.
    */
   textStyles: TextStyleResource[];
+  /** Complete document-owned PaintStyle values. */
+  paintStyles: PaintStyleResource[];
 }
 
 export interface DocumentSnapshot_ExtensionsEntry {
@@ -969,6 +971,15 @@ export interface TextStyleResource {
   paragraph?: ParagraphStyle | undefined;
 }
 
+export interface PaintStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  paints?: PaintStack | undefined;
+}
+
 /**
  * M3 prototype vocabulary. These records are append-only and intentionally
  * separate from Player's transient navigation/overlay state. The current Core
@@ -1254,6 +1265,10 @@ export interface RegisterTextStyle {
   style?: TextStyleResource | undefined;
 }
 
+export interface RegisterPaintStyle {
+  style?: PaintStyleResource | undefined;
+}
+
 /**
  * Assigns or clears an image fill on a Frame, Rectangle, Ellipse, or Image
  * node. The asset must already be a registered document resource.
@@ -1421,6 +1436,7 @@ export interface ResolvedOperation {
   setNodeExtensions?: SetNodeExtensions | undefined;
   convertToTextPath?: ConvertToTextPath | undefined;
   registerTextStyle?: RegisterTextStyle | undefined;
+  registerPaintStyle?: RegisterPaintStyle | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -2213,6 +2229,7 @@ function createBaseDocumentSnapshot(): DocumentSnapshot {
     documentColorProfile: 0,
     retiredNodeIds: [],
     textStyles: [],
+    paintStyles: [],
   };
 }
 
@@ -2250,6 +2267,9 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     }
     for (const v of message.textStyles) {
       TextStyleResource.encode(v!, writer.uint32(146).fork()).join();
+    }
+    for (const v of message.paintStyles) {
+      PaintStyleResource.encode(v!, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -2352,6 +2372,14 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
           message.textStyles.push(TextStyleResource.decode(reader, reader.uint32()));
           continue;
         }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.paintStyles.push(PaintStyleResource.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2385,6 +2413,7 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     message.documentColorProfile = object.documentColorProfile ?? 0;
     message.retiredNodeIds = object.retiredNodeIds?.map((e) => e) || [];
     message.textStyles = object.textStyles?.map((e) => TextStyleResource.fromPartial(e)) || [];
+    message.paintStyles = object.paintStyles?.map((e) => PaintStyleResource.fromPartial(e)) || [];
     return message;
   },
 };
@@ -5856,6 +5885,114 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
   },
 };
 
+function createBasePaintStyleResource(): PaintStyleResource {
+  return { id: "", key: "", name: "", description: "", remote: false, paints: undefined };
+}
+
+export const PaintStyleResource: MessageFns<PaintStyleResource> = {
+  encode(message: PaintStyleResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.description !== "") {
+      writer.uint32(34).string(message.description);
+    }
+    if (message.remote !== false) {
+      writer.uint32(40).bool(message.remote);
+    }
+    if (message.paints !== undefined) {
+      PaintStack.encode(message.paints, writer.uint32(50).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PaintStyleResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePaintStyleResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.paints = PaintStack.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<PaintStyleResource>, I>>(base?: I): PaintStyleResource {
+    return PaintStyleResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PaintStyleResource>, I>>(object: I): PaintStyleResource {
+    const message = createBasePaintStyleResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.remote = object.remote ?? false;
+    message.paints = (object.paints !== undefined && object.paints !== null)
+      ? PaintStack.fromPartial(object.paints)
+      : undefined;
+    return message;
+  },
+};
+
 function createBasePrototypeEmpty(): PrototypeEmpty {
   return {};
 }
@@ -8809,6 +8946,54 @@ export const RegisterTextStyle: MessageFns<RegisterTextStyle> = {
   },
 };
 
+function createBaseRegisterPaintStyle(): RegisterPaintStyle {
+  return { style: undefined };
+}
+
+export const RegisterPaintStyle: MessageFns<RegisterPaintStyle> = {
+  encode(message: RegisterPaintStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      PaintStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterPaintStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterPaintStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = PaintStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterPaintStyle>, I>>(base?: I): RegisterPaintStyle {
+    return RegisterPaintStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterPaintStyle>, I>>(object: I): RegisterPaintStyle {
+    const message = createBaseRegisterPaintStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? PaintStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseImageFillUpdate(): ImageFillUpdate {
   return { nodeId: new Uint8Array(0), assetId: undefined };
 }
@@ -9884,6 +10069,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setNodeExtensions: undefined,
     convertToTextPath: undefined,
     registerTextStyle: undefined,
+    registerPaintStyle: undefined,
   };
 }
 
@@ -9972,6 +10158,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.registerTextStyle !== undefined) {
       RegisterTextStyle.encode(message.registerTextStyle, writer.uint32(226).fork()).join();
+    }
+    if (message.registerPaintStyle !== undefined) {
+      RegisterPaintStyle.encode(message.registerPaintStyle, writer.uint32(234).fork()).join();
     }
     return writer;
   },
@@ -10207,6 +10396,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.registerTextStyle = RegisterTextStyle.decode(reader, reader.uint32());
           continue;
         }
+        case 29: {
+          if (tag !== 234) {
+            break;
+          }
+
+          message.registerPaintStyle = RegisterPaintStyle.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10308,6 +10505,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.registerTextStyle = (object.registerTextStyle !== undefined && object.registerTextStyle !== null)
       ? RegisterTextStyle.fromPartial(object.registerTextStyle)
+      : undefined;
+    message.registerPaintStyle = (object.registerPaintStyle !== undefined && object.registerPaintStyle !== null)
+      ? RegisterPaintStyle.fromPartial(object.registerPaintStyle)
       : undefined;
     return message;
   },

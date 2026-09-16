@@ -38,6 +38,9 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
     if (command.type === "registerTextStyle") {
       return { type: "registerTextStyle", style: structuredClone(command.style) };
     }
+    if (command.type === "registerPaintStyle") {
+      return { type: "registerPaintStyle", style: structuredClone(command.style) };
+    }
     if (command.type === "createPage" || command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles" || command.type === "setExtensions") {
       return { ...command };
     }

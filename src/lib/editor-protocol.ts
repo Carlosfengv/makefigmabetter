@@ -344,6 +344,16 @@ export interface DocumentTextStyleResource {
   paragraph: DocumentTextProperties["paragraph"];
 }
 
+/** Complete document-owned PaintStyle resource. */
+export interface DocumentPaintStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  paints: DocumentPaintStack;
+}
+
 /** M3's durable prototype contract.  It intentionally lives beside the Canvas
  * projection rather than in UI state, and is encoded through the Canonical
  * extension map by transaction-batch. */
@@ -501,6 +511,7 @@ export type CoreBatchCommand =
    * transaction as nodes that first reference it (cross-document paste). */
   | { type: "registerAsset"; asset: DocumentAsset }
   | { type: "registerTextStyle"; style: DocumentTextStyleResource }
+  | { type: "registerPaintStyle"; style: DocumentPaintStyleResource }
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
@@ -763,6 +774,7 @@ export interface EditorSnapshot {
   nodes: CanvasNode[];
   assets?: DocumentAsset[];
   textStyles?: DocumentTextStyleResource[];
+  paintStyles?: DocumentPaintStyleResource[];
   /** Runtime-only FontFace loading state. It never enters Canonical snapshots. */
   fontAvailability?: Record<string, "idle" | "loading" | "ready" | "unavailable">;
   pages: CanvasPage[];

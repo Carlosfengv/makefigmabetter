@@ -51,6 +51,30 @@ describe("protocol operation codec", () => {
     });
   });
 
+  it("serializes canonical PaintStyle registration with an ordered paint stack", () => {
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{
+      type: "registerPaintStyle",
+      style: {
+        id: "S:brand-fill",
+        key: "library-paint-key",
+        name: "Brand fill",
+        description: "Primary surface",
+        remote: true,
+        paints: { layers: [{ visible: true, opacity: .75, blendMode: "multiply", paint: { css: "#ff0000ff", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
+      },
+    }]));
+
+    expect(batch.operations).toHaveLength(1);
+    expect(batch.operations[0]?.registerPaintStyle?.style).toMatchObject({
+      id: "S:brand-fill",
+      key: "library-paint-key",
+      name: "Brand fill",
+      description: "Primary surface",
+      remote: true,
+      paints: { layers: [{ visible: true, opacity: .75, blendMode: BlendMode.BLEND_MODE_MULTIPLY, solid: { space: ColorSpace.COLOR_SPACE_SRGB, red: 1, green: 0, blue: 0, alpha: 1 } }] },
+    });
+  });
+
   it("serializes a zero-height line with the generated Line node kind", () => {
     const node = { ...createNode("line", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const resolved = resolveCoreBatch([], [{ type: "create", node }]);

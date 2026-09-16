@@ -7,12 +7,12 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
     Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
     HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
-    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
-    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -474,6 +474,12 @@ pub fn snapshot_from_document(
         return Err(ServiceError::ReducerRejected);
     }
     if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.paint_styles().next().is_some()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && document.assets().any(|asset| !asset.font_faces.is_empty())
     {
@@ -915,6 +921,10 @@ pub fn snapshot_from_document(
             .text_styles()
             .map(text_style_resource_to_proto)
             .collect(),
+        paint_styles: document
+            .paint_styles()
+            .map(paint_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -967,6 +977,17 @@ pub fn document_from_snapshot(
     for style in snapshot.text_styles {
         document
             .seed_text_style(text_style_resource_from_proto(style)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.paint_styles.is_empty()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    for style in snapshot.paint_styles {
+        document
+            .seed_paint_style(paint_style_resource_from_proto(style)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
     }
     let mut page_hashes = Vec::new();
@@ -2580,6 +2601,30 @@ fn text_style_resource_from_proto(
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::ReducerRejected)?,
         paragraph: properties.paragraph,
+    })
+}
+
+fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyleResource {
+    v1::PaintStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        paints: Some(paint_stack_to_proto(&resource.paints)),
+    }
+}
+
+fn paint_style_resource_from_proto(
+    resource: v1::PaintStyleResource,
+) -> Result<PaintStyleResource, ServiceError> {
+    Ok(PaintStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::ReducerRejected)?)?,
     })
 }
 

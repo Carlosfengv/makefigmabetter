@@ -17,6 +17,7 @@ import {
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
   type DocumentFontReference,
+  type DocumentPaintStyleResource,
   type DocumentTextStyleResource,
   type DocumentTextPathMetadata,
   type DocumentTransformModifier,
@@ -27,6 +28,7 @@ import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
 import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
 import { RuntimeTextStyle } from "./runtime-text-style";
+import { RuntimePaintStyle } from "./runtime-paint-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
 import type { RuntimeWorkerViewState } from "./runtime-worker-bridge";
@@ -242,18 +244,23 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.projectionStore.confirmedProjection.textStyles?.find((style) => style.id === styleId);
   }
 
+  paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.confirmedProjection.paintStyles?.find((style) => style.id === styleId);
+  }
+
   assertSynchronousDocumentAccess(): void {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
   }
 
-  getStyleById(styleId: string): RuntimeTextStyle | null {
+  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
     return this.textStyleForId(styleId);
   }
 
-  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | null> {
+  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | null> {
     this.assertOpen();
     if (typeof styleId !== "string" || !styleId) throw runtimeError("INVALID_ARGUMENT");
     await Promise.resolve();
@@ -272,9 +279,23 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.localTextStyles();
   }
 
-  private textStyleForId(styleId: string): RuntimeTextStyle | null {
+  getLocalPaintStyles(): readonly RuntimePaintStyle[] {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+    return this.localPaintStyles();
+  }
+
+  async getLocalPaintStylesAsync(): Promise<readonly RuntimePaintStyle[]> {
+    this.assertOpen();
+    await Promise.resolve();
+    return this.localPaintStyles();
+  }
+
+  private textStyleForId(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null {
     const resource = this.textStyleResource(styleId);
-    return resource ? new RuntimeTextStyle(resource, this.textStyleHost()) : null;
+    if (resource) return new RuntimeTextStyle(resource, this.textStyleHost());
+    const paintResource = this.paintStyleResource(styleId);
+    return paintResource ? new RuntimePaintStyle(paintResource, this.paintStyleHost()) : null;
   }
 
   private localTextStyles(): readonly RuntimeTextStyle[] {
@@ -282,6 +303,23 @@ export class RuntimeSession implements RuntimeContainerHost {
     return Object.freeze((this.projectionStore.confirmedProjection.textStyles ?? [])
       .filter((style) => !style.remote)
       .map((style) => new RuntimeTextStyle(style, host)));
+  }
+
+  private localPaintStyles(): readonly RuntimePaintStyle[] {
+    const host = this.paintStyleHost();
+    return Object.freeze((this.projectionStore.confirmedProjection.paintStyles ?? [])
+      .filter((style) => !style.remote)
+      .map((style) => new RuntimePaintStyle(style, host)));
+  }
+
+  private paintStyleHost() {
+    return {
+      // Node style-link identities are introduced with the application API.
+      consumersForPaintStyle: (styleId: string) => {
+        void styleId;
+        return Object.freeze([]);
+      },
+    };
   }
 
   private textStyleHost() {

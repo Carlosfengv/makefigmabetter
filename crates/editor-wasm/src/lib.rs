@@ -9,12 +9,12 @@ use editor_core::{
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
     FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
     LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
-    OperationEnvelope, OperationId, Origin, Page, PageId, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
-    TextStyleRun, TextTruncation, TextWrapStyle, Transaction, TransactionId, VectorPath,
-    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleResource, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, Transaction,
+    TransactionId, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -294,6 +294,11 @@ impl DocumentEngine {
                 BatchCommand::RegisterTextStyle { style } => {
                     commands.push(Command::RegisterTextStyle {
                         style: text_style_resource_from_projection(&style)?,
+                    });
+                }
+                BatchCommand::RegisterPaintStyle { style } => {
+                    commands.push(Command::RegisterPaintStyle {
+                        style: paint_style_resource_from_projection(&style)?,
                     });
                 }
                 BatchCommand::Create { node } => {
@@ -841,13 +846,20 @@ struct CoreSnapshot {
     resource_index: Option<Vec<ProjectionAsset>>,
     #[serde(default)]
     text_styles: Option<Vec<ProjectionTextStyleResource>>,
+    #[serde(default)]
+    paint_styles: Option<Vec<ProjectionPaintStyleResource>>,
     nodes: Vec<ProjectionNode>,
     #[serde(default)]
     retired_ids: Option<Vec<String>>,
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=59).contains(&snapshot.schema_version)
+    if !(1..=60).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 60
+            && snapshot
+                .paint_styles
+                .as_ref()
+                .is_some_and(|styles| !styles.is_empty()))
         || (snapshot.schema_version < 59
             && snapshot
                 .text_styles
@@ -1603,6 +1615,20 @@ struct ProjectionTextStyleResource {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionPaintStyleResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    remote: bool,
+    paints: ProjectionPaintStack,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionTextDecorationOffset {
     value: f64,
     unit: String,
@@ -1841,6 +1867,9 @@ enum BatchCommand {
     RegisterTextStyle {
         style: ProjectionTextStyleResource,
     },
+    RegisterPaintStyle {
+        style: ProjectionPaintStyleResource,
+    },
     Create {
         node: ProjectionNode,
     },
@@ -2005,7 +2034,9 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.text_styles().next().is_some() {
+        let schema_version = if self.document.paint_styles().next().is_some() {
+            60
+        } else if self.document.text_styles().next().is_some() {
             59
         } else if self.document.nodes().any(|node| {
             self.document
@@ -2294,6 +2325,12 @@ impl DocumentEngine {
                 self.document
                     .text_styles()
                     .map(projection_text_style_resource)
+                    .collect(),
+            ),
+            paint_styles: Some(
+                self.document
+                    .paint_styles()
+                    .map(projection_paint_style_resource)
                     .collect(),
             ),
             nodes: self
@@ -2635,6 +2672,11 @@ impl DocumentEngine {
                 .seed_text_style(text_style_resource_from_projection(&style)?)
                 .map_err(core_error)?;
         }
+        for style in snapshot.paint_styles.clone().unwrap_or_default() {
+            document
+                .seed_paint_style(paint_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -2777,6 +2819,7 @@ impl DocumentEngine {
                 BatchCommand::CreatePage { .. }
                 | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::RegisterTextStyle { .. }
+                | BatchCommand::RegisterPaintStyle { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }
@@ -5767,6 +5810,30 @@ fn text_style_resource_from_projection(
             .base_style
             .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_RESOURCE"))?,
         paragraph: properties.paragraph,
+    })
+}
+
+fn projection_paint_style_resource(resource: &PaintStyleResource) -> ProjectionPaintStyleResource {
+    ProjectionPaintStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        paints: projection_paint_stack(&resource.paints),
+    }
+}
+
+fn paint_style_resource_from_projection(
+    resource: &ProjectionPaintStyleResource,
+) -> Result<PaintStyleResource, JsValue> {
+    Ok(PaintStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        paints: paint_stack_from_projection(&resource.paints)?,
     })
 }
 
@@ -10054,6 +10121,47 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 58;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v60_round_trips_the_paint_style_catalog_and_v59_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([{
+            "type": "registerPaintStyle",
+            "style": {
+                "id": "S:brand-fill",
+                "key": "library-paint-key",
+                "name": "Brand fill",
+                "description": "Primary surface",
+                "remote": true,
+                "paints": { "layers": [] }
+            }
+        }]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000060",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":60"));
+        assert!(snapshot.contains("\"paintStyles\":[{\"id\":\"S:brand-fill\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored.document.paint_style("S:brand-fill").unwrap().name,
+            "Brand fill"
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 59;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

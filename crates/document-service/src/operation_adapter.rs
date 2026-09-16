@@ -6,12 +6,12 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
     FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
     LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
-    TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType,
-    VectorSubpath, WrapTrackAlignment,
+    NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
+    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -48,6 +48,19 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::RegisterPaintStyle(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
@@ -1559,6 +1572,11 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
                 value.style.ok_or(ServiceError::InvalidEnvelope)?,
             )?,
         }),
+        Kind::RegisterPaintStyle(value) => Ok(Command::RegisterPaintStyle {
+            style: paint_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
     }
 }
 
@@ -2210,6 +2228,19 @@ fn text_style_resource_from_proto(
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
         paragraph: properties.paragraph,
+    })
+}
+
+fn paint_style_resource_from_proto(
+    resource: v1::PaintStyleResource,
+) -> Result<PaintStyleResource, ServiceError> {
+    Ok(PaintStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::InvalidEnvelope)?)?,
     })
 }
 
@@ -4820,6 +4851,41 @@ mod tests {
                     && style.key == "library-key"
                     && style.style.font_size == 16.0
                     && style.paragraph.line_height == Some(24.0)
+        ));
+    }
+
+    #[test]
+    fn paint_style_catalog_operations_require_semantics_forty_five() {
+        let style = v1::PaintStyleResource {
+            id: "S:brand-fill".into(),
+            key: "library-paint-key".into(),
+            name: "Brand fill".into(),
+            description: "Primary surface".into(),
+            remote: true,
+            paints: Some(v1::PaintStack { layers: Vec::new() }),
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::RegisterPaintStyle(
+                    v1::RegisterPaintStyle { style: Some(style) },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::RegisterPaintStyle { style }]
+                if style.id == "S:brand-fill"
+                    && style.key == "library-paint-key"
+                    && style.paints.layers.is_empty()
         ));
     }
 

@@ -41,6 +41,9 @@ pub const MAX_STYLE_ID_BYTES: usize = 2_048;
 pub const MAX_TEXT_STYLE_RESOURCES: usize = 4_096;
 pub const MAX_TEXT_STYLE_RESOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_TEXT_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PAINT_STYLE_RESOURCES: usize = 4_096;
+pub const MAX_PAINT_STYLE_RESOURCE_BYTES: usize = 256 * 1024;
+pub const MAX_PAINT_STYLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
 pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
 pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
@@ -903,6 +906,18 @@ pub struct TextStyleResource {
     pub paragraph: ParagraphStyle,
 }
 
+/// A complete, document-owned Figma PaintStyle resource. The ordered paint
+/// stack retains presence-bearing empty styles and every admitted paint layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintStyleResource {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub remote: bool,
+    pub paints: PaintStack,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextTruncation {
     #[default]
@@ -1133,6 +1148,9 @@ pub struct Document {
     /// Complete TextStyle values keyed by their stable Figma-compatible ID.
     text_styles: SharedOrdMap<String, TextStyleResource>,
     text_style_bytes: usize,
+    /// Complete PaintStyle values keyed by their stable Figma-compatible ID.
+    paint_styles: SharedOrdMap<String, PaintStyleResource>,
+    paint_style_bytes: usize,
     node_bytes: usize,
     /// IDs are never allocated to an unrelated new node after deletion.
     retired_ids: SharedOrdSet<NodeId>,
@@ -1357,6 +1375,9 @@ pub enum Command {
     RegisterTextStyle {
         style: TextStyleResource,
     },
+    RegisterPaintStyle {
+        style: PaintStyleResource,
+    },
     Delete {
         id: NodeId,
     },
@@ -1496,6 +1517,9 @@ pub enum AppliedChange {
     },
     TextStyleRegistered {
         style: TextStyleResource,
+    },
+    PaintStyleRegistered {
+        style: PaintStyleResource,
     },
     NodeDeleted {
         node: Node,
@@ -1679,6 +1703,10 @@ pub enum CommandError {
         id: String,
     },
     InvalidTextStyle,
+    DuplicatePaintStyle {
+        id: String,
+    },
+    InvalidPaintStyle,
 }
 
 impl Document {
@@ -1717,6 +1745,8 @@ impl Document {
             assets: SharedOrdMap::new(),
             text_styles: SharedOrdMap::new(),
             text_style_bytes: 0,
+            paint_styles: SharedOrdMap::new(),
+            paint_style_bytes: 0,
             node_bytes: 0,
             retired_ids: SharedOrdSet::new(),
             undo_stack: SharedVector::new(),
@@ -1953,6 +1983,14 @@ impl Document {
         self.text_styles.get(id)
     }
 
+    pub fn paint_styles(&self) -> impl Iterator<Item = &PaintStyleResource> {
+        self.paint_styles.values()
+    }
+
+    pub fn paint_style(&self, id: &str) -> Option<&PaintStyleResource> {
+        self.paint_styles.get(id)
+    }
+
     pub fn asset(&self, id: AssetId) -> Option<&AssetReference> {
         self.assets.get(&id)
     }
@@ -2085,6 +2123,13 @@ impl Document {
             hash_len(&mut hasher, self.text_styles.len());
             for style in self.text_styles.values() {
                 hash_text_style_resource(&mut hasher, style);
+            }
+        }
+        if !self.paint_styles.is_empty() {
+            hasher.update(b"makefigma/editor-core/paint-style-catalog-v1");
+            hash_len(&mut hasher, self.paint_styles.len());
+            for style in self.paint_styles.values() {
+                hash_paint_style_resource(&mut hasher, style);
             }
         }
         hash_len(&mut hasher, self.retired_ids.len());
@@ -2240,9 +2285,57 @@ impl Document {
         self.insert_text_style(style)
     }
 
+    /// Installs one verified PaintStyle while hydrating a trusted snapshot.
+    pub fn seed_paint_style(&mut self, style: PaintStyleResource) -> Result<(), CommandError> {
+        self.insert_paint_style(style)
+    }
+
+    fn insert_paint_style(&mut self, style: PaintStyleResource) -> Result<(), CommandError> {
+        if self.paint_styles.contains_key(&style.id) {
+            return Err(CommandError::DuplicatePaintStyle { id: style.id });
+        }
+        if self.text_styles.contains_key(&style.id) {
+            return Err(CommandError::InvalidPaintStyle);
+        }
+        let bytes = style.estimated_bytes();
+        let valid_identity = !style.id.is_empty()
+            && style.id.len() <= MAX_STYLE_ID_BYTES
+            && !style.id.contains('\0')
+            && style.key.len() <= MAX_STYLE_KEY_BYTES
+            && !style.key.contains('\0')
+            && (!style.remote || !style.key.is_empty())
+            && !style.name.trim().is_empty()
+            && style.name.len() <= MAX_STYLE_NAME_BYTES
+            && !style.name.contains('\0')
+            && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description.contains('\0');
+        let valid_assets = style.paints.layers.iter().all(|layer| match layer.paint {
+            PaintLayerKind::Image(image) => self
+                .assets
+                .get(&image.asset_id)
+                .is_some_and(|asset| asset.media_type.starts_with("image/")),
+            _ => true,
+        });
+        if !valid_identity
+            || !style.paints.is_valid()
+            || !valid_assets
+            || bytes > MAX_PAINT_STYLE_RESOURCE_BYTES
+            || self.paint_styles.len() >= MAX_PAINT_STYLE_RESOURCES
+            || self.paint_style_bytes.saturating_add(bytes) > MAX_PAINT_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidPaintStyle);
+        }
+        self.paint_style_bytes += bytes;
+        self.paint_styles.insert(style.id.clone(), style);
+        Ok(())
+    }
+
     fn insert_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
         if self.text_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicateTextStyle { id: style.id });
+        }
+        if self.paint_styles.contains_key(&style.id) {
+            return Err(CommandError::InvalidTextStyle);
         }
         let bytes = style.estimated_bytes();
         let mut properties = TextProperties::default();
@@ -4115,6 +4208,12 @@ impl Document {
                     style: style.clone(),
                 })
             }
+            Command::RegisterPaintStyle { style } => {
+                self.insert_paint_style(style.clone())?;
+                Ok(AppliedChange::PaintStyleRegistered {
+                    style: style.clone(),
+                })
+            }
         }
     }
 
@@ -4200,6 +4299,12 @@ impl Document {
                     .text_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
+            AppliedChange::PaintStyleRegistered { style } => {
+                self.paint_styles.remove(&style.id);
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
             AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
@@ -4275,6 +4380,12 @@ impl Document {
                     .text_style_bytes
                     .saturating_add(style.estimated_bytes());
                 self.text_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::PaintStyleRegistered { style } => {
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.paint_styles.insert(style.id.clone(), style.clone());
             }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
             AppliedChange::NodeRestored { node } => self.restore_node(node),
@@ -4472,7 +4583,8 @@ impl Document {
                 Command::CreatePage(_)
                 | Command::SetDocumentColorProfile { .. }
                 | Command::RegisterAsset { .. }
-                | Command::RegisterTextStyle { .. } => {}
+                | Command::RegisterTextStyle { .. }
+                | Command::RegisterPaintStyle { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -7167,6 +7279,7 @@ impl Command {
                         .sum::<usize>()
             }
             Command::RegisterTextStyle { style } => style.estimated_bytes(),
+            Command::RegisterPaintStyle { style } => style.estimated_bytes(),
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -7300,6 +7413,17 @@ impl TextStyleResource {
             + self.name.len()
             + self.description.len()
             + properties.estimated_bytes()
+    }
+}
+
+impl PaintStyleResource {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.description.len()
+            + self.paints.estimated_bytes()
     }
 }
 
@@ -7440,6 +7564,7 @@ impl AppliedChange {
                         .sum::<usize>()
             }
             AppliedChange::TextStyleRegistered { style } => style.estimated_bytes(),
+            AppliedChange::PaintStyleRegistered { style } => style.estimated_bytes(),
         }
     }
 }
@@ -7918,6 +8043,15 @@ fn hash_text_style_resource(hasher: &mut Sha256, resource: &TextStyleResource) {
     properties.paragraph = resource.paragraph.clone();
     properties.base_style = Some(resource.style.clone());
     hash_text_properties(hasher, &properties);
+}
+
+fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource) {
+    hash_text(hasher, &resource.id);
+    hash_text(hasher, &resource.key);
+    hash_text(hasher, &resource.name);
+    hash_text(hasher, &resource.description);
+    hasher.update([u8::from(resource.remote)]);
+    hash_versioned_paint_stack(hasher, &resource.paints);
 }
 
 fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
@@ -9112,6 +9246,10 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update([26]);
             hash_text_style_resource(hasher, style);
         }
+        Command::RegisterPaintStyle { style } => {
+            hasher.update([27]);
+            hash_paint_style_resource(hasher, style);
+        }
         Command::SetDocumentColorProfile { profile } => {
             hasher.update([6]);
             hash_document_color_profile(hasher, *profile);
@@ -10167,6 +10305,17 @@ mod tests {
                 text_style_id: None,
             },
             paragraph: TextProperties::default().paragraph,
+        }
+    }
+
+    fn paint_style_resource(id: &str) -> PaintStyleResource {
+        PaintStyleResource {
+            id: id.into(),
+            key: String::new(),
+            name: "Brand fill".into(),
+            description: "Primary surface".into(),
+            remote: false,
+            paints: PaintStack::default(),
         }
     }
 
@@ -12774,6 +12923,51 @@ mod tests {
         assert_eq!(
             document.seed_text_style(invalid),
             Err(CommandError::InvalidTextStyle)
+        );
+    }
+
+    #[test]
+    fn paint_style_catalog_is_hashed_bounded_and_undoable() {
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash_hex();
+        let style = paint_style_resource("S:brand-fill");
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterPaintStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.paint_style("S:brand-fill"), Some(&style));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert!(document.paint_style("S:brand-fill").is_none());
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.paint_style("S:brand-fill"), Some(&style));
+        assert!(matches!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::RegisterPaintStyle { style }]
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::DuplicatePaintStyle { .. })
+        ));
+        assert_eq!(
+            document.seed_text_style(text_style_resource("S:brand-fill")),
+            Err(CommandError::InvalidTextStyle)
+        );
+        let mut invalid = paint_style_resource("S:invalid");
+        invalid.remote = true;
+        assert_eq!(
+            document.seed_paint_style(invalid),
+            Err(CommandError::InvalidPaintStyle)
         );
     }
 

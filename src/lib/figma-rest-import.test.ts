@@ -1093,6 +1093,44 @@ describe("Figma REST import planning", () => {
     ]);
   });
 
+  it("builds a canonical PaintStyle catalog from REST metadata and linked layer paints", () => {
+    const plan = planFigmaRestImport({
+      version: "paint-style-catalog",
+      styles: {
+        "S:brand-fill": {
+          key: "published-paint-key",
+          name: "Brand/Primary",
+          description: "Primary surface",
+          styleType: "FILL",
+          remote: true,
+        },
+      },
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1",
+        type: "RECTANGLE",
+        relativeTransform: [[1, 0, 0], [0, 1, 0]],
+        absoluteBoundingBox: { x: 0, y: 0, width: 120, height: 24 },
+        styles: { fill: "S:brand-fill" },
+        fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .75, blendMode: "NORMAL", visible: true }],
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.paintStyles).toEqual([{
+      id: "S:brand-fill",
+      key: "published-paint-key",
+      name: "Brand/Primary",
+      description: "Primary surface",
+      remote: true,
+      paints: { layers: [{ visible: true, opacity: .75, blendMode: "normal", paint: { css: "#ff0000", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
+    }]);
+    expect(resolveFigmaRestImportBatch(plan)?.batch.map((command) => command.type)).toEqual([
+      "createPage",
+      "registerPaintStyle",
+      "create",
+    ]);
+  });
+
   it("preserves an empty Figma Text node style as its Canonical insertion style", () => {
     const plan = planFigmaRestImport({
       version: "empty-text-style",

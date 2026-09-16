@@ -15,6 +15,7 @@ import {
   type DocumentLinearGradient,
   type DocumentPaintLayer,
   type DocumentPaintStack,
+  type DocumentPaintStyleResource,
   type DocumentPaint,
   type RelativeTransform,
   type DocumentTextProperties,
@@ -48,6 +49,7 @@ export type FigmaRestImportPlan = {
   pages: CanvasPage[];
   nodes: CanvasNode[];
   textStyles?: DocumentTextStyleResource[];
+  paintStyles?: DocumentPaintStyleResource[];
   /** Image references only. An authorized adapter must resolve/download bytes
    * and register an Asset before it binds any request to `nodeId`. */
   assetRequests: FigmaRestAssetRequest[];
@@ -136,6 +138,7 @@ export function resolveFigmaRestImportBatch(plan: FigmaRestImportPlan): Resolved
     batch: [
       ...plan.pages.map((page) => ({ type: "createPage" as const, page: structuredClone(page) })),
       ...(plan.textStyles ?? []).map((style) => ({ type: "registerTextStyle" as const, style: structuredClone(style) })),
+      ...(plan.paintStyles ?? []).map((style) => ({ type: "registerPaintStyle" as const, style: structuredClone(style) })),
       ...nodes.batch,
     ],
   };
@@ -446,6 +449,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
       pages,
       nodes,
       textStyles: [],
+      paintStyles: [],
       assetRequests,
       pageCommands: [],
       nodeCommands: [],
@@ -569,6 +573,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   }
   normalizeImportedAlphaMasks(nodes, issues);
   const textStyles = importedTextStyleResources(sourceStyles, nodes, issues);
+  const paintStyles = importedPaintStyleResources(sourceStyles, nodes, sourceNodeByCanonicalId, issues);
   const pageCommands = pages.map((page) => ({ type: "create-page" as const, id: page.id, name: page.name, positionId: page.positionId }));
   const nodeCommands = nodes.map((node) => ({ type: "create" as const, node }));
   // The import path contains only Page/Create/SetMask commands. Build its
@@ -577,6 +582,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   const transactionBatch: CoreBatchCommand[] = [
     ...pages.map((page) => ({ type: "createPage" as const, page: structuredClone(page) })),
     ...textStyles.map((style) => ({ type: "registerTextStyle" as const, style: structuredClone(style) })),
+    ...paintStyles.map((style) => ({ type: "registerPaintStyle" as const, style: structuredClone(style) })),
     ...nodes.map((node) => ({ type: "create" as const, node: coreProjectionNode(node) })),
     ...nodes.filter((node) => node.isMask).map((node) => ({ type: "setMask" as const, id: node.id, enabled: true })),
   ];
@@ -589,6 +595,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
     pages,
     nodes,
     textStyles,
+    paintStyles,
     assetRequests,
     pageCommands,
     nodeCommands,
@@ -1234,7 +1241,17 @@ function versionedPaintStackFromSource(
   bindings: ReadonlyMap<string, AuthorizedImagePaintBinding>,
 ): PaintStackSourceResult {
   const paints = figmaPaintSource(node, usage);
-  if (!paints?.some((paint) => {
+  return paintStackFromSourcePaints(paints, usage, bindings, false);
+}
+
+function paintStackFromSourcePaints(
+  paints: unknown[] | undefined,
+  usage: "fill" | "stroke",
+  bindings: ReadonlyMap<string, AuthorizedImagePaintBinding>,
+  includeSimplePaints: boolean,
+): PaintStackSourceResult {
+  if (!paints?.length) return paints ? { status: "complete", stack: { layers: [] } } : { status: "none" };
+  if (!includeSimplePaints && !paints.some((paint) => {
     const item = record(paint);
     const type = string(item?.type);
     const blendMode = string(item?.blendMode);
@@ -1418,6 +1435,72 @@ function constraintState(value: unknown, sourceId: string, issues: FigmaImportIs
 }
 
 type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim" | "openTypeFeatures" | "textStyleId">;
+
+function importedPaintStyleResources(
+  sourceStyles: JsonRecord | undefined,
+  nodes: readonly CanvasNode[],
+  sourceNodeByCanonicalId: ReadonlyMap<string, JsonRecord>,
+  issues: FigmaImportIssue[],
+): DocumentPaintStyleResource[] {
+  if (!sourceStyles) return [];
+  const consumers = new Map<string, DocumentPaintStack[]>();
+  for (const node of nodes) {
+    const source = sourceNodeByCanonicalId.get(node.id);
+    const styles = record(source?.styles);
+    for (const [field, rawPaints] of [["fill", source?.fills], ["stroke", source?.strokes]] as const) {
+      const id = string(styles?.[field]);
+      if (!id) continue;
+      const result = paintStackFromSourcePaints(array(rawPaints), field, new Map(), true);
+      if (result.status !== "complete") continue;
+      const entries = consumers.get(id) ?? [];
+      entries.push(result.stack);
+      consumers.set(id, entries);
+    }
+  }
+  const entries = Object.entries(sourceStyles).filter(([, source]) => {
+    const metadata = record(source);
+    const styleType = string(metadata?.styleType) ?? string(metadata?.style_type) ?? string(metadata?.type);
+    return styleType === "FILL";
+  });
+  if (entries.length > 4_096) {
+    issues.push({ capability: "paint-style-resource", outcome: "rejected", reason: "Figma PaintStyle metadata exceeds the 4,096-resource catalog limit." });
+  }
+  const resources: DocumentPaintStyleResource[] = [];
+  for (const [id, source] of entries.slice(0, 4_096)) {
+    const metadata = record(source);
+    const values = consumers.get(id) ?? [];
+    if (!values.length) {
+      issues.push({ sourceId: id, capability: "paint-style-resource", outcome: "preserved-extension", reason: "Figma supplied PaintStyle metadata without a consuming layer that could resolve its complete paints." });
+      continue;
+    }
+    const first = values[0]!;
+    if (values.some((value) => JSON.stringify(value) !== JSON.stringify(first))) {
+      issues.push({ sourceId: id, capability: "paint-style-resource", outcome: "preserved-extension", reason: "Consumers of this Figma PaintStyle disagree on its complete paints, so no ambiguous catalog entry was created." });
+      continue;
+    }
+    const name = string(metadata?.name);
+    const key = string(metadata?.key) ?? "";
+    const description = string(metadata?.description) ?? "";
+    const remote = metadata?.remote === true;
+    const valid = name !== undefined
+      && name.trim().length > 0
+      && !name.includes("\0")
+      && encoder.encode(name).byteLength <= 1_024
+      && !id.includes("\0")
+      && encoder.encode(id).byteLength <= 2_048
+      && !key.includes("\0")
+      && encoder.encode(key).byteLength <= 2_048
+      && (!remote || key.length > 0)
+      && !description.includes("\0")
+      && encoder.encode(description).byteLength <= 32 * 1_024;
+    if (!valid) {
+      issues.push({ sourceId: id, capability: "paint-style-resource", outcome: "preserved-extension", reason: "Figma PaintStyle identity metadata exceeds the Canonical catalog bounds." });
+      continue;
+    }
+    resources.push({ id, key, name, description, remote, paints: first });
+  }
+  return resources.sort((left, right) => left.id.localeCompare(right.id));
+}
 
 function importedTextStyleResources(
   sourceStyles: JsonRecord | undefined,

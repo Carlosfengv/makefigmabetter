@@ -8,12 +8,12 @@ use editor_core::{
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
     FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
     InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
-    TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType,
-    VectorSubpath, WrapTrackAlignment, can_parent_contain_child,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
+    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment, can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -67,8 +67,9 @@ pub const FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION: u32 = 41;
 pub const OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION: u32 = 42;
 pub const TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 43;
 pub const TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 44;
+pub const PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 45;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -103,6 +104,11 @@ pub fn snapshot_from_document(
 ) -> Result<Vec<u8>, SnapshotError> {
     if engine_semantics_version < TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.text_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.paint_styles().next().is_some()
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
@@ -529,6 +535,10 @@ pub fn snapshot_from_document(
             .text_styles()
             .map(text_style_resource_to_proto)
             .collect(),
+        paint_styles: document
+            .paint_styles()
+            .map(paint_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -589,6 +599,16 @@ pub fn document_from_snapshot_with_engine_semantics(
     for style in snapshot.text_styles {
         document
             .seed_text_style(text_style_resource_from_proto(style)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    if declared_engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.paint_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    for style in snapshot.paint_styles {
+        document
+            .seed_paint_style(paint_style_resource_from_proto(style)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
     let mut page_hashes = BTreeMap::new();
@@ -2302,6 +2322,30 @@ fn text_style_resource_from_proto(
     })
 }
 
+fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyleResource {
+    v1::PaintStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        paints: Some(paint_stack_to_proto(&resource.paints)),
+    }
+}
+
+fn paint_style_resource_from_proto(
+    resource: v1::PaintStyleResource,
+) -> Result<PaintStyleResource, SnapshotError> {
+    Ok(PaintStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        paints: paint_stack_from_proto(resource.paints.ok_or(SnapshotError::Invalid)?)?,
+    })
+}
+
 fn text_properties_has_truncation(properties: &TextProperties) -> bool {
     properties.text_truncation == TextTruncation::Ending || properties.max_lines.is_some()
 }
@@ -3081,8 +3125,8 @@ mod tests {
     use super::*;
     use editor_core::{
         AssetId, AssetReference, DEFAULT_PAGE_ID, DropShadow, Effect, NodeKind, Page, PageId,
-        ParagraphStyle, TextAlign, TextAutoSize, TextProperties, TextStyleResource, TextStyleRun,
-        color::Color, geometry::AffineTransform,
+        PaintStyleResource, ParagraphStyle, TextAlign, TextAutoSize, TextProperties,
+        TextStyleResource, TextStyleRun, color::Color, geometry::AffineTransform,
     };
 
     fn node(id: u128, kind: NodeKind, parent_id: Option<NodeId>) -> Node {
@@ -5737,6 +5781,47 @@ mod tests {
                 172_u128.to_be_bytes(),
                 hash,
                 TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paint_style_catalog_round_trips_and_requires_semantics_forty_five() {
+        let mut document = Document::with_id(DocumentId(173));
+        let style = PaintStyleResource {
+            id: "S:brand-fill".into(),
+            key: "library-paint-key".into(),
+            name: "Brand fill".into(),
+            description: "Primary surface".into(),
+            remote: true,
+            paints: PaintStack::default(),
+        };
+        document.seed_paint_style(style.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            173_u128.to_be_bytes(),
+            hash,
+            PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.paint_style("S:brand-fill"), Some(&style));
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                173_u128.to_be_bytes(),
+                hash,
+                PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );
