@@ -2526,6 +2526,51 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => link.mediaData), "UNSUPPORTED_PROPERTY")).toBe(true);
   });
 
+  it("creates provider-resolved Embed and LinkUnfurl nodes through the host boundary", async () => {
+    const transport = new InMemoryTransport(initial) as InMemoryTransport & {
+      resolveLinkPreviewAsync: (url: string) => Promise<
+        | { type: "EMBED"; data: { srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null } }
+        | { type: "LINK_UNFURL"; data: { url: string; title: string | null; description: string | null; provider: string | null } }
+      >;
+    };
+    transport.resolveLinkPreviewAsync = vi.fn(async (url: string) => url.includes("video")
+      ? { type: "EMBED" as const, data: { srcUrl: "https://player.example/embed/1", canonicalUrl: url, title: "Video", provider: "Example" } }
+      : { type: "LINK_UNFURL" as const, data: { url, title: "Story", description: "Summary", provider: "Example" } });
+    let nextId = 0;
+    const session = new RuntimeSession({
+      sessionId: "create-preview",
+      projection: initial,
+      transport,
+      scheduleMicrotask: () => {},
+      createId: () => `preview-${++nextId}`,
+    });
+
+    const embed = await session.createLinkPreviewAsync("https://example.com/video");
+    const link = await session.createLinkPreviewAsync("https://example.com/story");
+    expect(embed).toMatchObject({ type: "EMBED", name: "Video", width: 360, height: 240 });
+    expect(embed.embedData.srcUrl).toBe("https://player.example/embed/1");
+    expect(link).toMatchObject({ type: "LINK_UNFURL", name: "Story", width: 360, height: 180 });
+    expect(link.linkUnfurlData.description).toBe("Summary");
+    await expect(session.createLinkPreviewAsync("javascript:alert(1)")).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RESOURCE_UNAVAILABLE"));
+    expect(transport.resolveLinkPreviewAsync).toHaveBeenCalledTimes(2);
+
+    await session.commitAsync();
+    expect(session.projectionStore.getNode(embed.id)?.removed).not.toBe(true);
+    expect(session.projectionStore.getNode(link.id)?.removed).not.toBe(true);
+  });
+
+  it("rejects missing or invalid link-preview resolvers before staging a node", async () => {
+    const withoutResolver = new RuntimeSession({ sessionId: "missing-preview-resolver", projection: initial, transport: new InMemoryTransport(initial), scheduleMicrotask: () => {} });
+    await expect(withoutResolver.createLinkPreviewAsync("https://example.com")).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RESOURCE_UNAVAILABLE"));
+    expect(withoutResolver.projectionStore.pendingTransactionIds()).toEqual([]);
+
+    const transport = new InMemoryTransport(initial) as InMemoryTransport & { resolveLinkPreviewAsync: () => Promise<unknown> };
+    transport.resolveLinkPreviewAsync = async () => ({ type: "EMBED", data: { srcUrl: "file:///private", canonicalUrl: null, title: null, provider: null } });
+    const invalidResolver = new RuntimeSession({ sessionId: "invalid-preview-resolver", projection: initial, transport: transport as never, scheduleMicrotask: () => {} });
+    await expect(invalidResolver.createLinkPreviewAsync("https://example.com")).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RESOURCE_UNAVAILABLE"));
+    expect(invalidResolver.projectionStore.pendingTransactionIds()).toEqual([]);
+  });
+
   it("does not register an image when cancellation wins during admission", async () => {
     const registerAssetAsync = vi.fn(async () => undefined);
     const transport = new InMemoryTransport(initial) as InMemoryTransport & { registerAssetAsync: typeof registerAssetAsync };

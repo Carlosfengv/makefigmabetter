@@ -61,6 +61,7 @@ export class FigmaCompatibleRuntime {
   }
   createImageNode(image: RuntimeImage): RuntimeNodeProxy { return this.session.createImageNode(image); }
   createGif(hash: string): RuntimeNodeProxy { return this.session.createGif(hash); }
+  createLinkPreviewAsync(url: string): Promise<RuntimeNodeProxy> { return this.session.createLinkPreviewAsync(url); }
   union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
     return this.session.union(nodes, parent, index);
   }

@@ -179,14 +179,14 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {
-    id: "special-preview.runtime-read",
+    id: "special-preview.runtime",
     editorTypes: ["figjam"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
     nodeTypes: ["EMBED", "LINK_UNFURL"],
-    property: "embedData|linkUnfurlData",
-    surface: "read",
+    property: "embedData|linkUnfurlData|createLinkPreviewAsync",
+    surface: "write",
     status: "partial",
-    limitation: "Existing Embed and LinkUnfurl nodes expose immutable provider-resolved metadata through live Runtime proxies. Provider discovery, thumbnail retrieval, iframe activation, clone and Runtime createLinkPreviewAsync remain staged.",
+    limitation: "Existing Embed and LinkUnfurl nodes expose immutable provider-resolved metadata through live Runtime proxies. createLinkPreviewAsync delegates provider discovery to an explicit host resolver, validates bounded HTTP(S) metadata, then stages one normal Canonical create transaction. Thumbnail retrieval, iframe activation and clone remain staged.",
   },
   {
     id: "runtime.view-state",

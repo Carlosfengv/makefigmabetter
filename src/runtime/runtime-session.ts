@@ -17,7 +17,9 @@ import {
   type DocumentBooleanOperation,
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
+  type DocumentEmbedMetadata,
   type DocumentFontReference,
+  type DocumentLinkUnfurlMetadata,
   type DocumentPaintStyleResource,
   type DocumentTextStyleResource,
   type DocumentTextPathMetadata,
@@ -51,7 +53,7 @@ const CONTAINER_TYPES = new Set<M1NodeType>([
 ]);
 const CREATABLE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "COMPONENT", "SLICE", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "IMAGE",
-  "CONNECTOR", "MEDIA", "SHAPE_WITH_TEXT",
+  "CONNECTOR", "EMBED", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
 const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
@@ -83,9 +85,13 @@ type RuntimeFontTransport = RuntimeTransactionTransport & {
   setSelectionAsync?: (ids: readonly string[], timeoutMs?: number) => Promise<void>;
   subscribeViewState?: (listener: (state: RuntimeWorkerViewState) => void) => () => void;
   resolveBooleanPathsAsync?: (revision: number, nodeIds: readonly string[], timeoutMs?: number) => Promise<ReadonlyMap<string, DocumentVectorPath>>;
+  resolveLinkPreviewAsync?: (url: string, timeoutMs?: number) => Promise<RuntimeLinkPreview>;
 };
 
 export type RuntimeImage = Readonly<{ hash: string; width: number; height: number }>;
+export type RuntimeLinkPreview =
+  | Readonly<{ type: "EMBED"; data: DocumentEmbedMetadata }>
+  | Readonly<{ type: "LINK_UNFURL"; data: DocumentLinkUnfurlMetadata }>;
 export type RuntimeTaskOptions = Readonly<{ timeoutMs?: number }>;
 export type RuntimeAvailableFont = Readonly<{ fontName: RuntimeFontName; assetId: string; faceIndex: number }>;
 
@@ -945,6 +951,32 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
   }
 
+  async createLinkPreviewAsync(url: string, timeoutMs?: number): Promise<RuntimeNodeProxy> {
+    this.assertOpen();
+    if (!validRuntimeHttpUrl(url) || !this.resourceTransport.resolveLinkPreviewAsync) {
+      throw runtimeError("RESOURCE_UNAVAILABLE");
+    }
+    const preview = await this.resourceTransport.resolveLinkPreviewAsync(url, timeoutMs);
+    this.assertOpen();
+    if (preview.type === "EMBED" && validRuntimeEmbedMetadata(preview.data)) {
+      return this.createNode("EMBED", {
+        name: preview.data.title || "Embed",
+        width: 360,
+        height: 240,
+        embedMetadata: structuredClone(preview.data),
+      });
+    }
+    if (preview.type === "LINK_UNFURL" && validRuntimeLinkUnfurlMetadata(preview.data)) {
+      return this.createNode("LINK_UNFURL", {
+        name: preview.data.title || "Link unfurl",
+        width: 360,
+        height: 180,
+        linkUnfurlMetadata: structuredClone(preview.data),
+      });
+    }
+    throw runtimeError("RESOURCE_UNAVAILABLE");
+  }
+
   union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
     return this.createBoolean(nodes, parent, index, "union");
   }
@@ -1739,6 +1771,38 @@ async function admitRuntimeImage(bytes: Uint8Array, declaredMime: string, signal
     pixelWidth: probe.rasterDimensions.width,
     pixelHeight: probe.rasterDimensions.height,
   };
+}
+
+function validRuntimeHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value || new TextEncoder().encode(value).byteLength > 2_048) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validRuntimeNullablePreviewText(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && new TextEncoder().encode(value).byteLength <= 4_096);
+}
+
+function validRuntimeEmbedMetadata(value: unknown): value is DocumentEmbedMetadata {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<DocumentEmbedMetadata>;
+  return validRuntimeHttpUrl(candidate.srcUrl)
+    && (candidate.canonicalUrl === null || validRuntimeHttpUrl(candidate.canonicalUrl))
+    && validRuntimeNullablePreviewText(candidate.title)
+    && validRuntimeNullablePreviewText(candidate.provider);
+}
+
+function validRuntimeLinkUnfurlMetadata(value: unknown): value is DocumentLinkUnfurlMetadata {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<DocumentLinkUnfurlMetadata>;
+  return validRuntimeHttpUrl(candidate.url)
+    && validRuntimeNullablePreviewText(candidate.title)
+    && validRuntimeNullablePreviewText(candidate.description)
+    && validRuntimeNullablePreviewText(candidate.provider);
 }
 
 function runtimeRasterDataUri(mediaType: string, bytes: Uint8Array): string {

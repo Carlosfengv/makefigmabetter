@@ -27,6 +27,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   if (false) {
     const media = runtime.createGif("admitted-gif-hash");
     void media.mediaData.hash;
+    void runtime.createLinkPreviewAsync("https://example.com");
   }
   const rectangle = runtime.createRectangle();
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];

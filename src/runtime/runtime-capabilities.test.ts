@@ -52,10 +52,10 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("image.async-resource")?.property).toContain("createGif");
     expect(runtimeCapability("image.async-resource")?.property).toContain("mediaData");
     expect(runtimeCapability("image.async-resource")?.nodeTypes).toContain("MEDIA");
-    expect(runtimeCapability("special-preview.runtime-read")).toMatchObject({
+    expect(runtimeCapability("special-preview.runtime")).toMatchObject({
       nodeTypes: ["EMBED", "LINK_UNFURL"],
-      property: "embedData|linkUnfurlData",
-      surface: "read",
+      property: "embedData|linkUnfurlData|createLinkPreviewAsync",
+      surface: "write",
     });
     expect(runtimeCapability("node.export-async")).toMatchObject({ status: "partial", surface: "export" });
     expect(runtimeCapability("runtime.commit-async")).toMatchObject({ status: "partial" });

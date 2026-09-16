@@ -343,6 +343,8 @@ export function assertFigmaPluginTypingsContract(
   ];
   const media: MediaNode = figma.createGif("admitted-gif-hash");
   void media.mediaData.hash;
+  const preview: Promise<EmbedNode | LinkUnfurlNode> = figma.createLinkPreviewAsync("https://example.com");
+  void preview;
 
   return { version: FIGMA_PLUGIN_TYPINGS_VERSION, allPages, nodeLookup, svg, reactions };
 }
