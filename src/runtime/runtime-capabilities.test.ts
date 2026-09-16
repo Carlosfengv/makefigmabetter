@@ -18,9 +18,10 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("node.create-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("createComponent"),
-      nodeTypes: expect.arrayContaining(["COMPONENT", "INSTANCE", "SLICE"]),
+      nodeTypes: expect.arrayContaining(["COMPONENT", "INSTANCE", "SLOT", "SLICE"]),
     });
     expect(runtimeCapability("node.create-runtime")?.property).toContain("ComponentNode.createInstance");
+    expect(runtimeCapability("node.create-runtime")?.property).toContain("ComponentNode.createSlot");
     expect(runtimeCapability("node.create-runtime")?.property).toContain("createComponentFromNode");
     expect(runtimeCapability("node.sync-write")).toMatchObject({ status: "partial" });
     expect(runtimeCapability("node.clone-runtime")).toMatchObject({

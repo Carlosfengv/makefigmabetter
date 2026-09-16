@@ -790,6 +790,83 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations(operations);
     return this.containerFor(instanceId);
   }
+  createSlot(componentId: string): RuntimeContainerNodeProxy {
+    this.assertOpen();
+    const component = this.projectionStore.getNode(componentId);
+    if (!component || component.removed === true || component.type !== "COMPONENT") {
+      throw runtimeError("NODE_NOT_FOUND", { nodeId: componentId });
+    }
+    const metadata = component.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!metadata || metadata.remote) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    const id = this.createId();
+    const propertyName = `Slot#${id}`;
+    if (metadata.componentPropertyDefinitions[propertyName]) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    const linkedInstances = this.projectionStore.listLiveNodes().filter((node) => node.type === "INSTANCE" && instanceMainComponentId(node) === componentId);
+    if (linkedInstances.length + 1 > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+    const children = this.siblingsOf(componentId);
+    const positionId = positionIdForLayerInsertion(children, children.length);
+    if (!positionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+    const source = structuredClone(component) as Record<string, unknown>;
+    delete source.componentMetadata;
+    delete source.instanceMetadata;
+    delete source.componentSetMetadata;
+    const slot: RuntimeProjectionNode = {
+      ...source,
+      id,
+      type: "SLOT",
+      parentId: componentId,
+      pageId: this.pageIdFor(component),
+      siblingIndex: children.length,
+      positionId,
+      name: "Slot",
+      x: 0,
+      y: 0,
+      rotation: 0,
+      relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      width: Math.max(1, (typeof component.width === "number" ? component.width : 100) / 2),
+      height: Math.max(1, (typeof component.height === "number" ? component.height : 100) / 2),
+      removed: false,
+      extensions: {},
+      slotMetadata: { propertyName },
+    };
+    const instanceSlotOperations = linkedInstances.map((instance): PendingProjectionOperation => {
+      const instanceChildren = this.siblingsOf(instance.id);
+      const instancePositionId = positionIdForLayerInsertion(instanceChildren, instanceChildren.length);
+      if (!instancePositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: instance.id });
+      const instanceSlotId = this.createId();
+      return {
+        type: "create",
+        node: {
+          ...structuredClone(slot),
+          id: instanceSlotId,
+          parentId: instance.id,
+          pageId: this.pageIdFor(instance),
+          siblingIndex: instanceChildren.length,
+          positionId: instancePositionId,
+          extensions: { [INSTANCE_SOURCE_NODE_EXTENSION]: [...new TextEncoder().encode(id)] },
+          slotMetadata: { propertyName, sourceSlotId: id },
+        },
+      };
+    });
+    this.enqueueOperations([
+      {
+        type: "update",
+        nodeId: componentId,
+        patch: {
+          componentMetadata: {
+            ...structuredClone(metadata),
+            componentPropertyDefinitions: {
+              ...structuredClone(metadata.componentPropertyDefinitions),
+              [propertyName]: { type: "SLOT" },
+            },
+          },
+        },
+      },
+      { type: "create", node: slot },
+      ...instanceSlotOperations,
+    ]);
+    return this.containerFor(id);
+  }
   createTextPath(vectorProxy: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
     this.assertOpen();
     if (vectorProxy.handle.sessionId !== this.sessionId || vectorProxy.removed || !["VECTOR", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "LINE"].includes(vectorProxy.type)) {

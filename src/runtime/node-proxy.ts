@@ -173,6 +173,7 @@ export interface RuntimeNodeHost {
   getNodeByIdAsync(nodeId: string): Promise<RuntimeNodeProxy | null>;
   getInstancesOfComponentAsync(componentId: string): Promise<readonly RuntimeNodeProxy[]>;
   createInstance(componentId: string): RuntimeContainerNodeProxy;
+  createSlot(componentId: string): RuntimeContainerNodeProxy;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -1889,6 +1890,12 @@ export class RuntimeNodeProxy {
   createInstance(): RuntimeContainerNodeProxy {
     if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     return this.host.createInstance(this.handle.nodeId);
+  }
+
+  createSlot(): RuntimeContainerNodeProxy {
+    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    return this.host.createSlot(this.handle.nodeId);
   }
 
   removeOverrides(): void {

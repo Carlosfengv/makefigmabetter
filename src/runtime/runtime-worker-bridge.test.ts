@@ -440,6 +440,57 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("lowers Component.createSlot as one valid Core component subtree", async () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const snapshot = snapshotAt(4);
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x90;
+    const session = new RuntimeSession({
+      sessionId: "component-slot-core-lowering",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const component = session.createComponent();
+    const instance = component.createInstance();
+    const slot = component.createSlot();
+    const propertyName = Object.keys(component.componentPropertyDefinitions)[0]!;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({
+          id: component.id,
+          kind: "component",
+          componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } }),
+        }),
+      }),
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({ id: instance.id, kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: component.id }) }),
+      }),
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({ id: slot.id, parentId: component.id, kind: "slot", slotMetadata: { propertyName } }),
+      }),
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({ parentId: instance.id, kind: "slot", slotMetadata: { propertyName, sourceSlotId: slot.id } }),
+      }),
+    ]);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: component.id, kind: "component", componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } }) }),
+      expect.objectContaining({ id: slot.id, parentId: component.id, kind: "slot", slotMetadata: { propertyName } }),
+      expect.objectContaining({ parentId: instance.id, kind: "slot", slotMetadata: { propertyName, sourceSlotId: slot.id } }),
+    ]));
+
+    bridge.close();
+    await commit;
+  });
+
   it("lowers a linked Instance subtree and preserves its source-node identities", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

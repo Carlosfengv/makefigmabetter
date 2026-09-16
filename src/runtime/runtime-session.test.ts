@@ -490,6 +490,33 @@ describe("M1 RuntimeSession", () => {
     expect(session.projectionStore.pendingTransactionIds()).toHaveLength(transactionCount);
   });
 
+  it("creates a Slot and its component property atomically", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const instance = component.createInstance();
+    const slot = component.createSlot();
+    const definitions = component.componentPropertyDefinitions;
+    const propertyName = Object.keys(definitions)[0]!;
+
+    expect(slot).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(slot).toMatchObject({ type: "SLOT", name: "Slot", parent: component, width: 50, height: 50 });
+    expect(definitions[propertyName]).toEqual({ type: "SLOT" });
+    expect(session.projectionStore.getNode(slot.id)?.slotMetadata).toEqual({ propertyName });
+    expect(component.children).toEqual([slot]);
+    expect(instance.children).toHaveLength(1);
+    expect(session.projectionStore.getNode(instance.children[0]!.id)?.slotMetadata).toEqual({ propertyName, sourceSlotId: slot.id });
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: component.id, type: "COMPONENT" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: instance.id, type: "INSTANCE" }) }),
+      expect.objectContaining({ type: "update", nodeId: component.id, patch: { componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } }) } }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: slot.id, type: "SLOT", parentId: component.id, slotMetadata: { propertyName } }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ type: "SLOT", parentId: instance.id, slotMetadata: { propertyName, sourceSlotId: slot.id } }) }),
+    ]);
+  });
+
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
