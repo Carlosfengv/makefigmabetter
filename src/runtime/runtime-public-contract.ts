@@ -38,6 +38,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void text.getRangeOpenTypeFeatures(0, 1);
   void text.textStyleId;
   void text.getRangeTextStyleId(0, 1);
+  text.textStyleId = "S:body";
+  if (false) void text.setTextStyleIdAsync("S:body");
+  text.setRangeTextStyleId(0, 1, "S:body");
+  if (false) void text.setRangeTextStyleIdAsync(0, 1, "S:body");
   void text.fontName;
   void text.getRangeFontName(0, 1);
   void text.getRangeAllFontNames(0, 1);

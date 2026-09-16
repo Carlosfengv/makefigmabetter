@@ -237,6 +237,16 @@ export class RuntimeSession implements RuntimeContainerHost {
     return runtimeFontNameForReference(font, this.fontAssets());
   }
 
+  textStyleResource(styleId: string): DocumentTextStyleResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.confirmedProjection.textStyles?.find((style) => style.id === styleId);
+  }
+
+  assertSynchronousDocumentAccess(): void {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+  }
+
   getStyleById(styleId: string): RuntimeTextStyle | null {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
@@ -263,7 +273,7 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   private textStyleForId(styleId: string): RuntimeTextStyle | null {
-    const resource = this.projectionStore.confirmedProjection.textStyles?.find((style) => style.id === styleId);
+    const resource = this.textStyleResource(styleId);
     return resource ? new RuntimeTextStyle(resource, this.textStyleHost()) : null;
   }
 

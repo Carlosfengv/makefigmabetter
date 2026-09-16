@@ -13,6 +13,7 @@ import type {
   DocumentInstanceMetadata,
   DocumentPaintStack,
   DocumentTextProperties,
+  DocumentTextStyleResource,
   DocumentTextPathMetadata,
   DocumentTransformModifier,
   DocumentVectorPath,
@@ -163,6 +164,8 @@ export interface RuntimeNodeHost {
   assertFontsLoaded(fonts: readonly DocumentFontReference[]): void;
   resolveFontName(fontName: RuntimeFontName): DocumentFontReference | undefined;
   fontNameForReference(font: DocumentFontReference): RuntimeFontName;
+  textStyleResource(styleId: string): DocumentTextStyleResource | undefined;
+  assertSynchronousDocumentAccess(): void;
   hasFontReference(font: DocumentFontReference): boolean;
   hasImageHash(hash: string): boolean;
   allocateRuntimeId(): string;
@@ -180,6 +183,7 @@ function isRuntimeLineHeight(value: unknown): value is RuntimeLineHeight {
     && candidate.value > 0;
 }
 const SHAPE_WITH_TEXT_DEFAULTS = Object.freeze({ fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0, lineHeight: 20 });
+const DEFAULT_RUNTIME_TEXT_STYLE = Object.freeze({ fontSize: 31, fontWeight: 400, italic: false, letterSpacing: 0, lineHeight: 20 });
 const SHAPE_WITH_TEXT_DEFAULT_FILLS: readonly RuntimePaint[] = Object.freeze([{
   type: "SOLID",
   color: { r: 31 / 255, g: 41 / 255, b: 55 / 255 },
@@ -239,6 +243,67 @@ function runtimeTextStyleIdForRange(
     .map((style) => style.textStyleId ?? "");
   if (!values.length) return properties?.baseStyle?.textStyleId ?? "";
   return values.some((value) => value !== values[0]) ? RUNTIME_MIXED : values[0]!;
+}
+
+function applyRuntimeTextStyleRange(
+  text: string,
+  properties: DocumentTextProperties | undefined,
+  start: number,
+  end: number,
+  styleId: string,
+  resource: DocumentTextStyleResource | undefined,
+  defaults: Readonly<{ fontSize: number; fontWeight: number; italic: boolean; letterSpacing: number; lineHeight: number }>,
+): DocumentTextProperties {
+  runtimeTextRange(text, start, end);
+  if (!styleId) return patchRuntimeTextRange(text, properties, start, end, { textStyleId: undefined }, defaults);
+  if (!resource || resource.id !== styleId) throw runtimeError("RESOURCE_UNAVAILABLE");
+  const style = resource.style;
+  const patch: RuntimeTextStylePatch = {
+    font: structuredClone(style.font),
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    italic: style.italic,
+    letterSpacing: style.letterSpacing,
+    color: structuredClone(style.color),
+    fillStack: structuredClone(style.fillStack),
+    textCase: style.textCase,
+    textDecoration: style.textDecoration,
+    textDecorationStyle: style.textDecorationStyle,
+    textDecorationOffset: structuredClone(style.textDecorationOffset),
+    textDecorationThickness: structuredClone(style.textDecorationThickness),
+    textDecorationColor: structuredClone(style.textDecorationColor),
+    textDecorationSkipInk: style.textDecorationSkipInk,
+    leadingTrim: style.leadingTrim,
+    openTypeFeatures: style.openTypeFeatures ? { ...style.openTypeFeatures } : undefined,
+    textStyleId: styleId,
+  };
+  let next = patchRuntimeTextRange(text, properties, start, end, patch, defaults);
+  if (start === 0 && end === text.length) {
+    return {
+      ...next,
+      paragraph: structuredClone(resource.paragraph),
+      paragraphStyleRuns: undefined,
+    };
+  }
+  const currentParagraph = next.paragraph;
+  const targetParagraph = resource.paragraph;
+  if (currentParagraph.alignment !== targetParagraph.alignment
+    || (currentParagraph.hangingList ?? false) !== (targetParagraph.hangingList ?? false)
+    || (currentParagraph.hangingPunctuation ?? false) !== (targetParagraph.hangingPunctuation ?? false)) {
+    throw runtimeError("UNSUPPORTED_FEATURE");
+  }
+  const lineHeight: RuntimeParagraphLineHeight = targetParagraph.lineHeightUnit === "auto"
+    ? { unit: "AUTO" }
+    : {
+        value: targetParagraph.lineHeight ?? defaults.lineHeight,
+        unit: targetParagraph.lineHeightUnit === "percent" ? "PERCENT" : "PIXELS",
+      };
+  next = patchRuntimeParagraphLineHeight(text, next, start, end, lineHeight);
+  next = patchRuntimeParagraphSpacing(text, next, start, end, targetParagraph.paragraphSpacing);
+  next = patchRuntimeParagraphIndent(text, next, start, end, targetParagraph.paragraphIndent ?? 0);
+  next = patchRuntimeParagraphTextWrapStyle(text, next, start, end, targetParagraph.textWrapStyle ?? "auto");
+  next = patchRuntimeParagraphListType(text, next, start, end, targetParagraph.listType);
+  return patchRuntimeParagraphListSpacing(text, next, start, end, targetParagraph.listSpacing ?? 0);
 }
 
 function canonicalHyperlink(value: RuntimeHyperlinkTarget | null): DocumentTextProperties["runs"][number]["hyperlink"] {
@@ -495,6 +560,17 @@ export class RuntimeTextSublayerProxy {
 
   get textStyleId(): string | typeof RUNTIME_MIXED {
     return this.getRangeTextStyleId(0, this.characters.length);
+  }
+
+  set textStyleId(value: string | typeof RUNTIME_MIXED) {
+    if (value === RUNTIME_MIXED) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.host.assertSynchronousDocumentAccess();
+    this.applyTextStyleRange(0, this.characters.length, value);
+  }
+
+  async setTextStyleIdAsync(styleId: string): Promise<void> {
+    this.applyTextStyleRange(0, this.characters.length, styleId);
+    await this.host.commitAsync();
   }
 
   get textCase(): RuntimeTextCase | typeof RUNTIME_MIXED {
@@ -859,6 +935,16 @@ export class RuntimeTextSublayerProxy {
     return runtimeTextStyleIdForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end);
   }
 
+  setRangeTextStyleId(start: number, end: number, styleId: string): void {
+    this.host.assertSynchronousDocumentAccess();
+    this.applyTextStyleRange(start, end, styleId);
+  }
+
+  async setRangeTextStyleIdAsync(start: number, end: number, styleId: string): Promise<void> {
+    this.applyTextStyleRange(start, end, styleId);
+    await this.host.commitAsync();
+  }
+
   setRangeFontSize(start: number, end: number, value: number): void {
     if (!Number.isFinite(value) || value < 1) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.setTextRange(start, end, { fontSize: value });
@@ -1005,6 +1091,29 @@ export class RuntimeTextSublayerProxy {
       ? patch.font ? [patch.font] : []
       : fontsForRuntimeTextRange(text, properties, start, end));
     this.write({ textProperties: patchRuntimeTextRange(text, properties, start, end, patch, SHAPE_WITH_TEXT_DEFAULTS) });
+  }
+
+  private applyTextStyleRange(start: number, end: number, styleId: string): void {
+    if (typeof styleId !== "string" || styleId.includes("\0") || new TextEncoder().encode(styleId).byteLength > 2_048) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    if (text.length > 0 && start === end) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    runtimeTextRange(text, start, end);
+    const resource = styleId ? this.host.textStyleResource(styleId) : undefined;
+    if (resource?.style.font) this.host.assertFontsLoaded([resource.style.font]);
+    this.write({
+      textProperties: applyRuntimeTextStyleRange(
+        text,
+        node.textProperties as DocumentTextProperties | undefined,
+        start,
+        end,
+        styleId,
+        resource,
+        SHAPE_WITH_TEXT_DEFAULTS,
+      ),
+    });
   }
 
   private replaceCharacters(start: number, end: number, replacement: string, insertionStyle: RuntimeTextInsertionStyle = "BEFORE"): void {
@@ -1609,6 +1718,19 @@ export class RuntimeNodeProxy {
     return this.getRangeTextStyleId(0, this.characters.length);
   }
 
+  set textStyleId(value: string | typeof RUNTIME_MIXED) {
+    this.assertText();
+    if (value === RUNTIME_MIXED) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.host.assertSynchronousDocumentAccess();
+    this.applyTextStyleRange(0, this.characters.length, value);
+  }
+
+  async setTextStyleIdAsync(styleId: string): Promise<void> {
+    this.assertText();
+    this.applyTextStyleRange(0, this.characters.length, styleId);
+    await this.host.commitAsync();
+  }
+
   get letterSpacing(): RuntimeLetterSpacing | typeof RUNTIME_MIXED {
     this.assertText();
     return this.getRangeLetterSpacing(0, this.characters.length);
@@ -1823,6 +1945,18 @@ export class RuntimeNodeProxy {
       start,
       end,
     );
+  }
+
+  setRangeTextStyleId(start: number, end: number, styleId: string): void {
+    this.assertText();
+    this.host.assertSynchronousDocumentAccess();
+    this.applyTextStyleRange(start, end, styleId);
+  }
+
+  async setRangeTextStyleIdAsync(start: number, end: number, styleId: string): Promise<void> {
+    this.assertText();
+    this.applyTextStyleRange(start, end, styleId);
+    await this.host.commitAsync();
   }
 
   getRangeLetterSpacing(start: number, end: number): RuntimeLetterSpacing | typeof RUNTIME_MIXED {
@@ -2749,6 +2883,30 @@ export class RuntimeNodeProxy {
       : fontsForRuntimeTextRange(text, properties, start, end);
     this.host.assertFontsLoaded(fonts);
     this.write({ textProperties: patchRuntimeTextRange(text, properties, start, end, patch) });
+  }
+
+  private applyTextStyleRange(start: number, end: number, styleId: string): void {
+    this.assertText();
+    if (typeof styleId !== "string" || styleId.includes("\0") || new TextEncoder().encode(styleId).byteLength > 2_048) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    if (text.length > 0 && start === end) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    runtimeTextRange(text, start, end);
+    const resource = styleId ? this.host.textStyleResource(styleId) : undefined;
+    if (resource?.style.font) this.host.assertFontsLoaded([resource.style.font]);
+    this.write({
+      textProperties: applyRuntimeTextStyleRange(
+        text,
+        node.textProperties as DocumentTextProperties | undefined,
+        start,
+        end,
+        styleId,
+        resource,
+        DEFAULT_RUNTIME_TEXT_STYLE,
+      ),
+    });
   }
 
   private replaceCharacters(start: number, end: number, replacement: string, insertionStyle: RuntimeTextInsertionStyle = "BEFORE"): void {
