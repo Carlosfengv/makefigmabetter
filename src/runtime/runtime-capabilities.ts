@@ -169,13 +169,13 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
   },
   {
     id: "image.async-resource",
-    editorTypes: ["figma"],
+    editorTypes: ["figma", "figjam"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
-    nodeTypes: ["IMAGE"],
-    property: "createImageAsync|getImageByHash|createImageNode|setImageAsset",
+    nodeTypes: ["IMAGE", "MEDIA"],
+    property: "createImageAsync|getImageByHash|createImageNode|setImageAsset|createGif",
     surface: "write",
     status: "partial",
-    limitation: "M2 admits bounded raster bytes, registers metadata in Core and seeds Worker decode bytes. W12-P can reference the resulting AssetId through the admitted Figma-shaped Image Paint subset; filters, video and the full Figma image-adjustment surface remain staged.",
+    limitation: "M2 admits bounded raster bytes, registers metadata in Core and seeds Worker decode bytes. W12-P can reference the resulting AssetId through the admitted Figma-shaped Image Paint subset. The FigJam createGif subset requires an already-admitted image/gif AssetId and synchronously creates a MEDIA node with immutable hash and source dimensions; playback remains a deterministic poster fallback. Filters, video and the full Figma image-adjustment surface remain staged.",
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {

@@ -2450,6 +2450,47 @@ describe("M1 RuntimeSession", () => {
     expect(session.projectionStore.getNode(imageNode.id)).toMatchObject({ assetId: "image-1", type: "IMAGE" });
   });
 
+  it("creates a FigJam Media node from an admitted GIF hash", async () => {
+    const projection: RuntimeProjection = {
+      revision: 0,
+      nodes: [
+        {
+          id: "document",
+          type: "DOCUMENT",
+          name: "Document",
+          assets: [
+            { assetId: "gif-1", contentHash: "a".repeat(64), mediaType: "image/gif", byteLength: 12, pixelWidth: 320, pixelHeight: 180 },
+            { assetId: "png-1", contentHash: "b".repeat(64), mediaType: "image/png", byteLength: 8, pixelWidth: 20, pixelHeight: 10 },
+          ],
+        },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({
+      sessionId: "create-gif",
+      projection,
+      transport,
+      scheduleMicrotask: () => {},
+      createId: () => "media-1",
+    });
+
+    const media = session.createGif("gif-1");
+    expect(media.type).toBe("MEDIA");
+    expect(session.projectionStore.getNode(media.id)).toMatchObject({
+      type: "MEDIA",
+      assetId: "gif-1",
+      width: 320,
+      height: 180,
+      mediaMetadata: { hash: "gif-1" },
+    });
+    expect(isRuntimeError(captureError(() => session.createGif("missing")), "RESOURCE_UNAVAILABLE")).toBe(true);
+    expect(isRuntimeError(captureError(() => session.createGif("png-1")), "RESOURCE_UNAVAILABLE")).toBe(true);
+
+    await session.commitAsync();
+    expect(session.projectionStore.getNode(media.id)?.removed).not.toBe(true);
+  });
+
   it("does not register an image when cancellation wins during admission", async () => {
     const registerAssetAsync = vi.fn(async () => undefined);
     const transport = new InMemoryTransport(initial) as InMemoryTransport & { registerAssetAsync: typeof registerAssetAsync };

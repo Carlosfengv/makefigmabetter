@@ -51,7 +51,7 @@ const CONTAINER_TYPES = new Set<M1NodeType>([
 ]);
 const CREATABLE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "COMPONENT", "SLICE", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "IMAGE",
-  "CONNECTOR", "SHAPE_WITH_TEXT",
+  "CONNECTOR", "MEDIA", "SHAPE_WITH_TEXT",
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
 const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
@@ -918,6 +918,31 @@ export class RuntimeSession implements RuntimeContainerHost {
       throw runtimeError("INVALID_ARGUMENT");
     }
     return this.createNode("IMAGE", { name: "Image", assetId: image.hash, width: image.width, height: image.height });
+  }
+
+  createGif(hash: string): RuntimeNodeProxy {
+    this.assertOpen();
+    if (!hash) throw runtimeError("INVALID_ARGUMENT");
+    const assets = this.projectionStore.getNode(this.rootNodeId)?.assets;
+    const asset = Array.isArray(assets)
+      ? assets.find((candidate): candidate is DocumentAsset => Boolean(
+          candidate
+          && typeof candidate === "object"
+          && (candidate as DocumentAsset).assetId === hash
+          && (candidate as DocumentAsset).mediaType === "image/gif",
+        ))
+      : undefined;
+    if (!asset || !Number.isFinite(asset.pixelWidth) || !Number.isFinite(asset.pixelHeight)
+      || (asset.pixelWidth ?? 0) <= 0 || (asset.pixelHeight ?? 0) <= 0) {
+      throw runtimeError("RESOURCE_UNAVAILABLE");
+    }
+    return this.createNode("MEDIA", {
+      name: "Gif",
+      assetId: asset.assetId,
+      width: asset.pixelWidth,
+      height: asset.pixelHeight,
+      mediaMetadata: { hash: asset.assetId },
+    });
   }
 
   union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {

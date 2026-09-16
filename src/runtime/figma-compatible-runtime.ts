@@ -60,6 +60,7 @@ export class FigmaCompatibleRuntime {
     return this.session.transformGroup(nodes, parent, index, modifiers);
   }
   createImageNode(image: RuntimeImage): RuntimeNodeProxy { return this.session.createImageNode(image); }
+  createGif(hash: string): RuntimeNodeProxy { return this.session.createGif(hash); }
   union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
     return this.session.union(nodes, parent, index);
   }

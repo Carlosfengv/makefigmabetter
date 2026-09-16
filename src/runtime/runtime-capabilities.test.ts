@@ -49,6 +49,8 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("text.async-font-and-range")).toMatchObject({ errorCode: "FONT_NOT_LOADED" });
     expect(runtimeCapability("text.async-font-and-range")?.property).toContain("textAutoResize");
     expect(runtimeCapability("image.async-resource")).toMatchObject({ errorCode: "RESOURCE_UNAVAILABLE" });
+    expect(runtimeCapability("image.async-resource")?.property).toContain("createGif");
+    expect(runtimeCapability("image.async-resource")?.nodeTypes).toContain("MEDIA");
     expect(runtimeCapability("node.export-async")).toMatchObject({ status: "partial", surface: "export" });
     expect(runtimeCapability("runtime.commit-async")).toMatchObject({ status: "partial" });
     expect(runtimeCapability("plugin.sandbox")).toMatchObject({ status: "partial", surface: "plugin", errorCode: "PERMISSION_DENIED" });

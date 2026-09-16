@@ -341,6 +341,8 @@ export function assertFigmaPluginTypingsContract(
     { type: "REPEAT", repeatType: "LINEAR", count: 1, unitType: "PIXELS", offset: 120, axis: "HORIZONTAL" },
     { type: "REPEAT", repeatType: "RADIAL", count: 3, unitType: "PIXELS", offset: 64 },
   ];
+  const media: MediaNode = figma.createGif("admitted-gif-hash");
+  void media.mediaData.hash;
 
   return { version: FIGMA_PLUGIN_TYPINGS_VERSION, allPages, nodeLookup, svg, reactions };
 }
