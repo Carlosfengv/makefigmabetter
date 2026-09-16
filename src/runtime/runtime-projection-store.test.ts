@@ -93,6 +93,41 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("sibling")).toMatchObject({ siblingIndex: 0 });
   });
 
+  it("projects Frame-to-Component replacement and child adoption atomically", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "frame", type: "FRAME", parentId: "page", siblingIndex: 0, positionId: "40000000000000000000000000000000:00000000000000000000000000000001" },
+        { id: "child", type: "RECTANGLE", parentId: "frame", siblingIndex: 0, x: 8, y: 12 },
+      ],
+    });
+    const finalPositionId = "40000000000000000000000000000000:00000000000000000000000000000001";
+    store.stage({
+      transactionId: "tx-component-from-node",
+      baseRevision: 7,
+      operations: [{
+        type: "componentFromNode",
+        sourceId: "frame",
+        replacement: {
+          id: "component",
+          type: "COMPONENT",
+          parentId: "page",
+          siblingIndex: 0,
+          positionId: finalPositionId,
+          componentMetadata: { key: "component", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} },
+        },
+        childIds: ["child"],
+        temporaryPositionId: "fffffffffffffffffffffffffffffffe:00000000000000000000000000000002",
+        finalPositionId,
+      }],
+    });
+
+    expect(store.getNode("frame")).toMatchObject({ removed: true });
+    expect(store.getNode("component")).toMatchObject({ type: "COMPONENT", parentId: "page", positionId: finalPositionId, removed: false });
+    expect(store.getNode("child")).toMatchObject({ parentId: "component", siblingIndex: 0, x: 8, y: 12 });
+  });
+
   it("projects same-page cross-parent Boolean moves and reindexes each source parent", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

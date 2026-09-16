@@ -58,10 +58,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
     nodeTypes: ["FRAME", "GROUP", "SECTION", "COMPONENT", "INSTANCE", "SLICE", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "CONNECTOR", "SHAPE_WITH_TEXT"],
-    property: "createFrame|createGroup|createSection|createComponent|ComponentNode.createInstance|createSlice|createRectangle|createEllipse|createPolygon|createStar|createVector|createLine|createText|createConnector|createShapeWithText",
+    property: "createFrame|createGroup|createSection|createComponent|createComponentFromNode|ComponentNode.createInstance|createSlice|createRectangle|createEllipse|createPolygon|createStar|createVector|createLine|createText|createConnector|createShapeWithText",
     surface: "write",
     status: "partial",
-    limitation: "Runtime synchronously creates the listed nodes under currentPage with immediate read-your-writes projection and one fenced transaction. Local Component creation initializes a stable local key and complete local publishable metadata; ComponentNode.createInstance clones a bounded supported subtree with durable source links and default component properties in one transaction; Slice creation initializes a paint-free export region. Remote components, unsupported descendant types, editor-specific, resource-backed and structural conversion creators remain staged.",
+    limitation: "Runtime synchronously creates the listed nodes under currentPage with immediate read-your-writes projection and one fenced transaction. Local Component creation initializes a stable local key and complete local publishable metadata; createComponentFromNode atomically replaces a same-session Frame or Group outside Component/ComponentSet/Instance ancestry, preserving its direct children, geometry, page and final layer position; ComponentNode.createInstance clones a bounded supported subtree with durable source links and default component properties in one transaction; Slice creation initializes a paint-free export region. Other conversion sources, remote components, unsupported descendant types, editor-specific and resource-backed creators remain staged.",
   },
   {
     id: "node.sync-write",

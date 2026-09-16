@@ -589,6 +589,67 @@ export class RuntimeSession implements RuntimeContainerHost {
   createGroup(): RuntimeContainerNodeProxy { return this.createNode("GROUP") as RuntimeContainerNodeProxy; }
   createSection(): RuntimeContainerNodeProxy { return this.createNode("SECTION") as RuntimeContainerNodeProxy; }
   createComponent(): RuntimeContainerNodeProxy { return this.createNode("COMPONENT") as RuntimeContainerNodeProxy; }
+  createComponentFromNode(sourceProxy: RuntimeNodeProxy): RuntimeContainerNodeProxy {
+    this.assertOpen();
+    if (sourceProxy.handle.sessionId !== this.sessionId || sourceProxy.removed) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: sourceProxy.handle.nodeId });
+    }
+    const source = this.projectionStore.getNode(sourceProxy.id);
+    if (!source || (source.type !== "FRAME" && source.type !== "GROUP") || typeof source.parentId !== "string") {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceProxy.id });
+    }
+    let ancestor = this.projectionStore.getNode(source.parentId);
+    const visited = new Set<string>();
+    while (ancestor && !visited.has(ancestor.id)) {
+      visited.add(ancestor.id);
+      if (["COMPONENT", "COMPONENT_SET", "INSTANCE"].includes(ancestor.type)) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+      }
+      ancestor = typeof ancestor.parentId === "string" ? this.projectionStore.getNode(ancestor.parentId) : undefined;
+    }
+    if (this.findDescendants(source.id).some((node) => node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    }
+
+    const siblings = this.siblingsOf(source.parentId);
+    const sourceIndex = siblings.findIndex((node) => node.id === source.id);
+    if (sourceIndex < 0) throw runtimeError("NODE_NOT_FOUND", { nodeId: source.id });
+    const remaining = siblings.filter((node) => node.id !== source.id);
+    const id = this.createId();
+    const finalPositionId = typeof source.positionId === "string" && source.positionId
+      ? source.positionId
+      : positionIdForLayerInsertion(remaining, sourceIndex);
+    if (!finalPositionId) throw runtimeError("INVALID_ARGUMENT", { nodeId: source.id });
+    const temporaryPositionId = runtimeTemporaryPositionId(id, finalPositionId);
+    const componentMetadata: DocumentComponentMetadata = {
+      key: id,
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      componentPropertyDefinitions: {},
+    };
+    const replacement: RuntimeProjectionNode = {
+      ...structuredClone(source),
+      id,
+      type: "COMPONENT",
+      removed: false,
+      positionId: finalPositionId,
+      siblingIndex: sourceIndex,
+      componentMetadata,
+      instanceMetadata: undefined,
+      componentSetMetadata: undefined,
+    };
+    this.enqueueOperations([{
+      type: "componentFromNode",
+      sourceId: source.id,
+      replacement,
+      childIds: this.siblingsOf(source.id).map((node) => node.id),
+      temporaryPositionId,
+      finalPositionId,
+    }]);
+    return this.containerFor(id);
+  }
   createSlice(): RuntimeNodeProxy { return this.createNode("SLICE"); }
   createRectangle(): RuntimeNodeProxy { return this.createNode("RECTANGLE"); }
   createEllipse(): RuntimeNodeProxy { return this.createNode("ELLIPSE"); }
@@ -1600,6 +1661,13 @@ function runtimeBooleanHasImmutableAncestor(
 function runtimePublishableIsRemote(node: RuntimeProjectionNode): boolean {
   const metadata = node.type === "COMPONENT" ? node.componentMetadata : node.componentSetMetadata;
   return Boolean(metadata && typeof metadata === "object" && (metadata as { remote?: unknown }).remote === true);
+}
+
+function runtimeTemporaryPositionId(nodeId: string, finalPositionId: string): string {
+  const compact = nodeId.replaceAll("-", "").toLowerCase();
+  const actor = /^[0-9a-f]{32}$/.test(compact) ? compact : "00000000000000000000000000000007";
+  const high = `fffffffffffffffffffffffffffffffe:${actor}`;
+  return high === finalPositionId ? `00000000000000000000000000000001:${actor}` : high;
 }
 
 function sortRuntimeNodesByDocumentOrder(

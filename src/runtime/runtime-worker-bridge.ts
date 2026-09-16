@@ -373,8 +373,26 @@ function transactionToEditorCommands(
   const createdTransformGroups = new Map<string, Extract<PendingProjectionTransaction["operations"][number], { type: "transformGroup" }>>();
   const createdOrder: string[] = [];
   const remaining: PendingProjectionTransaction["operations"][number][] = [];
+  const commands: EditorTransaction["commands"] = [];
+  const flush = (): void => {
+    commands.push(...createdOrder.flatMap((nodeId) => {
+      const node = created.get(nodeId);
+      return node ? toEditorCommands({ type: "create", node }, pageIds) : [];
+    }));
+    commands.push(...remaining.flatMap((operation) => toEditorCommands(operation, pageIds)));
+    created.clear();
+    createdBooleans.clear();
+    createdTransformGroups.clear();
+    createdOrder.length = 0;
+    remaining.length = 0;
+  };
 
   for (const operation of operations) {
+    if (operation.type === "componentFromNode") {
+      flush();
+      commands.push(...toEditorCommands(operation, pageIds));
+      continue;
+    }
     if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
       remaining.push(structuredClone(operation));
       continue;
@@ -416,13 +434,8 @@ function transactionToEditorCommands(
     remaining.push(operation);
   }
 
-  return [
-    ...createdOrder.flatMap((nodeId) => {
-      const node = created.get(nodeId);
-      return node ? toEditorCommands({ type: "create", node }, pageIds) : [];
-    }),
-    ...remaining.flatMap((operation) => toEditorCommands(operation, pageIds)),
-  ];
+  flush();
+  return commands;
 }
 
 function toEditorCommands(
@@ -446,6 +459,15 @@ function toEditorCommands(
   }
   if (operation.type === "deleteVariableCollection") {
     return [{ type: "delete-variable-collection", id: operation.id }];
+  }
+  if (operation.type === "componentFromNode") {
+    const temporary = { ...structuredClone(operation.replacement), positionId: operation.temporaryPositionId };
+    return [
+      ...toEditorCommands({ type: "create", node: temporary }, pageIds),
+      ...(operation.childIds.length ? [{ type: "reparent" as const, ids: [...operation.childIds], parentId: operation.replacement.id }] : []),
+      { type: "delete", ids: [operation.sourceId] },
+      { type: "reposition", positionIds: [{ id: operation.replacement.id, positionId: operation.finalPositionId }] },
+    ];
   }
   if (operation.type === "boolean") {
     const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;

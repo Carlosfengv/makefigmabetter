@@ -23,10 +23,12 @@ export function assertFigmaPluginTypingsContract(
   void figma.variables.getLocalVariableCollectionsAsync();
   void figma.variables.getVariableByIdAsync("V:spacing");
   const createdComponent: ComponentNode = figma.createComponent();
+  const convertedComponent: ComponentNode = figma.createComponentFromNode(figma.createFrame());
   const createdSlice: SliceNode = figma.createSlice();
   createdComponent.appendChild(figma.createRectangle());
   const createdInstance: InstanceNode = createdComponent.createInstance();
   void createdInstance.mainComponent;
+  void convertedComponent.children;
   createdSlice.resize(320, 180);
   node.x = node.x;
   node.y = node.y;

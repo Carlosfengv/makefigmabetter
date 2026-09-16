@@ -349,6 +349,72 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("keeps component conversion as an ordering barrier before same-turn instance creation", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const sourceId = "00000000-0000-4000-8000-000000000028";
+    const childId = "00000000-0000-4000-8000-000000000029";
+    const componentId = "00000000-0000-4000-8000-00000000002a";
+    const instanceId = "00000000-0000-4000-8000-00000000002b";
+    const finalPositionId = "80000000000000000000000000000000:00000000000040008000000000000028";
+    const temporaryPositionId = "fffffffffffffffffffffffffffffffe:0000000000004000800000000000002a";
+    const componentMetadata = { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} };
+    void bridge.submit({
+      transactionId: "tx-component-conversion",
+      baseRevision: 4,
+      operations: [
+        { type: "create", node: { id: sourceId, type: "FRAME", parentId: "page", pageId: "page", siblingIndex: 1, positionId: finalPositionId, name: "Card", x: 40, y: 24, width: 160, height: 100 } },
+        { type: "create", node: { id: childId, type: "RECTANGLE", parentId: sourceId, pageId: "page", siblingIndex: 0, name: "Surface", x: 8, y: 12, width: 120, height: 60, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 8, f: 12 } } },
+        {
+          type: "componentFromNode",
+          sourceId,
+          replacement: { id: componentId, type: "COMPONENT", parentId: "page", pageId: "page", siblingIndex: 1, positionId: finalPositionId, name: "Card", x: 40, y: 24, width: 160, height: 100, componentMetadata },
+          childIds: [childId],
+          temporaryPositionId,
+          finalPositionId,
+        },
+        {
+          type: "create",
+          node: {
+            id: instanceId,
+            type: "INSTANCE",
+            parentId: "page",
+            pageId: "page",
+            siblingIndex: 2,
+            name: "Card instance",
+            x: 56,
+            y: 40,
+            width: 160,
+            height: 100,
+            instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false },
+          },
+        },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands.map((command) => command.type)).toEqual([
+      "create", "create", "create", "reparent", "delete", "reposition", "create",
+    ]);
+    expect(posted[0]?.transaction.commands[2]).toEqual(expect.objectContaining({
+      type: "create",
+      node: expect.objectContaining({ id: componentId, kind: "component", positionId: temporaryPositionId }),
+    }));
+    expect(posted[0]?.transaction.commands[5]).toEqual({ type: "reposition", positionIds: [{ id: componentId, positionId: finalPositionId }] });
+    expect(posted[0]?.transaction.commands[6]).toEqual(expect.objectContaining({
+      type: "create",
+      node: expect.objectContaining({ id: instanceId, kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: componentId }) }),
+    }));
+    const resolved = resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: componentId, kind: "component", positionId: finalPositionId }),
+      expect.objectContaining({ id: childId, parentId: componentId, x: 8, y: 12 }),
+      expect.objectContaining({ id: instanceId, kind: "instance" }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => node.id === sourceId)).toBe(false);
+    bridge.close();
+  });
+
   it("lowers bounded special-node Runtime creates without dropping their durable metadata", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

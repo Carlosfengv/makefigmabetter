@@ -417,6 +417,86 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(slice.id))?.width).toBe(320);
   });
 
+  it("atomically replaces a Frame with a local Component and preserves its subtree", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const source = (await session.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    source.x = 40;
+    source.y = 24;
+    const child = session.createRectangle();
+    child.x = 56;
+    child.y = 36;
+    source.appendChild(child);
+
+    const component = session.createComponentFromNode(source);
+    const instance = component.createInstance();
+
+    expect(source.removed).toBe(true);
+    expect(component).toMatchObject({
+      type: "COMPONENT",
+      name: "Existing frame",
+      x: 40,
+      y: 24,
+      key: component.id,
+      remote: false,
+    });
+    expect(component.children).toEqual([child]);
+    expect(child.parent).toBe(component);
+    expect(child).toMatchObject({ x: 16, y: 12 });
+    expect(await instance.getMainComponentAsync()).toBe(component);
+    expect(session.currentPage.children.map((node) => node.id)).toEqual([component.id, instance.id]);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "componentFromNode",
+        sourceId: "frame",
+        replacement: expect.objectContaining({ id: component.id, type: "COMPONENT", name: "Existing frame" }),
+        childIds: [child.id],
+      }),
+    ]));
+    expect(await session.getNodeByIdAsync("frame")).toBeNull();
+    expect((await session.getNodeByIdAsync(component.id))?.children).toEqual([child]);
+  });
+
+  it("rejects component conversion inside component ancestry without staging work", () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const nested = session.createFrame();
+    component.appendChild(nested);
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCountBefore = session.projectionStore.transaction(transactionId)?.operations.length;
+
+    expect(isRuntimeError(captureError(() => session.createComponentFromNode(nested)), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCountBefore!);
+
+    const outer = session.createFrame();
+    const nestedComponent = session.createComponent();
+    outer.appendChild(nestedComponent);
+    const operationCountBeforeNestedMain = session.projectionStore.transaction(transactionId)?.operations.length;
+    expect(isRuntimeError(captureError(() => session.createComponentFromNode(outer)), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCountBeforeNestedMain!);
+  });
+
+  it("converts a newly created Group in the same transaction turn", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const group = session.createGroup();
+    group.name = "Badge group";
+    const ellipse = session.createEllipse();
+    group.appendChild(ellipse);
+
+    const component = session.createComponentFromNode(group);
+    expect(group.removed).toBe(true);
+    expect(component).toMatchObject({ type: "COMPONENT", name: "Badge group" });
+    expect(component.children).toEqual([ellipse]);
+
+    await session.commitAsync();
+    expect(await session.getNodeByIdAsync(group.id)).toBeNull();
+    expect((await session.getNodeByIdAsync(component.id))?.type).toBe("COMPONENT");
+  });
+
   it("preserves a newly created child's world transform when appendChild is coalesced before Ack", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
@@ -2619,6 +2699,14 @@ class InMemoryTransport implements RuntimeTransactionTransport {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
         });
+      }
+      else if (operation.type === "componentFromNode") {
+        nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), positionId: operation.finalPositionId, removed: false });
+        operation.childIds.forEach((nodeId, siblingIndex) => {
+          const node = nodes.get(nodeId);
+          if (node) nodes.set(nodeId, { ...node, parentId: operation.replacement.id, siblingIndex });
+        });
+        nodes.delete(operation.sourceId);
       }
       else if (operation.type === "remove") nodes.delete(operation.nodeId);
       else {

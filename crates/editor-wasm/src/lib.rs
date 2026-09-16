@@ -7319,6 +7319,137 @@ mod tests {
     }
 
     #[test]
+    fn component_conversion_is_one_undoable_create_reparent_delete_reposition_batch() {
+        let mut engine = DocumentEngine::new();
+        let root_id = "00000000-0000-4000-8000-000000000620";
+        let source_id = "00000000-0000-4000-8000-000000000621";
+        let child_id = "00000000-0000-4000-8000-000000000622";
+        let component_id = "00000000-0000-4000-8000-000000000623";
+        let source_position = "00000000000000000000000000000061:00000000000000000000000000000000";
+        let child_position = "00000000000000000000000000000062:00000000000000000000000000000000";
+        let temporary_position =
+            "fffffffffffffffffffffffffffffffe:00000000000000000000000000000623";
+
+        let root: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": root_id, "name": "Root", "kind": "frame",
+            "x": 0.0, "y": 0.0, "width": 400.0, "height": 300.0,
+            "fill": "transparent", "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false, "contentsHidden": false,
+            "positionId": "00000000000000000000000000000060:00000000000000000000000000000000"
+        }))
+        .unwrap();
+        let mut source = root.clone();
+        source.id = source_id.into();
+        source.parent_id = Some(root_id.into());
+        source.name = "Card".into();
+        source.x = 10.0;
+        source.y = 20.0;
+        source.width = 160.0;
+        source.height = 100.0;
+        source.relative_transform = Some(ProjectionTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 10.0,
+            f: 20.0,
+        });
+        source.position_id = Some(source_position.into());
+
+        let mut child = root.clone();
+        child.id = child_id.into();
+        child.parent_id = Some(source_id.into());
+        child.name = "Label background".into();
+        child.kind = "rectangle".into();
+        child.x = 4.0;
+        child.y = 5.0;
+        child.width = 80.0;
+        child.height = 24.0;
+        child.relative_transform = Some(ProjectionTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 4.0,
+            f: 5.0,
+        });
+        child.position_id = Some(child_position.into());
+
+        engine
+            .submit_batch(
+                NodeId(0x622),
+                0,
+                vec![
+                    BatchCommand::Create { node: root.clone() },
+                    BatchCommand::Create {
+                        node: source.clone(),
+                    },
+                    BatchCommand::Create {
+                        node: child.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let mut component = source.clone();
+        component.id = component_id.into();
+        component.kind = "component".into();
+        component.position_id = Some(temporary_position.into());
+        engine
+            .submit_batch(
+                NodeId(0x623),
+                1,
+                vec![
+                    BatchCommand::Create { node: component },
+                    BatchCommand::Reparent {
+                        parent_ids: vec![ParentUpdate {
+                            id: child_id.into(),
+                            parent_id: Some(component_id.into()),
+                            position_id: child_position.into(),
+                        }],
+                    },
+                    BatchCommand::Delete {
+                        ids: vec![source_id.into()],
+                    },
+                    BatchCommand::Reposition {
+                        position_ids: vec![PositionUpdate {
+                            id: component_id.into(),
+                            position_id: source_position.into(),
+                        }],
+                    },
+                ],
+            )
+            .unwrap();
+
+        let source_core_id = parse_id(source_id).unwrap();
+        let child_core_id = parse_id(child_id).unwrap();
+        let component_core_id = parse_id(component_id).unwrap();
+        assert_eq!(engine.document.revision, 2);
+        assert!(engine.document.node(source_core_id).is_none());
+        let component = engine.document.node(component_core_id).unwrap();
+        assert_eq!(component.kind, NodeKind::Component);
+        assert_eq!(
+            component.position,
+            parse_position_id(source_position).unwrap()
+        );
+        let child = engine.document.node(child_core_id).unwrap();
+        assert_eq!(child.parent_id, Some(component_core_id));
+        assert_eq!(child.x, 4.0);
+        assert_eq!(child.y, 5.0);
+
+        engine.document.undo().unwrap();
+        assert!(engine.document.node(component_core_id).is_none());
+        assert_eq!(
+            engine.document.node(child_core_id).unwrap().parent_id,
+            Some(source_core_id)
+        );
+        assert_eq!(
+            engine.document.node(source_core_id).unwrap().kind,
+            NodeKind::Frame
+        );
+    }
+
+    #[test]
     fn parametric_shape_geometry_bridge_returns_core_derived_clockwise_outline() {
         let polygon: serde_json::Value = serde_json::from_str(
             &parametric_shape_outline_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#)
