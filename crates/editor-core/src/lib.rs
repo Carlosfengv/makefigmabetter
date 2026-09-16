@@ -47,6 +47,12 @@ pub const MAX_PAINT_STYLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
 pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
 pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
+pub const MAX_VARIABLE_COLLECTIONS: usize = 1_024;
+pub const MAX_VARIABLES: usize = 8_192;
+pub const MAX_VARIABLE_MODES: usize = 40;
+pub const MAX_VARIABLE_SCOPES: usize = 32;
+pub const MAX_VARIABLE_STRING_BYTES: usize = 32 * 1024;
+pub const MAX_VARIABLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u128);
@@ -922,6 +928,54 @@ pub struct PaintStyleResource {
     pub paints: PaintStack,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableMode {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableCollectionResource {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub remote: bool,
+    pub hidden_from_publishing: bool,
+    pub modes: Vec<VariableMode>,
+    pub default_mode_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableResolvedType {
+    Boolean,
+    Color,
+    Float,
+    String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VariableValue {
+    Boolean(bool),
+    Color(Color),
+    Float(f64),
+    String(String),
+    Alias(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableResource {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub remote: bool,
+    pub hidden_from_publishing: bool,
+    pub collection_id: String,
+    pub resolved_type: VariableResolvedType,
+    pub values_by_mode: BTreeMap<String, VariableValue>,
+    pub scopes: Vec<String>,
+}
+
 /// Stable node-level PaintStyle link identities. Background is retained as a
 /// deprecated Frame alias and must match fill when both are present.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1166,6 +1220,9 @@ pub struct Document {
     /// Complete PaintStyle values keyed by their stable Figma-compatible ID.
     paint_styles: SharedOrdMap<String, PaintStyleResource>,
     paint_style_bytes: usize,
+    variable_collections: SharedOrdMap<String, VariableCollectionResource>,
+    variables: SharedOrdMap<String, VariableResource>,
+    variable_catalog_bytes: usize,
     node_bytes: usize,
     /// IDs are never allocated to an unrelated new node after deletion.
     retired_ids: SharedOrdSet<NodeId>,
@@ -1732,6 +1789,14 @@ pub enum CommandError {
     },
     InvalidPaintStyle,
     InvalidPaintStyleLinks,
+    DuplicateVariableCollection {
+        id: String,
+    },
+    DuplicateVariable {
+        id: String,
+    },
+    InvalidVariableCollection,
+    InvalidVariable,
 }
 
 impl Document {
@@ -1774,6 +1839,9 @@ impl Document {
             text_style_bytes: 0,
             paint_styles: SharedOrdMap::new(),
             paint_style_bytes: 0,
+            variable_collections: SharedOrdMap::new(),
+            variables: SharedOrdMap::new(),
+            variable_catalog_bytes: 0,
             node_bytes: 0,
             retired_ids: SharedOrdSet::new(),
             undo_stack: SharedVector::new(),
@@ -1816,6 +1884,9 @@ impl Document {
             && self.retired_node_paint_style_links.is_empty()
             && self.assets.is_empty()
             && self.text_styles.is_empty()
+            && self.paint_styles.is_empty()
+            && self.variable_collections.is_empty()
+            && self.variables.is_empty()
             && self.retired_ids.is_empty()
             && self.undo_stack.is_empty()
             && self.redo_stack.is_empty()
@@ -2024,6 +2095,22 @@ impl Document {
         self.paint_styles.get(id)
     }
 
+    pub fn variable_collections(&self) -> impl Iterator<Item = &VariableCollectionResource> {
+        self.variable_collections.values()
+    }
+
+    pub fn variable_collection(&self, id: &str) -> Option<&VariableCollectionResource> {
+        self.variable_collections.get(id)
+    }
+
+    pub fn variables(&self) -> impl Iterator<Item = &VariableResource> {
+        self.variables.values()
+    }
+
+    pub fn variable(&self, id: &str) -> Option<&VariableResource> {
+        self.variables.get(id)
+    }
+
     pub fn asset(&self, id: AssetId) -> Option<&AssetReference> {
         self.assets.get(&id)
     }
@@ -2173,6 +2260,17 @@ impl Document {
             hash_len(&mut hasher, self.paint_styles.len());
             for style in self.paint_styles.values() {
                 hash_paint_style_resource(&mut hasher, style);
+            }
+        }
+        if !self.variable_collections.is_empty() || !self.variables.is_empty() {
+            hasher.update(b"makefigma/editor-core/variable-catalog-v1");
+            hash_len(&mut hasher, self.variable_collections.len());
+            for collection in self.variable_collections.values() {
+                hash_variable_collection(&mut hasher, collection);
+            }
+            hash_len(&mut hasher, self.variables.len());
+            for variable in self.variables.values() {
+                hash_variable_resource(&mut hasher, variable);
             }
         }
         hash_len(&mut hasher, self.retired_ids.len());
@@ -2341,6 +2439,125 @@ impl Document {
     /// Installs one verified PaintStyle while hydrating a trusted snapshot.
     pub fn seed_paint_style(&mut self, style: PaintStyleResource) -> Result<(), CommandError> {
         self.insert_paint_style(style)
+    }
+
+    pub fn seed_variable_collection(
+        &mut self,
+        collection: VariableCollectionResource,
+    ) -> Result<(), CommandError> {
+        if self.variable_collections.contains_key(&collection.id) {
+            return Err(CommandError::DuplicateVariableCollection { id: collection.id });
+        }
+        let bytes = collection.estimated_bytes();
+        let mut mode_ids = BTreeSet::new();
+        let valid = valid_resource_identity(
+            &collection.id,
+            &collection.key,
+            &collection.name,
+            collection.remote,
+        ) && !collection.modes.is_empty()
+            && collection.modes.len() <= MAX_VARIABLE_MODES
+            && collection.modes.iter().all(|mode| {
+                !mode.id.is_empty()
+                    && mode.id.len() <= MAX_STYLE_ID_BYTES
+                    && !mode.id.contains('\0')
+                    && !mode.name.trim().is_empty()
+                    && mode.name.len() <= MAX_STYLE_NAME_BYTES
+                    && !mode.name.contains('\0')
+                    && mode_ids.insert(mode.id.clone())
+            })
+            && mode_ids.contains(&collection.default_mode_id)
+            && self.variable_collections.len() < MAX_VARIABLE_COLLECTIONS
+            && self.variable_catalog_bytes.saturating_add(bytes) <= MAX_VARIABLE_CATALOG_BYTES;
+        if !valid {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        self.variable_catalog_bytes += bytes;
+        self.variable_collections
+            .insert(collection.id.clone(), collection);
+        Ok(())
+    }
+
+    pub fn seed_variable(&mut self, variable: VariableResource) -> Result<(), CommandError> {
+        if self.variables.contains_key(&variable.id) {
+            return Err(CommandError::DuplicateVariable { id: variable.id });
+        }
+        let Some(collection) = self.variable_collections.get(&variable.collection_id) else {
+            return Err(CommandError::InvalidVariable);
+        };
+        let bytes = variable.estimated_bytes();
+        let modes: BTreeSet<&str> = collection
+            .modes
+            .iter()
+            .map(|mode| mode.id.as_str())
+            .collect();
+        let values_valid = variable.values_by_mode.len() == modes.len()
+            && variable.values_by_mode.iter().all(|(mode_id, value)| {
+                modes.contains(mode_id.as_str())
+                    && variable_value_matches(value, variable.resolved_type)
+            });
+        let scopes_valid = variable.scopes.len() <= MAX_VARIABLE_SCOPES
+            && variable
+                .scopes
+                .iter()
+                .all(|scope| !scope.is_empty() && scope.len() <= 128 && !scope.contains('\0'));
+        let valid =
+            valid_resource_identity(&variable.id, &variable.key, &variable.name, variable.remote)
+                && variable.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
+                && !variable.description.contains('\0')
+                && values_valid
+                && scopes_valid
+                && self.variables.len() < MAX_VARIABLES
+                && self.variable_catalog_bytes.saturating_add(bytes) <= MAX_VARIABLE_CATALOG_BYTES;
+        if !valid {
+            return Err(CommandError::InvalidVariable);
+        }
+        self.variable_catalog_bytes += bytes;
+        self.variables.insert(variable.id.clone(), variable);
+        Ok(())
+    }
+
+    pub fn validate_variable_catalog(&self) -> Result<(), CommandError> {
+        for variable in self.variables.values() {
+            for value in variable.values_by_mode.values() {
+                let VariableValue::Alias(target_id) = value else {
+                    continue;
+                };
+                let Some(target) = self.variables.get(target_id) else {
+                    return Err(CommandError::InvalidVariable);
+                };
+                if target.resolved_type != variable.resolved_type {
+                    return Err(CommandError::InvalidVariable);
+                }
+            }
+        }
+        let mut colors = BTreeMap::<&str, u8>::new();
+        for start in self.variables.keys() {
+            let mut stack = vec![(start.as_str(), false)];
+            while let Some((id, exiting)) = stack.pop() {
+                if exiting {
+                    colors.insert(id, 2);
+                    continue;
+                }
+                match colors.get(id).copied().unwrap_or(0) {
+                    2 => continue,
+                    1 => return Err(CommandError::InvalidVariable),
+                    _ => {}
+                }
+                colors.insert(id, 1);
+                stack.push((id, true));
+                let variable = self
+                    .variables
+                    .get(id)
+                    .ok_or(CommandError::InvalidVariable)?;
+                for value in variable.values_by_mode.values() {
+                    if let VariableValue::Alias(target_id) = value {
+                        stack.push((target_id.as_str(), false));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn insert_paint_style(&mut self, style: PaintStyleResource) -> Result<(), CommandError> {
@@ -7182,6 +7399,33 @@ fn valid_font_metadata_name(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn valid_resource_identity(id: &str, key: &str, name: &str, remote: bool) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_STYLE_ID_BYTES
+        && !id.contains('\0')
+        && key.len() <= MAX_STYLE_KEY_BYTES
+        && !key.contains('\0')
+        && (!remote || !key.is_empty())
+        && !name.trim().is_empty()
+        && name.len() <= MAX_STYLE_NAME_BYTES
+        && !name.contains('\0')
+}
+
+fn variable_value_matches(value: &VariableValue, resolved_type: VariableResolvedType) -> bool {
+    match (value, resolved_type) {
+        (VariableValue::Boolean(_), VariableResolvedType::Boolean) => true,
+        (VariableValue::Color(color), VariableResolvedType::Color) => color.is_valid(),
+        (VariableValue::Float(value), VariableResolvedType::Float) => value.is_finite(),
+        (VariableValue::String(value), VariableResolvedType::String) => {
+            value.len() <= MAX_VARIABLE_STRING_BYTES && !value.contains('\0')
+        }
+        (VariableValue::Alias(id), _) => {
+            !id.is_empty() && id.len() <= MAX_STYLE_ID_BYTES && !id.contains('\0')
+        }
+        _ => false,
+    }
+}
+
 impl Transaction {
     fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<TransactionId>()
@@ -7572,6 +7816,48 @@ impl PaintStyleResource {
             + self.name.len()
             + self.description.len()
             + self.paints.estimated_bytes()
+    }
+}
+
+impl VariableCollectionResource {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.default_mode_id.len()
+            + self
+                .modes
+                .iter()
+                .map(|mode| mode.id.len() + mode.name.len())
+                .sum::<usize>()
+    }
+}
+
+impl VariableValue {
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::String(value) | Self::Alias(value) => value.len(),
+                _ => 0,
+            }
+    }
+}
+
+impl VariableResource {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.description.len()
+            + self.collection_id.len()
+            + self
+                .values_by_mode
+                .iter()
+                .map(|(mode, value)| mode.len() + value.estimated_bytes())
+                .sum::<usize>()
+            + self.scopes.iter().map(String::len).sum::<usize>()
     }
 }
 
@@ -8218,6 +8504,67 @@ fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource)
     hash_text(hasher, &resource.description);
     hasher.update([u8::from(resource.remote)]);
     hash_versioned_paint_stack(hasher, &resource.paints);
+}
+
+fn hash_variable_collection(hasher: &mut Sha256, collection: &VariableCollectionResource) {
+    hash_text(hasher, &collection.id);
+    hash_text(hasher, &collection.key);
+    hash_text(hasher, &collection.name);
+    hasher.update([
+        u8::from(collection.remote),
+        u8::from(collection.hidden_from_publishing),
+    ]);
+    hash_len(hasher, collection.modes.len());
+    for mode in &collection.modes {
+        hash_text(hasher, &mode.id);
+        hash_text(hasher, &mode.name);
+    }
+    hash_text(hasher, &collection.default_mode_id);
+}
+
+fn hash_variable_resource(hasher: &mut Sha256, variable: &VariableResource) {
+    hash_text(hasher, &variable.id);
+    hash_text(hasher, &variable.key);
+    hash_text(hasher, &variable.name);
+    hash_text(hasher, &variable.description);
+    hasher.update([
+        u8::from(variable.remote),
+        u8::from(variable.hidden_from_publishing),
+    ]);
+    hash_text(hasher, &variable.collection_id);
+    hasher.update([match variable.resolved_type {
+        VariableResolvedType::Boolean => 1,
+        VariableResolvedType::Color => 2,
+        VariableResolvedType::Float => 3,
+        VariableResolvedType::String => 4,
+    }]);
+    hash_len(hasher, variable.values_by_mode.len());
+    for (mode, value) in &variable.values_by_mode {
+        hash_text(hasher, mode);
+        match value {
+            VariableValue::Boolean(value) => hasher.update([1, u8::from(*value)]),
+            VariableValue::Color(value) => {
+                hasher.update([2]);
+                hash_color(hasher, *value);
+            }
+            VariableValue::Float(value) => {
+                hasher.update([3]);
+                hash_number(hasher, *value);
+            }
+            VariableValue::String(value) => {
+                hasher.update([4]);
+                hash_text(hasher, value);
+            }
+            VariableValue::Alias(value) => {
+                hasher.update([5]);
+                hash_text(hasher, value);
+            }
+        }
+    }
+    hash_len(hasher, variable.scopes.len());
+    for scope in &variable.scopes {
+        hash_text(hasher, scope);
+    }
 }
 
 fn hash_optional_style_id(hasher: &mut Sha256, value: Option<&str>) {
@@ -21806,5 +22153,89 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), converted_hash);
         assert_eq!(document.node(NodeId(91)).unwrap().kind, NodeKind::TextPath);
+    }
+
+    #[test]
+    fn variable_catalog_is_bounded_hashed_and_alias_safe() {
+        let mut document = Document::with_id(DocumentId(920));
+        let collection = VariableCollectionResource {
+            id: "VC:theme".into(),
+            key: String::new(),
+            name: "Theme".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![
+                VariableMode {
+                    id: "light".into(),
+                    name: "Light".into(),
+                },
+                VariableMode {
+                    id: "dark".into(),
+                    name: "Dark".into(),
+                },
+            ],
+            default_mode_id: "light".into(),
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        let before = document.canonical_hash();
+        let spacing = VariableResource {
+            id: "V:spacing".into(),
+            key: String::new(),
+            name: "Spacing".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [
+                ("light".into(), VariableValue::Float(8.0)),
+                ("dark".into(), VariableValue::Float(12.0)),
+            ]
+            .into(),
+            scopes: vec!["GAP".into()],
+        };
+        document.seed_variable(spacing.clone()).unwrap();
+        document
+            .seed_variable(VariableResource {
+                id: "V:alias".into(),
+                key: String::new(),
+                name: "Alias".into(),
+                description: String::new(),
+                remote: false,
+                hidden_from_publishing: false,
+                collection_id: collection.id.clone(),
+                resolved_type: VariableResolvedType::Float,
+                values_by_mode: [
+                    ("light".into(), VariableValue::Alias(spacing.id.clone())),
+                    ("dark".into(), VariableValue::Float(16.0)),
+                ]
+                .into(),
+                scopes: Vec::new(),
+            })
+            .unwrap();
+        document.validate_variable_catalog().unwrap();
+        assert_ne!(document.canonical_hash(), before);
+        assert_eq!(document.variable("V:spacing"), Some(&spacing));
+        assert!(matches!(
+            document.seed_variable(VariableResource {
+                id: "V:bad".into(),
+                key: String::new(),
+                name: "Bad".into(),
+                description: String::new(),
+                remote: false,
+                hidden_from_publishing: false,
+                collection_id: collection.id,
+                resolved_type: VariableResolvedType::Boolean,
+                values_by_mode: [
+                    ("light".into(), VariableValue::Float(1.0)),
+                    ("dark".into(), VariableValue::Boolean(true))
+                ]
+                .into(),
+                scopes: Vec::new(),
+            }),
+            Err(CommandError::InvalidVariable)
+        ));
     }
 }

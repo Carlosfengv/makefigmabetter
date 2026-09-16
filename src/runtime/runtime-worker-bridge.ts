@@ -25,6 +25,8 @@ export function runtimeProjectionFromEditorSnapshot(snapshot: EditorSnapshot): R
     revision: snapshot.revision,
     textStyles: structuredClone(snapshot.textStyles ?? []),
     paintStyles: structuredClone(snapshot.paintStyles ?? []),
+    variableCollections: structuredClone(snapshot.variableCollections ?? []),
+    variables: structuredClone(snapshot.variables ?? []),
     nodes: [
       {
         id: documentId,

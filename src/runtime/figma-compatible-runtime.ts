@@ -8,6 +8,7 @@ import { PrototypePlayer, type PrototypePlayerOptions } from "./prototype-player
 import type { RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
 import type { RuntimeTextStyle } from "./runtime-text-style";
 import type { RuntimePaintStyle } from "./runtime-paint-style";
+import type { RuntimeVariablesAPI } from "./runtime-variables";
 
 /** Public M1 facade. Figma-compatible members stay here; project-specific
  * lifecycle/transaction details remain explicitly named `runtime.*` APIs. */
@@ -19,6 +20,7 @@ export class FigmaCompatibleRuntime {
 
   get root(): RuntimeContainerNodeProxy { return this.session.root; }
   get currentPage(): RuntimeContainerNodeProxy { return this.session.currentPage; }
+  get variables(): RuntimeVariablesAPI { return this.session.variables; }
 
   getNodeByIdAsync(nodeId: string): Promise<RuntimeNodeProxy | null> {
     return this.session.getNodeByIdAsync(nodeId);

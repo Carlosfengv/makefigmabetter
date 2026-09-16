@@ -14,7 +14,8 @@ use editor_core::{
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
     TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    Transaction, TransactionId, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
@@ -876,13 +877,26 @@ struct CoreSnapshot {
     text_styles: Option<Vec<ProjectionTextStyleResource>>,
     #[serde(default)]
     paint_styles: Option<Vec<ProjectionPaintStyleResource>>,
+    #[serde(default)]
+    variable_collections: Option<Vec<ProjectionVariableCollectionResource>>,
+    #[serde(default)]
+    variables: Option<Vec<ProjectionVariableResource>>,
     nodes: Vec<ProjectionNode>,
     #[serde(default)]
     retired_ids: Option<Vec<String>>,
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=62).contains(&snapshot.schema_version)
+    if !(1..=63).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 63
+            && (snapshot
+                .variable_collections
+                .as_ref()
+                .is_some_and(|values| !values.is_empty())
+                || snapshot
+                    .variables
+                    .as_ref()
+                    .is_some_and(|values| !values.is_empty())))
         || (snapshot.schema_version < 62
             && snapshot.nodes.iter().any(|node| {
                 node.text_properties.as_ref().is_some_and(|properties| {
@@ -1686,6 +1700,65 @@ struct ProjectionPaintStyleResource {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionVariableMode {
+    mode_id: String,
+    name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionVariableCollectionResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    remote: bool,
+    #[serde(default)]
+    hidden_from_publishing: bool,
+    modes: Vec<ProjectionVariableMode>,
+    default_mode_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionVariableAlias {
+    r#type: String,
+    id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ProjectionVariableValue {
+    Boolean(bool),
+    Float(f64),
+    String(String),
+    Color(ProjectionColor),
+    Alias(ProjectionVariableAlias),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionVariableResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    remote: bool,
+    #[serde(default)]
+    hidden_from_publishing: bool,
+    collection_id: String,
+    resolved_type: String,
+    values_by_mode: std::collections::BTreeMap<String, ProjectionVariableValue>,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionTextDecorationOffset {
     value: f64,
     unit: String,
@@ -2091,7 +2164,11 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.nodes().any(|node| {
+        let schema_version = if self.document.variable_collections().next().is_some()
+            || self.document.variables().next().is_some()
+        {
+            63
+        } else if self.document.nodes().any(|node| {
             self.document
                 .text_properties_for_node(node.id)
                 .is_some_and(|properties| {
@@ -2409,6 +2486,18 @@ impl DocumentEngine {
                 self.document
                     .paint_styles()
                     .map(projection_paint_style_resource)
+                    .collect(),
+            ),
+            variable_collections: Some(
+                self.document
+                    .variable_collections()
+                    .map(projection_variable_collection)
+                    .collect(),
+            ),
+            variables: Some(
+                self.document
+                    .variables()
+                    .map(projection_variable_resource)
                     .collect(),
             ),
             nodes: self
@@ -2756,6 +2845,17 @@ impl DocumentEngine {
                 .seed_paint_style(paint_style_resource_from_projection(&style)?)
                 .map_err(core_error)?;
         }
+        for collection in snapshot.variable_collections.clone().unwrap_or_default() {
+            document
+                .seed_variable_collection(variable_collection_from_projection(&collection)?)
+                .map_err(core_error)?;
+        }
+        for variable in snapshot.variables.clone().unwrap_or_default() {
+            document
+                .seed_variable(variable_resource_from_projection(&variable)?)
+                .map_err(core_error)?;
+        }
+        document.validate_variable_catalog().map_err(core_error)?;
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -5928,6 +6028,131 @@ fn paint_style_resource_from_projection(
         description: resource.description.clone(),
         remote: resource.remote,
         paints: paint_stack_from_projection(&resource.paints)?,
+    })
+}
+
+fn projection_variable_collection(
+    value: &VariableCollectionResource,
+) -> ProjectionVariableCollectionResource {
+    ProjectionVariableCollectionResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .iter()
+            .map(|mode| ProjectionVariableMode {
+                mode_id: mode.id.clone(),
+                name: mode.name.clone(),
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id.clone(),
+    }
+}
+
+fn variable_collection_from_projection(
+    value: &ProjectionVariableCollectionResource,
+) -> Result<VariableCollectionResource, JsValue> {
+    Ok(VariableCollectionResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .iter()
+            .map(|mode| VariableMode {
+                id: mode.mode_id.clone(),
+                name: mode.name.clone(),
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id.clone(),
+    })
+}
+
+fn projection_variable_value(value: &VariableValue) -> ProjectionVariableValue {
+    match value {
+        VariableValue::Boolean(value) => ProjectionVariableValue::Boolean(*value),
+        VariableValue::Color(value) => ProjectionVariableValue::Color(projection_color(*value)),
+        VariableValue::Float(value) => ProjectionVariableValue::Float(*value),
+        VariableValue::String(value) => ProjectionVariableValue::String(value.clone()),
+        VariableValue::Alias(id) => ProjectionVariableValue::Alias(ProjectionVariableAlias {
+            r#type: "VARIABLE_ALIAS".into(),
+            id: id.clone(),
+        }),
+    }
+}
+
+fn variable_value_from_projection(
+    value: &ProjectionVariableValue,
+) -> Result<VariableValue, JsValue> {
+    match value {
+        ProjectionVariableValue::Boolean(value) => Ok(VariableValue::Boolean(*value)),
+        ProjectionVariableValue::Color(value) => {
+            Ok(VariableValue::Color(color_from_projection(value)?))
+        }
+        ProjectionVariableValue::Float(value) => Ok(VariableValue::Float(*value)),
+        ProjectionVariableValue::String(value) => Ok(VariableValue::String(value.clone())),
+        ProjectionVariableValue::Alias(value) if value.r#type == "VARIABLE_ALIAS" => {
+            Ok(VariableValue::Alias(value.id.clone()))
+        }
+        ProjectionVariableValue::Alias(_) => Err(JsValue::from_str("INVALID_VARIABLE_ALIAS")),
+    }
+}
+
+fn projection_variable_resource(value: &VariableResource) -> ProjectionVariableResource {
+    ProjectionVariableResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        description: value.description.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id.clone(),
+        resolved_type: match value.resolved_type {
+            VariableResolvedType::Boolean => "BOOLEAN",
+            VariableResolvedType::Color => "COLOR",
+            VariableResolvedType::Float => "FLOAT",
+            VariableResolvedType::String => "STRING",
+        }
+        .into(),
+        values_by_mode: value
+            .values_by_mode
+            .iter()
+            .map(|(mode, value)| (mode.clone(), projection_variable_value(value)))
+            .collect(),
+        scopes: value.scopes.clone(),
+    }
+}
+
+fn variable_resource_from_projection(
+    value: &ProjectionVariableResource,
+) -> Result<VariableResource, JsValue> {
+    let resolved_type = match value.resolved_type.as_str() {
+        "BOOLEAN" => VariableResolvedType::Boolean,
+        "COLOR" => VariableResolvedType::Color,
+        "FLOAT" => VariableResolvedType::Float,
+        "STRING" => VariableResolvedType::String,
+        _ => return Err(JsValue::from_str("INVALID_VARIABLE_TYPE")),
+    };
+    Ok(VariableResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        description: value.description.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id.clone(),
+        resolved_type,
+        values_by_mode: value
+            .values_by_mode
+            .iter()
+            .map(|(mode, value)| Ok((mode.clone(), variable_value_from_projection(value)?)))
+            .collect::<Result<_, JsValue>>()?,
+        scopes: value.scopes.clone(),
     })
 }
 
@@ -13130,5 +13355,50 @@ mod tests {
                 serde_json::to_value(committed_node).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn variable_catalog_uses_snapshot_v63_and_round_trips() {
+        let mut engine = DocumentEngine::new();
+        let collection = VariableCollectionResource {
+            id: "VC:theme".into(),
+            key: String::new(),
+            name: "Theme".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "light".into(),
+                name: "Light".into(),
+            }],
+            default_mode_id: "light".into(),
+        };
+        engine
+            .document
+            .seed_variable_collection(collection)
+            .unwrap();
+        engine
+            .document
+            .seed_variable(VariableResource {
+                id: "V:gap".into(),
+                key: String::new(),
+                name: "Gap".into(),
+                description: String::new(),
+                remote: false,
+                hidden_from_publishing: false,
+                collection_id: "VC:theme".into(),
+                resolved_type: VariableResolvedType::Float,
+                values_by_mode: [("light".into(), VariableValue::Float(8.0))].into(),
+                scopes: vec!["GAP".into()],
+            })
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        let projected: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(projected.schema_version, 63);
+        assert_eq!(projected.variable_collections.unwrap()[0].id, "VC:theme");
+        assert_eq!(projected.variables.unwrap()[0].resolved_type, "FLOAT");
+        let hash = engine.canonical_hash();
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), hash);
     }
 }

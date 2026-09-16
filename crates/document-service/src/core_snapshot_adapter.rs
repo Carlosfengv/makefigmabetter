@@ -1,6 +1,6 @@
 //! Protobuf snapshot ↔ canonical editor-core adapter used only by Document Service.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
@@ -12,7 +12,8 @@ use editor_core::{
     PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
     TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
     TextDecorationThickness, TextListType, TextProperties, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
@@ -489,6 +490,13 @@ pub fn snapshot_from_document(
         return Err(ServiceError::ReducerRejected);
     }
     if engine_semantics_version
+        < makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && (document.variable_collections().next().is_some()
+            || document.variables().next().is_some())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
         && document
             .nodes()
@@ -953,6 +961,14 @@ pub fn snapshot_from_document(
             .paint_styles()
             .map(paint_style_resource_to_proto)
             .collect(),
+        variable_collections: document
+            .variable_collections()
+            .map(variable_collection_to_proto)
+            .collect(),
+        variables: document
+            .variables()
+            .map(variable_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -1018,6 +1034,25 @@ pub fn document_from_snapshot(
             .seed_paint_style(paint_style_resource_from_proto(style)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
     }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && (!snapshot.variable_collections.is_empty() || !snapshot.variables.is_empty())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    for collection in snapshot.variable_collections {
+        document
+            .seed_variable_collection(variable_collection_from_proto(collection)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    for variable in snapshot.variables {
+        document
+            .seed_variable(variable_resource_from_proto(variable)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    document
+        .validate_variable_catalog()
+        .map_err(|_| ServiceError::ReducerRejected)?;
     let mut page_hashes = Vec::new();
     for chunk in snapshot.page_chunks {
         if chunk.format_version != SNAPSHOT_FORMAT_VERSION {
@@ -2693,6 +2728,138 @@ fn paint_style_resource_from_proto(
         description: resource.description,
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::ReducerRejected)?)?,
+    })
+}
+
+fn variable_collection_to_proto(
+    value: &VariableCollectionResource,
+) -> v1::VariableCollectionResource {
+    v1::VariableCollectionResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .iter()
+            .map(|mode| v1::VariableMode {
+                mode_id: mode.id.clone(),
+                name: mode.name.clone(),
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id.clone(),
+    }
+}
+
+fn variable_collection_from_proto(
+    value: v1::VariableCollectionResource,
+) -> Result<VariableCollectionResource, ServiceError> {
+    Ok(VariableCollectionResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .into_iter()
+            .map(|mode| VariableMode {
+                id: mode.mode_id,
+                name: mode.name,
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id,
+    })
+}
+
+fn variable_value_to_proto(value: &VariableValue) -> v1::VariableValue {
+    use v1::variable_value::Value;
+    v1::VariableValue {
+        value: Some(match value {
+            VariableValue::Boolean(value) => Value::BooleanValue(*value),
+            VariableValue::Color(value) => Value::ColorValue(color_to_proto(*value)),
+            VariableValue::Float(value) => Value::FloatValue(*value),
+            VariableValue::String(value) => Value::StringValue(value.clone()),
+            VariableValue::Alias(value) => Value::AliasVariableId(value.clone()),
+        }),
+    }
+}
+
+fn variable_value_from_proto(value: v1::VariableValue) -> Result<VariableValue, ServiceError> {
+    use v1::variable_value::Value;
+    match value.value.ok_or(ServiceError::ReducerRejected)? {
+        Value::BooleanValue(value) => Ok(VariableValue::Boolean(value)),
+        Value::ColorValue(value) => Ok(VariableValue::Color(color_from_proto(value)?)),
+        Value::FloatValue(value) => Ok(VariableValue::Float(value)),
+        Value::StringValue(value) => Ok(VariableValue::String(value)),
+        Value::AliasVariableId(value) => Ok(VariableValue::Alias(value)),
+    }
+}
+
+fn variable_resource_to_proto(value: &VariableResource) -> v1::VariableResource {
+    let resolved_type = match value.resolved_type {
+        VariableResolvedType::Boolean => v1::VariableResolvedType::Boolean,
+        VariableResolvedType::Color => v1::VariableResolvedType::Color,
+        VariableResolvedType::Float => v1::VariableResolvedType::Float,
+        VariableResolvedType::String => v1::VariableResolvedType::String,
+    };
+    v1::VariableResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        description: value.description.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id.clone(),
+        resolved_type: resolved_type as i32,
+        values_by_mode: value
+            .values_by_mode
+            .iter()
+            .map(|(mode_id, value)| v1::VariableModeValue {
+                mode_id: mode_id.clone(),
+                value: Some(variable_value_to_proto(value)),
+            })
+            .collect(),
+        scopes: value.scopes.clone(),
+    }
+}
+
+fn variable_resource_from_proto(
+    value: v1::VariableResource,
+) -> Result<VariableResource, ServiceError> {
+    let resolved_type = match v1::VariableResolvedType::try_from(value.resolved_type)
+        .map_err(|_| ServiceError::ReducerRejected)?
+    {
+        v1::VariableResolvedType::Boolean => VariableResolvedType::Boolean,
+        v1::VariableResolvedType::Color => VariableResolvedType::Color,
+        v1::VariableResolvedType::Float => VariableResolvedType::Float,
+        v1::VariableResolvedType::String => VariableResolvedType::String,
+        v1::VariableResolvedType::Unspecified => return Err(ServiceError::ReducerRejected),
+    };
+    let mut values_by_mode = BTreeMap::new();
+    for entry in value.values_by_mode {
+        if values_by_mode
+            .insert(
+                entry.mode_id,
+                variable_value_from_proto(entry.value.ok_or(ServiceError::ReducerRejected)?)?,
+            )
+            .is_some()
+        {
+            return Err(ServiceError::ReducerRejected);
+        }
+    }
+    Ok(VariableResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        description: value.description,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id,
+        resolved_type,
+        values_by_mode,
+        scopes: value.scopes,
     })
 }
 

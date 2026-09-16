@@ -362,6 +362,15 @@ export enum LineHeightUnit {
   UNRECOGNIZED = -1,
 }
 
+export enum VariableResolvedType {
+  VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0,
+  VARIABLE_RESOLVED_TYPE_BOOLEAN = 1,
+  VARIABLE_RESOLVED_TYPE_COLOR = 2,
+  VARIABLE_RESOLVED_TYPE_FLOAT = 3,
+  VARIABLE_RESOLVED_TYPE_STRING = 4,
+  UNRECOGNIZED = -1,
+}
+
 export enum AckResult {
   ACK_RESULT_UNSPECIFIED = 0,
   ACK_RESULT_ACCEPTED = 1,
@@ -484,6 +493,12 @@ export interface DocumentSnapshot {
   textStyles: TextStyleResource[];
   /** Complete document-owned PaintStyle values. */
   paintStyles: PaintStyleResource[];
+  /**
+   * Immutable variable catalogs. Collection modes and variable values are
+   * persisted together so aliases can be resolved without a UI-side cache.
+   */
+  variableCollections: VariableCollectionResource[];
+  variables: VariableResource[];
 }
 
 export interface DocumentSnapshot_ExtensionsEntry {
@@ -985,6 +1000,47 @@ export interface PaintStyleResource {
   description: string;
   remote: boolean;
   paints?: PaintStack | undefined;
+}
+
+export interface VariableMode {
+  modeId: string;
+  name: string;
+}
+
+export interface VariableCollectionResource {
+  id: string;
+  key: string;
+  name: string;
+  remote: boolean;
+  hiddenFromPublishing: boolean;
+  modes: VariableMode[];
+  defaultModeId: string;
+}
+
+export interface VariableValue {
+  booleanValue?: boolean | undefined;
+  colorValue?: Color | undefined;
+  floatValue?: number | undefined;
+  stringValue?: string | undefined;
+  aliasVariableId?: string | undefined;
+}
+
+export interface VariableModeValue {
+  modeId: string;
+  value?: VariableValue | undefined;
+}
+
+export interface VariableResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  hiddenFromPublishing: boolean;
+  collectionId: string;
+  resolvedType: VariableResolvedType;
+  valuesByMode: VariableModeValue[];
+  scopes: string[];
 }
 
 /**
@@ -2248,6 +2304,8 @@ function createBaseDocumentSnapshot(): DocumentSnapshot {
     retiredNodeIds: [],
     textStyles: [],
     paintStyles: [],
+    variableCollections: [],
+    variables: [],
   };
 }
 
@@ -2288,6 +2346,12 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     }
     for (const v of message.paintStyles) {
       PaintStyleResource.encode(v!, writer.uint32(154).fork()).join();
+    }
+    for (const v of message.variableCollections) {
+      VariableCollectionResource.encode(v!, writer.uint32(162).fork()).join();
+    }
+    for (const v of message.variables) {
+      VariableResource.encode(v!, writer.uint32(170).fork()).join();
     }
     return writer;
   },
@@ -2398,6 +2462,22 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
           message.paintStyles.push(PaintStyleResource.decode(reader, reader.uint32()));
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.variableCollections.push(VariableCollectionResource.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 21: {
+          if (tag !== 170) {
+            break;
+          }
+
+          message.variables.push(VariableResource.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2432,6 +2512,9 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     message.retiredNodeIds = object.retiredNodeIds?.map((e) => e) || [];
     message.textStyles = object.textStyles?.map((e) => TextStyleResource.fromPartial(e)) || [];
     message.paintStyles = object.paintStyles?.map((e) => PaintStyleResource.fromPartial(e)) || [];
+    message.variableCollections = object.variableCollections?.map((e) => VariableCollectionResource.fromPartial(e)) ||
+      [];
+    message.variables = object.variables?.map((e) => VariableResource.fromPartial(e)) || [];
     return message;
   },
 };
@@ -6020,6 +6103,509 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
     message.paints = (object.paints !== undefined && object.paints !== null)
       ? PaintStack.fromPartial(object.paints)
       : undefined;
+    return message;
+  },
+};
+
+function createBaseVariableMode(): VariableMode {
+  return { modeId: "", name: "" };
+}
+
+export const VariableMode: MessageFns<VariableMode> = {
+  encode(message: VariableMode, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.modeId !== "") {
+      writer.uint32(10).string(message.modeId);
+    }
+    if (message.name !== "") {
+      writer.uint32(18).string(message.name);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableMode {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableMode();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.modeId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableMode>, I>>(base?: I): VariableMode {
+    return VariableMode.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableMode>, I>>(object: I): VariableMode {
+    const message = createBaseVariableMode();
+    message.modeId = object.modeId ?? "";
+    message.name = object.name ?? "";
+    return message;
+  },
+};
+
+function createBaseVariableCollectionResource(): VariableCollectionResource {
+  return { id: "", key: "", name: "", remote: false, hiddenFromPublishing: false, modes: [], defaultModeId: "" };
+}
+
+export const VariableCollectionResource: MessageFns<VariableCollectionResource> = {
+  encode(message: VariableCollectionResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.remote !== false) {
+      writer.uint32(32).bool(message.remote);
+    }
+    if (message.hiddenFromPublishing !== false) {
+      writer.uint32(40).bool(message.hiddenFromPublishing);
+    }
+    for (const v of message.modes) {
+      VariableMode.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.defaultModeId !== "") {
+      writer.uint32(58).string(message.defaultModeId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableCollectionResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableCollectionResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.hiddenFromPublishing = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.modes.push(VariableMode.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.defaultModeId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableCollectionResource>, I>>(base?: I): VariableCollectionResource {
+    return VariableCollectionResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableCollectionResource>, I>>(object: I): VariableCollectionResource {
+    const message = createBaseVariableCollectionResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.remote = object.remote ?? false;
+    message.hiddenFromPublishing = object.hiddenFromPublishing ?? false;
+    message.modes = object.modes?.map((e) => VariableMode.fromPartial(e)) || [];
+    message.defaultModeId = object.defaultModeId ?? "";
+    return message;
+  },
+};
+
+function createBaseVariableValue(): VariableValue {
+  return {
+    booleanValue: undefined,
+    colorValue: undefined,
+    floatValue: undefined,
+    stringValue: undefined,
+    aliasVariableId: undefined,
+  };
+}
+
+export const VariableValue: MessageFns<VariableValue> = {
+  encode(message: VariableValue, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.booleanValue !== undefined) {
+      writer.uint32(8).bool(message.booleanValue);
+    }
+    if (message.colorValue !== undefined) {
+      Color.encode(message.colorValue, writer.uint32(18).fork()).join();
+    }
+    if (message.floatValue !== undefined) {
+      writer.uint32(25).double(message.floatValue);
+    }
+    if (message.stringValue !== undefined) {
+      writer.uint32(34).string(message.stringValue);
+    }
+    if (message.aliasVariableId !== undefined) {
+      writer.uint32(42).string(message.aliasVariableId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableValue {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableValue();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.booleanValue = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.colorValue = Color.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.floatValue = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.stringValue = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.aliasVariableId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableValue>, I>>(base?: I): VariableValue {
+    return VariableValue.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableValue>, I>>(object: I): VariableValue {
+    const message = createBaseVariableValue();
+    message.booleanValue = object.booleanValue ?? undefined;
+    message.colorValue = (object.colorValue !== undefined && object.colorValue !== null)
+      ? Color.fromPartial(object.colorValue)
+      : undefined;
+    message.floatValue = object.floatValue ?? undefined;
+    message.stringValue = object.stringValue ?? undefined;
+    message.aliasVariableId = object.aliasVariableId ?? undefined;
+    return message;
+  },
+};
+
+function createBaseVariableModeValue(): VariableModeValue {
+  return { modeId: "", value: undefined };
+}
+
+export const VariableModeValue: MessageFns<VariableModeValue> = {
+  encode(message: VariableModeValue, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.modeId !== "") {
+      writer.uint32(10).string(message.modeId);
+    }
+    if (message.value !== undefined) {
+      VariableValue.encode(message.value, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableModeValue {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableModeValue();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.modeId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = VariableValue.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableModeValue>, I>>(base?: I): VariableModeValue {
+    return VariableModeValue.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableModeValue>, I>>(object: I): VariableModeValue {
+    const message = createBaseVariableModeValue();
+    message.modeId = object.modeId ?? "";
+    message.value = (object.value !== undefined && object.value !== null)
+      ? VariableValue.fromPartial(object.value)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseVariableResource(): VariableResource {
+  return {
+    id: "",
+    key: "",
+    name: "",
+    description: "",
+    remote: false,
+    hiddenFromPublishing: false,
+    collectionId: "",
+    resolvedType: 0,
+    valuesByMode: [],
+    scopes: [],
+  };
+}
+
+export const VariableResource: MessageFns<VariableResource> = {
+  encode(message: VariableResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.description !== "") {
+      writer.uint32(34).string(message.description);
+    }
+    if (message.remote !== false) {
+      writer.uint32(40).bool(message.remote);
+    }
+    if (message.hiddenFromPublishing !== false) {
+      writer.uint32(48).bool(message.hiddenFromPublishing);
+    }
+    if (message.collectionId !== "") {
+      writer.uint32(58).string(message.collectionId);
+    }
+    if (message.resolvedType !== 0) {
+      writer.uint32(64).int32(message.resolvedType);
+    }
+    for (const v of message.valuesByMode) {
+      VariableModeValue.encode(v!, writer.uint32(74).fork()).join();
+    }
+    for (const v of message.scopes) {
+      writer.uint32(82).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.hiddenFromPublishing = reader.bool();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.collectionId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.resolvedType = reader.int32() as any;
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.valuesByMode.push(VariableModeValue.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.scopes.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableResource>, I>>(base?: I): VariableResource {
+    return VariableResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableResource>, I>>(object: I): VariableResource {
+    const message = createBaseVariableResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.remote = object.remote ?? false;
+    message.hiddenFromPublishing = object.hiddenFromPublishing ?? false;
+    message.collectionId = object.collectionId ?? "";
+    message.resolvedType = object.resolvedType ?? 0;
+    message.valuesByMode = object.valuesByMode?.map((e) => VariableModeValue.fromPartial(e)) || [];
+    message.scopes = object.scopes?.map((e) => e) || [];
     return message;
   },
 };

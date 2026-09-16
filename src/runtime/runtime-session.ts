@@ -21,6 +21,9 @@ import {
   type DocumentTextStyleResource,
   type DocumentTextPathMetadata,
   type DocumentTransformModifier,
+  type DocumentVariableCollectionResource,
+  type DocumentVariableResolvedType,
+  type DocumentVariableResource,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
@@ -37,6 +40,7 @@ import { PrototypePlayer, type PrototypePlayerOptions } from "./prototype-player
 import { RevisionLeasePool, type RevisionLeaseResource } from "./revision-lease";
 import { exportRuntimeNodeSvgResult, rasterizeRuntimePng, runtimePngScale, type RuntimePngExportSettings, type RuntimePngRasterizer } from "./runtime-svg-export";
 import { isBoundedTransformGroupRepeatForest, isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
+import { RuntimeVariablesAPI } from "./runtime-variables";
 
 const CONTAINER_TYPES = new Set<M1NodeType>([
   "DOCUMENT", "PAGE", "FRAME", "GROUP", "SECTION", "BOOLEAN_OPERATION", "COMPONENT", "INSTANCE", "SLOT",
@@ -85,6 +89,7 @@ export type RuntimeAvailableFont = Readonly<{ fontName: RuntimeFontName; assetId
 export class RuntimeSession implements RuntimeContainerHost {
   readonly sessionId: string;
   readonly projectionStore: RuntimeProjectionStore;
+  readonly variables: RuntimeVariablesAPI;
   private readonly registry: NodeRegistry<RuntimeNodeProxy>;
   private readonly transactions: RuntimeTransactionClient;
   private readonly createId: () => string;
@@ -117,6 +122,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!options.sessionId) throw runtimeError("INVALID_ARGUMENT");
     this.sessionId = options.sessionId;
     this.projectionStore = new RuntimeProjectionStore(options.projection);
+    this.variables = new RuntimeVariablesAPI(this);
     this.registry = new NodeRegistry<RuntimeNodeProxy>(options.sessionId);
     this.createId = options.createId ?? (() => crypto.randomUUID());
     this.scheduleMicrotask = options.scheduleMicrotask ?? ((flush) => queueMicrotask(flush));
@@ -247,6 +253,31 @@ export class RuntimeSession implements RuntimeContainerHost {
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined {
     this.assertOpen();
     return this.projectionStore.confirmedProjection.paintStyles?.find((style) => style.id === styleId);
+  }
+
+  variableResource(id: string): DocumentVariableResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.confirmedProjection.variables?.find((variable) => variable.id === id);
+  }
+
+  variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.confirmedProjection.variableCollections?.find((collection) => collection.id === id);
+  }
+
+  localVariables(type?: DocumentVariableResolvedType): readonly DocumentVariableResource[] {
+    this.assertOpen();
+    return (this.projectionStore.confirmedProjection.variables ?? []).filter((variable) => !variable.remote && (type === undefined || variable.resolvedType === type));
+  }
+
+  allVariableResources(): readonly DocumentVariableResource[] {
+    this.assertOpen();
+    return this.projectionStore.confirmedProjection.variables ?? [];
+  }
+
+  localVariableCollections(): readonly DocumentVariableCollectionResource[] {
+    this.assertOpen();
+    return (this.projectionStore.confirmedProjection.variableCollections ?? []).filter((collection) => !collection.remote);
   }
 
   assertSynchronousDocumentAccess(): void {

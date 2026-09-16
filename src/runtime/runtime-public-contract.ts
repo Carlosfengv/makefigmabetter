@@ -8,6 +8,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   nodeLookup: Promise<unknown>;
   acceptedRevision: Promise<number>;
 } {
+  void runtime.variables.getLocalVariablesAsync();
+  void runtime.variables.getLocalVariableCollectionsAsync();
+  void runtime.variables.getVariableByIdAsync("V:spacing");
   const rectangle = runtime.createRectangle();
   rectangle.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5, blendMode: "MULTIPLY" }];
   rectangle.strokes = [{

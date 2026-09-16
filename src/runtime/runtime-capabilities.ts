@@ -97,6 +97,16 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {
+    id: "variables.catalog-runtime",
+    editorTypes: ["figma"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    property: "variables.getVariableByIdAsync|variables.getVariableCollectionByIdAsync|variables.getLocalVariablesAsync|variables.getLocalVariableCollectionsAsync|variables.createVariableAlias|Variable.resolveForConsumer",
+    surface: "read",
+    status: "partial",
+    limitation: "Document-owned variable collections, modes, BOOLEAN/COLOR/FLOAT/STRING values, scopes and aliases persist through semantics 48/local Snapshot v63. Runtime reads filter local resources, preserve remote identity, and resolve bounded alias chains through each collection's default mode. Explicit per-node modes, node/text/paint/effect bindings, EASING/TIMING, library import and catalog mutation remain staged.",
+    errorCode: "RESOURCE_UNAVAILABLE",
+  },
+  {
     id: "geometry.parametric-runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,

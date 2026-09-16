@@ -13,7 +13,8 @@ use editor_core::{
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
     TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
@@ -71,8 +72,9 @@ pub const TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 44;
 pub const PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 45;
 pub const PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 46;
 pub const TEXT_PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 47;
+pub const VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 48;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = TEXT_PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -113,6 +115,12 @@ pub fn snapshot_from_document(
     }
     if engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.paint_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && (document.variable_collections().next().is_some()
+            || document.variables().next().is_some())
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
@@ -560,6 +568,14 @@ pub fn snapshot_from_document(
             .paint_styles()
             .map(paint_style_resource_to_proto)
             .collect(),
+        variable_collections: document
+            .variable_collections()
+            .map(variable_collection_to_proto)
+            .collect(),
+        variables: document
+            .variables()
+            .map(variable_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -632,6 +648,24 @@ pub fn document_from_snapshot_with_engine_semantics(
             .seed_paint_style(paint_style_resource_from_proto(style)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
+    if declared_engine_semantics_version < VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && (!snapshot.variable_collections.is_empty() || !snapshot.variables.is_empty())
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    for collection in snapshot.variable_collections {
+        document
+            .seed_variable_collection(variable_collection_from_proto(collection)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    for variable in snapshot.variables {
+        document
+            .seed_variable(variable_resource_from_proto(variable)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    document
+        .validate_variable_catalog()
+        .map_err(|_| SnapshotError::Invalid)?;
     let mut page_hashes = BTreeMap::new();
     let mut decoded_nodes = BTreeMap::new();
     for chunk in snapshot.page_chunks {
@@ -2403,6 +2437,138 @@ fn paint_style_resource_from_proto(
         description: resource.description,
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(SnapshotError::Invalid)?)?,
+    })
+}
+
+fn variable_collection_to_proto(
+    value: &VariableCollectionResource,
+) -> v1::VariableCollectionResource {
+    v1::VariableCollectionResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .iter()
+            .map(|mode| v1::VariableMode {
+                mode_id: mode.id.clone(),
+                name: mode.name.clone(),
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id.clone(),
+    }
+}
+
+fn variable_collection_from_proto(
+    value: v1::VariableCollectionResource,
+) -> Result<VariableCollectionResource, SnapshotError> {
+    Ok(VariableCollectionResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .into_iter()
+            .map(|mode| VariableMode {
+                id: mode.mode_id,
+                name: mode.name,
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id,
+    })
+}
+
+fn variable_value_to_proto(value: &VariableValue) -> v1::VariableValue {
+    use v1::variable_value::Value;
+    v1::VariableValue {
+        value: Some(match value {
+            VariableValue::Boolean(value) => Value::BooleanValue(*value),
+            VariableValue::Color(value) => Value::ColorValue(color_to_proto(*value)),
+            VariableValue::Float(value) => Value::FloatValue(*value),
+            VariableValue::String(value) => Value::StringValue(value.clone()),
+            VariableValue::Alias(value) => Value::AliasVariableId(value.clone()),
+        }),
+    }
+}
+
+fn variable_value_from_proto(value: v1::VariableValue) -> Result<VariableValue, SnapshotError> {
+    use v1::variable_value::Value;
+    match value.value.ok_or(SnapshotError::Invalid)? {
+        Value::BooleanValue(value) => Ok(VariableValue::Boolean(value)),
+        Value::ColorValue(value) => Ok(VariableValue::Color(color_from_proto(value)?)),
+        Value::FloatValue(value) => Ok(VariableValue::Float(value)),
+        Value::StringValue(value) => Ok(VariableValue::String(value)),
+        Value::AliasVariableId(value) => Ok(VariableValue::Alias(value)),
+    }
+}
+
+fn variable_resource_to_proto(value: &VariableResource) -> v1::VariableResource {
+    let resolved_type = match value.resolved_type {
+        VariableResolvedType::Boolean => v1::VariableResolvedType::Boolean,
+        VariableResolvedType::Color => v1::VariableResolvedType::Color,
+        VariableResolvedType::Float => v1::VariableResolvedType::Float,
+        VariableResolvedType::String => v1::VariableResolvedType::String,
+    };
+    v1::VariableResource {
+        id: value.id.clone(),
+        key: value.key.clone(),
+        name: value.name.clone(),
+        description: value.description.clone(),
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id.clone(),
+        resolved_type: resolved_type as i32,
+        values_by_mode: value
+            .values_by_mode
+            .iter()
+            .map(|(mode_id, value)| v1::VariableModeValue {
+                mode_id: mode_id.clone(),
+                value: Some(variable_value_to_proto(value)),
+            })
+            .collect(),
+        scopes: value.scopes.clone(),
+    }
+}
+
+fn variable_resource_from_proto(
+    value: v1::VariableResource,
+) -> Result<VariableResource, SnapshotError> {
+    let resolved_type = match v1::VariableResolvedType::try_from(value.resolved_type)
+        .map_err(|_| SnapshotError::Invalid)?
+    {
+        v1::VariableResolvedType::Boolean => VariableResolvedType::Boolean,
+        v1::VariableResolvedType::Color => VariableResolvedType::Color,
+        v1::VariableResolvedType::Float => VariableResolvedType::Float,
+        v1::VariableResolvedType::String => VariableResolvedType::String,
+        v1::VariableResolvedType::Unspecified => return Err(SnapshotError::Invalid),
+    };
+    let mut values_by_mode = BTreeMap::new();
+    for entry in value.values_by_mode {
+        if values_by_mode
+            .insert(
+                entry.mode_id,
+                variable_value_from_proto(entry.value.ok_or(SnapshotError::Invalid)?)?,
+            )
+            .is_some()
+        {
+            return Err(SnapshotError::Invalid);
+        }
+    }
+    Ok(VariableResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        description: value.description,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id,
+        resolved_type,
+        values_by_mode,
+        scopes: value.scopes,
     })
 }
 
@@ -6674,6 +6840,74 @@ mod tests {
                 74_u128.to_be_bytes(),
                 hash,
                 FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn variable_catalog_round_trips_and_requires_semantics_forty_eight() {
+        let mut document = Document::with_id(DocumentId(920));
+        let collection = VariableCollectionResource {
+            id: "VC:theme".into(),
+            key: String::new(),
+            name: "Theme".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "light".into(),
+                name: "Light".into(),
+            }],
+            default_mode_id: "light".into(),
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        let variable = VariableResource {
+            id: "V:surface".into(),
+            key: String::new(),
+            name: "Surface".into(),
+            description: "Canvas".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Color,
+            values_by_mode: [(
+                "light".into(),
+                VariableValue::Color(
+                    Color::new(ColorSpace::DisplayP3, [1.0, 0.5, 0.0], 0.75).unwrap(),
+                ),
+            )]
+            .into(),
+            scopes: vec!["ALL_FILLS".into()],
+        };
+        document.seed_variable(variable.clone()).unwrap();
+        document.validate_variable_catalog().unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            920_u128.to_be_bytes(),
+            hash,
+            VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.variable_collection("VC:theme"), Some(&collection));
+        assert_eq!(restored.variable("V:surface"), Some(&variable));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                920_u128.to_be_bytes(),
+                hash,
+                VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
             ),
             Err(SnapshotError::Invalid)
         );

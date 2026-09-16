@@ -19,6 +19,9 @@ export function assertFigmaPluginTypingsContract(
   svg: Promise<string>;
   reactions: readonly Reaction[];
 } {
+  void figma.variables.getLocalVariablesAsync();
+  void figma.variables.getLocalVariableCollectionsAsync();
+  void figma.variables.getVariableByIdAsync("V:spacing");
   node.x = node.x;
   node.y = node.y;
   node.name = node.name;

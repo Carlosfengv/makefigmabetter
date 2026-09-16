@@ -81,6 +81,10 @@ message DocumentSnapshot {
   repeated TextStyleResource text_styles = 18;
   // Complete document-owned PaintStyle values.
   repeated PaintStyleResource paint_styles = 19;
+  // Immutable variable catalogs. Collection modes and variable values are
+  // persisted together so aliases can be resolved without a UI-side cache.
+  repeated VariableCollectionResource variable_collections = 20;
+  repeated VariableResource variables = 21;
 }
 
 enum NodeKind {
@@ -758,6 +762,57 @@ message PaintStyleResource {
   string description = 4;
   bool remote = 5;
   PaintStack paints = 6;
+}
+
+enum VariableResolvedType {
+  VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0;
+  VARIABLE_RESOLVED_TYPE_BOOLEAN = 1;
+  VARIABLE_RESOLVED_TYPE_COLOR = 2;
+  VARIABLE_RESOLVED_TYPE_FLOAT = 3;
+  VARIABLE_RESOLVED_TYPE_STRING = 4;
+}
+
+message VariableMode {
+  string mode_id = 1;
+  string name = 2;
+}
+
+message VariableCollectionResource {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  bool remote = 4;
+  bool hidden_from_publishing = 5;
+  repeated VariableMode modes = 6;
+  string default_mode_id = 7;
+}
+
+message VariableValue {
+  oneof value {
+    bool boolean_value = 1;
+    Color color_value = 2;
+    double float_value = 3;
+    string string_value = 4;
+    string alias_variable_id = 5;
+  }
+}
+
+message VariableModeValue {
+  string mode_id = 1;
+  VariableValue value = 2;
+}
+
+message VariableResource {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  string description = 4;
+  bool remote = 5;
+  bool hidden_from_publishing = 6;
+  string collection_id = 7;
+  VariableResolvedType resolved_type = 8;
+  repeated VariableModeValue values_by_mode = 9;
+  repeated string scopes = 10;
 }
 
 // M3 prototype vocabulary. These records are append-only and intentionally

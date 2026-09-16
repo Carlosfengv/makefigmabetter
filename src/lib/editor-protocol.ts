@@ -356,6 +356,32 @@ export interface DocumentPaintStyleResource {
   paints: DocumentPaintStack;
 }
 
+export type DocumentVariableResolvedType = "BOOLEAN" | "COLOR" | "FLOAT" | "STRING";
+export interface DocumentVariableMode { modeId: string; name: string; }
+export interface DocumentVariableCollectionResource {
+  id: string;
+  key: string;
+  name: string;
+  remote: boolean;
+  hiddenFromPublishing: boolean;
+  modes: DocumentVariableMode[];
+  defaultModeId: string;
+}
+export type DocumentVariableAlias = { type: "VARIABLE_ALIAS"; id: string };
+export type DocumentVariableValue = boolean | number | string | DocumentColor | DocumentVariableAlias;
+export interface DocumentVariableResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  hiddenFromPublishing: boolean;
+  collectionId: string;
+  resolvedType: DocumentVariableResolvedType;
+  valuesByMode: Record<string, DocumentVariableValue>;
+  scopes: string[];
+}
+
 /** M3's durable prototype contract.  It intentionally lives beside the Canvas
  * projection rather than in UI state, and is encoded through the Canonical
  * extension map by transaction-batch. */
@@ -783,6 +809,8 @@ export interface EditorSnapshot {
   assets?: DocumentAsset[];
   textStyles?: DocumentTextStyleResource[];
   paintStyles?: DocumentPaintStyleResource[];
+  variableCollections?: DocumentVariableCollectionResource[];
+  variables?: DocumentVariableResource[];
   /** Runtime-only FontFace loading state. It never enters Canonical snapshots. */
   fontAvailability?: Record<string, "idle" | "loading" | "ready" | "unavailable">;
   pages: CanvasPage[];

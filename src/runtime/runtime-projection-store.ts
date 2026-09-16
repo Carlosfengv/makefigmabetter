@@ -1,6 +1,6 @@
 import { runtimeError } from "./runtime-errors";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
-import type { DocumentPaintStyleResource, DocumentTextStyleResource } from "../lib/editor-protocol";
+import type { DocumentPaintStyleResource, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 
 export type RuntimeProjectionNode = Readonly<{
@@ -16,6 +16,8 @@ export type RuntimeProjection = Readonly<{
   nodes: readonly RuntimeProjectionNode[];
   textStyles?: readonly DocumentTextStyleResource[];
   paintStyles?: readonly DocumentPaintStyleResource[];
+  variableCollections?: readonly DocumentVariableCollectionResource[];
+  variables?: readonly DocumentVariableResource[];
 }>;
 
 export type PendingProjectionOperation =
@@ -447,11 +449,15 @@ function freezeProjection(projection: RuntimeProjection): RuntimeProjection {
   });
   const textStyles = projection.textStyles?.map((style) => deepFreeze(structuredClone(style)));
   const paintStyles = projection.paintStyles?.map((style) => deepFreeze(structuredClone(style)));
+  const variableCollections = projection.variableCollections?.map((collection) => deepFreeze(structuredClone(collection)));
+  const variables = projection.variables?.map((variable) => deepFreeze(structuredClone(variable)));
   return Object.freeze({
     revision: projection.revision,
     nodes: Object.freeze(nodes),
     ...(textStyles ? { textStyles: Object.freeze(textStyles) } : {}),
     ...(paintStyles ? { paintStyles: Object.freeze(paintStyles) } : {}),
+    ...(variableCollections ? { variableCollections: Object.freeze(variableCollections) } : {}),
+    ...(variables ? { variables: Object.freeze(variables) } : {}),
   });
 }
 
