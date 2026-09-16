@@ -66,7 +66,9 @@ import { type PrototypeMetadata, type PrototypeReaction, validatePrototypeMetada
 import type { RuntimeExportSettings, RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
 import {
   canonicalVectorPathFromRuntimeNetwork,
+  extensionsWithRuntimeVectorNetwork,
   runtimeVectorNetworkFromCanonical,
+  runtimeVectorNetworkFromExtension,
   type RuntimeVectorNetwork,
 } from "./runtime-vector-network";
 import {
@@ -1832,13 +1834,18 @@ export class RuntimeNodeProxy {
       () => this.host.allocateRuntimeId(),
     );
     if ("reason" in parsed) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-    this.write({ vectorPath: parsed.path });
+    this.write({
+      vectorPath: parsed.path,
+      extensions: extensionsWithRuntimeVectorNetwork(this.read().extensions, undefined),
+    });
   }
 
   get vectorNetwork(): RuntimeVectorNetwork {
     if (this.type !== "VECTOR") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const node = this.read();
     const path = node.vectorPath as DocumentVectorPath | undefined;
+    const exactNetwork = path && runtimeVectorNetworkFromExtension(node.extensions, path);
+    if (exactNetwork) return exactNetwork;
     return runtimeVectorNetworkFromCanonical(
       path ?? { fillRule: "nonZero", subpaths: [] },
       canonicalStrokeCapValue(node.strokeCapStart),
@@ -1860,6 +1867,7 @@ export class RuntimeNodeProxy {
       strokeCapStart: converted.strokeCapStart,
       strokeCapEnd: converted.strokeCapEnd,
       ...(converted.strokeJoin ? { strokeJoin: converted.strokeJoin } : {}),
+      extensions: extensionsWithRuntimeVectorNetwork(node.extensions, converted.network, converted.path),
     });
     await this.host.commitAsync();
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, runtimeVectorNetworkFromCanonical } from "./runtime-vector-network";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -76,13 +76,46 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(converted).toMatchObject({ strokeCapStart: "square", strokeCapEnd: "triangleFilled", strokeJoin: "round" });
   });
 
-  it("rejects topology and region data that Canonical cannot preserve", () => {
+  it("materializes a bounded open branch while preserving exact topology in an extension", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }],
+      segments: [{ start: 0, end: 1 }, { start: 0, end: 2, tangentStart: { x: 2, y: 1 } }],
+    } as const;
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `branch-${sequence++}`, {
+      strokeCapStart: "none",
+      strokeCapEnd: "none",
+      strokeJoin: "miter",
+    });
+    expect(converted).toMatchObject({
+      network,
+      path: {
+        fillRule: "nonZero",
+        subpaths: [
+          { closed: false, points: [{ x: 0, y: 0 }, { x: 10, y: 0 }] },
+          { closed: false, points: [{ x: 0, y: 0, handleOut: { x: 2, y: 1 } }, { x: 10, y: 10 }] },
+        ],
+      },
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const extensions = extensionsWithRuntimeVectorNetwork({ keep: [7] }, converted.network, converted.path);
+    expect(runtimeVectorNetworkFromExtension(extensions, converted.path)).toEqual(network);
+    expect(runtimeVectorNetworkFromExtension(extensions, { ...converted.path, fillRule: "evenOdd" })).toBeUndefined();
+    expect(extensionsWithRuntimeVectorNetwork(extensions, undefined)).toEqual({ keep: [7] });
+  });
+
+  it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
-    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("branching") });
+      regions: [{ windingRule: "NONZERO", loops: [[0, 1]] }],
+    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("regions") });
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      vertices: [{ x: 0, y: 0, strokeCap: "ROUND" }, { x: 10, y: 0 }, { x: 10, y: 10 }],
+      segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
+    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("NONE endpoint caps") });
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 }],

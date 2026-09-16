@@ -35,10 +35,13 @@ type NetworkConversion = Readonly<{
   strokeCapStart: StrokeCap;
   strokeCapEnd: StrokeCap;
   strokeJoin?: StrokeJoin;
+  network?: RuntimeVectorNetwork;
 }>;
 
 const MAX_VECTOR_SUBPATHS = 64;
 const MAX_VECTOR_POINTS = 8_192;
+const MAX_VECTOR_NETWORK_EXTENSION_BYTES = 256 * 1024;
+export const VECTOR_NETWORK_EXTENSION = "figma.runtime.vector-network.v1";
 
 /**
  * Canonical VectorPath is a collection of independent cubic chains. This
@@ -124,8 +127,9 @@ export function canonicalVectorPathFromRuntimeNetwork(
     outgoing[segment.start]!.push(segmentIndex);
     incoming[segment.end]!.push(segmentIndex);
   });
-  if (incoming.some((segments, vertexIndex) => segments.length > 1 || outgoing[vertexIndex]!.length > 1 || (segments.length + outgoing[vertexIndex]!.length > 1 && (segments.length !== 1 || outgoing[vertexIndex]!.length !== 1)))) {
-    return { reason: "Canonical VectorPath cannot represent branching or direction-conflicting VectorNetwork vertices." };
+  const hasSharedTopology = incoming.some((segments, vertexIndex) => segments.length > 1 || outgoing[vertexIndex]!.length > 1 || (segments.length + outgoing[vertexIndex]!.length > 1 && (segments.length !== 1 || outgoing[vertexIndex]!.length !== 1)));
+  if (hasSharedTopology) {
+    return canonicalBranchedNetwork(input, allocatePointId, defaults);
   }
 
   const visitedSegments = new Set<number>();
@@ -246,6 +250,112 @@ export function canonicalVectorPathFromRuntimeNetwork(
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
     ...(hasExplicitJoin && resolvedJoins[0] ? { strokeJoin: resolvedJoins[0] } : {}),
   };
+}
+
+/** Reads the exact shared-topology record only while its derived VectorPath is
+ * still current. Generic path edits therefore invalidate the extension
+ * without requiring every mutation surface to know about VectorNetwork. */
+export function runtimeVectorNetworkFromExtension(extensions: unknown, path: DocumentVectorPath): RuntimeVectorNetwork | undefined {
+  if (!extensions || typeof extensions !== "object") return undefined;
+  const bytes = (extensions as Record<string, unknown>)[VECTOR_NETWORK_EXTENSION];
+  if (!Array.isArray(bytes) || bytes.length > MAX_VECTOR_NETWORK_EXTENSION_BYTES || bytes.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) return undefined;
+  try {
+    const decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes))) as unknown;
+    if (!decoded || typeof decoded !== "object") return undefined;
+    const record = decoded as { version?: unknown; network?: unknown; path?: unknown };
+    if (record.version !== 1 || stableJson(record.path) !== stableJson(path) || !validNetworkShape(record.network)) return undefined;
+    return structuredClone(record.network);
+  } catch {
+    return undefined;
+  }
+}
+
+export function extensionsWithRuntimeVectorNetwork(
+  extensions: unknown,
+  network: RuntimeVectorNetwork | undefined,
+  path?: DocumentVectorPath,
+): Record<string, number[]> {
+  const next = extensions && typeof extensions === "object"
+    ? structuredClone(extensions as Record<string, number[]>)
+    : {};
+  delete next[VECTOR_NETWORK_EXTENSION];
+  if (!network || !path) return next;
+  const encoded = [...new TextEncoder().encode(JSON.stringify({ version: 1, network, path }))];
+  if (encoded.length > MAX_VECTOR_NETWORK_EXTENSION_BYTES) throw new Error("VectorNetwork extension exceeds its byte budget.");
+  next[VECTOR_NETWORK_EXTENSION] = encoded;
+  return next;
+}
+
+function canonicalBranchedNetwork(
+  input: RuntimeVectorNetwork,
+  allocatePointId: () => string,
+  defaults: Readonly<{ strokeCapStart: StrokeCap; strokeCapEnd: StrokeCap; strokeJoin: StrokeJoin }>,
+): NetworkConversion | { reason: string } {
+  if (input.regions?.length) return { reason: "Branched VectorNetwork regions remain outside the globally styled VectorPath subset." };
+  if (input.vertices.some((vertex) => vertex.cornerRadius !== undefined)) return { reason: "Canonical VectorPath cannot represent per-vertex corner radii." };
+  if (input.vertices.some((vertex) => vertex.strokeJoin !== undefined)) return { reason: "Branched VectorNetwork vertices cannot preserve explicit per-vertex stroke joins." };
+  if (input.vertices.some((vertex) => vertex.strokeCap !== undefined) || defaults.strokeCapStart !== "none" || defaults.strokeCapEnd !== "none") {
+    return { reason: "Branched VectorNetwork rendering requires NONE endpoint caps." };
+  }
+  const connectedVertices = new Set(input.segments.flatMap((segment) => [segment.start, segment.end]));
+  const isolated = input.vertices.map((_, index) => index).filter((index) => !connectedVertices.has(index));
+  if (input.segments.length + isolated.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
+  const edgeKeys = new Set<string>();
+  for (const segment of input.segments) {
+    const key = segment.start < segment.end ? `${segment.start}:${segment.end}` : `${segment.end}:${segment.start}`;
+    if (edgeKeys.has(key)) return { reason: "Branched VectorNetwork contains duplicate edges." };
+    edgeKeys.add(key);
+  }
+  const point = (vertexIndex: number, handleIn?: RuntimeVector, handleOut?: RuntimeVector) => {
+    const vertex = input.vertices[vertexIndex]!;
+    return {
+      id: allocatePointId(),
+      x: vertex.x,
+      y: vertex.y,
+      ...(handleIn ? { handleIn: { ...handleIn } } : {}),
+      ...(handleOut ? { handleOut: { ...handleOut } } : {}),
+      pointType: vertex.handleMirroring === "ANGLE_AND_LENGTH" ? "mirrored" as const : vertex.handleMirroring === "ANGLE" ? "asymmetric" as const : "corner" as const,
+    };
+  };
+  const subpaths: DocumentVectorPath["subpaths"] = input.segments.map((segment) => ({
+    closed: false,
+    points: [
+      point(segment.start, undefined, segment.tangentStart),
+      point(segment.end, segment.tangentEnd, undefined),
+    ],
+  }));
+  isolated.forEach((vertexIndex) => subpaths.push({ closed: false, points: [point(vertexIndex)] }));
+  return {
+    path: { fillRule: "nonZero", subpaths },
+    strokeCapStart: "none",
+    strokeCapEnd: "none",
+    strokeJoin: defaults.strokeJoin,
+    network: structuredClone(input),
+  };
+}
+
+function validNetworkShape(value: unknown): value is RuntimeVectorNetwork {
+  if (!value || typeof value !== "object") return false;
+  const network = value as RuntimeVectorNetwork;
+  return Array.isArray(network.vertices)
+    && Array.isArray(network.segments)
+    && network.vertices.length <= MAX_VECTOR_POINTS
+    && network.segments.length <= MAX_VECTOR_POINTS
+    && network.vertices.every(validVertex)
+    && network.segments.every((segment) => validSegment(segment, network.vertices.length))
+    && (network.regions === undefined || Array.isArray(network.regions) && network.regions.every(validRegion));
+}
+
+function stableJson(value: unknown): string {
+  const normalize = (candidate: unknown): unknown => {
+    if (Array.isArray(candidate)) return candidate.map(normalize);
+    if (!candidate || typeof candidate !== "object") return candidate;
+    return Object.fromEntries(Object.entries(candidate as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, normalize(entry)]));
+  };
+  return JSON.stringify(normalize(value));
 }
 
 function validVertex(vertex: RuntimeVectorVertex): boolean {

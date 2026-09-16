@@ -1149,7 +1149,7 @@ describe("M1 RuntimeSession", () => {
     expect(line.strokeCap).toBe("SQUARE");
   });
 
-  it("round-trips the representable VectorNetwork subset and commits endpoint-specific caps", async () => {
+  it("round-trips independent and bounded branched VectorNetworks", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
     const vector = session.createVector();
@@ -1183,10 +1183,23 @@ describe("M1 RuntimeSession", () => {
         vectorPath: expect.objectContaining({ subpaths: [expect.objectContaining({ closed: false })] }),
       }),
     });
-    await expect(vector.setVectorNetworkAsync({
+    vector.strokeCap = "NONE";
+    const branch = {
       vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
-    })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    } as const;
+    await vector.setVectorNetworkAsync(branch);
+    expect(vector.vectorNetwork).toEqual(branch);
+    expect(transport.submitted[2]?.operations).toContainEqual({
+      type: "update",
+      nodeId: vector.id,
+      patch: expect.objectContaining({
+        strokeCapStart: "none",
+        strokeCapEnd: "none",
+        vectorPath: expect.objectContaining({ subpaths: [expect.objectContaining({ closed: false }), expect.objectContaining({ closed: false })] }),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    });
   });
 
   it("creates and flattens Vector Booleans with synchronous structural projection", async () => {
