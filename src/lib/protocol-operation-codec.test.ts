@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, GridItemsPositioning, GridTrackType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, GridAutoTracks, GridItemsPositioning, GridTrackType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -953,6 +953,19 @@ describe("protocol operation codec", () => {
       gridRowAnchor: 0,
       gridColumnAnchor: 1,
     });
+  });
+
+  it("serializes automatic Grid rows as a versioned omission-bearing field", () => {
+    const autoLayout = {
+      mode: "grid" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, wrap: false,
+      primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false,
+      gridRows: [{ type: "flex" as const, value: 1 }],
+      gridColumns: [{ type: "flex" as const, value: 1 }, { type: "flex" as const, value: 1 }],
+      gridAutoTracks: "rows" as const,
+    };
+    const node = { ...createNode("frame", 10, 20), id, autoLayout };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(batch.operations[0]?.createNode?.node?.autoLayout?.gridAutoTracks).toBe(GridAutoTracks.GRID_AUTO_TRACKS_ROWS);
   });
 
   it("serializes a flow child's align-self relationship as a durable operation", () => {

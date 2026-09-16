@@ -7,9 +7,9 @@ use editor_core::{
     ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
-    FontReference, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow,
-    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId,
+    FontReference, GridAutoTracks, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId,
     PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
     ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
     StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
@@ -936,7 +936,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=73).contains(&snapshot.schema_version)
+    if !(1..=74).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 74
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.grid_auto_tracks.is_some())
+            }))
         || (snapshot.schema_version < 73
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -1658,6 +1664,8 @@ struct ProjectionAutoLayout {
     grid_row_anchor: Option<u32>,
     #[serde(default)]
     grid_column_anchor: Option<u32>,
+    #[serde(default)]
+    grid_auto_tracks: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2395,6 +2403,10 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            self.document.auto_layout_for_node(node.id).grid_auto_tracks == GridAutoTracks::Rows
+        }) {
+            74
+        } else if self.document.nodes().any(|node| {
             let layout = self.document.auto_layout_for_node(node.id);
             layout.grid_items_positioning == GridItemsPositioning::Manual
                 || layout.grid_row_anchor.is_some()
@@ -7180,6 +7192,7 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
             .then(|| "manual".into()),
         grid_row_anchor: layout.grid_row_anchor,
         grid_column_anchor: layout.grid_column_anchor,
+        grid_auto_tracks: (layout.grid_auto_tracks == GridAutoTracks::Rows).then(|| "rows".into()),
     })
 }
 
@@ -7252,6 +7265,11 @@ fn auto_layout_from_projection(
         Some("manual") => GridItemsPositioning::Manual,
         Some(_) => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     };
+    let grid_auto_tracks = match value.grid_auto_tracks.as_deref() {
+        None | Some("none") => GridAutoTracks::None,
+        Some("rows") => GridAutoTracks::Rows,
+        Some(_) => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
+    };
     let layout = AutoLayout {
         mode,
         padding: value.padding,
@@ -7286,6 +7304,7 @@ fn auto_layout_from_projection(
         grid_items_positioning,
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
+        grid_auto_tracks,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -11717,6 +11736,40 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 72;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v74_round_trips_grid_auto_rows_and_v73_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let mut frame = existing_rect(NodeId(0x74));
+        frame.kind = NodeKind::Frame;
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)],
+            grid_auto_tracks: GridAutoTracks::Rows,
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(frame.id, layout.clone())
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":74"));
+        assert!(snapshot.contains("\"gridAutoTracks\":\"rows\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 73;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

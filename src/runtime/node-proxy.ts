@@ -195,6 +195,7 @@ type RuntimeAutoLayout = Readonly<{
   gridRowSpan?: number;
   gridColumnSpan?: number;
   gridItemsPositioning?: "manual";
+  gridAutoTracks?: "rows";
   gridRowAnchor?: number;
   gridColumnAnchor?: number;
 }>;
@@ -3437,11 +3438,11 @@ export class RuntimeNodeProxy {
       : {
           mode: value.toLowerCase() as RuntimeAutoLayout["mode"],
           gridRows: undefined, gridColumns: undefined, gridRowGap: undefined, gridColumnGap: undefined,
-          gridItemsPositioning: undefined,
+          gridItemsPositioning: undefined, gridAutoTracks: undefined,
         });
   }
 
-  get gridRowCount(): number { return this.gridTracks("row").length; }
+  get gridRowCount(): number { return this.effectiveGridRows().length; }
   set gridRowCount(value: number) { this.resizeGridTracks("row", value); }
   get gridColumnCount(): number { return this.gridTracks("column").length; }
   set gridColumnCount(value: number) { this.resizeGridTracks("column", value); }
@@ -3457,8 +3458,24 @@ export class RuntimeNodeProxy {
   reorderColumns(options: RuntimeGridTrackReorderOptions): readonly RuntimeGridTrackReorderEntry[] {
     return this.reorderGridTracks("column", options);
   }
-  get gridAutoTracks(): "NONE" { this.assertGridFrame(); return "NONE"; }
-  set gridAutoTracks(value: "NONE") { this.assertGridFrame(); if (value !== "NONE") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
+  get gridAutoTracks(): "NONE" | "ROWS" {
+    this.assertGridFrame();
+    return this.autoLayout().gridAutoTracks === "rows" ? "ROWS" : "NONE";
+  }
+  set gridAutoTracks(value: "NONE" | "ROWS") {
+    this.assertGridFrame();
+    if (value !== "NONE" && value !== "ROWS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    if (value === this.gridAutoTracks) return;
+    if (value === "ROWS") {
+      if (this.gridItemsPositioning !== "ROW_AUTO_FLOW") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+      const firstRow = this.gridTracks("row")[0];
+      if (!firstRow) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+      this.gridPlacements([firstRow], this.gridTracks("column"), undefined, new Map(), true);
+      this.writeAutoLayout({ gridRows: [firstRow], gridAutoTracks: "rows" });
+      return;
+    }
+    this.writeAutoLayout({ gridRows: this.effectiveGridRows(), gridAutoTracks: undefined });
+  }
   get gridItemsPositioning(): "ROW_AUTO_FLOW" | "MANUAL" {
     this.assertGridFrame();
     return this.autoLayout().gridItemsPositioning === "manual" ? "MANUAL" : "ROW_AUTO_FLOW";
@@ -3468,6 +3485,7 @@ export class RuntimeNodeProxy {
     if (value !== "ROW_AUTO_FLOW" && value !== "MANUAL") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     if (value === this.gridItemsPositioning) return;
     if (value === "MANUAL") {
+      if (this.gridAutoTracks === "ROWS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
       const placements = this.gridPlacements();
       for (const { child, row, column } of placements.values()) {
         child.writeAutoLayout({ gridRowAnchor: row, gridColumnAnchor: column });
@@ -4137,6 +4155,7 @@ export class RuntimeNodeProxy {
 
   private resizeGridTracks(axis: "row" | "column", value: number): void {
     this.assertGridFrame();
+    if (axis === "row" && this.gridAutoTracks === "ROWS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     if (!Number.isInteger(value) || value < 1 || value > 128) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     const layout = this.autoLayout();
     const rows = [...(layout.gridRows ?? [])];
@@ -4158,6 +4177,7 @@ export class RuntimeNodeProxy {
 
   private reorderGridTracks(axis: "row" | "column", options: RuntimeGridTrackReorderOptions): readonly RuntimeGridTrackReorderEntry[] {
     this.assertGridFrame();
+    if (axis === "row" && this.gridAutoTracks === "ROWS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     const tracks = [...this.gridTracks(axis)];
     if (!options || !Array.isArray(options.fromIndices) || !Number.isInteger(options.insertionIndex)
       || options.insertionIndex < 0 || options.insertionIndex > tracks.length
@@ -4246,9 +4266,10 @@ export class RuntimeNodeProxy {
   }
 
   private gridTrackProxies(axis: "row" | "column"): RuntimeGridTrackSize[] {
-    return this.gridTracks(axis).map((_track, index) => {
+    const visibleTracks = axis === "row" ? this.effectiveGridRows() : this.gridTracks(axis);
+    return visibleTracks.map((_track, index) => {
       const nodeId = this.id;
-      const readTrack = () => this.gridTracks(axis)[index]!;
+      const readTrack = () => axis === "row" ? this.effectiveGridRows()[index]! : this.gridTracks(axis)[index]!;
       const writeTrack = (patch: { type?: "flex" | "fixed" | "hug"; value?: number }) => this.writeGridTrack(axis, index, patch);
       return {
         get type(): RuntimeGridTrackType {
@@ -4325,9 +4346,11 @@ export class RuntimeNodeProxy {
     columns = this.gridTracks("column"),
     override?: { nodeId: string; rowSpan: number; columnSpan: number; row?: number; column?: number },
     anchorOverrides: ReadonlyMap<string, { row: number; column: number }> = new Map(),
+    autoRows = this.gridAutoTracks === "ROWS",
   ): Map<string, { child: RuntimeNodeProxy; row: number; column: number; rowSpan: number; columnSpan: number }> {
     this.assertGridFrame();
-    const occupied = Array.from({ length: rows.length * columns.length }, () => false);
+    const effectiveRows = [...rows];
+    const occupied = Array.from({ length: effectiveRows.length * columns.length }, () => false);
     const placements = new Map<string, { child: RuntimeNodeProxy; row: number; column: number; rowSpan: number; columnSpan: number }>();
     for (const child of this.host.childrenOf(this.id).filter((candidate) => !candidate.autoLayout().absolute)) {
       const childLayout = child.autoLayout();
@@ -4343,21 +4366,26 @@ export class RuntimeNodeProxy {
         throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
       }
       if (!placement) {
-        for (let index = 0; index < occupied.length; index += 1) {
-          const row = Math.floor(index / columns.length);
-          const column = index % columns.length;
-          if (row + rowSpan > rows.length || column + columnSpan > columns.length) continue;
-          let available = true;
-          for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
-            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
-              if (occupied[occupiedRow * columns.length + occupiedColumn]) { available = false; break; }
+        while (!placement) {
+          for (let index = 0; index < occupied.length; index += 1) {
+            const row = Math.floor(index / columns.length);
+            const column = index % columns.length;
+            if (row + rowSpan > effectiveRows.length || column + columnSpan > columns.length) continue;
+            let available = true;
+            for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+              for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+                if (occupied[occupiedRow * columns.length + occupiedColumn]) { available = false; break; }
+              }
             }
+            if (available) { placement = { row, column }; break; }
           }
-          if (available) { placement = { row, column }; break; }
+          if (placement || !autoRows || effectiveRows.length >= Math.min(128, Math.floor(4096 / columns.length))) break;
+          effectiveRows.push({ type: "flex", value: 1 });
+          occupied.push(...Array.from({ length: columns.length }, () => false));
         }
       }
       if (!placement || placement.row < 0 || placement.column < 0
-        || placement.row + rowSpan > rows.length || placement.column + columnSpan > columns.length) {
+        || placement.row + rowSpan > effectiveRows.length || placement.column + columnSpan > columns.length) {
         throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
       }
       for (let occupiedRow = placement.row; occupiedRow < placement.row + rowSpan; occupiedRow += 1) {
@@ -4367,7 +4395,7 @@ export class RuntimeNodeProxy {
           occupied[index] = true;
         }
       }
-      if ((child.readLayoutSizing(false) === "FILL" && rows.slice(placement.row, placement.row + rowSpan).some((track) => track.type === "hug"))
+      if ((child.readLayoutSizing(false) === "FILL" && effectiveRows.slice(placement.row, placement.row + rowSpan).some((track) => track.type === "hug"))
         || (child.readLayoutSizing(true) === "FILL" && columns.slice(placement.column, placement.column + columnSpan).some((track) => track.type === "hug"))) {
         throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
       }
@@ -4376,9 +4404,20 @@ export class RuntimeNodeProxy {
     return placements;
   }
 
+  private effectiveGridRows(): readonly AutoLayoutGridTrack[] {
+    const rows = [...this.gridTracks("row")];
+    if (this.gridAutoTracks !== "ROWS") return rows;
+    const placements = this.gridPlacements(rows, this.gridTracks("column"));
+    const count = Math.max(1, ...[...placements.values()].map(({ row, rowSpan }) => row + rowSpan));
+    while (rows.length < count) rows.push({ type: "flex", value: 1 });
+    return rows;
+  }
+
   private writeGridSpan(axis: "row" | "column", value: number): void {
     const parent = this.parentGridFrame();
-    const limit = axis === "row" ? parent.gridTracks("row").length : parent.gridTracks("column").length;
+    const limit = axis === "row" && parent.gridAutoTracks === "ROWS"
+      ? Math.min(128, Math.floor(4096 / parent.gridTracks("column").length))
+      : axis === "row" ? parent.gridTracks("row").length : parent.gridTracks("column").length;
     if (!Number.isInteger(value) || value < 1 || value > limit) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     }

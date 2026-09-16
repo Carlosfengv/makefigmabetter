@@ -262,6 +262,12 @@ enum GridItemsPositioning {
   GRID_ITEMS_POSITIONING_MANUAL = 2;
 }
 
+enum GridAutoTracks {
+  GRID_AUTO_TRACKS_UNSPECIFIED = 0;
+  GRID_AUTO_TRACKS_NONE = 1;
+  GRID_AUTO_TRACKS_ROWS = 2;
+}
+
 message GridTrack {
   GridTrackType type = 1;
   // FLEX uses fractional units; FIXED uses logical pixels; HUG ignores value.
@@ -311,6 +317,10 @@ message AutoLayout {
   optional GridItemsPositioning grid_items_positioning = 26;
   optional uint32 grid_row_anchor = 27;
   optional uint32 grid_column_anchor = 28;
+  // Automatic row creation requires semantics 60. NONE is omitted by
+  // canonical writers; ROWS stores one authored row template and derives the
+  // effective row count from row-auto-flow placement.
+  optional GridAutoTracks grid_auto_tracks = 29;
 }
 
 enum ColorSpace {

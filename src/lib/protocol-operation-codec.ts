@@ -18,6 +18,7 @@ import {
   LayoutSizing as ProtoLayoutSizing,
   GridTrackType as ProtoGridTrackType,
   GridItemsPositioning as ProtoGridItemsPositioning,
+  GridAutoTracks as ProtoGridAutoTracks,
   LineHeightUnit as ProtoLineHeightUnit,
   LeadingTrim as ProtoLeadingTrim,
   TextListType as ProtoTextListType,
@@ -442,6 +443,7 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
     gridRowGap: bound(value.gridRowGap), gridColumnGap: bound(value.gridColumnGap),
     gridRowSpan: gridSpan(value.gridRowSpan), gridColumnSpan: gridSpan(value.gridColumnSpan),
     gridItemsPositioning: value.gridItemsPositioning === "manual" ? ProtoGridItemsPositioning.GRID_ITEMS_POSITIONING_MANUAL : undefined,
+    gridAutoTracks: value.gridAutoTracks === "rows" ? ProtoGridAutoTracks.GRID_AUTO_TRACKS_ROWS : undefined,
     gridRowAnchor, gridColumnAnchor,
   };
 }

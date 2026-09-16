@@ -79,6 +79,7 @@ export function normalizeAutoLayout(
     gridRowSpan: optionalGridSpan(source.gridRowSpan),
     gridColumnSpan: optionalGridSpan(source.gridColumnSpan),
     gridItemsPositioning: mode === "grid" && source.gridItemsPositioning === "manual" ? "manual" : undefined,
+    gridAutoTracks: mode === "grid" && source.gridAutoTracks === "rows" ? "rows" : undefined,
     gridRowAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? rowAnchor : undefined,
     gridColumnAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? columnAnchor : undefined,
   };

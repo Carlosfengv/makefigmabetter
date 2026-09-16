@@ -1534,6 +1534,11 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const gridColumns = grid ? gridTracks(node.gridColumnSizes, node.gridColumnCount) : undefined;
   const gridAutoTracks = string(node.gridAutoTracks);
   const gridItemsPositioning = string(node.gridItemsPositioning);
+  const automaticRows = gridAutoTracks === "ROWS";
+  const automaticRowTracksValid = !automaticRows || (gridRows !== undefined
+    && gridRows.length >= 1
+    && gridRows.slice(1).every((track) => track.type === "flex" && track.value === 1));
+  const canonicalGridRows = automaticRows ? gridRows?.slice(0, 1) : gridRows;
   const gridRowGap = grid ? finite(node.gridRowGap) ?? (node.gridRowGap === undefined ? 0 : undefined) : undefined;
   const gridColumnGap = grid ? finite(node.gridColumnGap) ?? (node.gridColumnGap === undefined ? 0 : undefined) : undefined;
   const gridPlacements = grid && gridRows && gridColumns ? (() => {
@@ -1591,11 +1596,13 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     || gridRows.length * gridColumns.length > 4096
     || !gridPlacements
     || gridHasFillHugCycle
-    || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE")
+    || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE" && gridAutoTracks !== "ROWS")
+    || !automaticRowTracksValid
+    || (automaticRows && gridItemsPositioning !== "ROW_AUTO_FLOW")
     || (gridItemsPositioning !== "ROW_AUTO_FLOW" && gridItemsPositioning !== "MANUAL")
   )) {
     extensions["figma.rest.grid-auto-layout.v1"] = jsonBytes({ gridRowCount: node.gridRowCount, gridColumnCount: node.gridColumnCount, gridRowSizes: node.gridRowSizes, gridColumnSizes: node.gridColumnSizes, gridRowGap: node.gridRowGap, gridColumnGap: node.gridColumnGap, gridAutoTracks: node.gridAutoTracks, gridItemsPositioning: node.gridItemsPositioning });
-    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, unplaceable spans or anchors, HUG/FILL cycles, automatic rows or an oversized track matrix is outside the bounded Grid subset." });
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, unplaceable spans or anchors, HUG/FILL cycles, unsupported automatic-row tracks or an oversized track matrix is outside the bounded Grid subset." });
     return undefined;
   }
   return {
@@ -1615,13 +1622,14 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     minHeight: finite(node.minHeight) ?? undefined,
     maxHeight: finite(node.maxHeight) ?? undefined,
     absolute,
-    gridRows,
+    gridRows: canonicalGridRows,
     gridColumns,
     gridRowGap,
     gridColumnGap,
     gridRowSpan: gridSpansValid && rawGridRowSpan !== undefined && rawGridRowSpan !== 1 ? rawGridRowSpan : undefined,
     gridColumnSpan: gridSpansValid && rawGridColumnSpan !== undefined && rawGridColumnSpan !== 1 ? rawGridColumnSpan : undefined,
     gridItemsPositioning: grid && gridItemsPositioning === "MANUAL" ? "manual" : undefined,
+    gridAutoTracks: grid && automaticRows ? "rows" : undefined,
     gridRowAnchor: gridAnchorsValid ? rawGridRowAnchor : undefined,
     gridColumnAnchor: gridAnchorsValid ? rawGridColumnAnchor : undefined,
   };

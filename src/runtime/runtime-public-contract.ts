@@ -307,6 +307,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   gridFrame.gridRowSizes[0]!.type = "FIXED";
   gridFrame.gridRowSizes[0]!.value = 64;
   void gridFrame.gridAutoTracks;
+  gridFrame.gridAutoTracks = "ROWS";
+  gridFrame.gridAutoTracks = "NONE";
   void gridFrame.gridItemsPositioning;
   const gridChild = runtime.createRectangle();
   gridFrame.appendChild(gridChild);

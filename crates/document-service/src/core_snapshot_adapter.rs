@@ -5,15 +5,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
-    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridItemsPositioning,
-    GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
-    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page,
-    PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
-    TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
+    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
+    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
     VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
     WrapTrackAlignment,
     color::{
@@ -478,6 +478,13 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version < makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document.auto_layout_for_node(node.id).grid_auto_tracks == GridAutoTracks::Rows
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
@@ -1067,6 +1074,21 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| layout.grid_auto_tracks.is_some())
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if declared_engine_semantics_version
         < makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
         && snapshot
@@ -2181,6 +2203,8 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
             .then_some(v1::GridItemsPositioning::Manual as i32),
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
+        grid_auto_tracks: (value.grid_auto_tracks == GridAutoTracks::Rows)
+            .then_some(v1::GridAutoTracks::Rows as i32),
     }
 }
 
@@ -2277,6 +2301,16 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
             v1::GridItemsPositioning::Unspecified => return Err(ServiceError::ReducerRejected),
         },
     };
+    let grid_auto_tracks = match value.grid_auto_tracks {
+        None => GridAutoTracks::None,
+        Some(raw) => {
+            match v1::GridAutoTracks::try_from(raw).map_err(|_| ServiceError::ReducerRejected)? {
+                v1::GridAutoTracks::None => GridAutoTracks::None,
+                v1::GridAutoTracks::Rows => GridAutoTracks::Rows,
+                v1::GridAutoTracks::Unspecified => return Err(ServiceError::ReducerRejected),
+            }
+        }
+    };
     let layout = AutoLayout {
         mode,
         padding: [
@@ -2316,6 +2350,7 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         grid_items_positioning,
         grid_row_anchor: value.grid_row_anchor,
         grid_column_anchor: value.grid_column_anchor,
+        grid_auto_tracks,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -5760,6 +5795,40 @@ mod tests {
             document_from_snapshot(&snapshot, 73_u128.to_be_bytes(), document.canonical_hash())
                 .unwrap();
         assert_eq!(restored.auto_layout_for_node(NodeId(73)), layout);
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_sixty_for_grid_auto_rows() {
+        let mut document = Document::with_id(DocumentId(74));
+        let mut frame = leaf(NodeId(74), None, NodeKind::Frame);
+        frame.name = "Automatic rows".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Flex(1.0)],
+            grid_auto_tracks: GridAutoTracks::Rows,
+            ..AutoLayout::default()
+        };
+        document
+            .seed_auto_layout(NodeId(74), layout.clone())
+            .unwrap();
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 74_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(restored.auto_layout_for_node(NodeId(74)), layout);
     }
 
     #[test]

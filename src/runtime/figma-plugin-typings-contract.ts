@@ -282,6 +282,8 @@ export function assertFigmaPluginTypingsContract(
   frame.appendChild(rectangle);
   if (false) {
     frame.layoutMode = "GRID";
+    frame.gridAutoTracks = "ROWS";
+    frame.gridAutoTracks = "NONE";
     frame.gridItemsPositioning = "MANUAL";
     frame.appendChildAt(rectangle, 0, 0);
     void frame.reorderRows({ fromIndices: [0], insertionIndex: 1 });

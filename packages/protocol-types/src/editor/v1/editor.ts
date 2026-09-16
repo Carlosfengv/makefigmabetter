@@ -211,6 +211,13 @@ export enum GridItemsPositioning {
   UNRECOGNIZED = -1,
 }
 
+export enum GridAutoTracks {
+  GRID_AUTO_TRACKS_UNSPECIFIED = 0,
+  GRID_AUTO_TRACKS_NONE = 1,
+  GRID_AUTO_TRACKS_ROWS = 2,
+  UNRECOGNIZED = -1,
+}
+
 export enum ColorSpace {
   COLOR_SPACE_UNSPECIFIED = 0,
   COLOR_SPACE_SRGB = 1,
@@ -608,7 +615,15 @@ export interface AutoLayout {
    */
   gridItemsPositioning?: GridItemsPositioning | undefined;
   gridRowAnchor?: number | undefined;
-  gridColumnAnchor?: number | undefined;
+  gridColumnAnchor?:
+    | number
+    | undefined;
+  /**
+   * Automatic row creation requires semantics 60. NONE is omitted by
+   * canonical writers; ROWS stores one authored row template and derives the
+   * effective row count from row-auto-flow placement.
+   */
+  gridAutoTracks?: GridAutoTracks | undefined;
 }
 
 export interface Color {
@@ -2877,6 +2892,7 @@ function createBaseAutoLayout(): AutoLayout {
     gridItemsPositioning: undefined,
     gridRowAnchor: undefined,
     gridColumnAnchor: undefined,
+    gridAutoTracks: undefined,
   };
 }
 
@@ -2965,6 +2981,9 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.gridColumnAnchor !== undefined) {
       writer.uint32(224).uint32(message.gridColumnAnchor);
+    }
+    if (message.gridAutoTracks !== undefined) {
+      writer.uint32(232).int32(message.gridAutoTracks);
     }
     return writer;
   },
@@ -3200,6 +3219,14 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.gridColumnAnchor = reader.uint32();
           continue;
         }
+        case 29: {
+          if (tag !== 232) {
+            break;
+          }
+
+          message.gridAutoTracks = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3242,6 +3269,7 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.gridItemsPositioning = object.gridItemsPositioning ?? undefined;
     message.gridRowAnchor = object.gridRowAnchor ?? undefined;
     message.gridColumnAnchor = object.gridColumnAnchor ?? undefined;
+    message.gridAutoTracks = object.gridAutoTracks ?? undefined;
     return message;
   },
 };

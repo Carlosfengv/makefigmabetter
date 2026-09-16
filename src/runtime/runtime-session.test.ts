@@ -3232,6 +3232,43 @@ describe("M1 RuntimeSession", () => {
     await expect(session.commitAsync()).resolves.toBe(1);
   });
 
+  it("derives automatic rows from flow children and materializes them when disabled", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    grid.gridColumnCount = 2;
+    grid.gridAutoTracks = "ROWS";
+    const children = Array.from({ length: 5 }, () => session.createRectangle());
+    children.forEach((child) => grid.appendChild(child));
+
+    expect(grid.gridAutoTracks).toBe("ROWS");
+    expect(grid.gridRowCount).toBe(3);
+    expect(grid.gridRowSizes.map((track) => ({ type: track.type, value: track.value }))).toEqual([
+      { type: "FLEX", value: 1 },
+      { type: "FLEX", value: 1 },
+      { type: "FLEX", value: 1 },
+    ]);
+    expect([children[4]!.gridRowAnchorIndex, children[4]!.gridColumnAnchorIndex]).toEqual([2, 0]);
+    expect(isRuntimeError(captureError(() => { grid.gridRowCount = 4; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { grid.gridItemsPositioning = "MANUAL"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { grid.gridRowSizes[1]!.value = 2; }), "INVALID_ARGUMENT")).toBe(true);
+
+    children[4]!.remove();
+    expect(grid.gridRowCount).toBe(2);
+    grid.gridAutoTracks = "NONE";
+    expect(grid.gridAutoTracks).toBe("NONE");
+    expect(grid.gridRowCount).toBe(2);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: grid.id,
+        patch: { autoLayout: expect.objectContaining({ gridRows: [{ type: "flex", value: 1 }, { type: "flex", value: 1 }], gridAutoTracks: undefined }) },
+      }),
+    ]));
+  });
+
   it("places row-auto-flow children across bounded row and column spans", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

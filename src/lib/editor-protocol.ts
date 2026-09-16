@@ -149,6 +149,9 @@ export interface DocumentAutoLayout {
   /** Grid container policy; omission is row auto-flow. Manual children persist
    * both zero-based anchors so layer reordering does not move geometry. */
   gridItemsPositioning?: "manual";
+  /** Omission means an explicit row matrix. `rows` stores one authored first
+   * row and derives later FLEX rows from row-auto-flow placement. */
+  gridAutoTracks?: "rows";
   gridRowAnchor?: number;
   gridColumnAnchor?: number;
 }

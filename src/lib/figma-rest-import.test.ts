@@ -132,6 +132,33 @@ describe("Figma REST import planning", () => {
     });
   });
 
+  it("imports bounded automatic rows as one authored template plus derived rows", () => {
+    const children = Array.from({ length: 5 }, (_, index) => ({
+      id: `1:${index + 2}`,
+      type: "RECTANGLE",
+      relativeTransform: [[1, 0, (index % 2) * 100], [0, 1, Math.floor(index / 2) * 80]],
+      absoluteBoundingBox: { x: (index % 2) * 100, y: Math.floor(index / 2) * 80, width: 40, height: 40 },
+    }));
+    const plan = planFigmaRestImport({
+      version: "grid-auto-rows",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 200, height: 240 },
+        layoutMode: "GRID", gridRowCount: 3, gridColumnCount: 2,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "ROWS",
+        gridRowSizes: Array.from({ length: 3 }, () => ({ type: "FLEX", value: 1 })),
+        gridColumnSizes: Array.from({ length: 2 }, () => ({ type: "FLEX", value: 1 })),
+        children,
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.nodes[0]?.autoLayout).toMatchObject({
+      mode: "grid",
+      gridRows: [{ type: "flex", value: 1 }],
+      gridAutoTracks: "rows",
+    });
+  });
+
   it("imports bounded row-auto-flow child spans without losing occupancy order", () => {
     const plan = planFigmaRestImport({
       version: "grid-spans",

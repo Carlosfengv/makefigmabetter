@@ -387,6 +387,13 @@ pub enum GridItemsPositioning {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridAutoTracks {
+    #[default]
+    None,
+    Rows,
+}
+
 /// Container and child inputs live in a separate canonical table, which keeps
 /// legacy Node snapshots byte-compatible while still making layout semantic.
 #[derive(Debug, Clone, PartialEq)]
@@ -425,6 +432,10 @@ pub struct AutoLayout {
     pub grid_column_span: Option<u32>,
     /// Grid container placement policy. Row auto-flow is the legacy default.
     pub grid_items_positioning: GridItemsPositioning,
+    /// Automatic rows keep one authored row track as the first-row template;
+    /// later FLEX rows are derived from child placement and never enter hash or
+    /// history as reflow side effects.
+    pub grid_auto_tracks: GridAutoTracks,
     /// Direct-child manual Grid anchors. Both values are present together and
     /// are interpreted only while the parent Grid uses manual positioning.
     pub grid_row_anchor: Option<u32>,
@@ -457,6 +468,7 @@ impl Default for AutoLayout {
             grid_row_span: None,
             grid_column_span: None,
             grid_items_positioning: GridItemsPositioning::RowAutoFlow,
+            grid_auto_tracks: GridAutoTracks::None,
             grid_row_anchor: None,
             grid_column_anchor: None,
         }
@@ -6085,11 +6097,11 @@ impl Document {
                     }
                     let row_gap = layout.grid_row_gap.unwrap_or(0.0);
                     let column_gap = layout.grid_column_gap.unwrap_or(0.0);
-                    let cell_count = layout
-                        .grid_rows
-                        .len()
-                        .saturating_mul(layout.grid_columns.len());
-                    if flow.len() > cell_count {
+                    let mut grid_rows = layout.grid_rows.clone();
+                    let column_count = layout.grid_columns.len();
+                    let max_row_count = 128_usize.min(4096 / column_count);
+                    let mut cell_count = grid_rows.len().saturating_mul(column_count);
+                    if layout.grid_auto_tracks == GridAutoTracks::None && flow.len() > cell_count {
                         return Err(CommandError::AutoLayoutUnsupported);
                     }
                     let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
@@ -6097,7 +6109,7 @@ impl Document {
                             .unwrap_or(value)
                             .max(min.unwrap_or(0.0))
                     };
-                    let mut hug_rows = vec![0.0_f64; layout.grid_rows.len()];
+                    let mut hug_rows = vec![0.0_f64; grid_rows.len()];
                     let mut hug_columns = vec![0.0_f64; layout.grid_columns.len()];
                     let mut occupied = vec![false; cell_count];
                     let mut prepared = Vec::with_capacity(flow.len());
@@ -6114,7 +6126,9 @@ impl Document {
                         }
                         let row_span = child_layout.grid_row_span.unwrap_or(1) as usize;
                         let column_span = child_layout.grid_column_span.unwrap_or(1) as usize;
-                        if row_span > layout.grid_rows.len()
+                        if (layout.grid_auto_tracks == GridAutoTracks::None
+                            && row_span > grid_rows.len())
+                            || row_span > max_row_count
                             || column_span > layout.grid_columns.len()
                         {
                             return Err(CommandError::AutoLayoutUnsupported);
@@ -6134,37 +6148,46 @@ impl Document {
                             }
                         };
                         if layout.grid_items_positioning == GridItemsPositioning::RowAutoFlow {
-                            'cells: for index in 0..cell_count {
-                                let row = index / layout.grid_columns.len();
-                                let column = index % layout.grid_columns.len();
-                                if row + row_span > layout.grid_rows.len()
-                                    || column + column_span > layout.grid_columns.len()
-                                {
-                                    continue;
-                                }
-                                for occupied_row in row..row + row_span {
-                                    for occupied_column in column..column + column_span {
-                                        if occupied[occupied_row * layout.grid_columns.len()
-                                            + occupied_column]
-                                        {
-                                            continue 'cells;
+                            loop {
+                                'cells: for index in 0..cell_count {
+                                    let row = index / column_count;
+                                    let column = index % column_count;
+                                    if row + row_span > grid_rows.len()
+                                        || column + column_span > column_count
+                                    {
+                                        continue;
+                                    }
+                                    for occupied_row in row..row + row_span {
+                                        for occupied_column in column..column + column_span {
+                                            if occupied
+                                                [occupied_row * column_count + occupied_column]
+                                            {
+                                                continue 'cells;
+                                            }
                                         }
                                     }
+                                    placement = Some((row, column));
+                                    break 'cells;
                                 }
-                                placement = Some((row, column));
-                                break;
+                                if placement.is_some()
+                                    || layout.grid_auto_tracks != GridAutoTracks::Rows
+                                    || grid_rows.len() >= max_row_count
+                                {
+                                    break;
+                                }
+                                grid_rows.push(GridTrack::Flex(1.0));
+                                hug_rows.push(0.0);
+                                occupied.extend(std::iter::repeat_n(false, column_count));
+                                cell_count += column_count;
                             }
                         }
                         let (row, column) = placement.ok_or(CommandError::AutoLayoutUnsupported)?;
-                        if row + row_span > layout.grid_rows.len()
-                            || column + column_span > layout.grid_columns.len()
-                        {
+                        if row + row_span > grid_rows.len() || column + column_span > column_count {
                             return Err(CommandError::AutoLayoutUnsupported);
                         }
                         for occupied_row in row..row + row_span {
                             for occupied_column in column..column + column_span {
-                                let index =
-                                    occupied_row * layout.grid_columns.len() + occupied_column;
+                                let index = occupied_row * column_count + occupied_column;
                                 if occupied[index] {
                                     return Err(CommandError::AutoLayoutUnsupported);
                                 }
@@ -6239,7 +6262,7 @@ impl Document {
                             column_gap,
                         )?;
                         measure_hug_tracks(
-                            &layout.grid_rows,
+                            &grid_rows,
                             &mut hug_rows,
                             row,
                             row_span,
@@ -6293,8 +6316,7 @@ impl Document {
                                 })
                                 .collect::<Vec<_>>())
                         };
-                    let row_sizes =
-                        resolve_tracks(&layout.grid_rows, &hug_rows, content_height, row_gap)?;
+                    let row_sizes = resolve_tracks(&grid_rows, &hug_rows, content_height, row_gap)?;
                     let column_sizes = resolve_tracks(
                         &layout.grid_columns,
                         &hug_columns,
@@ -9461,6 +9483,9 @@ fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
             }
         }
     }
+    if layout.grid_auto_tracks == GridAutoTracks::Rows {
+        hasher.update(b"makefigma/editor-core/grid-auto-rows-v1");
+    }
 }
 
 fn valid_auto_layout(layout: &AutoLayout) -> bool {
@@ -9488,6 +9513,10 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
             && layout.track_alignment == WrapTrackAlignment::Auto
             && layout.primary_alignment == LayoutAlignment::Start
             && layout.counter_alignment == LayoutAlignment::Start
+            && (layout.grid_auto_tracks == GridAutoTracks::None
+                || (layout.grid_auto_tracks == GridAutoTracks::Rows
+                    && layout.grid_rows.len() == 1
+                    && layout.grid_items_positioning == GridItemsPositioning::RowAutoFlow))
             && layout
                 .grid_row_gap
                 .is_none_or(|value| value.is_finite() && value >= 0.0)
@@ -9499,6 +9528,7 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
             && layout.grid_columns.is_empty()
             && layout.grid_row_gap.is_none()
             && layout.grid_column_gap.is_none()
+            && layout.grid_auto_tracks == GridAutoTracks::None
     };
     layout
         .padding
@@ -12924,6 +12954,62 @@ mod tests {
             Err(CommandError::AutoLayoutUnsupported)
         );
         assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn grid_auto_rows_derives_effective_tracks_without_mutating_canonical_layout() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 200.0;
+        frame.height = 300.0;
+        let mut commands = vec![Command::Create(frame.clone())];
+        for id in 2..=6 {
+            let mut child = node(id);
+            child.parent_id = Some(frame.id);
+            child.width = 20.0;
+            child.height = 20.0;
+            commands.push(Command::Create(child));
+        }
+        let grid = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)],
+            grid_auto_tracks: GridAutoTracks::Rows,
+            ..AutoLayout::default()
+        };
+        commands.push(Command::SetAutoLayout {
+            id: frame.id,
+            layout: grid.clone(),
+        });
+        document
+            .submit(transaction(0, commands), Origin::LocalUser)
+            .unwrap();
+
+        assert_eq!(
+            document.node(NodeId(2)).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            document.node(NodeId(4)).map(|node| (node.x, node.y)),
+            Some((0.0, 100.0))
+        );
+        assert_eq!(
+            document.node(NodeId(6)).map(|node| (node.x, node.y)),
+            Some((0.0, 200.0))
+        );
+        assert_eq!(document.auto_layout_for_node(frame.id), grid);
+        let hash = document.canonical_hash();
+        document
+            .submit(
+                transaction(document.revision, vec![Command::Delete { id: NodeId(6) }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.node(NodeId(4)).map(|node| node.y), Some(150.0));
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), hash);
+        assert_eq!(document.node(NodeId(4)).map(|node| node.y), Some(100.0));
+        assert_eq!(document.auto_layout_for_node(frame.id).grid_rows.len(), 1);
     }
 
     #[test]
