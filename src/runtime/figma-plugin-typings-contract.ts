@@ -27,7 +27,12 @@ export function assertFigmaPluginTypingsContract(
   node.name = node.name;
   rectangle.opacity = rectangle.opacity;
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
-  if (floatVariable) rectangle.setBoundVariable("opacity", floatVariable);
+  if (floatVariable) {
+    rectangle.setBoundVariable("opacity", floatVariable);
+    rectangle.setBoundVariable("width", floatVariable);
+  }
+  const stringVariable = figma.variables.getLocalVariables("STRING")[0];
+  if (stringVariable) text.setBoundVariable("characters", stringVariable);
   void rectangle.boundVariables;
   const variableCollection = figma.variables.getLocalVariableCollections()[0];
   if (variableCollection) rectangle.setExplicitVariableModeForCollection(variableCollection, variableCollection.defaultModeId);

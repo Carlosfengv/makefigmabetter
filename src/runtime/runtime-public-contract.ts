@@ -13,7 +13,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getVariableByIdAsync("V:spacing");
   const rectangle = runtime.createRectangle();
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
-  if (runtimeVariable) rectangle.setBoundVariable("opacity", runtimeVariable);
+  if (runtimeVariable) {
+    rectangle.setBoundVariable("opacity", runtimeVariable);
+    rectangle.setBoundVariable("width", runtimeVariable);
+  }
   void rectangle.boundVariables;
   const runtimeCollection = runtime.variables.getLocalVariableCollections()[0];
   if (runtimeCollection) rectangle.setExplicitVariableModeForCollection(runtimeCollection, runtimeCollection.defaultModeId);
@@ -32,6 +35,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   if (false) void rectangle.setFillStyleIdAsync("S:brand-fill");
   if (false) void rectangle.setStrokeStyleIdAsync("S:brand-stroke");
   const text = runtime.createText();
+  const runtimeStringVariable = runtime.variables.getLocalVariables("STRING")[0];
+  if (runtimeStringVariable) text.setBoundVariable("characters", runtimeStringVariable);
   text.textAutoResize = "HEIGHT";
   text.textTruncation = "ENDING";
   text.maxLines = 2;

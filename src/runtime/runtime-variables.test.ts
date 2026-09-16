@@ -17,6 +17,9 @@ const projection: RuntimeProjection = {
     { id: "V:surface", key: "", name: "Surface", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "COLOR", valuesByMode: { light: { space: "display-p3", components: [1, .5, 0], alpha: .75 }, dark: { space: "srgb", components: [0, 0, 0], alpha: 1 } }, scopes: ["ALL_FILLS"] },
     { id: "V:opacity", key: "", name: "Opacity", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "FLOAT", valuesByMode: { light: .5, dark: .8 }, scopes: ["OPACITY"] },
     { id: "V:visible", key: "", name: "Visible", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "BOOLEAN", valuesByMode: { light: false, dark: true }, scopes: ["ALL_SCOPES"] },
+    { id: "V:width", key: "", name: "Width", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "FLOAT", valuesByMode: { light: 120, dark: 180 }, scopes: ["WIDTH_HEIGHT"] },
+    { id: "V:height", key: "", name: "Height", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "FLOAT", valuesByMode: { light: 60, dark: 90 }, scopes: ["WIDTH_HEIGHT"] },
+    { id: "V:label", key: "", name: "Label", description: "", remote: false, hiddenFromPublishing: false, collectionId: "VC:theme", resolvedType: "STRING", valuesByMode: { light: "Light", dark: "Dark" }, scopes: ["TEXT_CONTENT"] },
     { id: "V:remote", key: "variable-key", name: "Remote", description: "", remote: true, hiddenFromPublishing: false, collectionId: "VC:library", resolvedType: "STRING", valuesByMode: { base: "Library value" }, scopes: [] },
   ],
   nodes: [
@@ -31,9 +34,9 @@ describe("Variables resource runtime", () => {
     const figma = new FigmaCompatibleRuntime(session);
 
     expect((await figma.variables.getLocalVariableCollectionsAsync()).map((value) => value.id)).toEqual(["VC:theme"]);
-    expect((await figma.variables.getLocalVariablesAsync("FLOAT")).map((value) => value.id)).toEqual(["V:spacing", "V:spacing-alias", "V:opacity"]);
+    expect((await figma.variables.getLocalVariablesAsync("FLOAT")).map((value) => value.id)).toEqual(["V:spacing", "V:spacing-alias", "V:opacity", "V:width", "V:height"]);
     const collection = await figma.variables.getVariableCollectionByIdAsync("VC:theme");
-    expect(collection).toMatchObject({ name: "Theme", defaultModeId: "light", variableIds: ["V:spacing", "V:spacing-alias", "V:surface", "V:opacity", "V:visible"] });
+    expect(collection).toMatchObject({ name: "Theme", defaultModeId: "light", variableIds: ["V:spacing", "V:spacing-alias", "V:surface", "V:opacity", "V:visible", "V:width", "V:height", "V:label"] });
 
     const alias = await figma.variables.getVariableByIdAsync("V:spacing-alias");
     expect(alias?.valuesByMode.light).toEqual({ type: "VARIABLE_ALIAS", id: "V:spacing" });
@@ -48,27 +51,37 @@ describe("Variables resource runtime", () => {
   it("keeps deprecated synchronous catalog reads behind full-document access", async () => {
     const session = new RuntimeSession({ sessionId: "variables-dynamic", projection, transport: new ReadOnlyTransport(), documentAccess: "dynamic-page", scheduleMicrotask: () => {} });
     expect(isRuntimeError(capture(() => session.variables.getLocalVariables()), "PAGE_NOT_LOADED")).toBe(true);
-    expect((await session.variables.getLocalVariablesAsync()).map((value) => value.id)).toEqual(["V:spacing", "V:spacing-alias", "V:surface", "V:opacity", "V:visible"]);
+    expect((await session.variables.getLocalVariablesAsync()).map((value) => value.id)).toEqual(["V:spacing", "V:spacing-alias", "V:surface", "V:opacity", "V:visible", "V:width", "V:height", "V:label"]);
   });
 
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
-    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0 }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, opacity: 1, visible: true, strokeWidth: 1 }] };
+    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0 }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, width: 100, height: 100, opacity: 1, visible: true, strokeWidth: 1 }, { id: "text", type: "TEXT", name: "Label", parentId: "frame", siblingIndex: 1, characters: "Initial", width: 100, height: 20 }] };
     const transport = new UpdatingTransport(writable);
     const session = new RuntimeSession({ sessionId: "variable-bindings", projection: writable, transport, scheduleMicrotask: () => {} });
     const rectangle = (await session.getNodeByIdAsync("rect"))!;
     const frame = (await session.getNodeByIdAsync("frame"))!;
+    const text = (await session.getNodeByIdAsync("text"))!;
     const collection = (await session.variables.getVariableCollectionByIdAsync("VC:theme"))!;
     const opacity = (await session.variables.getVariableByIdAsync("V:opacity"))!;
     const visible = (await session.variables.getVariableByIdAsync("V:visible"))!;
     const spacing = (await session.variables.getVariableByIdAsync("V:spacing"))!;
+    const width = (await session.variables.getVariableByIdAsync("V:width"))!;
+    const height = (await session.variables.getVariableByIdAsync("V:height"))!;
+    const label = (await session.variables.getVariableByIdAsync("V:label"))!;
 
     rectangle.setBoundVariable("opacity", opacity);
     rectangle.setBoundVariable("visible", visible);
     rectangle.setBoundVariable("strokeWeight", spacing);
+    rectangle.setBoundVariable("width", width);
+    rectangle.setBoundVariable("height", height);
+    text.setBoundVariable("characters", label);
     expect(rectangle.opacity).toBe(.5);
     expect(rectangle.visible).toBe(false);
     expect(rectangle.strokeWeight).toBe(8);
-    expect(rectangle.boundVariables).toEqual({ opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" } });
+    expect(rectangle.width).toBe(120);
+    expect(rectangle.height).toBe(60);
+    expect(text.characters).toBe("Light");
+    expect(rectangle.boundVariables).toEqual({ height: { type: "VARIABLE_ALIAS", id: "V:height" }, opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" }, width: { type: "VARIABLE_ALIAS", id: "V:width" } });
     expect(isRuntimeError(capture(() => rectangle.setBoundVariable("opacity", visible)), "INVALID_ARGUMENT")).toBe(true);
 
     frame.setExplicitVariableModeForCollection(collection, "dark");
@@ -77,6 +90,9 @@ describe("Variables resource runtime", () => {
     expect(rectangle.opacity).toBe(.8);
     expect(rectangle.visible).toBe(true);
     expect(rectangle.strokeWeight).toBe(12);
+    expect(rectangle.width).toBe(180);
+    expect(rectangle.height).toBe(90);
+    expect(text.characters).toBe("Dark");
     expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
 
     rectangle.setExplicitVariableModeForCollection(collection, "light");
@@ -85,6 +101,12 @@ describe("Variables resource runtime", () => {
     rectangle.clearExplicitVariableModeForCollection(collection);
     expect(rectangle.opacity).toBe(.8);
     expect(rectangle.resolvedVariableModes).toEqual({ "VC:theme": "dark" });
+
+    rectangle.resize(300, 200);
+    text.characters = "Manual";
+    expect(rectangle.boundVariables).not.toHaveProperty("width");
+    expect(rectangle.boundVariables).not.toHaveProperty("height");
+    expect(text.boundVariables).toBeUndefined();
 
     rectangle.opacity = .7;
     expect(rectangle.opacity).toBe(.7);

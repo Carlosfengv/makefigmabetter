@@ -185,6 +185,7 @@ export interface RuntimeNodeHost {
 
 export type RuntimeLetterSpacing = Readonly<{ value: number; unit: "PIXELS" }>;
 export type RuntimeLineHeight = RuntimeParagraphLineHeight;
+export type RuntimeVariableBindableNodeField = "width" | "height" | "characters" | "visible" | "strokeWeight" | "opacity";
 function isRuntimeLineHeight(value: unknown): value is RuntimeLineHeight {
   if (!value || typeof value !== "object" || !("unit" in value)) return false;
   const candidate = value as { unit?: unknown; value?: unknown };
@@ -562,7 +563,14 @@ export class RuntimeTextSublayerProxy {
     const before = typeof node.characters === "string" ? node.characters : "";
     const properties = node.textProperties as DocumentTextProperties | undefined;
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(before, properties));
-    this.write(updateRuntimeText(before, value, properties, SHAPE_WITH_TEXT_DEFAULTS));
+    const patch = updateRuntimeText(before, value, properties, SHAPE_WITH_TEXT_DEFAULTS);
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    if (Object.hasOwn(bindings, "characters")) {
+      delete bindings.characters;
+      this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+    } else {
+      this.write(patch);
+    }
   }
 
   get hasMissingFont(): boolean {
@@ -1335,8 +1343,8 @@ export class RuntimeNodeProxy {
     const aliases = variableAliases(variableBindingsFromExtensions(this.read().extensions));
     return Object.keys(aliases).length ? aliases : undefined;
   }
-  setBoundVariable(field: "opacity" | "visible" | "strokeWeight", variable: RuntimeVariable | string | null): void {
-    if (!["opacity", "visible", "strokeWeight"].includes(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+  setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
+    if (!["width", "height", "characters", "opacity", "visible", "strokeWeight"].includes(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     if (typeof variable === "string") this.host.assertSynchronousDocumentAccess();
     const node = this.read();
     const bindings = { ...variableBindingsFromExtensions(node.extensions) };
@@ -1847,7 +1855,7 @@ export class RuntimeNodeProxy {
     const before = typeof node.characters === "string" ? node.characters : "";
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(before, node.textProperties as never));
     const next = updateRuntimeText(before, value, node.textProperties as never);
-    this.write(this.type === "TEXT_PATH" && this.textPathMetadata().autoRename
+    this.writeUnboundVariableField("characters", this.type === "TEXT_PATH" && this.textPathMetadata().autoRename
       ? { ...next, name: value || "Text path" }
       : next);
   }
@@ -2823,7 +2831,7 @@ export class RuntimeNodeProxy {
     if (![width, height].every((value) => Number.isFinite(value) && value >= 0)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    this.write({ width, height });
+    this.writeUnboundVariableFields(["width", "height"], { width, height });
   }
 
   resizeWithoutConstraints(width: number, height: number): void {
@@ -2832,7 +2840,14 @@ export class RuntimeNodeProxy {
     }
     this.assertLive();
     this.assertMutable();
-    this.host.enqueueResizeWithoutConstraints(this.handle.nodeId, { width, height });
+    const node = this.read();
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    const linked = Object.hasOwn(bindings, "width") || Object.hasOwn(bindings, "height");
+    delete bindings.width;
+    delete bindings.height;
+    this.host.enqueueResizeWithoutConstraints(this.handle.nodeId, linked
+      ? { width, height, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) }
+      : { width, height });
   }
 
   remove(): void {
@@ -2901,6 +2916,18 @@ export class RuntimeNodeProxy {
     this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
   }
 
+  private writeUnboundVariableFields(fields: readonly string[], patch: Readonly<Record<string, unknown>>): void {
+    const node = this.read();
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    const linked = fields.some((field) => Object.hasOwn(bindings, field));
+    if (!linked) {
+      this.write(patch);
+      return;
+    }
+    for (const field of fields) delete bindings[field];
+    this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+  }
+
   private applyExplicitVariableModes(modes: Readonly<Record<string, string>>): void {
     const source = this.read();
     const targets: RuntimeNodeProxy[] = [];
@@ -2927,14 +2954,24 @@ export class RuntimeNodeProxy {
     const bindings = variableBindingsFromExtensions(this.read().extensions);
     const patch: Record<string, unknown> = {};
     for (const [field, variableId] of Object.entries(bindings)) {
-      if (field !== "opacity" && field !== "visible" && field !== "strokeWeight") continue;
+      if (!["width", "height", "characters", "opacity", "visible", "strokeWeight"].includes(field)) continue;
       const resolved = this.host.resolveVariableValue(variableId, this.id, override);
-      Object.assign(patch, this.variableFieldPatch(field, resolved.value, resolved.resolvedType));
+      Object.assign(patch, this.variableFieldPatch(field as RuntimeVariableBindableNodeField, resolved.value, resolved.resolvedType));
     }
     return patch;
   }
 
-  private variableFieldPatch(field: "opacity" | "visible" | "strokeWeight", value: DocumentVariableValue, type: DocumentVariableResolvedType): Readonly<Record<string, unknown>> {
+  private variableFieldPatch(field: RuntimeVariableBindableNodeField, value: DocumentVariableValue, type: DocumentVariableResolvedType): Readonly<Record<string, unknown>> {
+    if (field === "characters") {
+      this.assertTextCharacters();
+      if (type !== "STRING" || typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const node = this.read();
+      const before = typeof node.characters === "string" ? node.characters : "";
+      const properties = node.textProperties as DocumentTextProperties | undefined;
+      this.host.assertFontsLoaded(fontsForRuntimeTextRange(before, properties));
+      const patch = updateRuntimeText(before, value, properties, this.type === "SHAPE_WITH_TEXT" ? SHAPE_WITH_TEXT_DEFAULTS : DEFAULT_RUNTIME_TEXT_STYLE);
+      return this.type === "TEXT_PATH" && this.textPathMetadata().autoRename ? { ...patch, name: value || "Text path" } : patch;
+    }
     if (field === "visible") {
       if (type !== "BOOLEAN" || typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       return { visible: value };
@@ -2943,6 +2980,10 @@ export class RuntimeNodeProxy {
     if (field === "opacity") {
       if (value < 0 || value > 1) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       return { opacity: value };
+    }
+    if (field === "width" || field === "height") {
+      if (value <= 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { [field]: value };
     }
     this.assertGeometry();
     if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
