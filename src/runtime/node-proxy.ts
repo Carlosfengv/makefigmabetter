@@ -179,6 +179,7 @@ export interface RuntimeNodeHost {
   createSlot(componentId: string): RuntimeContainerNodeProxy;
   resetSlot(slotId: string): void;
   detachInstance(instanceId: string): RuntimeContainerNodeProxy;
+  swapInstanceComponent(instanceId: string, componentId: string): void;
   addComponentProperty(
     componentId: string,
     propertyName: string,
@@ -2036,20 +2037,11 @@ export class RuntimeNodeProxy {
   }
 
   swapComponent(component: RuntimeNodeProxy): void {
-    const metadata = this.instanceMetadata();
+    this.instanceMetadata();
     if (!(component instanceof RuntimeNodeProxy) || component.handle.sessionId !== this.handle.sessionId || component.removed || component.type !== "COMPONENT") {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    const componentProperties = Object.fromEntries(Object.entries(component.componentPropertyDefinitions).flatMap(([name, definition]) =>
-      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
-    this.write({
-      instanceMetadata: {
-        ...structuredClone(metadata),
-        mainComponentId: component.id,
-        componentProperties,
-        overrides: [],
-      },
-    });
+    this.host.swapInstanceComponent(this.handle.nodeId, component.id);
   }
 
   detachInstance(): RuntimeContainerNodeProxy {

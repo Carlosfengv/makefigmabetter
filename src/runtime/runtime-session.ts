@@ -833,6 +833,40 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations(operations);
     return this.containerFor(instanceId);
   }
+  swapInstanceComponent(instanceId: string, componentId: string): void {
+    this.assertOpen();
+    const instance = this.projectionStore.getNode(instanceId);
+    const component = this.projectionStore.getNode(componentId);
+    const instanceMetadata = instance?.instanceMetadata as DocumentInstanceMetadata | undefined;
+    const componentMetadata = component?.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!instance || instance.removed === true || instance.type !== "INSTANCE" || !instanceMetadata || !component || component.removed === true || component.type !== "COMPONENT" || !componentMetadata) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+    }
+    const componentProperties = Object.fromEntries(Object.entries(componentMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
+      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    const extensions = instance.extensions && typeof instance.extensions === "object" && !Array.isArray(instance.extensions)
+      ? structuredClone(instance.extensions as Record<string, number[]>)
+      : {};
+    extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(component.id)];
+    const subtreeOperations = this.replaceRuntimeSubtreeOperations(component, instance, (_source, clone) => {
+      const references = runtimeComponentPropertyReferences(clone);
+      if (!references) return clone;
+      return { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentMetadata.componentPropertyDefinitions) };
+    });
+    this.enqueueOperations([{
+      type: "update",
+      nodeId: instance.id,
+      patch: {
+        extensions,
+        instanceMetadata: {
+          ...structuredClone(instanceMetadata),
+          mainComponentId: component.id,
+          componentProperties,
+          overrides: [],
+        },
+      },
+    }, ...subtreeOperations]);
+  }
   detachInstance(instanceId: string): RuntimeContainerNodeProxy {
     this.assertOpen();
     const instance = this.projectionStore.getNode(instanceId);
@@ -998,51 +1032,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!slot || slot.removed === true || slot.type !== "SLOT" || !source || source.removed === true || source.type !== "SLOT") {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: slotId });
     }
-    const collect = (rootId: string): RuntimeProjectionNode[] => {
-      const result: RuntimeProjectionNode[] = [];
-      const visit = (parentId: string): void => {
-        this.siblingsOf(parentId).forEach((child) => {
-          if (result.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: slotId });
-          result.push(child);
-          visit(child.id);
-        });
-      };
-      visit(rootId);
-      return result;
-    };
-    const current = collect(slotId);
-    const sourceNodes = collect(source.id);
-    if (current.length + sourceNodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: slotId });
-    if (sourceNodes.some((node) => !INSTANCE_CLONE_TYPES.has(node.type as M1SceneNodeType))) {
-      throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: slotId });
-    }
-    const ids = new Map(sourceNodes.map((node) => [node.id, this.createId()]));
-    const replacements = sourceNodes.map((sourceNode): RuntimeProjectionNode => {
-      const extensions = sourceNode.extensions && typeof sourceNode.extensions === "object" && !Array.isArray(sourceNode.extensions)
-        ? structuredClone(sourceNode.extensions as Record<string, number[]>)
-        : {};
-      extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(sourceNode.id)];
-      const clone: RuntimeProjectionNode = {
-        ...structuredClone(sourceNode),
-        id: ids.get(sourceNode.id)!,
-        parentId: sourceNode.parentId === source.id ? slotId : ids.get(sourceNode.parentId!),
-        pageId: slot.pageId,
-        removed: false,
-        extensions,
-        ...(sourceNode.type === "SLOT" && sourceNode.slotMetadata && typeof sourceNode.slotMetadata === "object"
-          ? { slotMetadata: { ...(structuredClone(sourceNode.slotMetadata) as { propertyName: string }), sourceSlotId: sourceNode.id } }
-          : {}),
-      };
-      const mutableClone = clone as unknown as Record<string, unknown>;
-      if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") mutableClone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
-      if (Array.isArray(clone.reactions)) mutableClone.reactions = remapRuntimeReactions(clone.reactions, ids);
-      return clone;
-    });
-    const operations: PendingProjectionOperation[] = [
-      ...current.reverse().map((node) => ({ type: "remove" as const, nodeId: node.id })),
-      ...replacements.map((node) => ({ type: "create" as const, node })),
-    ];
-    this.enqueueOperations(operations);
+    this.enqueueOperations(this.replaceRuntimeSubtreeOperations(source, slot));
   }
   addComponentProperty(
     componentId: string,
@@ -2438,6 +2428,56 @@ export class RuntimeSession implements RuntimeContainerHost {
       components,
       linkedInstances,
     };
+  }
+
+  private replaceRuntimeSubtreeOperations(
+    sourceRoot: RuntimeProjectionNode,
+    targetRoot: RuntimeProjectionNode,
+    decorate?: (source: RuntimeProjectionNode, clone: RuntimeProjectionNode) => RuntimeProjectionNode,
+  ): PendingProjectionOperation[] {
+    const collect = (rootId: string): RuntimeProjectionNode[] => {
+      const result: RuntimeProjectionNode[] = [];
+      const visit = (parentId: string): void => {
+        this.siblingsOf(parentId).forEach((child) => {
+          if (result.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: targetRoot.id });
+          result.push(child);
+          visit(child.id);
+        });
+      };
+      visit(rootId);
+      return result;
+    };
+    const current = collect(targetRoot.id);
+    const sourceNodes = collect(sourceRoot.id);
+    if (current.length + sourceNodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: targetRoot.id });
+    if (sourceNodes.some((node) => !INSTANCE_CLONE_TYPES.has(node.type as M1SceneNodeType))) throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: targetRoot.id });
+    const ids = new Map(sourceNodes.map((node) => [node.id, this.createId()]));
+    const replacements = sourceNodes.map((sourceNode): RuntimeProjectionNode => {
+      const extensions = sourceNode.extensions && typeof sourceNode.extensions === "object" && !Array.isArray(sourceNode.extensions)
+        ? structuredClone(sourceNode.extensions as Record<string, number[]>)
+        : {};
+      extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(sourceNode.id)];
+      let clone: RuntimeProjectionNode = {
+        ...structuredClone(sourceNode),
+        id: ids.get(sourceNode.id)!,
+        parentId: sourceNode.parentId === sourceRoot.id ? targetRoot.id : ids.get(sourceNode.parentId!),
+        pageId: targetRoot.pageId,
+        removed: false,
+        extensions,
+        ...(sourceNode.type === "SLOT" && sourceNode.slotMetadata && typeof sourceNode.slotMetadata === "object"
+          ? { slotMetadata: { ...(structuredClone(sourceNode.slotMetadata) as { propertyName: string }), sourceSlotId: sourceNode.id } }
+          : {}),
+      };
+      const mutableClone = clone as unknown as Record<string, unknown>;
+      if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") mutableClone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
+      if (Array.isArray(clone.reactions)) mutableClone.reactions = remapRuntimeReactions(clone.reactions, ids);
+      if (decorate) clone = decorate(sourceNode, clone);
+      return clone;
+    });
+    return [
+      ...current.reverse().map((node) => ({ type: "remove" as const, nodeId: node.id })),
+      ...replacements.map((node) => ({ type: "create" as const, node })),
+    ];
   }
 
   private componentPropertyDefinitionOperations(

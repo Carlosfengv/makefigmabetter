@@ -605,6 +605,8 @@ describe("RuntimeWorkerBridge", () => {
     const componentId = "00000000-0000-4000-8000-0000000000a1";
     const targetId = "00000000-0000-4000-8000-0000000000a2";
     const instanceId = "00000000-0000-4000-8000-0000000000a3";
+    const targetChildId = "00000000-0000-4000-8000-0000000000a4";
+    const oldChildId = "00000000-0000-4000-8000-0000000000a5";
     const componentMetadata = { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { Enabled: { type: "BOOLEAN" as const, defaultValue: true }, Swap: { type: "INSTANCE_SWAP" as const, defaultValue: targetId } } };
     const base = snapshotAt(4);
     const snapshot: EditorSnapshot = {
@@ -613,7 +615,9 @@ describe("RuntimeWorkerBridge", () => {
         ...base.nodes,
         { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 100, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata },
         { id: targetId, pageId: "page", kind: "component", name: "Icon", x: 120, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { ...componentMetadata, key: targetId, componentPropertyDefinitions: { Icon: { type: "TEXT", defaultValue: "Star" } } } },
+        { id: targetChildId, pageId: "page", parentId: targetId, kind: "ellipse", name: "New source", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
         { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 0, y: 120, width: 100, height: 100, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: { Enabled: true, Swap: targetId }, overrides: [], isExposedInstance: false } },
+        { id: oldChildId, pageId: "page", parentId: instanceId, kind: "rectangle", name: "Old source", x: 0, y: 0, width: 100, height: 100, rotation: 0, fill: "#000", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
       ],
     };
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
@@ -624,9 +628,11 @@ describe("RuntimeWorkerBridge", () => {
     const target = session.currentPage.children.find((node) => node.id === targetId)!;
     instance.setProperties({ Enabled: false, Swap: targetId });
     instance.swapComponent(target);
+    const replacementId = instance.children[0]!.id;
     const commit = session.commitAsync().catch(() => undefined);
 
     expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, parentId: instanceId, kind: "ellipse", name: "New source" }) }),
       expect.objectContaining({
         type: "update",
         id: instanceId,
@@ -635,11 +641,13 @@ describe("RuntimeWorkerBridge", () => {
       expect.objectContaining({
         type: "update",
         id: instanceId,
-        patch: { instanceMetadata: expect.objectContaining({ mainComponentId: targetId, componentProperties: { Icon: "Star" }, overrides: [] }) },
+        patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: targetId, componentProperties: { Icon: "Star" }, overrides: [] }) }),
       }),
+      { type: "delete", ids: [oldChildId] },
     ]);
     expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ mainComponentId: targetId, componentProperties: { Icon: "Star" }, overrides: [] }) }),
+      expect.objectContaining({ id: replacementId, parentId: instanceId, kind: "ellipse", name: "New source" }),
     ]));
 
     bridge.close();

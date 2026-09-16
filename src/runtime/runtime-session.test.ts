@@ -735,8 +735,11 @@ describe("M1 RuntimeSession", () => {
       nodes: [
         ...initial.nodes,
         { id: "component", type: "COMPONENT", name: "Card", parentId: "page", siblingIndex: 1, componentMetadata },
+        { id: "component-child", type: "RECTANGLE", name: "Old source", parentId: "component", siblingIndex: 0, width: 100, height: 40 },
         { id: "target", type: "COMPONENT", name: "Icon", parentId: "page", siblingIndex: 2, componentMetadata: { ...componentMetadata, key: "icon-key", componentPropertyDefinitions: { Icon: { type: "TEXT", defaultValue: "Star" } } } },
+        { id: "target-child", type: "ELLIPSE", name: "New source", parentId: "target", siblingIndex: 0, width: 24, height: 24 },
         { id: "instance", type: "INSTANCE", name: "Card instance", parentId: "page", siblingIndex: 3, instanceMetadata: { mainComponentId: "component", scaleFactor: 1, componentProperties: { Enabled: true, Label: "Continue", Swap: "target", State: "Default" }, overrides: [], isExposedInstance: false } },
+        { id: "instance-child", type: "RECTANGLE", name: "Old source", parentId: "instance", siblingIndex: 0, width: 100, height: 40, extensions: { "figma.instance.source-node.v1": [...new TextEncoder().encode("component-child")] } },
       ],
     };
     const transport = new InMemoryTransport(projection);
@@ -761,19 +764,23 @@ describe("M1 RuntimeSession", () => {
     })]);
 
     const target = session.currentPage.children.find((node) => node.id === "target")!;
+    const oldInstanceChild = instance.children[0]!;
     instance.swapComponent(target);
     expect(await instance.getMainComponentAsync()).toBe(target);
     expect(instance.componentPropertyValues).toEqual({ Icon: "Star" });
     expect(instance.overrides).toEqual([]);
+    expect(oldInstanceChild.removed).toBe(true);
+    expect(instance.children).toHaveLength(1);
+    expect(instance.children[0]).toMatchObject({ type: "ELLIPSE", name: "New source" });
     const swapTransactionId = session.projectionStore.pendingTransactionIds()[0]!;
     expect(isRuntimeError(captureError(() => instance.swapComponent(session.currentPage.children.find((node) => node.id === "frame")!)), "INVALID_ARGUMENT")).toBe(true);
-    expect(session.projectionStore.transaction(swapTransactionId)?.operations).toHaveLength(1);
+    expect(session.projectionStore.transaction(swapTransactionId)?.operations).toHaveLength(3);
     await session.commitAsync();
-    expect(transport.submitted[1]?.operations).toEqual([expect.objectContaining({
-      type: "update",
-      nodeId: "instance",
-      patch: { instanceMetadata: expect.objectContaining({ mainComponentId: "target", componentProperties: { Icon: "Star" }, overrides: [] }) },
-    })]);
+    expect(transport.submitted[1]?.operations).toEqual([
+      expect.objectContaining({ type: "update", nodeId: "instance", patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: "target", componentProperties: { Icon: "Star" }, overrides: [] }) }) }),
+      { type: "remove", nodeId: "instance-child" },
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ type: "ELLIPSE", parentId: "instance", name: "New source" }) }),
+    ]);
   });
 
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {
