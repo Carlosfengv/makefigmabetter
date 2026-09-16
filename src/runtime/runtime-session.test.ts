@@ -20,6 +20,37 @@ const initial: RuntimeProjection = {
 };
 
 describe("M1 RuntimeSession", () => {
+  it("persists plugin-scoped node data through the ordinary transaction fence", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = new RuntimeSession({ sessionId: "plugin-data-a", pluginId: "com.example.alpha", projection: initial, transport, scheduleMicrotask: () => {} });
+    const frame = (await session.getNodeByIdAsync("frame"))!;
+
+    expect(frame.getPluginData("missing")).toBe("");
+    frame.setPluginData("z-key", "last");
+    frame.setPluginData("a-key", "first 😀");
+    expect(frame.getPluginData("a-key")).toBe("first 😀");
+    expect(frame.getPluginDataKeys()).toEqual(["a-key", "z-key"]);
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => frame.setPluginData("", "invalid")), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => frame.setPluginData("large", "x".repeat(64 * 1024 + 1))), "RESOURCE_LIMIT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    frame.setPluginData("z-key", "");
+    expect(frame.getPluginData("z-key")).toBe("");
+    expect(frame.getPluginDataKeys()).toEqual(["a-key"]);
+    await session.commitAsync();
+
+    const other = new RuntimeSession({ sessionId: "plugin-data-b", pluginId: "com.example.beta", projection: transport.currentProjection(), transport: new InMemoryTransport(transport.currentProjection()), scheduleMicrotask: () => {} });
+    const otherFrame = (await other.getNodeByIdAsync("frame"))!;
+    expect(otherFrame.getPluginData("a-key")).toBe("");
+    expect(otherFrame.getPluginDataKeys()).toEqual([]);
+
+    const unscoped = new RuntimeSession({ sessionId: "plugin-data-none", projection: transport.currentProjection(), transport: new InMemoryTransport(transport.currentProjection()), scheduleMicrotask: () => {} });
+    const unscopedFrame = (await unscoped.getNodeByIdAsync("frame"))!;
+    expect(isRuntimeError(captureError(() => unscopedFrame.getPluginData("a-key")), "PERMISSION_DENIED")).toBe(true);
+  });
+
   it("projects Figma-shaped fill and stroke stacks before Ack and validates image hashes", async () => {
     const projection: RuntimeProjection = {
       revision: 0,

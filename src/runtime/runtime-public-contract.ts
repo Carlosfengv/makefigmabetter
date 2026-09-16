@@ -68,6 +68,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
     void runtime.createLinkPreviewAsync("https://example.com");
   }
   const rectangle = runtime.createRectangle();
+  void rectangle.getPluginData("key");
+  rectangle.setPluginData("key", "value");
+  void rectangle.getPluginDataKeys();
   const highlight = runtime.currentPage.findOne((candidate) => candidate.type === "HIGHLIGHT");
   if (highlight?.type === "HIGHLIGHT") {
     void highlight.vectorPaths;

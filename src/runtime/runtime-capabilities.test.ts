@@ -30,6 +30,12 @@ describe("M0 runtime capability matrix", () => {
       property: "clone",
       nodeTypes: expect.arrayContaining(["FRAME", "COMPONENT", "SLOT", "EMBED", "MEDIA"]),
     });
+    expect(runtimeCapability("node.plugin-data-runtime")).toMatchObject({
+      status: "partial",
+      surface: "plugin",
+      property: "getPluginData|setPluginData|getPluginDataKeys",
+      errorCode: "PERMISSION_DENIED",
+    });
     expect(runtimeCapability("component.instance-properties-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("setProperties"),

@@ -219,6 +219,9 @@ export interface RuntimeNodeHost {
   hasFontReference(font: DocumentFontReference): boolean;
   hasImageHash(hash: string): boolean;
   allocateRuntimeId(): string;
+  getPluginData(nodeId: string, key: string): string;
+  setPluginData(nodeId: string, key: string, value: string): void;
+  getPluginDataKeys(nodeId: string): readonly string[];
 }
 
 export type RuntimeComponentPropertyType = "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT";
@@ -3339,6 +3342,22 @@ export class RuntimeNodeProxy {
     this.assertLive();
     this.assertMutable();
     return this.host.cloneNode(this.handle.nodeId);
+  }
+
+  getPluginData(key: string): string {
+    this.assertLive();
+    return this.host.getPluginData(this.handle.nodeId, key);
+  }
+
+  setPluginData(key: string, value: string): void {
+    this.assertLive();
+    this.assertMutable();
+    this.host.setPluginData(this.handle.nodeId, key, value);
+  }
+
+  getPluginDataKeys(): readonly string[] {
+    this.assertLive();
+    return this.host.getPluginDataKeys(this.handle.nodeId);
   }
 
   /** Figma-shaped M4D export entry. The result is derived from a confirmed,

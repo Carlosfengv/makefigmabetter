@@ -38,6 +38,10 @@ function runtimePaintStyleNodeTypes(): string[] {
   return [...new Set([...runtimePaintNodeTypes("fill"), ...runtimePaintNodeTypes("stroke")])];
 }
 
+function runtimeAllNodeTypes(): string[] {
+  return Object.keys(NODE_KIND_CAPABILITIES).map((kind) => externalNodeTypeForKind(kind as keyof typeof NODE_KIND_CAPABILITIES));
+}
+
 /**
  * The source-of-truth Runtime capability matrix. It states the current runtime
  * contract rather than the broader editor's existing capabilities. A feature
@@ -82,6 +86,17 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     surface: "write",
     status: "partial",
     limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame; TableCell descendants are copied only as part of a Table. Page, Slide hierarchy, root TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
+  },
+  {
+    id: "node.plugin-data-runtime",
+    editorTypes: RUNTIME_EDITOR_TYPES,
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    nodeTypes: runtimeAllNodeTypes(),
+    property: "getPluginData|setPluginData|getPluginDataKeys",
+    surface: "plugin",
+    status: "partial",
+    limitation: "A RuntimeSession with an explicit validated pluginId reads, writes, lists and deletes only that plugin's node data in the Canonical figma.plugin-data.v1 extension namespace. Writes are immediate in PendingProjection and cross the ordinary atomic transaction fence; keys are sorted, UTF-8 values round-trip, empty values delete, and each plugin/node is bounded to 64 entries and 64 KiB. Unscoped sessions fail with PERMISSION_DENIED. Shared plugin data, relaunch data and style/document plugin-data methods remain staged.",
+    errorCode: "PERMISSION_DENIED",
   },
   {
     id: "component.instance-properties-runtime",

@@ -51,6 +51,9 @@ export function assertFigmaPluginTypingsContract(
     node.handleMirroring = "ANGLE";
   }
   rectangle.opacity = rectangle.opacity;
+  void rectangle.getPluginData("key");
+  rectangle.setPluginData("key", "value");
+  void rectangle.getPluginDataKeys();
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) {
     floatVariable.setVariableCodeSyntax("WEB", "--spacing");

@@ -93,9 +93,13 @@ const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
   "id", "type", "kind", "parentId", "pageId", "positionId", "siblingIndex", "removed",
   "componentMetadata", "componentSetMetadata", "instanceMetadata", "slotMetadata", "extensions",
 ]);
+const RUNTIME_PLUGIN_DATA_PREFIX = "figma.plugin-data.v1/";
+const MAX_RUNTIME_PLUGIN_DATA_ENTRIES = 64;
+const MAX_RUNTIME_PLUGIN_DATA_BYTES = 64 * 1024;
 
 export type RuntimeSessionOptions = Readonly<{
   sessionId: string;
+  pluginId?: string;
   projection: RuntimeProjection;
   transport: RuntimeTransactionTransport;
   currentPageId?: string;
@@ -142,6 +146,7 @@ export class RuntimeSession implements RuntimeContainerHost {
   private readonly scheduleMicrotask: (flush: () => void) => void;
   private readonly maxSynchronousQueryNodes: number;
   private readonly onError?: (error: unknown) => void;
+  private readonly pluginId?: string;
   private readonly resourceTransport: RuntimeFontTransport;
   private readonly documentAccess: RuntimeDocumentAccessMode;
   private readonly loadedPageIds: Set<string>;
@@ -167,6 +172,8 @@ export class RuntimeSession implements RuntimeContainerHost {
   constructor(options: RuntimeSessionOptions) {
     if (!options.sessionId) throw runtimeError("INVALID_ARGUMENT");
     this.sessionId = options.sessionId;
+    if (options.pluginId !== undefined && !validRuntimePluginId(options.pluginId)) throw runtimeError("INVALID_ARGUMENT");
+    this.pluginId = options.pluginId;
     this.projectionStore = new RuntimeProjectionStore(options.projection);
     this.variables = new RuntimeVariablesAPI(this);
     this.registry = new NodeRegistry<RuntimeNodeProxy>(options.sessionId);
@@ -2550,6 +2557,67 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations([{ type: "remove", nodeId }]);
   }
 
+  getPluginData(nodeId: string, key: string): string {
+    const node = this.runtimePluginDataNode(nodeId);
+    const storageKey = this.runtimePluginDataStorageKey(key);
+    const bytes = node.extensions && typeof node.extensions === "object"
+      ? (node.extensions as Record<string, unknown>)[storageKey]
+      : undefined;
+    return Array.isArray(bytes) && bytes.every(validRuntimeExtensionByte)
+      ? new TextDecoder().decode(Uint8Array.from(bytes))
+      : "";
+  }
+
+  setPluginData(nodeId: string, key: string, value: string): void {
+    const node = this.runtimePluginDataNode(nodeId);
+    const storageKey = this.runtimePluginDataStorageKey(key);
+    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const encoded = [...new TextEncoder().encode(value)];
+    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+      ? structuredClone(node.extensions as Record<string, number[]>)
+      : {};
+    if (value) extensions[storageKey] = encoded;
+    else delete extensions[storageKey];
+    const prefix = this.runtimePluginDataPrefix();
+    const pluginEntries = Object.entries(extensions).filter(([entryKey]) => entryKey.startsWith(prefix));
+    if (pluginEntries.some(([, bytes]) => !Array.isArray(bytes) || !bytes.every(validRuntimeExtensionByte))) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    if (pluginEntries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || pluginEntries.reduce((total, [, bytes]) => total + bytes.length, 0) > MAX_RUNTIME_PLUGIN_DATA_BYTES) {
+      throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    }
+    this.enqueueUpdate(nodeId, { extensions });
+  }
+
+  getPluginDataKeys(nodeId: string): readonly string[] {
+    const node = this.runtimePluginDataNode(nodeId);
+    const prefix = this.runtimePluginDataPrefix();
+    return Object.keys(node.extensions ?? {})
+      .filter((entryKey) => entryKey.startsWith(prefix))
+      .map((entryKey) => entryKey.slice(prefix.length))
+      .filter(validRuntimePluginDataPart)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  private runtimePluginDataNode(nodeId: string): RuntimeProjectionNode {
+    this.assertOpen();
+    const node = this.projectionStore.getNode(nodeId);
+    if (!node || node.removed === true) throw runtimeError("NODE_REMOVED", { nodeId });
+    this.runtimePluginDataPrefix();
+    return node;
+  }
+
+  private runtimePluginDataPrefix(): string {
+    if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
+    return `${RUNTIME_PLUGIN_DATA_PREFIX}${this.pluginId}/`;
+  }
+
+  private runtimePluginDataStorageKey(key: string): string {
+    if (!validRuntimePluginDataPart(key)) throw runtimeError("INVALID_ARGUMENT");
+    return `${this.runtimePluginDataPrefix()}${key}`;
+  }
+
   cloneNode(nodeId: string): RuntimeNodeProxy {
     this.assertOpen();
     const source = this.projectionStore.getNode(nodeId);
@@ -3744,6 +3812,18 @@ function runtimeNodeHasAncestorIn(
     parentId = read(parentId)?.parentId;
   }
   return false;
+}
+
+function validRuntimePluginId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,256}$/u.test(value);
+}
+
+function validRuntimePluginDataPart(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f]/u.test(value);
+}
+
+function validRuntimeExtensionByte(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 255;
 }
 
 function instanceMainComponentId(node: RuntimeProjectionNode): string | undefined {
