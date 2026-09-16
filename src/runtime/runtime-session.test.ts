@@ -766,6 +766,91 @@ describe("M1 RuntimeSession", () => {
     expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
   });
 
+  it("binds VariableAlias values to Instance properties and recomputes referenced layers", async () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      variableCollections: [{
+        id: "instance-properties",
+        key: "",
+        name: "Instance properties",
+        remote: false,
+        hiddenFromPublishing: false,
+        modes: [{ modeId: "default", name: "Default" }, { modeId: "dark", name: "Dark" }],
+        defaultModeId: "default",
+      }],
+      variables: [
+        { id: "instance-enabled", key: "", name: "Enabled", description: "", remote: false, hiddenFromPublishing: false, collectionId: "instance-properties", resolvedType: "BOOLEAN", valuesByMode: { default: false, dark: true }, scopes: ["ALL_SCOPES"] },
+        { id: "instance-swap", key: "", name: "Swap", description: "", remote: false, hiddenFromPublishing: false, collectionId: "instance-properties", resolvedType: "STRING", valuesByMode: { default: "pending", dark: "pending" }, scopes: ["ALL_SCOPES"] },
+        { id: "wrong-instance-value", key: "", name: "Wrong", description: "", remote: false, hiddenFromPublishing: false, collectionId: "instance-properties", resolvedType: "STRING", valuesByMode: { default: "wrong", dark: "wrong" }, scopes: ["ALL_SCOPES"] },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "instance-property-alias", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const component = session.createComponent();
+    const alternate = session.createComponent();
+    alternate.appendChild(session.createRectangle());
+    const replacement = session.createComponent();
+    replacement.appendChild(session.createEllipse());
+    session.setVariable({ ...projection.variables![1]!, valuesByMode: { default: alternate.id, dark: replacement.id } });
+    const surface = session.createRectangle();
+    const nested = alternate.createInstance();
+    component.appendChild(surface);
+    component.appendChild(nested);
+    const enabled = component.addComponentProperty("Enabled", "BOOLEAN", true);
+    const swap = component.addComponentProperty("Swap", "INSTANCE_SWAP", alternate.id);
+    surface.componentPropertyReferences = { visible: enabled };
+    nested.componentPropertyReferences = { mainComponent: swap };
+    const instance = component.createInstance();
+    const instanceSurface = instance.children.find((child) => child.type === "RECTANGLE")!;
+    const instanceNested = instance.children.find((child) => child.type === "INSTANCE")!;
+
+    instance.setProperties({
+      [enabled]: { type: "VARIABLE_ALIAS", id: "instance-enabled" },
+      [swap]: { type: "VARIABLE_ALIAS", id: "instance-swap" },
+    });
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: false, [swap]: alternate.id });
+    expect(instance.componentProperties[enabled]?.boundVariables).toEqual({ defaultValue: { type: "VARIABLE_ALIAS", id: "instance-enabled" } });
+    expect(instance.boundVariables).toMatchObject({
+      componentProperties: {
+        [enabled]: { type: "VARIABLE_ALIAS", id: "instance-enabled" },
+        [swap]: { type: "VARIABLE_ALIAS", id: "instance-swap" },
+      },
+    });
+    expect(instanceSurface.visible).toBe(false);
+    expect((await instanceNested.getMainComponentAsync())?.id).toBe(alternate.id);
+    expect(session.variableIsBound("instance-enabled")).toBe(true);
+
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: true, dark: true } });
+    expect(instance.componentPropertyValues[enabled]).toBe(true);
+    expect(instanceSurface.visible).toBe(true);
+    session.setVariable(projection.variables![0]!);
+    expect(instance.componentPropertyValues[enabled]).toBe(false);
+    expect(instanceSurface.visible).toBe(false);
+
+    const collection = session.variables.getVariableCollectionById("instance-properties")!;
+    instance.setExplicitVariableModeForCollection(collection, "dark");
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [swap]: replacement.id });
+    expect(instanceSurface.visible).toBe(true);
+    expect((await instanceNested.getMainComponentAsync())?.id).toBe(replacement.id);
+    expect(instanceNested.children).toEqual([expect.objectContaining({ type: "ELLIPSE" })]);
+
+    const shown = component.editComponentProperty(enabled, { name: "Shown" });
+    expect(instance.componentProperties[shown]?.boundVariables).toEqual({ defaultValue: { type: "VARIABLE_ALIAS", id: "instance-enabled" } });
+    expect(instance.boundVariables?.componentProperties).toMatchObject({ [shown]: { type: "VARIABLE_ALIAS", id: "instance-enabled" } });
+    expect(instance.boundVariables?.componentProperties).not.toHaveProperty(enabled);
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => instance.setProperties({ [shown]: { type: "VARIABLE_ALIAS", id: "wrong-instance-value" } })), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => instance.setProperties({ Missing: { type: "VARIABLE_ALIAS", id: "instance-enabled" } })), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    instance.setProperties({ [shown]: false });
+    expect(instance.componentProperties[shown]?.boundVariables).toBeUndefined();
+    expect(instance.boundVariables?.componentProperties).toEqual({ [swap]: { type: "VARIABLE_ALIAS", id: "instance-swap" } });
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: true, dark: true } });
+    expect(instance.componentPropertyValues[shown]).toBe(false);
+  });
+
   it("rebuilds referenced nested Instances when a VariableAlias swap default changes", async () => {
     const projection: RuntimeProjection = {
       ...initial,

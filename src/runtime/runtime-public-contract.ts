@@ -27,6 +27,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void instance.exposedInstances;
   instance.isExposedInstance = instance.isExposedInstance;
   instance.setProperties({});
+  if (false) instance.setProperties({ Enabled: { type: "VARIABLE_ALIAS", id: "V:enabled" } });
+  void instance.boundVariables;
   const slot = component.createSlot();
   void slot.limitViolations;
   void slot.resetSlot;

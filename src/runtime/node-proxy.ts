@@ -54,7 +54,7 @@ import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextC
 import { colorToSrgbCss } from "../lib/color-rendering";
 import type { RuntimeImage } from "./runtime-session";
 import type { RuntimeVariable, RuntimeVariableCollection } from "./runtime-variables";
-import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_EFFECT_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, VARIABLE_PAINT_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions, variableEffectBindingsFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
+import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_EFFECT_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, VARIABLE_PAINT_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions, variableComponentPropertyBindingsFromExtensions, variableEffectBindingsFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
 import {
   documentPaintStackFromRuntime,
   documentTextDecorationColorFromRuntime,
@@ -192,7 +192,7 @@ export interface RuntimeNodeHost {
   editComponentProperty(componentId: string, propertyName: string, value: RuntimeComponentPropertyEdit): string;
   deleteComponentProperty(componentId: string, propertyName: string): void;
   setComponentPropertyReferences(nodeId: string, references: DocumentComponentPropertyReferences | null): void;
-  setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void;
+  setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean | RuntimeVariableAlias>>): void;
   setInstanceExposed(instanceId: string, value: boolean): void;
   renameVariantComponent(componentId: string, name: string): boolean;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
@@ -1455,9 +1455,9 @@ export class RuntimeNodeProxy {
     if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.writeUnboundVariableField("visible", { visible: value });
   }
-  get boundVariables(): Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[]>> | undefined {
+  get boundVariables(): Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[] | Readonly<Record<string, RuntimeVariableAlias>>>> | undefined {
     const node = this.read();
-    const aliases: Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[]> = { ...variableAliases(variableBindingsFromExtensions(node.extensions)) };
+    const aliases: Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }> | readonly Readonly<{ type: "VARIABLE_ALIAS"; id: string }>[] | Readonly<Record<string, RuntimeVariableAlias>>> = { ...variableAliases(variableBindingsFromExtensions(node.extensions)) };
     const paintBindings = variablePaintBindingsFromExtensions(node.extensions);
     for (const usage of ["fill", "stroke"] as const) {
       const values = Object.entries(paintBindings)
@@ -1477,6 +1477,8 @@ export class RuntimeNodeProxy {
       .sort((a, b) => a.index - b.index || a.field.localeCompare(b.field))
       .map(({ id }) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id }));
     if (effectValues.length) aliases.effects = Object.freeze(effectValues);
+    const componentPropertyBindings = variableAliases(variableComponentPropertyBindingsFromExtensions(node.extensions));
+    if (Object.keys(componentPropertyBindings).length) aliases.componentProperties = componentPropertyBindings;
     return Object.keys(aliases).length ? Object.freeze(aliases) : undefined;
   }
   setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
@@ -1767,6 +1769,7 @@ export class RuntimeNodeProxy {
 
   get componentProperties(): Readonly<Record<string, RuntimeComponentPropertyValue>> {
     const metadata = this.instanceMetadata();
+    const bindings = variableComponentPropertyBindingsFromExtensions(this.read().extensions);
     if (!this.host.hasLiveNode(metadata.mainComponentId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
     const main = this.host.proxyFor(metadata.mainComponentId);
     if (main.type !== "COMPONENT") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
@@ -1786,7 +1789,9 @@ export class RuntimeNodeProxy {
         type: definition.type,
         value,
         ...(definition.preferredValues ? { preferredValues: structuredClone(definition.preferredValues) } : {}),
-        ...(definition.boundVariables ? { boundVariables: structuredClone(definition.boundVariables) } : {}),
+        ...(bindings[name]
+          ? { boundVariables: { defaultValue: { type: "VARIABLE_ALIAS" as const, id: bindings[name] } } }
+          : definition.boundVariables ? { boundVariables: structuredClone(definition.boundVariables) } : {}),
       }]];
     }));
   }
@@ -2112,7 +2117,7 @@ export class RuntimeNodeProxy {
     this.host.deleteComponentProperty(this.handle.nodeId, propertyName);
   }
 
-  setProperties(properties: Readonly<Record<string, string | boolean>>): void {
+  setProperties(properties: Readonly<Record<string, string | boolean | RuntimeVariableAlias>>): void {
     this.instanceMetadata();
     if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });

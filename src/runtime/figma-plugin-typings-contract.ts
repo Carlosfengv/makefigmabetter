@@ -28,6 +28,8 @@ export function assertFigmaPluginTypingsContract(
   const createdPropertyLayer = figma.createRectangle();
   createdComponent.appendChild(createdPropertyLayer);
   const createdInstance: InstanceNode = createdComponent.createInstance();
+  if (false) createdInstance.setProperties({ Enabled: { type: "VARIABLE_ALIAS", id: "V:enabled" } });
+  void createdInstance.boundVariables;
   const createdComponentSet: ComponentSetNode = figma.combineAsVariants([createdComponent, figma.createComponent()], figma.currentPage);
   void createdComponentSet.variantGroupProperties;
   void createdComponentSet.defaultVariant;
