@@ -629,6 +629,10 @@ describe("M1 RuntimeSession", () => {
       [icon]: { type: "INSTANCE_SWAP", defaultValue: target.id },
     });
     expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [icon]: target.id });
+    expect(instance.componentProperties).toMatchObject({
+      [enabled]: { type: "BOOLEAN", value: true },
+      [icon]: { type: "INSTANCE_SWAP", value: target.id },
+    });
 
     instance.setProperties({ [enabled]: false });
     const renamed = component.editComponentProperty(enabled, { name: "Active", defaultValue: false });
@@ -712,6 +716,11 @@ describe("M1 RuntimeSession", () => {
     expect(component.componentPropertyDefinitions[label]).toEqual({ type: "TEXT", defaultValue: "Continue", boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "label-variable" } } });
     const instance = component.createInstance();
     expect(instance.componentPropertyValues).toMatchObject({ [enabled]: false, [label]: "Continue" });
+    expect(instance.componentProperties[enabled]).toEqual({
+      type: "BOOLEAN",
+      value: false,
+      boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "enabled-variable" } },
+    });
     expect(session.variableIsBound("enabled-variable")).toBe(true);
 
     session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: true } });
@@ -1083,6 +1092,7 @@ describe("M1 RuntimeSession", () => {
     });
     expect(base.variantProperties).toEqual({ State: "Default", Size: "Medium" });
     expect(hover.variantProperties).toEqual({ State: "Hover", Size: "Medium" });
+    expect(set.defaultVariant).toBe(base);
     expect(set.children).toEqual([base, hover]);
     expect(base).toMatchObject({ parent: set, x: 0, y: 0 });
     expect(hover).toMatchObject({ parent: set, x: 140, y: 0 });
@@ -1233,6 +1243,11 @@ describe("M1 RuntimeSession", () => {
     expect((await instance.getMainComponentAsync())?.id).toBe(hover.id);
     expect(instance.variantProperties).toEqual({ State: "Hover", Size: "Large" });
     expect(instance.componentPropertyValues).toMatchObject({ State: "Hover", Size: "Large", [enabled]: true });
+    expect(instance.componentProperties).toMatchObject({
+      State: { type: "VARIANT", value: "Hover" },
+      Size: { type: "VARIANT", value: "Large" },
+      [enabled]: { type: "BOOLEAN", value: true },
+    });
     expect(oldSurface.removed).toBe(true);
     expect(instance.children).toHaveLength(1);
     expect(instance.children[0]).toMatchObject({ type: "RECTANGLE", name: "Surface", opacity: 0.35 });

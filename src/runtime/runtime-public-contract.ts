@@ -23,6 +23,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void component.key;
   void component.remote;
   const instance = component.createInstance();
+  void instance.componentProperties;
   instance.setProperties({});
   const slot = component.createSlot();
   void slot.limitViolations;
@@ -33,6 +34,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const componentSet = runtime.combineAsVariants([component, componentVariant], runtime.currentPage);
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;
+  void componentSet.defaultVariant;
   void component.variantProperties;
   void instance.variantProperties;
   const variantPropertyName = componentSet.addComponentProperty("State", "VARIANT", "Default");

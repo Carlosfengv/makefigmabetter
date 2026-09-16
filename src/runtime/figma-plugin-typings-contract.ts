@@ -30,6 +30,7 @@ export function assertFigmaPluginTypingsContract(
   const createdInstance: InstanceNode = createdComponent.createInstance();
   const createdComponentSet: ComponentSetNode = figma.combineAsVariants([createdComponent, figma.createComponent()], figma.currentPage);
   void createdComponentSet.variantGroupProperties;
+  void createdComponentSet.defaultVariant;
   void createdComponent.variantProperties;
   void createdInstance.variantProperties;
   const createdVariantProperty: string = createdComponentSet.addComponentProperty("State", "VARIANT", "Default");

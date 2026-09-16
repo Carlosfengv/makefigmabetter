@@ -230,6 +230,12 @@ export type RuntimeComponentPropertyEdit = Readonly<{
   description?: string;
   slotSettings?: Readonly<DocumentSlotSettings>;
 }>;
+export type RuntimeComponentPropertyValue = Readonly<{
+  type: RuntimeComponentPropertyType;
+  value: string | boolean;
+  preferredValues?: readonly Readonly<DocumentInstanceSwapPreferredValue>[];
+  boundVariables?: Readonly<{ defaultValue?: RuntimeVariableAlias }>;
+}>;
 
 export type RuntimeLetterSpacing = Readonly<{ value: number; unit: "PIXELS" }>;
 export type RuntimeLineHeight = RuntimeParagraphLineHeight;
@@ -1703,6 +1709,15 @@ export class RuntimeNodeProxy {
     return structuredClone(this.componentSetMetadata().variantGroupProperties);
   }
 
+  get defaultVariant(): RuntimeNodeProxy {
+    if (this.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const variant = [...this.host.childrenOf(this.handle.nodeId)]
+      .filter((child) => child.type === "COMPONENT")
+      .sort((left, right) => left.y - right.y || left.x - right.x || left.id.localeCompare(right.id))[0];
+    if (!variant) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    return variant;
+  }
+
   get variantProperties(): Readonly<Record<string, string>> | null {
     if (this.type === "COMPONENT") {
       const parent = this.parent;
@@ -1747,8 +1762,34 @@ export class RuntimeNodeProxy {
     this.host.setComponentPropertyReferences(this.handle.nodeId, value);
   }
 
-  /** Canonical currently stores the exact values but not every Figma property
-   * descriptor, so expose values explicitly instead of guessing API types. */
+  get componentProperties(): Readonly<Record<string, RuntimeComponentPropertyValue>> {
+    const metadata = this.instanceMetadata();
+    if (!this.host.hasLiveNode(metadata.mainComponentId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
+    const main = this.host.proxyFor(metadata.mainComponentId);
+    if (main.type !== "COMPONENT") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
+    const definitions = structuredClone(main.componentPropertyDefinitions);
+    const parent = main.parent;
+    if (parent?.type === "COMPONENT_SET") {
+      Object.entries(parent.componentPropertyDefinitions).forEach(([name, definition]) => {
+        if (definition.type === "VARIANT" || definitions[name] === undefined) definitions[name] = structuredClone(definition);
+      });
+    }
+    const variants = main.variantProperties ?? {};
+    return Object.fromEntries(Object.entries(definitions).flatMap(([name, definition]): Array<[string, RuntimeComponentPropertyValue]> => {
+      if (definition.type === "SLOT") return [];
+      const value = metadata.componentProperties[name] ?? (definition.type === "VARIANT" ? variants[name] : definition.defaultValue);
+      if (typeof value !== "string" && typeof value !== "boolean") return [];
+      return [[name, {
+        type: definition.type,
+        value,
+        ...(definition.preferredValues ? { preferredValues: structuredClone(definition.preferredValues) } : {}),
+        ...(definition.boundVariables ? { boundVariables: structuredClone(definition.boundVariables) } : {}),
+      }]];
+    }));
+  }
+
+  /** Raw values remain available for callers that adopted the earlier project
+   * extension before the official descriptor-shaped projection was exposed. */
   get componentPropertyValues(): Readonly<Record<string, string | boolean>> {
     return structuredClone(this.instanceMetadata().componentProperties);
   }
