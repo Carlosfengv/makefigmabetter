@@ -16,6 +16,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void component.key;
   void component.remote;
   const instance = component.createInstance();
+  instance.setProperties({});
   const slot = component.createSlot();
   const clonedComponent = component.clone();
   void clonedComponent.id;

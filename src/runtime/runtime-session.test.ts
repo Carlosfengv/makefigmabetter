@@ -517,6 +517,52 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
+  it("validates and writes Instance component properties from the main Component definition", async () => {
+    const componentMetadata = {
+      key: "card-key",
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      componentPropertyDefinitions: {
+        Enabled: { type: "BOOLEAN" as const, defaultValue: true },
+        Label: { type: "TEXT" as const, defaultValue: "Continue" },
+        Swap: { type: "INSTANCE_SWAP" as const, defaultValue: "target" },
+        State: { type: "VARIANT" as const, defaultValue: "Default" },
+        Content: { type: "SLOT" as const },
+      },
+    };
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { id: "component", type: "COMPONENT", name: "Card", parentId: "page", siblingIndex: 1, componentMetadata },
+        { id: "target", type: "COMPONENT", name: "Icon", parentId: "page", siblingIndex: 2, componentMetadata: { ...componentMetadata, key: "icon-key", componentPropertyDefinitions: {} } },
+        { id: "instance", type: "INSTANCE", name: "Card instance", parentId: "page", siblingIndex: 3, instanceMetadata: { mainComponentId: "component", scaleFactor: 1, componentProperties: { Enabled: true, Label: "Continue", Swap: "target", State: "Default" }, overrides: [], isExposedInstance: false } },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "instance-properties", projection, transport, scheduleMicrotask: () => {} });
+    const instance = session.currentPage.children.find((node) => node.id === "instance")!;
+
+    instance.setProperties({ Enabled: false, Label: "Save", Swap: "target", State: "Hover" });
+    expect(instance.componentPropertyValues).toEqual({ Enabled: false, Label: "Save", Swap: "target", State: "Hover" });
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => instance.setProperties({ Enabled: "false" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => instance.setProperties({ Missing: "value" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => instance.setProperties({ Content: "slot" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => instance.setProperties({ Swap: "frame" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)!.operations).toHaveLength(operationCount);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "update",
+      nodeId: "instance",
+      patch: { instanceMetadata: expect.objectContaining({ componentProperties: { Enabled: false, Label: "Save", Swap: "target", State: "Hover" } }) },
+    })]);
+  });
+
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

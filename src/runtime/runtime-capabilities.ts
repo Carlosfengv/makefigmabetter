@@ -84,6 +84,16 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame; TableCell descendants are copied only as part of a Table. Page, Slide hierarchy, root TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
   },
   {
+    id: "component.instance-properties-runtime",
+    editorTypes: ["figma"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    nodeTypes: ["INSTANCE"],
+    property: "componentPropertyValues|setProperties|removeOverrides|getMainComponentAsync",
+    surface: "write",
+    status: "partial",
+    limitation: "Runtime reads Canonical Instance property values, resolves the main Component, removes recorded overrides, and synchronously validates BOOLEAN, TEXT, INSTANCE_SWAP and VARIANT setProperties writes against the main Component definition. SLOT writes, VariableAlias values, variant-option validation, nested-instance swap heuristics and property-reference authoring remain staged.",
+  },
+  {
     id: "paint-stack.runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,

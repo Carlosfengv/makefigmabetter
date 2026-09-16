@@ -1898,6 +1898,30 @@ export class RuntimeNodeProxy {
     return this.host.createSlot(this.handle.nodeId);
   }
 
+  setProperties(properties: Readonly<Record<string, string | boolean>>): void {
+    const metadata = this.instanceMetadata();
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    if (!this.host.hasLiveNode(metadata.mainComponentId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
+    const component = this.host.proxyFor(metadata.mainComponentId);
+    if (component.type !== "COMPONENT") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
+    const definitions = component.componentPropertyDefinitions;
+    const next = { ...metadata.componentProperties };
+    for (const [name, value] of Object.entries(properties)) {
+      const definition = definitions[name];
+      if (!definition || definition.type === "SLOT") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      if (definition.type === "BOOLEAN" ? typeof value !== "boolean" : typeof value !== "string") {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      }
+      if (definition.type === "INSTANCE_SWAP" && (!this.host.hasLiveNode(value as string) || this.host.proxyFor(value as string).type !== "COMPONENT")) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      }
+      next[name] = value;
+    }
+    if (Object.keys(properties).length) this.write({ instanceMetadata: { ...structuredClone(metadata), componentProperties: next } });
+  }
+
   removeOverrides(): void {
     const metadata = this.instanceMetadata();
     this.write({ instanceMetadata: { ...structuredClone(metadata), overrides: [] } });
