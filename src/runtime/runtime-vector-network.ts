@@ -102,9 +102,9 @@ export function runtimeVectorNetworkFromCanonical(
 
 /**
  * Converts the lossless VectorNetwork subset back to Canonical. Supported
- * networks are independent directed chains/cycles with one global fill rule.
- * Branches, per-region paints, per-vertex corners and mixed joins are rejected
- * before an optimistic Runtime write is staged.
+ * networks are independent directed chains/cycles or bounded shared-vertex
+ * branches with one global fill rule. Per-region paints, per-vertex corners
+ * and mixed joins are rejected before an optimistic Runtime write is staged.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -292,10 +292,15 @@ function canonicalBranchedNetwork(
   defaults: Readonly<{ strokeCapStart: StrokeCap; strokeCapEnd: StrokeCap; strokeJoin: StrokeJoin }>,
 ): NetworkConversion | { reason: string } {
   const regions = input.regions ?? [];
-  if (regions.length > 1) return { reason: "Branched VectorNetwork supports at most one globally styled region." };
-  const region = regions[0];
-  if (region && (!validRegion(region) || region.fills !== undefined || region.fillStyleId !== undefined)) {
+  if (regions.length > MAX_VECTOR_SUBPATHS || regions.some((region) => !validRegion(region))) {
+    return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-region limit or contains an invalid region.` };
+  }
+  if (regions.some((region) => region.fills !== undefined || region.fillStyleId !== undefined)) {
     return { reason: "Canonical VectorPath cannot represent region-local fills or fill styles." };
+  }
+  const windingRules = new Set(regions.map((region) => region.windingRule));
+  if (windingRules.size > 1) {
+    return { reason: "Canonical VectorPath requires one shared winding rule across branch regions." };
   }
   if (input.vertices.some((vertex) => vertex.cornerRadius !== undefined)) return { reason: "Canonical VectorPath cannot represent per-vertex corner radii." };
   if (input.vertices.some((vertex) => vertex.strokeJoin !== undefined)) return { reason: "Branched VectorNetwork vertices cannot preserve explicit per-vertex stroke joins." };
@@ -323,7 +328,7 @@ function canonicalBranchedNetwork(
   };
   const loopSegmentIndexes = new Set<number>();
   const subpaths: DocumentVectorPath["subpaths"] = [];
-  for (const loop of region?.loops ?? []) {
+  for (const loop of regions.flatMap((region) => region.loops)) {
     if (loop.length < 3 || loop.some((segmentIndex) => segmentIndex >= input.segments.length || loopSegmentIndexes.has(segmentIndex))) {
       return { reason: "Branched VectorNetwork region loops must contain at least three unique in-range segments." };
     }
@@ -354,7 +359,7 @@ function canonicalBranchedNetwork(
   isolated.forEach((vertexIndex) => subpaths.push({ closed: false, points: [point(vertexIndex)] }));
   if (subpaths.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
   return {
-    path: { fillRule: region?.windingRule === "EVENODD" ? "evenOdd" : "nonZero", subpaths },
+    path: { fillRule: regions[0]?.windingRule === "EVENODD" ? "evenOdd" : "nonZero", subpaths },
     strokeCapStart: "none",
     strokeCapEnd: "none",
     strokeJoin: defaults.strokeJoin,
@@ -413,6 +418,7 @@ function validRegion(region: RuntimeVectorRegion): boolean {
   return Boolean(region && typeof region === "object")
     && (region.windingRule === "NONZERO" || region.windingRule === "EVENODD")
     && Array.isArray(region.loops)
+    && region.loops.length > 0
     && region.loops.every((loop) => Array.isArray(loop) && loop.every((segmentIndex) => Number.isSafeInteger(segmentIndex) && segmentIndex >= 0));
 }
 

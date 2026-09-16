@@ -2787,6 +2787,36 @@ describe("M1 RuntimeSession", () => {
         extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
       }),
     });
+
+    const multiRegionBranch = {
+      vertices: [
+        { x: 20, y: 20 }, { x: 0, y: 0 }, { x: 40, y: 0 },
+        { x: 0, y: 40 }, { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
+        { start: 0, end: 3 }, { start: 3, end: 4 }, { start: 4, end: 0 },
+      ],
+      regions: [
+        { windingRule: "NONZERO" as const, loops: [[0, 1, 2]] },
+        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]] },
+      ],
+    };
+    await vector.setVectorNetworkAsync(multiRegionBranch);
+    expect(vector.vectorNetwork).toEqual(multiRegionBranch);
+    expect(vector.vectorPaths).toHaveLength(1);
+    expect(vector.vectorPaths[0]!.data.match(/\bM\b/gu)).toHaveLength(2);
+    expect(transport.submitted[3]?.operations).toContainEqual({
+      type: "update",
+      nodeId: vector.id,
+      patch: expect.objectContaining({
+        vectorPath: expect.objectContaining({
+          fillRule: "nonZero",
+          subpaths: [expect.objectContaining({ closed: true }), expect.objectContaining({ closed: true })],
+        }),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    });
   });
 
   it("exposes Highlight through the complete VectorLike Runtime surface", async () => {

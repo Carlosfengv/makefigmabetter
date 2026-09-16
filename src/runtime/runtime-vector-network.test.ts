@@ -130,6 +130,43 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
+  it("materializes multiple globally styled regions that share branch vertices", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 20, y: 20 },
+        { x: 0, y: 0 },
+        { x: 40, y: 0 },
+        { x: 0, y: 40 },
+        { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
+        { start: 0, end: 3 }, { start: 3, end: 4 }, { start: 4, end: 0 },
+      ],
+      regions: [
+        { windingRule: "NONZERO" as const, loops: [[0, 1, 2]] },
+        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]] },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `multi-${sequence++}`, {
+      strokeCapStart: "none",
+      strokeCapEnd: "none",
+      strokeJoin: "round",
+    });
+
+    expect(converted).toMatchObject({
+      network,
+      path: {
+        fillRule: "nonZero",
+        subpaths: [
+          { closed: true, points: [{ x: 20, y: 20 }, { x: 0, y: 0 }, { x: 40, y: 0 }] },
+          { closed: true, points: [{ x: 20, y: 20 }, { x: 0, y: 40 }, { x: 40, y: 40 }] },
+        ],
+      },
+    });
+  });
+
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
@@ -147,6 +184,17 @@ describe("Runtime VectorNetwork adapter", () => {
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 }],
       regions: [{ windingRule: "NONZERO", loops: [[0, 1, 2]], fills: [] }],
     }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("region-local") });
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
+        { start: 0, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 0 },
+      ],
+      regions: [
+        { windingRule: "NONZERO", loops: [[0, 1, 2]] },
+        { windingRule: "EVENODD", loops: [[3, 4, 5]] },
+      ],
+    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("shared winding rule") });
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0, cornerRadius: 2 }],
       segments: [],
