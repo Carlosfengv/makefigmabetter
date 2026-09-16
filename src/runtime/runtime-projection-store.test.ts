@@ -117,6 +117,54 @@ describe("RuntimeProjectionStore", () => {
     })).toThrow();
   });
 
+  it("projects automatic ComponentSet dissolution when its last Component leaves", () => {
+    const projection = {
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0 },
+        { id: "set", type: "COMPONENT_SET", parentId: "group", siblingIndex: 0 },
+        { id: "default", type: "COMPONENT", parentId: "set", siblingIndex: 0 },
+      ],
+    } as const;
+    const store = new RuntimeProjectionStore(projection);
+    store.stage({
+      transactionId: "tx-dissolve-component-set",
+      baseRevision: 7,
+      operations: [{ type: "update", nodeId: "default", patch: { parentId: "page", siblingIndex: 0 } }],
+    });
+
+    expect(store.getNode("default")).toMatchObject({ parentId: "page" });
+    expect(store.getNode("default")).not.toHaveProperty("removed", true);
+    expect(store.getNode("set")).toMatchObject({ removed: true });
+    expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(isRuntimeError(captureError(() => {
+      store.append("tx-dissolve-component-set", [{ type: "update", nodeId: "set", patch: { name: "Gone" } }]);
+    }), "NODE_REMOVED")).toBe(true);
+    expect(store.transaction("tx-dissolve-component-set")?.operations).toHaveLength(1);
+
+    store.rollback("tx-dissolve-component-set");
+    expect(store.getNode("set")).not.toHaveProperty("removed", true);
+    expect(store.getNode("group")).not.toHaveProperty("removed", true);
+    expect(store.getNode("default")).toMatchObject({ parentId: "set" });
+  });
+
+  it("keeps a ComponentSet alive until its final child is removed", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "set", type: "COMPONENT_SET", parentId: "page", siblingIndex: 0 },
+        { id: "default", type: "COMPONENT", parentId: "set", siblingIndex: 0 },
+        { id: "hover", type: "COMPONENT", parentId: "set", siblingIndex: 1 },
+      ],
+    });
+    store.stage({ transactionId: "tx-remove-default", baseRevision: 7, operations: [{ type: "remove", nodeId: "default" }] });
+    expect(store.getNode("set")).not.toHaveProperty("removed", true);
+    store.append("tx-remove-default", [{ type: "remove", nodeId: "hover" }]);
+    expect(store.getNode("set")).toMatchObject({ removed: true });
+  });
+
   it("projects one leaf flatten replacement synchronously", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

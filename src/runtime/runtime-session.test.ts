@@ -1296,6 +1296,47 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(set.id))?.children).toEqual([base, hover]);
   });
 
+  it("projects ComponentSet dissolution synchronously when the last Component leaves", async () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        {
+          id: "set",
+          type: "COMPONENT_SET",
+          name: "Button variants",
+          parentId: "page",
+          siblingIndex: 1,
+          componentSetMetadata: {
+            key: "set-key",
+            remote: false,
+            description: "",
+            descriptionMarkdown: "",
+            documentationLinks: [],
+            componentPropertyDefinitions: {},
+            variantGroupProperties: {},
+          },
+        },
+        { id: "default", type: "COMPONENT", name: "State=Default", parentId: "set", siblingIndex: 0, componentMetadata: { key: "default-key", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } },
+        { id: "hover", type: "COMPONENT", name: "State=Hover", parentId: "set", siblingIndex: 1, componentMetadata: { key: "hover-key", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "component-set-dissolve", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const set = (await session.getNodeByIdAsync("set"))!;
+    const defaultVariant = (await session.getNodeByIdAsync("default"))!;
+    const hoverVariant = (await session.getNodeByIdAsync("hover"))!;
+
+    session.currentPage.appendChild(defaultVariant);
+    expect(set.removed).toBe(false);
+    expect(set.children.map((node) => node.id)).toEqual(["hover"]);
+    session.currentPage.appendChild(hoverVariant);
+    expect(set.removed).toBe(true);
+    expect(await session.getNodeByIdAsync("set")).toBeNull();
+    expect(session.currentPage.children.map((node) => node.id)).toEqual(expect.arrayContaining(["default", "hover"]));
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ type: "remove", nodeId: "set" })]));
+  });
+
   it("mutates shared ComponentSet properties across variants, Instances and referenced sublayers", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

@@ -385,8 +385,14 @@ function validateOperations(
 ): void {
   const overlay = new Map<string, RuntimeProjectionNode>();
   const read = (nodeId: string) => overlay.get(nodeId) ?? base.get(nodeId);
+  const structural = createStructuralProjectionIndex(
+    read,
+    () => new Set([...base.keys(), ...overlay.keys()]),
+    (nodeId, node) => overlay.set(nodeId, node),
+  );
   for (const operation of operations) {
     if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -486,10 +492,18 @@ function validateOperations(
     if (node.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId: operation.nodeId });
     if (operation.type === "remove") {
       overlay.set(operation.nodeId, cloneNode({ ...node, removed: true }));
+      structural.noteRemove(node.id, typeof node.parentId === "string" ? node.parentId : undefined);
+      structural.dissolveFrom(typeof node.parentId === "string" ? node.parentId : undefined);
       continue;
     }
     validatePatch(operation.patch, transactionId, operation.nodeId, operation.convertToTextPath === true);
     overlay.set(operation.nodeId, cloneNode({ ...node, ...operation.patch }));
+    if (Object.hasOwn(operation.patch, "parentId") && operation.patch.parentId !== node.parentId) {
+      const beforeParentId = typeof node.parentId === "string" ? node.parentId : undefined;
+      const afterParentId = typeof operation.patch.parentId === "string" ? operation.patch.parentId : undefined;
+      structural.noteMove(node.id, beforeParentId, afterParentId);
+      structural.dissolveFrom(beforeParentId);
+    }
   }
 }
 
@@ -498,8 +512,14 @@ function applyOperations(
   operations: readonly PendingProjectionOperation[],
   transactionId: string,
 ): void {
+  const structural = createStructuralProjectionIndex(
+    (nodeId) => nodes.get(nodeId),
+    () => nodes.keys(),
+    (nodeId, node) => nodes.set(nodeId, node),
+  );
   for (const operation of operations) {
     if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -591,12 +611,75 @@ function applyOperations(
 
     if (operation.type === "remove") {
       nodes.set(operation.nodeId, cloneNode({ ...node, removed: true }));
+      structural.noteRemove(node.id, typeof node.parentId === "string" ? node.parentId : undefined);
+      structural.dissolveFrom(typeof node.parentId === "string" ? node.parentId : undefined);
       continue;
     }
 
     validatePatch(operation.patch, transactionId, operation.nodeId, operation.convertToTextPath === true);
     nodes.set(operation.nodeId, cloneNode({ ...node, ...operation.patch }));
+    if (Object.hasOwn(operation.patch, "parentId") && operation.patch.parentId !== node.parentId) {
+      const beforeParentId = typeof node.parentId === "string" ? node.parentId : undefined;
+      const afterParentId = typeof operation.patch.parentId === "string" ? operation.patch.parentId : undefined;
+      structural.noteMove(node.id, beforeParentId, afterParentId);
+      structural.dissolveFrom(beforeParentId);
+    }
   }
+}
+
+function createStructuralProjectionIndex(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
+  write: (nodeId: string, node: RuntimeProjectionNode) => void,
+): Readonly<{
+  invalidate(): void;
+  noteMove(nodeId: string, beforeParentId: string | undefined, afterParentId: string | undefined): void;
+  noteRemove(nodeId: string, parentId: string | undefined): void;
+  dissolveFrom(parentId: string | undefined): void;
+}> {
+  let childrenByParent: Map<string, Set<string>> | undefined;
+  const ensure = (): Map<string, Set<string>> => {
+    if (childrenByParent) return childrenByParent;
+    childrenByParent = new Map();
+    for (const nodeId of nodeIds()) {
+      const node = read(nodeId);
+      if (!node || node.removed === true || typeof node.parentId !== "string") continue;
+      const children = childrenByParent.get(node.parentId) ?? new Set<string>();
+      children.add(node.id);
+      childrenByParent.set(node.parentId, children);
+    }
+    return childrenByParent;
+  };
+  return {
+    invalidate(): void { childrenByParent = undefined; },
+    noteMove(nodeId, beforeParentId, afterParentId): void {
+      if (!childrenByParent) return;
+      if (beforeParentId) childrenByParent.get(beforeParentId)?.delete(nodeId);
+      if (afterParentId) {
+        const children = childrenByParent.get(afterParentId) ?? new Set<string>();
+        children.add(nodeId);
+        childrenByParent.set(afterParentId, children);
+      }
+    },
+    noteRemove(nodeId, parentId): void {
+      if (childrenByParent && parentId) childrenByParent.get(parentId)?.delete(nodeId);
+    },
+    dissolveFrom(initialParentId): void {
+      const children = ensure();
+      let parentId = initialParentId;
+      const visited = new Set<string>();
+      while (parentId && !visited.has(parentId)) {
+        visited.add(parentId);
+        const container = read(parentId);
+        if (!container || container.removed === true || (container.type !== "GROUP" && container.type !== "COMPONENT_SET")) return;
+        if ((children.get(container.id)?.size ?? 0) > 0) return;
+        write(container.id, cloneNode({ ...container, removed: true }));
+        const ancestorId = typeof container.parentId === "string" ? container.parentId : undefined;
+        if (ancestorId) children.get(ancestorId)?.delete(container.id);
+        parentId = ancestorId;
+      }
+    },
+  };
 }
 
 function validateComponentFromNodeOperation(
