@@ -152,6 +152,16 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {
+    id: "style.catalog-runtime",
+    editorTypes: ["figma"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    property: "createTextStyle|createPaintStyle|getStyleById|getStyleByIdAsync|getLocalTextStyles|getLocalTextStylesAsync|getLocalPaintStyles|getLocalPaintStylesAsync",
+    surface: "write",
+    status: "partial",
+    limitation: "Runtime creates local TextStyle and PaintStyle resources with Figma-compatible defaults, exposes them immediately through the pending catalog, and registers both through the Canonical transaction boundary so hash, history, snapshots and replay retain their identities. Imported local and remote catalogs remain queryable; remote styles are excluded from getLocal*Styles. Style field mutation and remove() remain rejected until explicit set/delete style commands can preserve consumer links and Undo/Redo without overloading registration semantics.",
+    errorCode: "UNSUPPORTED_FEATURE",
+  },
+  {
     id: "variables.catalog-runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,

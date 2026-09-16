@@ -432,6 +432,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
   let selectionIds: string[] = [];
   const affectedGroupIds = new Set<string>();
   for (const command of commands) {
+    if (command.type === "register-text-style") {
+      batch.push({ type: "registerTextStyle", style: structuredClone(command.style) });
+      continue;
+    }
+    if (command.type === "register-paint-style") {
+      batch.push({ type: "registerPaintStyle", style: structuredClone(command.style) });
+      continue;
+    }
     if (command.type === "register-variable-collection") {
       batch.push({ type: "registerVariableCollection", collection: structuredClone(command.collection) });
       continue;

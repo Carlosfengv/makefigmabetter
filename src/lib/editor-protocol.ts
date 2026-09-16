@@ -873,6 +873,8 @@ export type EditorCommand =
   /** `positionId` is required for an externally ordered import. User-created
    * pages may omit it and retain the legacy ID-derived placement. */
   | { type: "create-page"; id: string; name: string; positionId?: string }
+  | { type: "register-text-style"; style: DocumentTextStyleResource }
+  | { type: "register-paint-style"; style: DocumentPaintStyleResource }
   | { type: "register-variable-collection"; collection: DocumentVariableCollectionResource }
   | { type: "register-variable"; variable: DocumentVariableResource }
   | { type: "set-variable"; variable: DocumentVariableResource }

@@ -393,7 +393,7 @@ function transactionToEditorCommands(
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
     }
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
       remaining.push(structuredClone(operation));
       continue;
     }
@@ -442,6 +442,12 @@ function toEditorCommands(
   operation: PendingProjectionTransaction["operations"][number],
   pageIds: ReadonlySet<string>,
 ): EditorTransaction["commands"] {
+  if (operation.type === "registerTextStyle") {
+    return [{ type: "register-text-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "registerPaintStyle") {
+    return [{ type: "register-paint-style", style: structuredClone(operation.style) }];
+  }
   if (operation.type === "registerVariableCollection") {
     return [{ type: "register-variable-collection", collection: structuredClone(operation.collection) }];
   }

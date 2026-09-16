@@ -42,6 +42,13 @@ describe("M0 runtime capability matrix", () => {
       property: "TextStyle|PaintStyle:getPluginData|setPluginData|getPluginDataKeys|getSharedPluginData|setSharedPluginData|getSharedPluginDataKeys",
       errorCode: "PERMISSION_DENIED",
     });
+    expect(runtimeCapability("style.catalog-runtime")).toMatchObject({
+      status: "partial",
+      surface: "write",
+      property: expect.stringContaining("createTextStyle"),
+      errorCode: "UNSUPPORTED_FEATURE",
+    });
+    expect(runtimeCapability("style.catalog-runtime")?.property).toContain("createPaintStyle");
     expect(runtimeCapability("component.instance-properties-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("setProperties"),

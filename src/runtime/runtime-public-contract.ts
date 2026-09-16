@@ -12,6 +12,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getLocalVariableCollectionsAsync();
   void runtime.variables.getVariableByIdAsync("V:spacing");
   if (false) {
+    const createdTextStyle = runtime.createTextStyle();
+    const createdPaintStyle = runtime.createPaintStyle();
+    void createdTextStyle.id;
+    void createdPaintStyle.id;
     const style = runtime.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

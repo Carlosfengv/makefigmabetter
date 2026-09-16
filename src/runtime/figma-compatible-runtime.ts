@@ -32,6 +32,8 @@ export class FigmaCompatibleRuntime {
   getLocalTextStylesAsync(): Promise<readonly RuntimeTextStyle[]> { return this.session.getLocalTextStylesAsync(); }
   getLocalPaintStyles(): readonly RuntimePaintStyle[] { return this.session.getLocalPaintStyles(); }
   getLocalPaintStylesAsync(): Promise<readonly RuntimePaintStyle[]> { return this.session.getLocalPaintStylesAsync(); }
+  createTextStyle(): RuntimeTextStyle { return this.session.createTextStyle(); }
+  createPaintStyle(): RuntimePaintStyle { return this.session.createPaintStyle(); }
 
   createFrame(): RuntimeContainerNodeProxy { return this.session.createFrame(); }
   createGroup(): RuntimeContainerNodeProxy { return this.session.createGroup(); }

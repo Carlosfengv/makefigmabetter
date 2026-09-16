@@ -33,6 +33,37 @@ const projection: RuntimeProjection = {
 };
 
 describe("PaintStyle resource runtime", () => {
+  it("creates a local empty PaintStyle through the pending canonical catalog", async () => {
+    const transport = new StyleTransport(projection);
+    const session = new RuntimeSession({
+      sessionId: "create-paint-style",
+      projection,
+      transport,
+      createId: () => "00000000-0000-4000-8000-000000000102",
+      scheduleMicrotask: () => {},
+    });
+    const figma = new FigmaCompatibleRuntime(session);
+
+    const style = figma.createPaintStyle();
+    expect(style).toMatchObject({
+      id: "S:00000000-0000-4000-8000-000000000102",
+      type: "PAINT",
+      name: "Paint Style",
+      remote: false,
+      paints: [],
+    });
+    expect((await figma.getStyleByIdAsync(style.id))?.id).toBe(style.id);
+    expect((await figma.getLocalPaintStylesAsync()).map((candidate) => candidate.id)).toEqual(["S:brand-fill", style.id]);
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations).toEqual([
+      { type: "registerPaintStyle", style: expect.objectContaining({ id: style.id, key: "", remote: false, paints: { layers: [] } }) },
+    ]);
+
+    await session.commitAsync();
+    const reopenedProjection = transport.currentProjection();
+    const reopened = new RuntimeSession({ sessionId: "created-paint-style", projection: reopenedProjection, transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
+    expect((await reopened.getStyleByIdAsync(style.id))?.id).toBe(style.id);
+  });
+
   it("queries complete canonical paints and filters remote styles", async () => {
     const session = new RuntimeSession({ sessionId: "paint-styles", projection, transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
     const figma = new FigmaCompatibleRuntime(session);
@@ -213,15 +244,22 @@ class StyleTransport implements RuntimeTransactionTransport {
     this.projection = structuredClone(projection);
   }
 
+  currentProjection(): RuntimeProjection { return structuredClone(this.projection); }
+
   async submit(transaction: PendingProjectionTransaction): Promise<RuntimeTransactionResult> {
     this.submitted.push(transaction);
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
+    const paintStyles = new Map((this.projection.paintStyles ?? []).map((style) => [style.id, structuredClone(style)]));
     for (const operation of transaction.operations) {
+      if (operation.type === "registerPaintStyle") {
+        paintStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
       if (operation.type !== "update") continue;
       const node = nodes.get(operation.nodeId);
       if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
     }
-    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()] };
+    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], paintStyles: [...paintStyles.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
 }

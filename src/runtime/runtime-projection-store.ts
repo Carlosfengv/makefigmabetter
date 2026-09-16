@@ -21,6 +21,8 @@ export type RuntimeProjection = Readonly<{
 }>;
 
 export type PendingProjectionOperation =
+  | Readonly<{ type: "registerTextStyle"; style: DocumentTextStyleResource }>
+  | Readonly<{ type: "registerPaintStyle"; style: DocumentPaintStyleResource }>
   | Readonly<{ type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }>
   | Readonly<{ type: "registerVariable"; variable: DocumentVariableResource }>
   | Readonly<{ type: "setVariable"; variable: DocumentVariableResource }>
@@ -147,7 +149,14 @@ export class RuntimeProjectionStore {
     }
     if (!transaction.operations.length) throw runtimeError("INVALID_ARGUMENT", { transactionId: transaction.transactionId });
 
-    validateResourceOperations(this.listVariableCollections(), this.listVariables(), transaction.operations, transaction.transactionId);
+    validateResourceOperations(
+      this.listTextStyles(),
+      this.listPaintStyles(),
+      this.listVariableCollections(),
+      this.listVariables(),
+      transaction.operations,
+      transaction.transactionId,
+    );
     validateOperations(this.composedNodeMap(), transaction.operations, transaction.transactionId);
     this.pending.set(transaction.transactionId, { transaction: freezeTransaction(transaction) });
     this.invalidateComposedCache();
@@ -217,6 +226,26 @@ export class RuntimeProjectionStore {
     return [...this.composedNodeMap().values()].filter((node) => node.removed !== true);
   }
 
+  listTextStyles(): readonly DocumentTextStyleResource[] {
+    const styles = new Map((this.confirmed.textStyles ?? []).map((value) => [value.id, value]));
+    for (const { transaction } of this.pending.values()) {
+      for (const operation of transaction.operations) {
+        if (operation.type === "registerTextStyle") styles.set(operation.style.id, operation.style);
+      }
+    }
+    return [...styles.values()];
+  }
+
+  listPaintStyles(): readonly DocumentPaintStyleResource[] {
+    const styles = new Map((this.confirmed.paintStyles ?? []).map((value) => [value.id, value]));
+    for (const { transaction } of this.pending.values()) {
+      for (const operation of transaction.operations) {
+        if (operation.type === "registerPaintStyle") styles.set(operation.style.id, operation.style);
+      }
+    }
+    return [...styles.values()];
+  }
+
   listVariableCollections(): readonly DocumentVariableCollectionResource[] {
     const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
     for (const { transaction } of this.pending.values()) {
@@ -266,27 +295,55 @@ export class RuntimeProjectionStore {
 
   private validatePendingReplacement(transactionId: string, replacement: PendingProjectionTransaction): void {
     const nodes = new Map(this.confirmedNodeMap);
+    const textStyles = new Map((this.confirmed.textStyles ?? []).map((value) => [value.id, value]));
+    const paintStyles = new Map((this.confirmed.paintStyles ?? []).map((value) => [value.id, value]));
     const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
     const variables = new Map((this.confirmed.variables ?? []).map((value) => [value.id, value]));
     for (const [candidateId, entry] of this.pending) {
       const transaction = candidateId === transactionId ? replacement : entry.transaction;
-      validateResourceOperations([...collections.values()], [...variables.values()], transaction.operations, transaction.transactionId);
-      applyResourceOperations(collections, variables, transaction.operations);
+      validateResourceOperations(
+        [...textStyles.values()],
+        [...paintStyles.values()],
+        [...collections.values()],
+        [...variables.values()],
+        transaction.operations,
+        transaction.transactionId,
+      );
+      applyResourceOperations(textStyles, paintStyles, collections, variables, transaction.operations);
       applyOperations(nodes, transaction.operations, transaction.transactionId);
     }
   }
 }
 
 function validateResourceOperations(
+  baseTextStyles: readonly DocumentTextStyleResource[],
+  basePaintStyles: readonly DocumentPaintStyleResource[],
   baseCollections: readonly DocumentVariableCollectionResource[],
   baseVariables: readonly DocumentVariableResource[],
   operations: readonly PendingProjectionOperation[],
   transactionId: string,
 ): void {
+  const textStyles = new Map(baseTextStyles.map((value) => [value.id, value]));
+  const paintStyles = new Map(basePaintStyles.map((value) => [value.id, value]));
   const collections = new Map(baseCollections.map((value) => [value.id, value]));
   const variables = new Map(baseVariables.map((value) => [value.id, value]));
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection") {
+    if (operation.type === "registerTextStyle") {
+      const value = operation.style;
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
+        || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
+        || !Number.isFinite(value.style.letterSpacing) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      textStyles.set(value.id, value);
+    } else if (operation.type === "registerPaintStyle") {
+      const value = operation.style;
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
+        || !value.paints || !Array.isArray(value.paints.layers)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      paintStyles.set(value.id, value);
+    } else if (operation.type === "registerVariableCollection") {
       const value = operation.collection;
       if (!value.id || !value.name.trim() || collections.has(value.id) || !value.modes.length || !value.modes.some((mode) => mode.modeId === value.defaultModeId)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
@@ -335,6 +392,11 @@ function validateResourceOperations(
   }
 }
 
+function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource): boolean {
+  return Boolean(value.id && !value.id.includes("\0") && value.name.trim() && !value.name.includes("\0")
+    && !value.description.includes("\0") && value.key === "");
+}
+
 function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariableResource>, transactionId: string): void {
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -357,11 +419,15 @@ function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariable
 }
 
 function applyResourceOperations(
+  textStyles: Map<string, DocumentTextStyleResource>,
+  paintStyles: Map<string, DocumentPaintStyleResource>,
   collections: Map<string, DocumentVariableCollectionResource>,
   variables: Map<string, DocumentVariableResource>,
   operations: readonly PendingProjectionOperation[],
 ): void {
   for (const operation of operations) {
+    if (operation.type === "registerTextStyle") textStyles.set(operation.style.id, operation.style);
+    if (operation.type === "registerPaintStyle") paintStyles.set(operation.style.id, operation.style);
     if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
     if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
     if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
@@ -391,7 +457,7 @@ function validateOperations(
     (nodeId, node) => overlay.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
@@ -518,7 +584,7 @@ function applyOperations(
     (nodeId, node) => nodes.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {

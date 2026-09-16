@@ -23,6 +23,10 @@ export function assertFigmaPluginTypingsContract(
   void figma.variables.getLocalVariableCollectionsAsync();
   void figma.variables.getVariableByIdAsync("V:spacing");
   if (false) {
+    const createdTextStyle: TextStyle = figma.createTextStyle();
+    const createdPaintStyle: PaintStyle = figma.createPaintStyle();
+    void createdTextStyle.id;
+    void createdPaintStyle.id;
     const style = figma.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

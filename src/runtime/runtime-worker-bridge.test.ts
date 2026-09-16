@@ -79,6 +79,48 @@ describe("RuntimeWorkerBridge", () => {
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));
   });
 
+  it("maps local style creation to canonical style registration commands", async () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const textStyle = {
+      id: "S:text",
+      key: "",
+      name: "Text Style",
+      description: "",
+      remote: false,
+      style: { fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 },
+      paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 },
+    };
+    const paintStyle = {
+      id: "S:paint",
+      key: "",
+      name: "Paint Style",
+      description: "",
+      remote: false,
+      paints: { layers: [] },
+    };
+
+    const pending = bridge.submit({
+      transactionId: "tx-styles",
+      baseRevision: 4,
+      operations: [
+        { type: "registerTextStyle", style: textStyle },
+        { type: "registerPaintStyle", style: paintStyle },
+      ],
+    });
+    const commands = posted[0]!.transaction.commands;
+    expect(commands).toEqual([
+      { type: "register-text-style", style: textStyle },
+      { type: "register-paint-style", style: paintStyle },
+    ]);
+    expect(resolveCoreBatch([], commands)?.batch).toEqual([
+      { type: "registerTextStyle", style: textStyle },
+      { type: "registerPaintStyle", style: paintStyle },
+    ]);
+    bridge.close();
+    await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));
+  });
+
   it("accepts a transaction when the matching projection arrives before its Worker Ack", async () => {
     const bridge = new RuntimeWorkerBridge(() => undefined);
     const pending = bridge.submit({

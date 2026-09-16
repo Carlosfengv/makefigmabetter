@@ -35,6 +35,39 @@ const projection: RuntimeProjection = {
 };
 
 describe("TextStyle resource runtime", () => {
+  it("creates a local default TextStyle through the pending canonical catalog", async () => {
+    const transport = new StyleTransport(projection);
+    const session = new RuntimeSession({
+      sessionId: "create-text-style",
+      projection,
+      transport,
+      createId: () => "00000000-0000-4000-8000-000000000101",
+      scheduleMicrotask: () => {},
+    });
+    const figma = new FigmaCompatibleRuntime(session);
+
+    const style = figma.createTextStyle();
+    expect(style).toMatchObject({
+      id: "S:00000000-0000-4000-8000-000000000101",
+      type: "TEXT",
+      name: "Text Style",
+      remote: false,
+      fontSize: 12,
+      fontName: { family: "Inter", style: "Regular" },
+      letterSpacing: { value: 0, unit: "PIXELS" },
+      lineHeight: { value: 20, unit: "PIXELS" },
+    });
+    expect((await figma.getStyleByIdAsync(style.id))?.id).toBe(style.id);
+    expect((await figma.getLocalTextStylesAsync()).map((candidate) => candidate.id)).toEqual(["S:body", style.id]);
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations).toEqual([
+      { type: "registerTextStyle", style: expect.objectContaining({ id: style.id, key: "", remote: false }) },
+    ]);
+
+    await session.commitAsync();
+    const reopened = new RuntimeSession({ sessionId: "created-text-style", projection: transport.currentProjection(), transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
+    expect((await reopened.getStyleByIdAsync(style.id))?.id).toBe(style.id);
+  });
+
   it("queries complete canonical styles and reports linked consumers", async () => {
     const session = new RuntimeSession({ sessionId: "styles", pluginId: "com.example.styles", projection, transport: new ReadOnlyTransport(), scheduleMicrotask: () => {} });
     const figma = new FigmaCompatibleRuntime(session);
@@ -226,12 +259,17 @@ class StyleTransport implements RuntimeTransactionTransport {
   async submit(transaction: PendingProjectionTransaction): Promise<RuntimeTransactionResult> {
     this.submitted.push(transaction);
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
+    const textStyles = new Map((this.projection.textStyles ?? []).map((style) => [style.id, structuredClone(style)]));
     for (const operation of transaction.operations) {
+      if (operation.type === "registerTextStyle") {
+        textStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
       if (operation.type !== "update") continue;
       const node = nodes.get(operation.nodeId);
       if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
     }
-    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()] };
+    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], textStyles: [...textStyles.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
 }

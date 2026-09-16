@@ -306,12 +306,12 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   textStyleResource(styleId: string): DocumentTextStyleResource | undefined {
     this.assertOpen();
-    return this.projectionStore.confirmedProjection.textStyles?.find((style) => style.id === styleId);
+    return this.projectionStore.listTextStyles().find((style) => style.id === styleId);
   }
 
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined {
     this.assertOpen();
-    return this.projectionStore.confirmedProjection.paintStyles?.find((style) => style.id === styleId);
+    return this.projectionStore.listPaintStyles().find((style) => style.id === styleId);
   }
 
   variableResource(id: string): DocumentVariableResource | undefined {
@@ -452,6 +452,41 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
   }
 
+  createTextStyle(): RuntimeTextStyle {
+    this.assertOpen();
+    const style: DocumentTextStyleResource = {
+      id: this.allocateRuntimeStyleId(),
+      key: "",
+      name: "Text Style",
+      description: "",
+      remote: false,
+      style: { fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 },
+      paragraph: { alignment: "left", lineHeight: 20, paragraphSpacing: 0 },
+    };
+    this.enqueueOperations([{ type: "registerTextStyle", style }]);
+    return new RuntimeTextStyle(style, this.textStyleHost());
+  }
+
+  createPaintStyle(): RuntimePaintStyle {
+    this.assertOpen();
+    const style: DocumentPaintStyleResource = {
+      id: this.allocateRuntimeStyleId(),
+      key: "",
+      name: "Paint Style",
+      description: "",
+      remote: false,
+      paints: { layers: [] },
+    };
+    this.enqueueOperations([{ type: "registerPaintStyle", style }]);
+    return new RuntimePaintStyle(style, this.paintStyleHost());
+  }
+
+  private allocateRuntimeStyleId(): string {
+    const id = `S:${this.createId()}`;
+    if (this.textStyleResource(id) || this.paintStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
+    return id;
+  }
+
   getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
@@ -498,14 +533,14 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   private localTextStyles(): readonly RuntimeTextStyle[] {
     const host = this.textStyleHost();
-    return Object.freeze((this.projectionStore.confirmedProjection.textStyles ?? [])
+    return Object.freeze(this.projectionStore.listTextStyles()
       .filter((style) => !style.remote)
       .map((style) => new RuntimeTextStyle(style, host)));
   }
 
   private localPaintStyles(): readonly RuntimePaintStyle[] {
     const host = this.paintStyleHost();
-    return Object.freeze((this.projectionStore.confirmedProjection.paintStyles ?? [])
+    return Object.freeze(this.projectionStore.listPaintStyles()
       .filter((style) => !style.remote)
       .map((style) => new RuntimePaintStyle(style, host)));
   }
