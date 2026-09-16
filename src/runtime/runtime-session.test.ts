@@ -322,6 +322,56 @@ describe("M1 RuntimeSession", () => {
     expect(clone.name).toBe("Text copy");
   });
 
+  it("creates local components and paint-free slice export regions through the transaction fence", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const child = session.createRectangle();
+    component.appendChild(child);
+    const slice = session.createSlice();
+    slice.resize(320, 180);
+
+    expect(component).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(component).toMatchObject({
+      type: "COMPONENT",
+      key: component.id,
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      componentPropertyDefinitions: {},
+    });
+    expect(component.documentationLinks).toEqual([]);
+    expect(component.children).toEqual([child]);
+    expect(slice).toMatchObject({ type: "SLICE", width: 320, height: 180 });
+    expect(isRuntimeError(captureError(() => slice.fills), "UNSUPPORTED_PROPERTY")).toBe(true);
+    expect(isRuntimeError(captureError(() => slice.strokes), "UNSUPPORTED_PROPERTY")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({
+          id: component.id,
+          type: "COMPONENT",
+          componentMetadata: {
+            key: component.id,
+            remote: false,
+            description: "",
+            descriptionMarkdown: "",
+            documentationLinks: [],
+            componentPropertyDefinitions: {},
+          },
+        }),
+      }),
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({ id: slice.id, type: "SLICE", fill: "transparent", stroke: "transparent", strokeWidth: 0 }),
+      }),
+    ]));
+    expect((await session.getNodeByIdAsync(component.id))?.key).toBe(component.id);
+    expect((await session.getNodeByIdAsync(slice.id))?.width).toBe(320);
+  });
+
   it("preserves a newly created child's world transform when appendChild is coalesced before Ack", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

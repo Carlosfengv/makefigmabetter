@@ -54,6 +54,29 @@ describe("FigmaCompatibleRuntime", () => {
     expect(line?.strokeCap).toBe(runtime.mixed);
     expect(runtime.mixed).toBe(runtime.mixed);
   });
+
+  it("exposes Figma-shaped component and slice creation", () => {
+    let nextId = 0;
+    const runtime = new FigmaCompatibleRuntime(new RuntimeSession({
+      sessionId: "component-slice",
+      projection: {
+        revision: 0,
+        nodes: [
+          { id: "document", type: "DOCUMENT", name: "Document" },
+          { id: "page", type: "PAGE", name: "Page", parentId: "document" },
+        ],
+      },
+      transport: new NoopTransport(),
+      createId: () => `created-${nextId++}`,
+      scheduleMicrotask: () => {},
+    }));
+
+    const component = runtime.createComponent();
+    const slice = runtime.createSlice();
+    expect(component).toMatchObject({ type: "COMPONENT", key: component.id, remote: false });
+    expect(slice).toMatchObject({ type: "SLICE", width: 100, height: 100 });
+    expect(runtime.currentPage.children).toEqual([component, slice]);
+  });
 });
 
 class NoopTransport implements RuntimeTransactionTransport {

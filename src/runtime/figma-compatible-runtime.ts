@@ -36,6 +36,8 @@ export class FigmaCompatibleRuntime {
   createFrame(): RuntimeContainerNodeProxy { return this.session.createFrame(); }
   createGroup(): RuntimeContainerNodeProxy { return this.session.createGroup(); }
   createSection(): RuntimeContainerNodeProxy { return this.session.createSection(); }
+  createComponent(): RuntimeContainerNodeProxy { return this.session.createComponent(); }
+  createSlice(): RuntimeNodeProxy { return this.session.createSlice(); }
   createRectangle(): RuntimeNodeProxy { return this.session.createRectangle(); }
   createEllipse(): RuntimeNodeProxy { return this.session.createEllipse(); }
   createPolygon(): RuntimeNodeProxy { return this.session.createPolygon(); }

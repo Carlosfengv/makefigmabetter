@@ -12,6 +12,7 @@ import {
 import { RuntimeTransactionClient, type RuntimeTransactionTransport } from "./runtime-transaction-client";
 import {
   createId,
+  type DocumentComponentMetadata,
   type DocumentAsset,
   type DocumentBooleanOperation,
   type DocumentVectorPath,
@@ -49,7 +50,7 @@ const CONTAINER_TYPES = new Set<M1NodeType>([
   "COMPONENT_SET", "SLIDE_GRID", "SLIDE", "SLIDE_ROW", "TABLE", "TRANSFORM_GROUP",
 ]);
 const CREATABLE_TYPES = new Set<M1SceneNodeType>([
-  "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "IMAGE",
+  "FRAME", "GROUP", "SECTION", "COMPONENT", "SLICE", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "IMAGE",
   "CONNECTOR", "SHAPE_WITH_TEXT",
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
@@ -582,6 +583,8 @@ export class RuntimeSession implements RuntimeContainerHost {
   createFrame(): RuntimeContainerNodeProxy { return this.createNode("FRAME") as RuntimeContainerNodeProxy; }
   createGroup(): RuntimeContainerNodeProxy { return this.createNode("GROUP") as RuntimeContainerNodeProxy; }
   createSection(): RuntimeContainerNodeProxy { return this.createNode("SECTION") as RuntimeContainerNodeProxy; }
+  createComponent(): RuntimeContainerNodeProxy { return this.createNode("COMPONENT") as RuntimeContainerNodeProxy; }
+  createSlice(): RuntimeNodeProxy { return this.createNode("SLICE"); }
   createRectangle(): RuntimeNodeProxy { return this.createNode("RECTANGLE"); }
   createEllipse(): RuntimeNodeProxy { return this.createNode("ELLIPSE"); }
   createPolygon(): RuntimeNodeProxy {
@@ -983,6 +986,20 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!CREATABLE_TYPES.has(type)) throw runtimeError("UNSUPPORTED_NODE_TYPE");
     const parent = this.currentPage;
     const id = this.createId();
+    const typeDefaults = type === "COMPONENT"
+      ? {
+          componentMetadata: {
+            key: id,
+            remote: false,
+            description: "",
+            descriptionMarkdown: "",
+            documentationLinks: [],
+            componentPropertyDefinitions: {},
+          } satisfies DocumentComponentMetadata,
+        }
+      : type === "SLICE"
+        ? { fill: "transparent", stroke: "transparent", strokeWidth: 0 }
+        : {};
     const node: RuntimeProjectionNode = {
       id,
       type,
@@ -996,6 +1013,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       opacity: 1,
       visible: true,
       siblingIndex: parent.children.length,
+      ...typeDefaults,
       ...initial,
     };
     if (node.id !== id || node.type !== type || node.parentId !== parent.id) throw runtimeError("INVALID_ARGUMENT", { nodeId: id });

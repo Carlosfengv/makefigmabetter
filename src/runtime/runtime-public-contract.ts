@@ -11,6 +11,12 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getLocalVariablesAsync();
   void runtime.variables.getLocalVariableCollectionsAsync();
   void runtime.variables.getVariableByIdAsync("V:spacing");
+  const component = runtime.createComponent();
+  component.appendChild(runtime.createRectangle());
+  void component.key;
+  void component.remote;
+  const slice = runtime.createSlice();
+  slice.resize(320, 180);
   const rectangle = runtime.createRectangle();
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
   if (runtimeVariable) {

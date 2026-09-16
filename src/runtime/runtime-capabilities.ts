@@ -54,6 +54,16 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     limitation: "M5 begins RevisionLease-frozen Smart Animate layer plans; component/instance variant mutation and raster export remain staged.",
   },
   {
+    id: "node.create-runtime",
+    editorTypes: ["figma"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    nodeTypes: ["FRAME", "GROUP", "SECTION", "COMPONENT", "SLICE", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "TEXT", "CONNECTOR", "SHAPE_WITH_TEXT"],
+    property: "createFrame|createGroup|createSection|createComponent|createSlice|createRectangle|createEllipse|createPolygon|createStar|createVector|createLine|createText|createConnector|createShapeWithText",
+    surface: "write",
+    status: "partial",
+    limitation: "Runtime synchronously creates the listed nodes under currentPage with immediate read-your-writes projection and one fenced transaction. Local Component creation initializes a stable local key and complete local publishable metadata; Slice creation initializes a paint-free export region. Editor-specific, resource-backed and structural conversion creators remain staged.",
+  },
+  {
     id: "node.sync-write",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,

@@ -15,6 +15,11 @@ describe("M0 runtime capability matrix", () => {
   });
 
   it("keeps Runtime-specific status separate from existing editor implementation", () => {
+    expect(runtimeCapability("node.create-runtime")).toMatchObject({
+      status: "partial",
+      property: expect.stringContaining("createComponent"),
+      nodeTypes: expect.arrayContaining(["COMPONENT", "SLICE"]),
+    });
     expect(runtimeCapability("node.sync-write")).toMatchObject({ status: "partial" });
     expect(runtimeCapability("node.sync-write")?.property).not.toMatch(/fills|strokes/);
     expect(runtimeCapability("paint-stack.runtime")).toMatchObject({ property: "fills" });
