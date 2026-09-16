@@ -642,10 +642,22 @@ function editorKind(type: string): Extract<EditorTransaction["commands"][number]
     LINE: "line",
     TEXT: "text",
     IMAGE: "image",
+    CODE_BLOCK: "codeBlock",
+    COMPONENT_SET: "componentSet",
     CONNECTOR: "connector",
+    EMBED: "embed",
+    HIGHLIGHT: "highlight",
+    LINK_UNFURL: "linkUnfurl",
+    MEDIA: "media",
     SHAPE_WITH_TEXT: "shapeWithText",
+    STAMP: "stamp",
+    STICKY: "sticky",
+    TABLE: "table",
+    TABLE_CELL: "tableCell",
     TEXT_PATH: "textPath",
     TRANSFORM_GROUP: "transformGroup",
+    WASHI_TAPE: "washiTape",
+    WIDGET: "widget",
   } as const;
   return kinds[type as keyof typeof kinds];
 }

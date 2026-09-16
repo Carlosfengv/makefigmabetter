@@ -467,6 +467,29 @@ describe("M1 RuntimeSession", () => {
     expect(session.projectionStore.pendingTransactionIds()).toHaveLength(transactionCount);
   });
 
+  it("clones TableCell descendants only as part of their Table", () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { id: "table", type: "TABLE", name: "Table", parentId: "page", siblingIndex: 1, width: 200, height: 40, tableMetadata: { rowHeights: [40], columnWidths: [100, 100] } },
+        { id: "cell-a", type: "TABLE_CELL", name: "A", parentId: "table", siblingIndex: 0, width: 100, height: 40, text: "A", tableCellMetadata: { rowIndex: 0, columnIndex: 0 } },
+        { id: "cell-b", type: "TABLE_CELL", name: "B", parentId: "table", siblingIndex: 1, width: 100, height: 40, text: "B", tableCellMetadata: { rowIndex: 0, columnIndex: 1 } },
+      ],
+    };
+    let sequence = 0;
+    const session = new RuntimeSession({ sessionId: "table-clone", projection, transport: new InMemoryTransport(projection), createId: () => `table-clone-${++sequence}`, scheduleMicrotask: () => {} });
+    const table = session.currentPage.children.find((node) => node.id === "table") as RuntimeContainerNodeProxy;
+    const clone = table.clone() as RuntimeContainerNodeProxy;
+
+    expect(clone.type).toBe("TABLE");
+    expect(clone.children.map((cell) => cell.type)).toEqual(["TABLE_CELL", "TABLE_CELL"]);
+    expect(clone.children.map((cell) => cell.id)).not.toEqual(["cell-a", "cell-b"]);
+    const transactionCount = session.projectionStore.pendingTransactionIds().length;
+    expect(isRuntimeError(captureError(() => table.children[0]!.clone()), "UNSUPPORTED_NODE_TYPE")).toBe(true);
+    expect(session.projectionStore.pendingTransactionIds()).toHaveLength(transactionCount);
+  });
+
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

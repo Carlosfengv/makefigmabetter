@@ -81,7 +81,7 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     property: "clone",
     surface: "write",
     status: "partial",
-    limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame. Page, Slide hierarchy, TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
+    limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame; TableCell descendants are copied only as part of a Table. Page, Slide hierarchy, root TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
   },
   {
     id: "paint-stack.runtime",

@@ -4,6 +4,7 @@ import { resolveCoreBatch } from "../lib/transaction-batch";
 import { RuntimeWorkerBridge, runtimeProjectionFromEditorSnapshot } from "./runtime-worker-bridge";
 import { isRuntimeError } from "./runtime-errors";
 import { RuntimeSession } from "./runtime-session";
+import type { PendingProjectionTransaction } from "./runtime-projection-store";
 
 describe("RuntimeWorkerBridge", () => {
   it("resolves on-demand Boolean paths only for the requested Worker revision", async () => {
@@ -178,6 +179,42 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("maps extended Runtime scene types to their canonical Core kinds", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const types = [
+      ["CODE_BLOCK", "codeBlock"],
+      ["COMPONENT_SET", "componentSet"],
+      ["EMBED", "embed"],
+      ["HIGHLIGHT", "highlight"],
+      ["LINK_UNFURL", "linkUnfurl"],
+      ["MEDIA", "media"],
+      ["STAMP", "stamp"],
+      ["STICKY", "sticky"],
+      ["TABLE", "table"],
+      ["TABLE_CELL", "tableCell"],
+      ["WASHI_TAPE", "washiTape"],
+      ["WIDGET", "widget"],
+    ] as const;
+    const operations = types.map(([type], index) => ({
+      type: "create" as const,
+      node: {
+        id: `00000000-0000-4000-8000-${(0x30 + index).toString(16).padStart(12, "0")}`,
+        type,
+        parentId: "page",
+        siblingIndex: index + 1,
+        name: type,
+        width: 100,
+        height: 100,
+      },
+    })) as PendingProjectionTransaction["operations"];
+    void bridge.submit({ transactionId: "tx-extended-types", baseRevision: 4, operations }).catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands.map((command) => command.type === "create" ? command.node.kind : command.type)).toEqual(types.map(([, kind]) => kind));
+    bridge.close();
+  });
+
   it("maps an M1 frame create and setter batch to a concrete Core batch", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
@@ -237,6 +274,92 @@ describe("RuntimeWorkerBridge", () => {
     expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: clone.id, kind: "frame" }),
       expect.objectContaining({ parentId: clone.id, kind: "rectangle" }),
+    ]));
+
+    bridge.close();
+    await commit;
+  });
+
+  it("lowers a cloned Table with its cells through Core structure validation", async () => {
+    const tableId = "00000000-0000-4000-8000-000000000051";
+    const cellAId = "00000000-0000-4000-8000-000000000052";
+    const cellBId = "00000000-0000-4000-8000-000000000053";
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: tableId, pageId: "page", kind: "table", name: "Table", x: 0, y: 0, width: 200, height: 40, rotation: 0, fill: "#fff", stroke: "#ddd", radius: 0, strokeWidth: 1, opacity: 1, tableMetadata: { rowHeights: [40], columnWidths: [100, 100] } },
+        { id: cellAId, pageId: "page", parentId: tableId, kind: "tableCell", name: "A", x: 0, y: 0, width: 100, height: 40, rotation: 0, fill: "#fff", stroke: "#ddd", radius: 0, strokeWidth: 1, opacity: 1, text: "A", tableCellMetadata: { rowIndex: 0, columnIndex: 0 } },
+        { id: cellBId, pageId: "page", parentId: tableId, kind: "tableCell", name: "B", x: 100, y: 0, width: 100, height: 40, rotation: 0, fill: "#fff", stroke: "#ddd", radius: 0, strokeWidth: 1, opacity: 1, text: "B", tableCellMetadata: { rowIndex: 0, columnIndex: 1 } },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x60;
+    const session = new RuntimeSession({
+      sessionId: "table-clone-core-lowering",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const table = session.currentPage.children.find((node) => node.id === tableId)!;
+    const clone = table.clone();
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: clone.id, kind: "table" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: clone.id, kind: "tableCell", tableCellMetadata: { rowIndex: 0, columnIndex: 0 } }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: clone.id, kind: "tableCell", tableCellMetadata: { rowIndex: 0, columnIndex: 1 } }) }),
+    ]);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: clone.id, kind: "table" }),
+      expect.objectContaining({ parentId: clone.id, kind: "tableCell" }),
+    ]));
+
+    bridge.close();
+    await commit;
+  });
+
+  it("lowers a cloned ComponentSet with new Component identities through Core", async () => {
+    const setId = "00000000-0000-4000-8000-000000000071";
+    const variantId = "00000000-0000-4000-8000-000000000072";
+    const childId = "00000000-0000-4000-8000-000000000073";
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: setId, pageId: "page", kind: "componentSet", name: "Button", x: 0, y: 0, width: 200, height: 80, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentSetMetadata: { key: "button-set", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} } },
+        { id: variantId, pageId: "page", parentId: setId, kind: "component", name: "State=Default", x: 0, y: 0, width: 100, height: 40, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { key: "button-default", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } },
+        { id: childId, pageId: "page", parentId: variantId, kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 40, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x80;
+    const session = new RuntimeSession({
+      sessionId: "component-set-clone-core-lowering",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const set = session.currentPage.children.find((node) => node.id === setId)!;
+    const clone = set.clone();
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: clone.id, kind: "componentSet", componentSetMetadata: expect.objectContaining({ key: clone.id, remote: false }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: clone.id, kind: "component", componentMetadata: expect.objectContaining({ remote: false }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "rectangle" }) }),
+    ]);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: clone.id, kind: "componentSet" }),
+      expect.objectContaining({ parentId: clone.id, kind: "component" }),
     ]));
 
     bridge.close();

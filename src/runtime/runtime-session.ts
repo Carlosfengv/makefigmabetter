@@ -67,6 +67,7 @@ const RUNTIME_CLONE_TYPES = new Set<M1SceneNodeType>([
   "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
   "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET",
 ]);
+const RUNTIME_CLONE_DESCENDANT_TYPES = new Set<M1SceneNodeType>([...RUNTIME_CLONE_TYPES, "TABLE_CELL"]);
 
 export type RuntimeSessionOptions = Readonly<{
   sessionId: string;
@@ -1343,7 +1344,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       if (visited.has(node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
       visited.add(node.id);
       if (subtree.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId });
-      if (!RUNTIME_CLONE_TYPES.has(node.type as M1SceneNodeType)) {
+      if (!(node.id === source.id ? RUNTIME_CLONE_TYPES : RUNTIME_CLONE_DESCENDANT_TYPES).has(node.type as M1SceneNodeType)) {
         throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: node.id });
       }
       subtree.push(node);
