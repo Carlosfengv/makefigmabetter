@@ -33,6 +33,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const clonedComponent = component.clone();
   void clonedComponent.id;
   const componentVariant = runtime.createComponent();
+  void instance.mainComponent;
+  instance.mainComponent = componentVariant;
   const componentSet = runtime.combineAsVariants([component, componentVariant], runtime.currentPage);
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;

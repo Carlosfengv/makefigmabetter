@@ -180,7 +180,7 @@ export interface RuntimeNodeHost {
   createSlot(componentId: string): RuntimeContainerNodeProxy;
   resetSlot(slotId: string): void;
   detachInstance(instanceId: string): RuntimeContainerNodeProxy;
-  swapInstanceComponent(instanceId: string, componentId: string): void;
+  swapInstanceComponent(instanceId: string, componentId: string, preserveOverrides: boolean): void;
   addComponentProperty(
     componentId: string,
     propertyName: string,
@@ -1840,6 +1840,22 @@ export class RuntimeNodeProxy {
     return structuredClone(this.instanceMetadata().overrides);
   }
 
+  get mainComponent(): RuntimeNodeProxy | null {
+    const metadata = this.instanceMetadata();
+    this.host.assertSynchronousDocumentAccess();
+    if (!this.host.hasLiveNode(metadata.mainComponentId)) return null;
+    const main = this.host.proxyFor(metadata.mainComponentId);
+    return main.type === "COMPONENT" ? main : null;
+  }
+  set mainComponent(component: RuntimeNodeProxy | null) {
+    this.instanceMetadata();
+    if (!(component instanceof RuntimeNodeProxy) || component.handle.sessionId !== this.handle.sessionId || component.removed || component.type !== "COMPONENT") {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    this.assertMutable();
+    this.host.swapInstanceComponent(this.handle.nodeId, component.id, false);
+  }
+
   get scaleFactor(): number { return this.instanceMetadata().scaleFactor; }
   get isExposedInstance(): boolean { return this.instanceMetadata().isExposedInstance; }
   set isExposedInstance(value: boolean) {
@@ -2108,7 +2124,8 @@ export class RuntimeNodeProxy {
     if (!(component instanceof RuntimeNodeProxy) || component.handle.sessionId !== this.handle.sessionId || component.removed || component.type !== "COMPONENT") {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    this.host.swapInstanceComponent(this.handle.nodeId, component.id);
+    this.assertMutable();
+    this.host.swapInstanceComponent(this.handle.nodeId, component.id, true);
   }
 
   detachInstance(): RuntimeContainerNodeProxy {

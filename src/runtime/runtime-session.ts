@@ -882,7 +882,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
     return this.containerFor(instanceId);
   }
-  swapInstanceComponent(instanceId: string, componentId: string): void {
+  swapInstanceComponent(instanceId: string, componentId: string, preserveOverrides: boolean): void {
     this.assertOpen();
     const instance = this.projectionStore.getNode(instanceId);
     const component = this.projectionStore.getNode(componentId);
@@ -892,15 +892,41 @@ export class RuntimeSession implements RuntimeContainerHost {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
     }
     const componentState = this.componentPropertyState(component);
-    const componentProperties = componentState.values;
+    const componentProperties = { ...componentState.values };
+    if (preserveOverrides) {
+      const currentComponentId = instanceMainComponentId(instance);
+      const currentComponent = currentComponentId ? this.projectionStore.getNode(currentComponentId) : undefined;
+      const currentState = currentComponent?.type === "COMPONENT" ? this.componentPropertyState(currentComponent) : undefined;
+      Object.entries(instanceMetadata.componentProperties).forEach(([name, value]) => {
+        const before = currentState?.definitions[name];
+        const after = componentState.definitions[name];
+        if (!before || !after || before.type !== after.type || after.type === "SLOT") return;
+        if (after.type === "BOOLEAN" ? typeof value !== "boolean" : typeof value !== "string") return;
+        if (after.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(value)) return;
+        if (after.type === "VARIANT" && after.variantOptions && !after.variantOptions.includes(value as string)) return;
+        componentProperties[name] = value;
+      });
+    }
+    const overridePlan: ReadonlyMap<string, Readonly<{ node: RuntimeProjectionNode; fields: string[] }>> = preserveOverrides
+      ? this.variantOverridePlan(instance, component)
+      : new Map();
+    const nextOverrides: DocumentInstanceMetadata["overrides"] = [];
     const extensions = instance.extensions && typeof instance.extensions === "object" && !Array.isArray(instance.extensions)
       ? structuredClone(instance.extensions as Record<string, number[]>)
       : {};
     extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(component.id)];
-    const subtreeOperations = this.replaceRuntimeSubtreeOperations(component, instance, (_source, clone) => {
+    const subtreeOperations = this.replaceRuntimeSubtreeOperations(component, instance, (source, clone) => {
       const references = runtimeComponentPropertyReferences(clone);
-      if (!references) return clone;
-      return { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentState.definitions) };
+      const patched = references
+        ? { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentState.definitions) }
+        : clone;
+      const override = overridePlan.get(source.id);
+      if (!override) return patched;
+      const mutable = patched as Record<string, unknown>;
+      const retainedFields = override.fields.filter((field) => !RUNTIME_STRUCTURAL_OVERRIDE_FIELDS.has(field) && Object.hasOwn(override.node, field));
+      retainedFields.forEach((field) => { mutable[field] = structuredClone(override.node[field]); });
+      if (retainedFields.length) nextOverrides.push({ id: clone.id, overriddenFields: retainedFields });
+      return patched;
     });
     this.enqueueOperations([{
       type: "update",
@@ -911,7 +937,7 @@ export class RuntimeSession implements RuntimeContainerHost {
           ...structuredClone(instanceMetadata),
           mainComponentId: component.id,
           componentProperties,
-          overrides: [],
+          overrides: nextOverrides,
         },
       },
     }, ...subtreeOperations]);

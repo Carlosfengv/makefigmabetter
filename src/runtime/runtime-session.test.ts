@@ -968,6 +968,96 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
+  it("distinguishes override-preserving swapComponent from direct mainComponent assignment", async () => {
+    const propertyName = "Label#shared";
+    const componentMetadata = (key: string, defaultValue: string) => ({
+      key,
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      componentPropertyDefinitions: { [propertyName]: { type: "TEXT" as const, defaultValue } },
+    });
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { id: "base", type: "COMPONENT", name: "Base", parentId: "page", siblingIndex: 1, componentMetadata: componentMetadata("base-key", "Base") },
+        { id: "base-surface", type: "RECTANGLE", name: "Surface", parentId: "base", siblingIndex: 0, opacity: 1 },
+        { id: "target", type: "COMPONENT", name: "Target", parentId: "page", siblingIndex: 2, componentMetadata: componentMetadata("target-key", "Target") },
+        { id: "target-surface", type: "RECTANGLE", name: "Surface", parentId: "target", siblingIndex: 0, opacity: 0.8 },
+        {
+          id: "instance",
+          type: "INSTANCE",
+          name: "Instance",
+          parentId: "page",
+          siblingIndex: 3,
+          instanceMetadata: {
+            mainComponentId: "base",
+            scaleFactor: 1,
+            componentProperties: { [propertyName]: "Custom" },
+            overrides: [{ id: "instance-surface", overriddenFields: ["opacity"] }],
+            isExposedInstance: false,
+          },
+        },
+        {
+          id: "instance-surface",
+          type: "RECTANGLE",
+          name: "Surface",
+          parentId: "instance",
+          siblingIndex: 0,
+          opacity: 0.35,
+          extensions: { "figma.instance.source-node.v1": [...new TextEncoder().encode("base-surface")] },
+        },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "instance-main-component", projection, transport, scheduleMicrotask: () => {} });
+    const instance = session.currentPage.children.find((node) => node.id === "instance")!;
+    const base = session.currentPage.children.find((node) => node.id === "base")!;
+    const target = session.currentPage.children.find((node) => node.id === "target")!;
+
+    expect(instance.mainComponent).toBe(base);
+    const oldSurface = instance.children[0]!;
+    instance.swapComponent(target);
+    const swappedSurface = instance.children[0]!;
+    expect(instance.mainComponent).toBe(target);
+    expect(instance.componentPropertyValues).toEqual({ [propertyName]: "Custom" });
+    expect(swappedSurface).toMatchObject({ name: "Surface", opacity: 0.35 });
+    expect(instance.overrides).toEqual([{ id: swappedSurface.id, overriddenFields: ["opacity"] }]);
+    expect(oldSurface.removed).toBe(true);
+    await session.commitAsync();
+
+    instance.mainComponent = base;
+    expect(instance.mainComponent).toBe(base);
+    expect(instance.componentPropertyValues).toEqual({ [propertyName]: "Base" });
+    expect(instance.children[0]).toMatchObject({ name: "Surface", opacity: 1 });
+    expect(instance.overrides).toEqual([]);
+    expect(swappedSurface.removed).toBe(true);
+    await session.commitAsync();
+
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: "instance", patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: "target", componentProperties: { [propertyName]: "Custom" } }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: "instance", name: "Surface", opacity: 0.35 }) }),
+    ]));
+    expect(transport.submitted[1]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: "instance", patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: "base", componentProperties: { [propertyName]: "Base" }, overrides: [] }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: "instance", name: "Surface", opacity: 1 }) }),
+    ]));
+
+    const dynamic = new RuntimeSession({
+      sessionId: "instance-main-component-dynamic",
+      projection,
+      transport: new InMemoryTransport(projection),
+      documentAccess: "dynamic-page",
+      loadedPageIds: ["page"],
+      scheduleMicrotask: () => {},
+    });
+    const dynamicInstance = dynamic.currentPage.children.find((node) => node.id === "instance")!;
+    expect(isRuntimeError(captureError(() => dynamicInstance.mainComponent), "PAGE_NOT_LOADED")).toBe(true);
+    expect((await dynamicInstance.getMainComponentAsync())?.id).toBe("base");
+  });
+
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

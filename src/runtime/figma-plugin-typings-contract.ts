@@ -370,6 +370,7 @@ export function assertFigmaPluginTypingsContract(
   void slot.children;
   const componentForSwap = figma.createComponent();
   const instanceForSwap = figma.createComponent().createInstance();
+  instanceForSwap.mainComponent = componentForSwap;
   instanceForSwap.setProperties({});
   instanceForSwap.swapComponent(componentForSwap);
   const detachedInstance: FrameNode = instanceForSwap.detachInstance();
