@@ -24,6 +24,7 @@ import {
   type DocumentVariableCollectionResource,
   type DocumentVariableResolvedType,
   type DocumentVariableResource,
+  type DocumentVariableValue,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
@@ -41,6 +42,7 @@ import { RevisionLeasePool, type RevisionLeaseResource } from "./revision-lease"
 import { exportRuntimeNodeSvgResult, rasterizeRuntimePng, runtimePngScale, type RuntimePngExportSettings, type RuntimePngRasterizer } from "./runtime-svg-export";
 import { isBoundedTransformGroupRepeatForest, isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 import { RuntimeVariablesAPI } from "./runtime-variables";
+import { variableModesFromExtensions } from "./runtime-variable-bindings";
 
 const CONTAINER_TYPES = new Set<M1NodeType>([
   "DOCUMENT", "PAGE", "FRAME", "GROUP", "SECTION", "BOOLEAN_OPERATION", "COMPONENT", "INSTANCE", "SLOT",
@@ -273,6 +275,55 @@ export class RuntimeSession implements RuntimeContainerHost {
   allVariableResources(): readonly DocumentVariableResource[] {
     this.assertOpen();
     return this.projectionStore.confirmedProjection.variables ?? [];
+  }
+
+  explicitVariableModesForNode(nodeId: string): Readonly<Record<string, string>> {
+    this.assertOpen();
+    const node = this.projectionStore.getNode(nodeId);
+    if (!node) throw runtimeError("NODE_REMOVED", { nodeId });
+    return variableModesFromExtensions(node.extensions);
+  }
+
+  resolvedVariableModesForNode(nodeId: string): Readonly<Record<string, string>> {
+    this.assertOpen();
+    const chain: RuntimeProjectionNode[] = [];
+    const seen = new Set<string>();
+    let node = this.projectionStore.getNode(nodeId);
+    while (node) {
+      if (seen.has(node.id)) throw runtimeError("INTERNAL_ERROR", { nodeId });
+      seen.add(node.id);
+      chain.push(node);
+      node = typeof node.parentId === "string" ? this.projectionStore.getNode(node.parentId) : undefined;
+    }
+    const result: Record<string, string> = {};
+    for (const item of chain.reverse()) Object.assign(result, variableModesFromExtensions(item.extensions));
+    return Object.freeze(result);
+  }
+
+  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> {
+    this.assertOpen();
+    const modes = nodeId ? this.resolvedVariableModesForNode(nodeId) : {};
+    const seen = new Set<string>();
+    let variable = this.variableResource(variableId);
+    if (!variable) throw runtimeError("RESOURCE_UNAVAILABLE");
+    const resolvedType = variable.resolvedType;
+    while (true) {
+      if (seen.has(variable.id)) throw runtimeError("INVALID_ARGUMENT");
+      seen.add(variable.id);
+      const collection = this.variableCollectionResource(variable.collectionId);
+      if (!collection) throw runtimeError("RESOURCE_UNAVAILABLE");
+      const modeId = modes[collection.id] ?? collection.defaultModeId;
+      if (!collection.modes.some((mode) => mode.modeId === modeId)) throw runtimeError("RESOURCE_UNAVAILABLE");
+      const value = variable.valuesByMode[modeId];
+      if (value === undefined) throw runtimeError("RESOURCE_UNAVAILABLE");
+      if (typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS") {
+        const target = this.variableResource(value.id);
+        if (!target || target.resolvedType !== resolvedType) throw runtimeError("RESOURCE_UNAVAILABLE");
+        variable = target;
+        continue;
+      }
+      return Object.freeze({ value: structuredClone(value), resolvedType });
+    }
   }
 
   localVariableCollections(): readonly DocumentVariableCollectionResource[] {

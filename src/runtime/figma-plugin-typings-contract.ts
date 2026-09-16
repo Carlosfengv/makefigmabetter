@@ -26,6 +26,9 @@ export function assertFigmaPluginTypingsContract(
   node.y = node.y;
   node.name = node.name;
   rectangle.opacity = rectangle.opacity;
+  const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
+  if (floatVariable) rectangle.setBoundVariable("opacity", floatVariable);
+  void rectangle.boundVariables;
   rectangle.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5, blendMode: "MULTIPLY" }];
   rectangle.strokes = [{
     type: "GRADIENT_LINEAR",

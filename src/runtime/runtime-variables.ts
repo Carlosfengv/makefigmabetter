@@ -18,6 +18,7 @@ export type RuntimeVariableHost = Readonly<{
   variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined;
   localVariables(type?: DocumentVariableResolvedType): readonly DocumentVariableResource[];
   allVariableResources(): readonly DocumentVariableResource[];
+  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   localVariableCollections(): readonly DocumentVariableCollectionResource[];
 }>;
 
@@ -58,25 +59,10 @@ export class RuntimeVariable {
   get codeSyntax(): Readonly<Record<string, string>> { return Object.freeze({}); }
 
   resolveForConsumer(_consumer: unknown): Readonly<{ value: RuntimeVariableValue; resolvedType: DocumentVariableResolvedType }> {
-    void _consumer;
     this.host.assertOpen();
-    const seen = new Set<string>();
-    let variable: DocumentVariableResource = this.resource;
-    while (true) {
-      if (seen.has(variable.id)) throw runtimeError("INVALID_ARGUMENT");
-      seen.add(variable.id);
-      const collection = this.host.variableCollectionResource(variable.collectionId);
-      if (!collection) throw runtimeError("RESOURCE_UNAVAILABLE");
-      const value = variable.valuesByMode[collection.defaultModeId];
-      if (value === undefined) throw runtimeError("RESOURCE_UNAVAILABLE");
-      if (typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS") {
-        const target = this.host.variableResource(value.id);
-        if (!target || target.resolvedType !== this.resource.resolvedType) throw runtimeError("RESOURCE_UNAVAILABLE");
-        variable = target;
-        continue;
-      }
-      return Object.freeze({ value: runtimeValue(value), resolvedType: this.resource.resolvedType });
-    }
+    const nodeId = _consumer && typeof _consumer === "object" && "id" in _consumer && typeof _consumer.id === "string" ? _consumer.id : undefined;
+    const resolved = this.host.resolveVariableValue(this.resource.id, nodeId);
+    return Object.freeze({ value: runtimeValue(resolved.value), resolvedType: resolved.resolvedType });
   }
 
   async getPublishStatusAsync(): Promise<"UNPUBLISHED" | "CURRENT"> { return this.resource.key ? "CURRENT" : "UNPUBLISHED"; }

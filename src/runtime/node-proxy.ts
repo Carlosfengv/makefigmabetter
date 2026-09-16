@@ -17,6 +17,10 @@ import type {
   DocumentTextPathMetadata,
   DocumentTransformModifier,
   DocumentVectorPath,
+  DocumentVariableCollectionResource,
+  DocumentVariableResolvedType,
+  DocumentVariableResource,
+  DocumentVariableValue,
   ShapeWithTextType,
   StrokeCap,
   StrokeJoin,
@@ -39,6 +43,8 @@ import { fontsForRuntimeTextRange, patchRuntimeParagraphIndent, patchRuntimePara
 import { DEFAULT_RUNTIME_FONT_NAME, sameRuntimeFontName, type RuntimeFontName } from "./runtime-font-name";
 import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextCase } from "../lib/text-case";
 import type { RuntimeImage } from "./runtime-session";
+import type { RuntimeVariable } from "./runtime-variables";
+import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions } from "./runtime-variable-bindings";
 import {
   documentPaintStackFromRuntime,
   documentTextDecorationColorFromRuntime,
@@ -166,6 +172,9 @@ export interface RuntimeNodeHost {
   fontNameForReference(font: DocumentFontReference): RuntimeFontName;
   textStyleResource(styleId: string): DocumentTextStyleResource | undefined;
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined;
+  variableResource(id: string): DocumentVariableResource | undefined;
+  variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined;
+  resolveVariableValue(variableId: string, nodeId?: string): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   assertSynchronousDocumentAccess(): void;
   hasFontReference(font: DocumentFontReference): boolean;
   hasImageHash(hash: string): boolean;
@@ -1312,7 +1321,33 @@ export class RuntimeNodeProxy {
   get opacity(): number { return this.number("opacity"); }
   set opacity(value: number) {
     if (!Number.isFinite(value) || value < 0 || value > 1) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-    this.write({ opacity: value });
+    this.writeUnboundVariableField("opacity", { opacity: value });
+  }
+  get visible(): boolean { return this.read().visible !== false; }
+  set visible(value: boolean) {
+    if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.writeUnboundVariableField("visible", { visible: value });
+  }
+  get boundVariables(): Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }>>> | undefined {
+    const aliases = variableAliases(variableBindingsFromExtensions(this.read().extensions));
+    return Object.keys(aliases).length ? aliases : undefined;
+  }
+  setBoundVariable(field: "opacity" | "visible" | "strokeWeight", variable: RuntimeVariable | string | null): void {
+    if (!["opacity", "visible", "strokeWeight"].includes(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (typeof variable === "string") this.host.assertSynchronousDocumentAccess();
+    const node = this.read();
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    if (variable === null) {
+      delete bindings[field];
+      this.write({ extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+      return;
+    }
+    const variableId = typeof variable === "string" ? variable : variable?.id;
+    if (!variableId || !this.host.variableResource(variableId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    const resolved = this.host.resolveVariableValue(variableId, this.id);
+    const patch = this.variableFieldPatch(field, resolved.value, resolved.resolvedType);
+    bindings[field] = variableId;
+    this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
   }
   get isMask(): boolean {
     const kind = nodeKindFromExternalType(this.type as ExternalNodeType);
@@ -1535,7 +1570,7 @@ export class RuntimeNodeProxy {
   set strokeWeight(value: number) {
     this.assertGeometry();
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-    this.write({ strokeWidth: value });
+    this.writeUnboundVariableField("strokeWeight", { strokeWidth: value });
   }
 
   get strokeCap(): RuntimeStrokeCapValue {
@@ -2823,6 +2858,32 @@ export class RuntimeNodeProxy {
   private writeFinite(property: string, value: number): void {
     if (!Number.isFinite(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.write({ [property]: value });
+  }
+
+  private writeUnboundVariableField(field: string, patch: Readonly<Record<string, unknown>>): void {
+    const node = this.read();
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    if (!Object.hasOwn(bindings, field)) {
+      this.write(patch);
+      return;
+    }
+    delete bindings[field];
+    this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
+  }
+
+  private variableFieldPatch(field: "opacity" | "visible" | "strokeWeight", value: DocumentVariableValue, type: DocumentVariableResolvedType): Readonly<Record<string, unknown>> {
+    if (field === "visible") {
+      if (type !== "BOOLEAN" || typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { visible: value };
+    }
+    if (type !== "FLOAT" || typeof value !== "number" || !Number.isFinite(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (field === "opacity") {
+      if (value < 0 || value > 1) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { opacity: value };
+    }
+    this.assertGeometry();
+    if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    return { strokeWidth: value };
   }
 
   private assertGeometry(): void {

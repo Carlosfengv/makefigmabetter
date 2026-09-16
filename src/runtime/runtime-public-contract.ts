@@ -12,6 +12,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getLocalVariableCollectionsAsync();
   void runtime.variables.getVariableByIdAsync("V:spacing");
   const rectangle = runtime.createRectangle();
+  const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
+  if (runtimeVariable) rectangle.setBoundVariable("opacity", runtimeVariable);
+  void rectangle.boundVariables;
   rectangle.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5, blendMode: "MULTIPLY" }];
   rectangle.strokes = [{
     type: "GRADIENT_LINEAR",
