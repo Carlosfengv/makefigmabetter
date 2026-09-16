@@ -26,6 +26,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const componentSource = runtime.createFrame();
   componentSource.appendChild(runtime.createRectangle());
   const convertedComponent = runtime.createComponentFromNode(componentSource);
+  instance.swapComponent(convertedComponent);
   void convertedComponent.children;
   const slice = runtime.createSlice();
   slice.resize(320, 180);

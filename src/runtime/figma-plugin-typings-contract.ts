@@ -345,7 +345,10 @@ export function assertFigmaPluginTypingsContract(
   void media.mediaData.hash;
   const slot: SlotNode = figma.createComponent().createSlot();
   void slot.children;
-  figma.createComponent().createInstance().setProperties({});
+  const componentForSwap = figma.createComponent();
+  const instanceForSwap = figma.createComponent().createInstance();
+  instanceForSwap.setProperties({});
+  instanceForSwap.swapComponent(componentForSwap);
   const clonedFrame: FrameNode = figma.createFrame().clone();
   void clonedFrame.children;
   const preview: Promise<EmbedNode | LinkUnfurlNode> = figma.createLinkPreviewAsync("https://example.com");

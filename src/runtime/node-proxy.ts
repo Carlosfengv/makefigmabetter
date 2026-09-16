@@ -1922,6 +1922,23 @@ export class RuntimeNodeProxy {
     if (Object.keys(properties).length) this.write({ instanceMetadata: { ...structuredClone(metadata), componentProperties: next } });
   }
 
+  swapComponent(component: RuntimeNodeProxy): void {
+    const metadata = this.instanceMetadata();
+    if (!(component instanceof RuntimeNodeProxy) || component.handle.sessionId !== this.handle.sessionId || component.removed || component.type !== "COMPONENT") {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const componentProperties = Object.fromEntries(Object.entries(component.componentPropertyDefinitions).flatMap(([name, definition]) =>
+      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    this.write({
+      instanceMetadata: {
+        ...structuredClone(metadata),
+        mainComponentId: component.id,
+        componentProperties,
+        overrides: [],
+      },
+    });
+  }
+
   removeOverrides(): void {
     const metadata = this.instanceMetadata();
     this.write({ instanceMetadata: { ...structuredClone(metadata), overrides: [] } });

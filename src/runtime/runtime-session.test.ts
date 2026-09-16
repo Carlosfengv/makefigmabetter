@@ -537,7 +537,7 @@ describe("M1 RuntimeSession", () => {
       nodes: [
         ...initial.nodes,
         { id: "component", type: "COMPONENT", name: "Card", parentId: "page", siblingIndex: 1, componentMetadata },
-        { id: "target", type: "COMPONENT", name: "Icon", parentId: "page", siblingIndex: 2, componentMetadata: { ...componentMetadata, key: "icon-key", componentPropertyDefinitions: {} } },
+        { id: "target", type: "COMPONENT", name: "Icon", parentId: "page", siblingIndex: 2, componentMetadata: { ...componentMetadata, key: "icon-key", componentPropertyDefinitions: { Icon: { type: "TEXT", defaultValue: "Star" } } } },
         { id: "instance", type: "INSTANCE", name: "Card instance", parentId: "page", siblingIndex: 3, instanceMetadata: { mainComponentId: "component", scaleFactor: 1, componentProperties: { Enabled: true, Label: "Continue", Swap: "target", State: "Default" }, overrides: [], isExposedInstance: false } },
       ],
     };
@@ -560,6 +560,21 @@ describe("M1 RuntimeSession", () => {
       type: "update",
       nodeId: "instance",
       patch: { instanceMetadata: expect.objectContaining({ componentProperties: { Enabled: false, Label: "Save", Swap: "target", State: "Hover" } }) },
+    })]);
+
+    const target = session.currentPage.children.find((node) => node.id === "target")!;
+    instance.swapComponent(target);
+    expect(await instance.getMainComponentAsync()).toBe(target);
+    expect(instance.componentPropertyValues).toEqual({ Icon: "Star" });
+    expect(instance.overrides).toEqual([]);
+    const swapTransactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    expect(isRuntimeError(captureError(() => instance.swapComponent(session.currentPage.children.find((node) => node.id === "frame")!)), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(swapTransactionId)?.operations).toHaveLength(1);
+    await session.commitAsync();
+    expect(transport.submitted[1]?.operations).toEqual([expect.objectContaining({
+      type: "update",
+      nodeId: "instance",
+      patch: { instanceMetadata: expect.objectContaining({ mainComponentId: "target", componentProperties: { Icon: "Star" }, overrides: [] }) },
     })]);
   });
 

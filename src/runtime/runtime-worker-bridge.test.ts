@@ -559,7 +559,7 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
-  it("lowers validated Instance.setProperties values through Core", async () => {
+  it("lowers validated Instance property writes and component swaps through Core", async () => {
     const componentId = "00000000-0000-4000-8000-0000000000a1";
     const targetId = "00000000-0000-4000-8000-0000000000a2";
     const instanceId = "00000000-0000-4000-8000-0000000000a3";
@@ -570,7 +570,7 @@ describe("RuntimeWorkerBridge", () => {
       nodes: [
         ...base.nodes,
         { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 100, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata },
-        { id: targetId, pageId: "page", kind: "component", name: "Icon", x: 120, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { ...componentMetadata, key: targetId, componentPropertyDefinitions: {} } },
+        { id: targetId, pageId: "page", kind: "component", name: "Icon", x: 120, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { ...componentMetadata, key: targetId, componentPropertyDefinitions: { Icon: { type: "TEXT", defaultValue: "Star" } } } },
         { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 0, y: 120, width: 100, height: 100, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: { Enabled: true, Swap: targetId }, overrides: [], isExposedInstance: false } },
       ],
     };
@@ -579,16 +579,25 @@ describe("RuntimeWorkerBridge", () => {
     bridge.observe({ type: "snapshot", snapshot });
     const session = new RuntimeSession({ sessionId: "instance-properties-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
     const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    const target = session.currentPage.children.find((node) => node.id === targetId)!;
     instance.setProperties({ Enabled: false, Swap: targetId });
+    instance.swapComponent(target);
     const commit = session.commitAsync().catch(() => undefined);
 
-    expect(posted[0]!.transaction.commands).toEqual([expect.objectContaining({
-      type: "update",
-      id: instanceId,
-      patch: { instanceMetadata: expect.objectContaining({ componentProperties: { Enabled: false, Swap: targetId } }) },
-    })]);
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({
+        type: "update",
+        id: instanceId,
+        patch: { instanceMetadata: expect.objectContaining({ componentProperties: { Enabled: false, Swap: targetId } }) },
+      }),
+      expect.objectContaining({
+        type: "update",
+        id: instanceId,
+        patch: { instanceMetadata: expect.objectContaining({ mainComponentId: targetId, componentProperties: { Icon: "Star" }, overrides: [] }) },
+      }),
+    ]);
     expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ componentProperties: { Enabled: false, Swap: targetId } }) }),
+      expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ mainComponentId: targetId, componentProperties: { Icon: "Star" }, overrides: [] }) }),
     ]));
 
     bridge.close();
