@@ -175,6 +175,7 @@ describe("M1 RuntimeSession", () => {
     expect(set.variantGroupProperties).toEqual({ State: { values: ["Default", "Hover"] } });
     expect(isRuntimeError(captureError(() => { component.name = "Changed"; }), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => component.remove()), "UNSUPPORTED_PROPERTY")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.createInstance()), "UNSUPPORTED_FEATURE")).toBe(true);
     expect(isRuntimeError(captureError(() => set.componentPropertyDefinitions), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => instance.getInstancesAsync()), "UNSUPPORTED_PROPERTY")).toBe(true);
 
@@ -328,6 +329,7 @@ describe("M1 RuntimeSession", () => {
     const component = session.createComponent();
     const child = session.createRectangle();
     component.appendChild(child);
+    const instance = component.createInstance();
     const slice = session.createSlice();
     slice.resize(320, 180);
 
@@ -342,6 +344,38 @@ describe("M1 RuntimeSession", () => {
     });
     expect(component.documentationLinks).toEqual([]);
     expect(component.children).toEqual([child]);
+    expect(instance).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(instance).toMatchObject({
+      type: "INSTANCE",
+      name: "Component instance",
+      scaleFactor: 1,
+      componentPropertyValues: {},
+      overrides: [],
+      isExposedInstance: false,
+    });
+    expect(instance.children).toHaveLength(1);
+    expect(instance.children[0]).toMatchObject({ type: "RECTANGLE", name: "Rectangle" });
+    expect(instance.children[0]?.id).not.toBe(child.id);
+    expect(instance.children[0]?.parent).toBe(instance);
+    expect(await instance.getMainComponentAsync()).toBe(component);
+    expect(await component.getInstancesAsync()).toEqual([instance]);
+    const configurable = session.createNode("COMPONENT", {
+      name: "Configurable",
+      componentMetadata: {
+        key: "configurable",
+        remote: false,
+        description: "",
+        descriptionMarkdown: "",
+        documentationLinks: [],
+        componentPropertyDefinitions: {
+          Enabled: { type: "BOOLEAN", defaultValue: true },
+          Label: { type: "TEXT", defaultValue: "Continue" },
+          Content: { type: "SLOT" },
+        },
+      },
+    });
+    const configuredInstance = configurable.createInstance();
+    expect(configuredInstance.componentPropertyValues).toEqual({ Enabled: true, Label: "Continue" });
     expect(slice).toMatchObject({ type: "SLICE", width: 320, height: 180 });
     expect(isRuntimeError(captureError(() => slice.fills), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => slice.strokes), "UNSUPPORTED_PROPERTY")).toBe(true);
@@ -366,6 +400,17 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({
         type: "create",
         node: expect.objectContaining({ id: slice.id, type: "SLICE", fill: "transparent", stroke: "transparent", strokeWidth: 0 }),
+      }),
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({
+          id: instance.id,
+          type: "INSTANCE",
+          parentId: "page",
+          pageId: "page",
+          instanceMetadata: expect.objectContaining({ mainComponentId: component.id, componentProperties: {} }),
+          extensions: expect.objectContaining({ "figma.instance.source-node.v1": expect.any(Array) }),
+        }),
       }),
     ]));
     expect((await session.getNodeByIdAsync(component.id))?.key).toBe(component.id);

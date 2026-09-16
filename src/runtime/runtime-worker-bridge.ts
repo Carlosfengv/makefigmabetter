@@ -608,18 +608,22 @@ function editorKind(type: string): Extract<EditorTransaction["commands"][number]
     GROUP: "group",
     SECTION: "section",
     COMPONENT: "component",
+    INSTANCE: "instance",
+    SLOT: "slot",
     SLICE: "slice",
     RECTANGLE: "rectangle",
     ELLIPSE: "ellipse",
     POLYGON: "polygon",
     STAR: "star",
     VECTOR: "vector",
+    BOOLEAN_OPERATION: "booleanOperation",
     LINE: "line",
     TEXT: "text",
     IMAGE: "image",
     CONNECTOR: "connector",
     SHAPE_WITH_TEXT: "shapeWithText",
     TEXT_PATH: "textPath",
+    TRANSFORM_GROUP: "transformGroup",
   } as const;
   return kinds[type as keyof typeof kinds];
 }

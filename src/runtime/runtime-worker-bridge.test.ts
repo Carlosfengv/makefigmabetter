@@ -281,6 +281,74 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("lowers a linked Instance subtree and preserves its source-node identities", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    const sourceExtension = (sourceId: string) => ({ "figma.instance.source-node.v1": [...new TextEncoder().encode(sourceId)] });
+    void bridge.submit({
+      transactionId: "tx-instance-create",
+      baseRevision: 4,
+      operations: [
+        {
+          type: "create",
+          node: {
+            id: "00000000-0000-4000-8000-000000000025",
+            type: "COMPONENT",
+            parentId: "page",
+            pageId: "page",
+            siblingIndex: 1,
+            name: "Card",
+            width: 100,
+            height: 100,
+            componentMetadata: { key: "card", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} },
+          },
+        },
+        {
+          type: "create",
+          node: {
+            id: "00000000-0000-4000-8000-000000000026",
+            type: "INSTANCE",
+            parentId: "page",
+            pageId: "page",
+            siblingIndex: 2,
+            name: "Card instance",
+            width: 100,
+            height: 100,
+            extensions: sourceExtension("00000000-0000-4000-8000-000000000025"),
+            instanceMetadata: { mainComponentId: "00000000-0000-4000-8000-000000000025", scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false },
+          },
+        },
+        {
+          type: "create",
+          node: {
+            id: "00000000-0000-4000-8000-000000000027",
+            type: "RECTANGLE",
+            parentId: "00000000-0000-4000-8000-000000000026",
+            pageId: "page",
+            siblingIndex: 0,
+            name: "Card surface",
+            width: 100,
+            height: 100,
+            extensions: sourceExtension("source-rectangle"),
+          },
+        },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "component" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: "00000000-0000-4000-8000-000000000025" }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "rectangle", parentId: "00000000-0000-4000-8000-000000000026", extensions: sourceExtension("source-rectangle") }) }),
+    ]);
+    const resolved = resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000026", kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: "00000000-0000-4000-8000-000000000025" }) }),
+      expect.objectContaining({ id: "00000000-0000-4000-8000-000000000027", parentId: "00000000-0000-4000-8000-000000000026" }),
+    ]));
+    bridge.close();
+  });
+
   it("lowers bounded special-node Runtime creates without dropping their durable metadata", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

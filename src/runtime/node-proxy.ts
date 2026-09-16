@@ -1,6 +1,7 @@
 import { runtimeError } from "./runtime-errors";
 import type { RuntimeProjectionNode } from "./runtime-projection-store";
 import type { RuntimeNodeHandle } from "./node-registry";
+import type { RuntimeContainerNodeProxy } from "./container-node-proxy";
 import type {
   DocumentComponentMetadata,
   DocumentComponentSetMetadata,
@@ -169,6 +170,7 @@ export interface RuntimeNodeHost {
   hasLiveNode(nodeId: string): boolean;
   getNodeByIdAsync(nodeId: string): Promise<RuntimeNodeProxy | null>;
   getInstancesOfComponentAsync(componentId: string): Promise<readonly RuntimeNodeProxy[]>;
+  createInstance(componentId: string): RuntimeContainerNodeProxy;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -1880,6 +1882,11 @@ export class RuntimeNodeProxy {
   getInstancesAsync(): Promise<readonly RuntimeNodeProxy[]> {
     if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     return this.host.getInstancesOfComponentAsync(this.handle.nodeId);
+  }
+
+  createInstance(): RuntimeContainerNodeProxy {
+    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    return this.host.createInstance(this.handle.nodeId);
   }
 
   removeOverrides(): void {

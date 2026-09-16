@@ -54,6 +54,11 @@ const CREATABLE_TYPES = new Set<M1SceneNodeType>([
   "CONNECTOR", "SHAPE_WITH_TEXT",
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
+const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
+const INSTANCE_CLONE_TYPES = new Set<M1SceneNodeType>([
+  "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
+  "INSTANCE", "SLOT", "CONNECTOR", "SHAPE_WITH_TEXT", "TEXT_PATH", "TRANSFORM_GROUP",
+]);
 
 export type RuntimeSessionOptions = Readonly<{
   sessionId: string;
@@ -646,6 +651,70 @@ export class RuntimeSession implements RuntimeContainerHost {
       characters: "",
       shapeWithTextType: "ROUNDED_RECTANGLE" satisfies ShapeWithTextType,
     });
+  }
+  createInstance(componentId: string): RuntimeContainerNodeProxy {
+    this.assertOpen();
+    const component = this.projectionStore.getNode(componentId);
+    if (!component || component.removed === true || component.type !== "COMPONENT") {
+      throw runtimeError("NODE_NOT_FOUND", { nodeId: componentId });
+    }
+    const metadata = component.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!metadata || metadata.remote) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+
+    const subtree: RuntimeProjectionNode[] = [];
+    const visited = new Set<string>();
+    const visit = (node: RuntimeProjectionNode): void => {
+      if (visited.has(node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
+      visited.add(node.id);
+      if (subtree.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+      if (node.id !== componentId && !INSTANCE_CLONE_TYPES.has(node.type as M1SceneNodeType)) {
+        throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: node.id });
+      }
+      subtree.push(node);
+      this.siblingsOf(node.id).forEach(visit);
+    };
+    visit(component);
+
+    const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
+    const instanceId = ids.get(componentId)!;
+    const componentProperties = Object.fromEntries(Object.entries(metadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
+      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    const pageId = this.currentPage.id;
+    const operations = subtree.map((source): PendingProjectionOperation => {
+      const id = ids.get(source.id)!;
+      const isRoot = source.id === componentId;
+      const sourceExtensions = source.extensions && typeof source.extensions === "object" && !Array.isArray(source.extensions)
+        ? structuredClone(source.extensions as Record<string, number[]>)
+        : {};
+      delete sourceExtensions["figma.component.metadata.v1"];
+      sourceExtensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(source.id)];
+      const clone: RuntimeProjectionNode = {
+        ...structuredClone(source),
+        id,
+        type: isRoot ? "INSTANCE" : source.type,
+        parentId: isRoot ? pageId : ids.get(source.parentId!),
+        pageId,
+        siblingIndex: isRoot ? this.currentPage.children.length : source.siblingIndex,
+        name: isRoot ? `${typeof source.name === "string" ? source.name : "Component"} instance` : source.name,
+        x: isRoot ? (typeof source.x === "number" ? source.x : 0) + 16 : source.x,
+        y: isRoot ? (typeof source.y === "number" ? source.y : 0) + 16 : source.y,
+        removed: false,
+        extensions: sourceExtensions,
+        ...(isRoot ? {
+          componentMetadata: undefined,
+          instanceMetadata: {
+            mainComponentId: componentId,
+            scaleFactor: 1,
+            componentProperties,
+            overrides: [],
+            isExposedInstance: false,
+          },
+        } : {}),
+      };
+      return { type: "create", node: clone };
+    });
+    this.enqueueOperations(operations);
+    return this.containerFor(instanceId);
   }
   createTextPath(vectorProxy: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
     this.assertOpen();
