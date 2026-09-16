@@ -205,6 +205,7 @@ export interface RuntimeNodeHost {
   variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined;
   explicitVariableModesForNode(nodeId: string): Readonly<Record<string, string>>;
   resolvedVariableModesForNode(nodeId: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, string>>;
+  refreshComponentPropertyVariableModes(nodeId: string, modes: Readonly<Record<string, string>>): void;
   resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   assertSynchronousDocumentAccess(): void;
   hasFontReference(font: DocumentFontReference): boolean;
@@ -3290,9 +3291,11 @@ export class RuntimeNodeProxy {
     const override = Object.freeze({ nodeId: this.id, modes });
     const patches = targets.map((target) => [target, target.boundVariableValuePatch(override)] as const);
     const sourcePatch = patches[0]![1];
+    const extensions = extensionsWithVariableMap(source.extensions, VARIABLE_MODES_EXTENSION, modes);
+    this.host.refreshComponentPropertyVariableModes(this.id, modes);
     this.write({
       ...sourcePatch,
-      extensions: extensionsWithVariableMap(source.extensions, VARIABLE_MODES_EXTENSION, modes),
+      extensions,
     });
     for (const [target, patch] of patches.slice(1)) {
       if (Object.keys(patch).length) target.write(patch);

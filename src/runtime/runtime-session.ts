@@ -30,6 +30,7 @@ import {
   type DocumentConnectorMetadata,
   type DocumentEmbedMetadata,
   type DocumentFontReference,
+  type DocumentInstanceMetadata,
   type DocumentLinkUnfurlMetadata,
   type DocumentPaintStyleResource,
   type DocumentTextStyleResource,
@@ -331,24 +332,40 @@ export class RuntimeSession implements RuntimeContainerHost {
     return Object.freeze(result);
   }
 
+  refreshComponentPropertyVariableModes(nodeId: string, modes: Readonly<Record<string, string>>): void {
+    const operations = this.componentPropertyVariableOperations(new Map(), new Map(), { nodeId, modes });
+    this.enqueueOperations(operations);
+  }
+
   resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> {
+    return this.resolveVariableValueFromResources(variableId, nodeId, override);
+  }
+
+  private resolveVariableValueFromResources(
+    variableId: string,
+    nodeId?: string,
+    override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>,
+    variableOverrides: ReadonlyMap<string, DocumentVariableResource> = new Map(),
+    collectionOverrides: ReadonlyMap<string, DocumentVariableCollectionResource> = new Map(),
+  ): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> {
     this.assertOpen();
     const modes = nodeId ? this.resolvedVariableModesForNode(nodeId, override) : {};
     const seen = new Set<string>();
-    let variable = this.variableResource(variableId);
-    if (!variable) throw runtimeError("RESOURCE_UNAVAILABLE");
-    const resolvedType = variable.resolvedType;
+    const initialVariable = variableOverrides.get(variableId) ?? this.variableResource(variableId);
+    if (!initialVariable) throw runtimeError("RESOURCE_UNAVAILABLE");
+    let variable: DocumentVariableResource = initialVariable;
+    const resolvedType = initialVariable.resolvedType;
     while (true) {
       if (seen.has(variable.id)) throw runtimeError("INVALID_ARGUMENT");
       seen.add(variable.id);
-      const collection = this.variableCollectionResource(variable.collectionId);
+      const collection = collectionOverrides.get(variable.collectionId) ?? this.variableCollectionResource(variable.collectionId);
       if (!collection) throw runtimeError("RESOURCE_UNAVAILABLE");
       const modeId = modes[collection.id] ?? collection.defaultModeId;
       if (!collection.modes.some((mode) => mode.modeId === modeId)) throw runtimeError("RESOURCE_UNAVAILABLE");
-      const value = variable.valuesByMode[modeId];
+      const value: DocumentVariableValue | undefined = variable.valuesByMode[modeId];
       if (value === undefined) throw runtimeError("RESOURCE_UNAVAILABLE");
       if (typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS") {
-        const target = this.variableResource(value.id);
+        const target: DocumentVariableResource | undefined = variableOverrides.get(value.id) ?? this.variableResource(value.id);
         if (!target || target.resolvedType !== resolvedType) throw runtimeError("RESOURCE_UNAVAILABLE");
         variable = target;
         continue;
@@ -371,7 +388,8 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   setVariable(variable: DocumentVariableResource): void {
-    this.enqueueOperations([{ type: "setVariable", variable }]);
+    const operations = this.componentPropertyVariableOperations(new Map([[variable.id, variable]]));
+    this.enqueueOperations([{ type: "setVariable", variable }, ...operations]);
   }
 
   deleteVariable(id: string): void {
@@ -394,7 +412,9 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
-    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }]);
+    const variableOverrides = new Map(variables.map((variable) => [variable.id, variable]));
+    const operations = this.componentPropertyVariableOperations(variableOverrides, new Map([[collection.id, collection]]));
+    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...operations]);
   }
 
   deleteVariableCollection(id: string): void {
@@ -2388,6 +2408,11 @@ export class RuntimeSession implements RuntimeContainerHost {
         const componentDefinitions = structuredClone(metadata.componentPropertyDefinitions);
         if (previousName !== undefined) delete componentDefinitions[previousName];
         if (nextName !== undefined && definition !== undefined) componentDefinitions[nextName] = structuredClone(definition);
+        if (previousName === undefined && nextName === undefined) {
+          Object.entries(definitions).forEach(([name, candidate]) => {
+            if (candidate.type !== "VARIANT" && componentDefinitions[name]) componentDefinitions[name] = structuredClone(candidate);
+          });
+        }
         operations.push({
           type: "update",
           nodeId: component.id,
@@ -2399,6 +2424,63 @@ export class RuntimeSession implements RuntimeContainerHost {
           },
         });
       });
+    }
+    return operations;
+  }
+
+  private componentPropertyVariableOperations(
+    variableOverrides: ReadonlyMap<string, DocumentVariableResource>,
+    collectionOverrides: ReadonlyMap<string, DocumentVariableCollectionResource> = new Map(),
+    modeOverride?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>,
+  ): PendingProjectionOperation[] {
+    const liveNodes = this.projectionStore.listLiveNodes();
+    const owners = liveNodes.filter((node) => {
+      if (modeOverride && node.id !== modeOverride.nodeId && !runtimeNodeHasAncestorIn(node, new Set([modeOverride.nodeId]), (id) => this.projectionStore.getNode(id))) return false;
+      if (node.type === "COMPONENT_SET") return true;
+      if (node.type !== "COMPONENT") return false;
+      return this.projectionStore.getNode(node.parentId ?? "")?.type !== "COMPONENT_SET";
+    });
+    if (owners.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
+    const operations: PendingProjectionOperation[] = [];
+    for (const owner of owners) {
+      const context = this.mutableComponentPropertyContext(owner.id);
+      const definitions = structuredClone(context.metadata.componentPropertyDefinitions);
+      const changes = new Map<string, Readonly<{ before: string | boolean | undefined; after: string | boolean }>>();
+      for (const [name, definition] of Object.entries(definitions)) {
+        const alias = definition.boundVariables?.defaultValue;
+        if (!alias) continue;
+        const resolved = this.resolveVariableValueFromResources(alias.id, owner.id, modeOverride, variableOverrides, collectionOverrides);
+        const expectedType = definition.type === "BOOLEAN" ? "BOOLEAN" : "STRING";
+        if (resolved.resolvedType !== expectedType || (definition.type === "BOOLEAN" ? typeof resolved.value !== "boolean" : typeof resolved.value !== "string")) {
+          throw runtimeError("INVALID_ARGUMENT", { nodeId: owner.id });
+        }
+        const value = resolved.value as string | boolean;
+        if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: owner.id });
+        if (value === definition.defaultValue) continue;
+        changes.set(name, { before: definition.defaultValue, after: value });
+        definition.defaultValue = value;
+      }
+      if (!changes.size) continue;
+      operations.push(...this.componentPropertyDefinitionOperations(context, definitions, undefined, undefined, undefined));
+      const linkedValues = new Map<string, Record<string, string | boolean>>();
+      context.linkedInstances.forEach((instance) => {
+        const metadata = instance.instanceMetadata as DocumentInstanceMetadata;
+        const values = structuredClone(metadata.componentProperties);
+        changes.forEach(({ before, after }, name) => { if (values[name] === before) values[name] = after; });
+        linkedValues.set(instance.id, values);
+        operations.push({ type: "update", nodeId: instance.id, patch: { instanceMetadata: { ...structuredClone(metadata), componentProperties: values } } });
+      });
+      const roots = [...context.components, ...context.linkedInstances];
+      const sourceValues = Object.fromEntries(Object.entries(definitions).flatMap(([name, definition]) => definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+      liveNodes.filter((node) => Object.values(runtimeComponentPropertyReferences(node) ?? {}).some((name) => changes.has(name))).forEach((node) => {
+        const root = roots.find((candidate) => runtimeNodeHasAncestorIn(node, new Set([candidate.id]), (id) => this.projectionStore.getNode(id)));
+        if (!root) return;
+        const references = runtimeComponentPropertyReferences(node)!;
+        const values = context.components.some((component) => component.id === root.id) ? sourceValues : linkedValues.get(root.id) ?? {};
+        const patch = this.componentPropertyReferenceValuePatch(node, references, values, definitions);
+        if (Object.keys(patch).length) operations.push({ type: "update", nodeId: node.id, patch });
+      });
+      if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: owner.id });
     }
     return operations;
   }

@@ -123,6 +123,12 @@ describe("Variables resource runtime", () => {
     const width = (await session.variables.getVariableByIdAsync("V:width"))!;
     const height = (await session.variables.getVariableByIdAsync("V:height"))!;
     const label = (await session.variables.getVariableByIdAsync("V:label"))!;
+    const component = session.createComponent();
+    frame.appendChild(component);
+    const enabledProperty = component.addComponentProperty("Enabled", "BOOLEAN", session.variables.createVariableAlias(visible));
+    const componentInstance = component.createInstance();
+    expect(component.componentPropertyDefinitions[enabledProperty]?.defaultValue).toBe(false);
+    expect(componentInstance.componentPropertyValues[enabledProperty]).toBe(false);
     const boundPaint = session.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: .5 }, "color", surface);
     const surfaceAlias = session.variables.createVariableAlias(surface);
     const boundGradient = {
@@ -201,6 +207,8 @@ describe("Variables resource runtime", () => {
     frame.setExplicitVariableModeForCollection(collection, "dark");
     expect(frame.explicitVariableModes).toEqual({ "VC:theme": "dark" });
     expect(rectangle.resolvedVariableModes).toEqual({ "VC:theme": "dark" });
+    expect(component.componentPropertyDefinitions[enabledProperty]?.defaultValue).toBe(true);
+    expect(componentInstance.componentPropertyValues[enabledProperty]).toBe(true);
     expect(rectangle.opacity).toBe(.8);
     expect(rectangle.visible).toBe(true);
     expect(rectangle.strokeWeight).toBe(12);

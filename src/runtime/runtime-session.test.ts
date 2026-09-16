@@ -616,12 +616,17 @@ describe("M1 RuntimeSession", () => {
 
     expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false, boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "enabled-variable" } } });
     expect(component.componentPropertyDefinitions[label]).toEqual({ type: "TEXT", defaultValue: "Continue", boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "label-variable" } } });
-    expect(component.createInstance().componentPropertyValues).toMatchObject({ [enabled]: false, [label]: "Continue" });
+    const instance = component.createInstance();
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: false, [label]: "Continue" });
     expect(session.variableIsBound("enabled-variable")).toBe(true);
 
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: true } });
+    expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: true, boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "enabled-variable" } } });
+    expect(instance.componentPropertyValues[enabled]).toBe(true);
+
     expect(isRuntimeError(captureError(() => component.addComponentProperty("Wrong", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "label-variable" })), "INVALID_ARGUMENT")).toBe(true);
-    component.editComponentProperty(enabled, { defaultValue: true });
-    expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: true });
+    component.editComponentProperty(enabled, { defaultValue: false });
+    expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
   });
 
   it("authors component property references and applies Instance values to linked sublayers", async () => {
