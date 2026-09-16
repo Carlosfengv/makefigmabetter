@@ -64,6 +64,21 @@ pub fn commands_from_payload_with_semantics(
             minimum: makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
         });
     }
+    if engine_semantics_version < makefigma_document_codec::STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::SetTextStyle(_))
+                    | Some(v1::resolved_operation::Kind::DeleteTextStyle(_))
+                    | Some(v1::resolved_operation::Kind::SetPaintStyle(_))
+                    | Some(v1::resolved_operation::Kind::DeletePaintStyle(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
     if engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(operation_has_paint_style_links)
@@ -1687,6 +1702,18 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
                 value.style.ok_or(ServiceError::InvalidEnvelope)?,
             )?,
         }),
+        Kind::SetTextStyle(value) => Ok(Command::SetTextStyle {
+            style: text_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::DeleteTextStyle(value) => Ok(Command::DeleteTextStyle { id: value.style_id }),
+        Kind::SetPaintStyle(value) => Ok(Command::SetPaintStyle {
+            style: paint_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::DeletePaintStyle(value) => Ok(Command::DeletePaintStyle { id: value.style_id }),
         Kind::RegisterVariableCollection(value) => Ok(Command::RegisterVariableCollection {
             collection: variable_collection_from_proto(
                 value.collection.ok_or(ServiceError::InvalidEnvelope)?,
@@ -5163,6 +5190,86 @@ mod tests {
                 if style.id == "S:brand-fill"
                     && style.key == "library-paint-key"
                     && style.paints.layers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn style_lifecycle_operations_map_to_distinct_core_commands() {
+        let text_style = v1::TextStyleResource {
+            id: "S:body".into(),
+            key: String::new(),
+            name: "Body".into(),
+            description: String::new(),
+            remote: false,
+            style: Some(v1::TextStyleRun {
+                font_size: 16.0,
+                font_weight: 400,
+                ..Default::default()
+            }),
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+        };
+        let paint_style = v1::PaintStyleResource {
+            id: "S:brand".into(),
+            key: String::new(),
+            name: "Brand".into(),
+            description: String::new(),
+            remote: false,
+            paints: Some(v1::PaintStack { layers: Vec::new() }),
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetTextStyle(
+                        v1::SetTextStyle {
+                            style: Some(text_style),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeleteTextStyle(
+                        v1::DeleteTextStyle {
+                            style_id: "S:body".into(),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetPaintStyle(
+                        v1::SetPaintStyle {
+                            style: Some(paint_style),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeletePaintStyle(
+                        v1::DeletePaintStyle {
+                            style_id: "S:brand".into(),
+                        },
+                    )),
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [
+                Command::SetTextStyle { style: text },
+                Command::DeleteTextStyle { id: text_id },
+                Command::SetPaintStyle { style: paint },
+                Command::DeletePaintStyle { id: paint_id },
+            ] if text.name == "Body" && text_id == "S:body" && paint.name == "Brand" && paint_id == "S:brand"
         ));
     }
 

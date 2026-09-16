@@ -440,6 +440,22 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       batch.push({ type: "registerPaintStyle", style: structuredClone(command.style) });
       continue;
     }
+    if (command.type === "set-text-style") {
+      batch.push({ type: "setTextStyle", style: structuredClone(command.style) });
+      continue;
+    }
+    if (command.type === "delete-text-style") {
+      batch.push({ type: "deleteTextStyle", id: command.id });
+      continue;
+    }
+    if (command.type === "set-paint-style") {
+      batch.push({ type: "setPaintStyle", style: structuredClone(command.style) });
+      continue;
+    }
+    if (command.type === "delete-paint-style") {
+      batch.push({ type: "deletePaintStyle", id: command.id });
+      continue;
+    }
     if (command.type === "register-variable-collection") {
       batch.push({ type: "registerVariableCollection", collection: structuredClone(command.collection) });
       continue;

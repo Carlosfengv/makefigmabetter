@@ -393,7 +393,7 @@ function transactionToEditorCommands(
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
     }
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
       remaining.push(structuredClone(operation));
       continue;
     }
@@ -447,6 +447,18 @@ function toEditorCommands(
   }
   if (operation.type === "registerPaintStyle") {
     return [{ type: "register-paint-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "setTextStyle") {
+    return [{ type: "set-text-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "deleteTextStyle") {
+    return [{ type: "delete-text-style", id: operation.id }];
+  }
+  if (operation.type === "setPaintStyle") {
+    return [{ type: "set-paint-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "deletePaintStyle") {
+    return [{ type: "delete-paint-style", id: operation.id }];
   }
   if (operation.type === "registerVariableCollection") {
     return [{ type: "register-variable-collection", collection: structuredClone(operation.collection) }];

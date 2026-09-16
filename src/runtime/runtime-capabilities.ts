@@ -155,10 +155,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     id: "style.catalog-runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
-    property: "createTextStyle|createPaintStyle|getStyleById|getStyleByIdAsync|getLocalTextStyles|getLocalTextStylesAsync|getLocalPaintStyles|getLocalPaintStylesAsync",
+    property: "createTextStyle|createPaintStyle|getStyleById|getStyleByIdAsync|getLocalTextStyles|getLocalTextStylesAsync|getLocalPaintStyles|getLocalPaintStylesAsync|BaseStyle.name|BaseStyle.description|BaseStyle.descriptionMarkdown|BaseStyle.remove",
     surface: "write",
     status: "partial",
-    limitation: "Runtime creates local TextStyle and PaintStyle resources with Figma-compatible defaults, exposes them immediately through the pending catalog, and registers both through the Canonical transaction boundary so hash, history, snapshots and replay retain their identities. Imported local and remote catalogs remain queryable; remote styles are excluded from getLocal*Styles. Style field mutation and remove() remain rejected until explicit set/delete style commands can preserve consumer links and Undo/Redo without overloading registration semantics.",
+    limitation: "Runtime creates local TextStyle and PaintStyle resources with Figma-compatible defaults, exposes them immediately through the pending catalog, and registers both through the Canonical transaction boundary so hash, history, snapshots and replay retain their identities. Local name, description and descriptionMarkdown edits use explicit set-style commands; remove() requires full-document access, atomically clears every node/text-range consumer link while preserving materialized values, then uses explicit delete-style commands. Core rejects remote edits and direct deletion while references remain; set/delete participate in hash, history, Operation replay and Undo/Redo without overloading registration semantics. Documentation links, TextStyle value fields, PaintStyle.paints and style Variable bindings remain staged.",
     errorCode: "UNSUPPORTED_FEATURE",
   },
   {

@@ -23,6 +23,10 @@ export type RuntimeProjection = Readonly<{
 export type PendingProjectionOperation =
   | Readonly<{ type: "registerTextStyle"; style: DocumentTextStyleResource }>
   | Readonly<{ type: "registerPaintStyle"; style: DocumentPaintStyleResource }>
+  | Readonly<{ type: "setTextStyle"; style: DocumentTextStyleResource }>
+  | Readonly<{ type: "deleteTextStyle"; id: string }>
+  | Readonly<{ type: "setPaintStyle"; style: DocumentPaintStyleResource }>
+  | Readonly<{ type: "deletePaintStyle"; id: string }>
   | Readonly<{ type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }>
   | Readonly<{ type: "registerVariable"; variable: DocumentVariableResource }>
   | Readonly<{ type: "setVariable"; variable: DocumentVariableResource }>
@@ -231,6 +235,8 @@ export class RuntimeProjectionStore {
     for (const { transaction } of this.pending.values()) {
       for (const operation of transaction.operations) {
         if (operation.type === "registerTextStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "setTextStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "deleteTextStyle") styles.delete(operation.id);
       }
     }
     return [...styles.values()];
@@ -241,6 +247,8 @@ export class RuntimeProjectionStore {
     for (const { transaction } of this.pending.values()) {
       for (const operation of transaction.operations) {
         if (operation.type === "registerPaintStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "setPaintStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "deletePaintStyle") styles.delete(operation.id);
       }
     }
     return [...styles.values()];
@@ -336,6 +344,18 @@ function validateResourceOperations(
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       textStyles.set(value.id, value);
+    } else if (operation.type === "setTextStyle") {
+      const value = operation.style;
+      const before = textStyles.get(value.id);
+      if (!before || before.remote || !validPendingStyleIdentity(value) || value.remote || before.key !== value.key
+        || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
+        || !Number.isFinite(value.style.letterSpacing) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      textStyles.set(value.id, value);
+    } else if (operation.type === "deleteTextStyle") {
+      if (textStyles.get(operation.id)?.remote !== false) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      textStyles.delete(operation.id);
     } else if (operation.type === "registerPaintStyle") {
       const value = operation.style;
       if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
@@ -343,6 +363,17 @@ function validateResourceOperations(
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       paintStyles.set(value.id, value);
+    } else if (operation.type === "setPaintStyle") {
+      const value = operation.style;
+      const before = paintStyles.get(value.id);
+      if (!before || before.remote || !validPendingStyleIdentity(value) || value.remote || before.key !== value.key
+        || !value.paints || !Array.isArray(value.paints.layers)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      paintStyles.set(value.id, value);
+    } else if (operation.type === "deletePaintStyle") {
+      if (paintStyles.get(operation.id)?.remote !== false) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      paintStyles.delete(operation.id);
     } else if (operation.type === "registerVariableCollection") {
       const value = operation.collection;
       if (!value.id || !value.name.trim() || collections.has(value.id) || !value.modes.length || !value.modes.some((mode) => mode.modeId === value.defaultModeId)) {
@@ -393,8 +424,11 @@ function validateResourceOperations(
 }
 
 function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource): boolean {
-  return Boolean(value.id && !value.id.includes("\0") && value.name.trim() && !value.name.includes("\0")
-    && !value.description.includes("\0") && value.key === "");
+  const encoder = new TextEncoder();
+  return Boolean(value.id && !value.id.includes("\0") && encoder.encode(value.id).byteLength <= 2_048
+    && value.name.trim() && !value.name.includes("\0") && encoder.encode(value.name).byteLength <= 1_024
+    && !value.description.includes("\0") && encoder.encode(value.description).byteLength <= 32 * 1_024
+    && value.key === "");
 }
 
 function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariableResource>, transactionId: string): void {
@@ -428,6 +462,10 @@ function applyResourceOperations(
   for (const operation of operations) {
     if (operation.type === "registerTextStyle") textStyles.set(operation.style.id, operation.style);
     if (operation.type === "registerPaintStyle") paintStyles.set(operation.style.id, operation.style);
+    if (operation.type === "setTextStyle") textStyles.set(operation.style.id, operation.style);
+    if (operation.type === "deleteTextStyle") textStyles.delete(operation.id);
+    if (operation.type === "setPaintStyle") paintStyles.set(operation.style.id, operation.style);
+    if (operation.type === "deletePaintStyle") paintStyles.delete(operation.id);
     if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
     if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
     if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
@@ -457,7 +495,7 @@ function validateOperations(
     (nodeId, node) => overlay.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
@@ -584,7 +622,7 @@ function applyOperations(
     (nodeId, node) => nodes.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {

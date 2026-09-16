@@ -1345,6 +1345,22 @@ export interface RegisterPaintStyle {
   style?: PaintStyleResource | undefined;
 }
 
+export interface SetTextStyle {
+  style?: TextStyleResource | undefined;
+}
+
+export interface DeleteTextStyle {
+  styleId: string;
+}
+
+export interface SetPaintStyle {
+  style?: PaintStyleResource | undefined;
+}
+
+export interface DeletePaintStyle {
+  styleId: string;
+}
+
 export interface RegisterVariableCollection {
   collection?: VariableCollectionResource | undefined;
 }
@@ -1552,6 +1568,10 @@ export interface ResolvedOperation {
   deleteVariable?: DeleteVariable | undefined;
   setVariableCollection?: SetVariableCollection | undefined;
   deleteVariableCollection?: DeleteVariableCollection | undefined;
+  setTextStyle?: SetTextStyle | undefined;
+  deleteTextStyle?: DeleteTextStyle | undefined;
+  setPaintStyle?: SetPaintStyle | undefined;
+  deletePaintStyle?: DeletePaintStyle | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -9777,6 +9797,194 @@ export const RegisterPaintStyle: MessageFns<RegisterPaintStyle> = {
   },
 };
 
+function createBaseSetTextStyle(): SetTextStyle {
+  return { style: undefined };
+}
+
+export const SetTextStyle: MessageFns<SetTextStyle> = {
+  encode(message: SetTextStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      TextStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetTextStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetTextStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = TextStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetTextStyle>, I>>(base?: I): SetTextStyle {
+    return SetTextStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetTextStyle>, I>>(object: I): SetTextStyle {
+    const message = createBaseSetTextStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? TextStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeleteTextStyle(): DeleteTextStyle {
+  return { styleId: "" };
+}
+
+export const DeleteTextStyle: MessageFns<DeleteTextStyle> = {
+  encode(message: DeleteTextStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.styleId !== "") {
+      writer.uint32(10).string(message.styleId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteTextStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteTextStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.styleId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteTextStyle>, I>>(base?: I): DeleteTextStyle {
+    return DeleteTextStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteTextStyle>, I>>(object: I): DeleteTextStyle {
+    const message = createBaseDeleteTextStyle();
+    message.styleId = object.styleId ?? "";
+    return message;
+  },
+};
+
+function createBaseSetPaintStyle(): SetPaintStyle {
+  return { style: undefined };
+}
+
+export const SetPaintStyle: MessageFns<SetPaintStyle> = {
+  encode(message: SetPaintStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      PaintStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetPaintStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetPaintStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = PaintStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetPaintStyle>, I>>(base?: I): SetPaintStyle {
+    return SetPaintStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetPaintStyle>, I>>(object: I): SetPaintStyle {
+    const message = createBaseSetPaintStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? PaintStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeletePaintStyle(): DeletePaintStyle {
+  return { styleId: "" };
+}
+
+export const DeletePaintStyle: MessageFns<DeletePaintStyle> = {
+  encode(message: DeletePaintStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.styleId !== "") {
+      writer.uint32(10).string(message.styleId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeletePaintStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeletePaintStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.styleId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeletePaintStyle>, I>>(base?: I): DeletePaintStyle {
+    return DeletePaintStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeletePaintStyle>, I>>(object: I): DeletePaintStyle {
+    const message = createBaseDeletePaintStyle();
+    message.styleId = object.styleId ?? "";
+    return message;
+  },
+};
+
 function createBaseRegisterVariableCollection(): RegisterVariableCollection {
   return { collection: undefined };
 }
@@ -11238,6 +11446,10 @@ function createBaseResolvedOperation(): ResolvedOperation {
     deleteVariable: undefined,
     setVariableCollection: undefined,
     deleteVariableCollection: undefined,
+    setTextStyle: undefined,
+    deleteTextStyle: undefined,
+    setPaintStyle: undefined,
+    deletePaintStyle: undefined,
   };
 }
 
@@ -11350,6 +11562,18 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.deleteVariableCollection !== undefined) {
       DeleteVariableCollection.encode(message.deleteVariableCollection, writer.uint32(290).fork()).join();
+    }
+    if (message.setTextStyle !== undefined) {
+      SetTextStyle.encode(message.setTextStyle, writer.uint32(298).fork()).join();
+    }
+    if (message.deleteTextStyle !== undefined) {
+      DeleteTextStyle.encode(message.deleteTextStyle, writer.uint32(306).fork()).join();
+    }
+    if (message.setPaintStyle !== undefined) {
+      SetPaintStyle.encode(message.setPaintStyle, writer.uint32(314).fork()).join();
+    }
+    if (message.deletePaintStyle !== undefined) {
+      DeletePaintStyle.encode(message.deletePaintStyle, writer.uint32(322).fork()).join();
     }
     return writer;
   },
@@ -11649,6 +11873,38 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.deleteVariableCollection = DeleteVariableCollection.decode(reader, reader.uint32());
           continue;
         }
+        case 37: {
+          if (tag !== 298) {
+            break;
+          }
+
+          message.setTextStyle = SetTextStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 38: {
+          if (tag !== 306) {
+            break;
+          }
+
+          message.deleteTextStyle = DeleteTextStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 39: {
+          if (tag !== 314) {
+            break;
+          }
+
+          message.setPaintStyle = SetPaintStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 40: {
+          if (tag !== 322) {
+            break;
+          }
+
+          message.deletePaintStyle = DeletePaintStyle.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11778,6 +12034,18 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       (object.deleteVariableCollection !== undefined && object.deleteVariableCollection !== null)
         ? DeleteVariableCollection.fromPartial(object.deleteVariableCollection)
         : undefined;
+    message.setTextStyle = (object.setTextStyle !== undefined && object.setTextStyle !== null)
+      ? SetTextStyle.fromPartial(object.setTextStyle)
+      : undefined;
+    message.deleteTextStyle = (object.deleteTextStyle !== undefined && object.deleteTextStyle !== null)
+      ? DeleteTextStyle.fromPartial(object.deleteTextStyle)
+      : undefined;
+    message.setPaintStyle = (object.setPaintStyle !== undefined && object.setPaintStyle !== null)
+      ? SetPaintStyle.fromPartial(object.setPaintStyle)
+      : undefined;
+    message.deletePaintStyle = (object.deletePaintStyle !== undefined && object.deletePaintStyle !== null)
+      ? DeletePaintStyle.fromPartial(object.deletePaintStyle)
+      : undefined;
     return message;
   },
 };

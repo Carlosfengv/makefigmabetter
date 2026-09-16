@@ -481,6 +481,54 @@ export class RuntimeSession implements RuntimeContainerHost {
     return new RuntimePaintStyle(style, this.paintStyleHost());
   }
 
+  setTextStyle(style: DocumentTextStyleResource): void {
+    this.assertOpen();
+    const current = this.textStyleResource(style.id);
+    if (!current || current.remote || style.remote || current.key !== style.key) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "setTextStyle", style }]);
+  }
+
+  deleteTextStyle(styleId: string): void {
+    this.assertSynchronousDocumentAccess();
+    const style = this.textStyleResource(styleId);
+    if (!style || style.remote) throw runtimeError("UNSUPPORTED_FEATURE");
+    const operations: PendingProjectionOperation[] = this.projectionStore.listLiveNodes().flatMap((node) => {
+      const properties = node.textProperties as DocumentTextProperties | undefined;
+      if (!properties) return [];
+      const next = runtimeTextPropertiesWithoutStyleLink(properties, "textStyleId", styleId);
+      return next === properties ? [] : [{ type: "update" as const, nodeId: node.id, patch: { textProperties: next } }];
+    });
+    operations.push({ type: "deleteTextStyle", id: styleId });
+    this.enqueueOperations(operations);
+  }
+
+  setPaintStyle(style: DocumentPaintStyleResource): void {
+    this.assertOpen();
+    const current = this.paintStyleResource(style.id);
+    if (!current || current.remote || style.remote || current.key !== style.key) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "setPaintStyle", style }]);
+  }
+
+  deletePaintStyle(styleId: string): void {
+    this.assertSynchronousDocumentAccess();
+    const style = this.paintStyleResource(styleId);
+    if (!style || style.remote) throw runtimeError("UNSUPPORTED_FEATURE");
+    const operations: PendingProjectionOperation[] = this.projectionStore.listLiveNodes().flatMap((node) => {
+      const patch: Record<string, unknown> = {};
+      if (node.fillStyleId === styleId) patch.fillStyleId = undefined;
+      if (node.strokeStyleId === styleId) patch.strokeStyleId = undefined;
+      if (node.backgroundStyleId === styleId) patch.backgroundStyleId = undefined;
+      const properties = node.textProperties as DocumentTextProperties | undefined;
+      if (properties) {
+        const next = runtimeTextPropertiesWithoutStyleLink(properties, "paintStyleId", styleId);
+        if (next !== properties) patch.textProperties = next;
+      }
+      return Object.keys(patch).length ? [{ type: "update" as const, nodeId: node.id, patch }] : [];
+    });
+    operations.push({ type: "deletePaintStyle", id: styleId });
+    this.enqueueOperations(operations);
+  }
+
   private allocateRuntimeStyleId(): string {
     const id = `S:${this.createId()}`;
     if (this.textStyleResource(id) || this.paintStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
@@ -547,6 +595,9 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   private paintStyleHost() {
     return {
+      paintStyleResource: (styleId: string): DocumentPaintStyleResource | undefined => this.paintStyleResource(styleId),
+      setPaintStyle: (style: DocumentPaintStyleResource): void => this.setPaintStyle(style),
+      deletePaintStyle: (styleId: string): void => this.deletePaintStyle(styleId),
       consumersForPaintStyle: (styleId: string) => Object.freeze(this.projectionStore
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node))
@@ -570,6 +621,9 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   private textStyleHost() {
     return {
+      textStyleResource: (styleId: string): DocumentTextStyleResource | undefined => this.textStyleResource(styleId),
+      setTextStyle: (style: DocumentTextStyleResource): void => this.setTextStyle(style),
+      deleteTextStyle: (styleId: string): void => this.deleteTextStyle(styleId),
       fontNameForStyle: (style: DocumentTextStyleResource): RuntimeFontName => style.style.font
         ? this.fontNameForReference(style.style.font)
         : DEFAULT_RUNTIME_FONT_NAME,
@@ -4515,6 +4569,28 @@ function runtimeNodeUsesPaintStyle(node: RuntimeProjectionNode, styleId: string)
   };
   return value.baseStyle?.paintStyleId === styleId
     || value.runs?.some((run) => run.paintStyleId === styleId) === true;
+}
+
+function runtimeTextPropertiesWithoutStyleLink(
+  properties: DocumentTextProperties,
+  field: "textStyleId" | "paintStyleId",
+  styleId: string,
+): DocumentTextProperties {
+  let changed = false;
+  const runs = properties.runs.map((run) => {
+    if (run[field] !== styleId) return run;
+    changed = true;
+    const next = { ...structuredClone(run) };
+    delete next[field];
+    return next;
+  });
+  let baseStyle = properties.baseStyle;
+  if (baseStyle?.[field] === styleId) {
+    changed = true;
+    baseStyle = { ...structuredClone(baseStyle) };
+    delete baseStyle[field];
+  }
+  return changed ? { ...structuredClone(properties), runs, ...(baseStyle ? { baseStyle } : {}) } : properties;
 }
 
 function runtimeSubtreeBooleanIds(projection: RuntimeProjection, rootNodeId: string): string[] {

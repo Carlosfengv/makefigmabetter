@@ -574,6 +574,10 @@ export type CoreBatchCommand =
   | { type: "registerAsset"; asset: DocumentAsset }
   | { type: "registerTextStyle"; style: DocumentTextStyleResource }
   | { type: "registerPaintStyle"; style: DocumentPaintStyleResource }
+  | { type: "setTextStyle"; style: DocumentTextStyleResource }
+  | { type: "deleteTextStyle"; id: string }
+  | { type: "setPaintStyle"; style: DocumentPaintStyleResource }
+  | { type: "deletePaintStyle"; id: string }
   | { type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }
   | { type: "registerVariable"; variable: DocumentVariableResource }
   | { type: "setVariable"; variable: DocumentVariableResource }
@@ -875,6 +879,10 @@ export type EditorCommand =
   | { type: "create-page"; id: string; name: string; positionId?: string }
   | { type: "register-text-style"; style: DocumentTextStyleResource }
   | { type: "register-paint-style"; style: DocumentPaintStyleResource }
+  | { type: "set-text-style"; style: DocumentTextStyleResource }
+  | { type: "delete-text-style"; id: string }
+  | { type: "set-paint-style"; style: DocumentPaintStyleResource }
+  | { type: "delete-paint-style"; id: string }
   | { type: "register-variable-collection"; collection: DocumentVariableCollectionResource }
   | { type: "register-variable"; variable: DocumentVariableResource }
   | { type: "set-variable"; variable: DocumentVariableResource }

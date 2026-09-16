@@ -14,8 +14,14 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   if (false) {
     const createdTextStyle = runtime.createTextStyle();
     const createdPaintStyle = runtime.createPaintStyle();
-    void createdTextStyle.id;
-    void createdPaintStyle.id;
+    createdTextStyle.name = createdTextStyle.name;
+    createdTextStyle.description = createdTextStyle.description;
+    createdTextStyle.descriptionMarkdown = createdTextStyle.descriptionMarkdown;
+    createdPaintStyle.name = createdPaintStyle.name;
+    createdPaintStyle.description = createdPaintStyle.description;
+    createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
+    createdTextStyle.remove();
+    createdPaintStyle.remove();
     const style = runtime.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

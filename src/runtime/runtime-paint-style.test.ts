@@ -74,7 +74,45 @@ describe("PaintStyle resource runtime", () => {
     expect(await style?.getStyleConsumersAsync()).toEqual([]);
     expect((await figma.getLocalPaintStylesAsync()).map((entry) => entry.id)).toEqual(["S:brand-fill"]);
     expect(await figma.getStyleByIdAsync("missing")).toBeNull();
-    expect(isRuntimeError(capture(() => { if (style) style.name = "Changed"; }), "UNSUPPORTED_FEATURE")).toBe(true);
+    const remote = await figma.getStyleByIdAsync("S:remote-fill");
+    expect(isRuntimeError(capture(() => { if (remote) remote.name = "Changed"; }), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
+  it("updates local style metadata and atomically unlinks node consumers before removal", async () => {
+    const linkedProjection: RuntimeProjection = {
+      ...projection,
+      nodes: [...projection.nodes, {
+        id: "rect",
+        type: "RECTANGLE",
+        name: "Card",
+        parentId: "page",
+        siblingIndex: 0,
+        fillStyleId: "S:brand-fill",
+        fillStack: structuredClone(projection.paintStyles![0]!.paints),
+      }],
+    };
+    const transport = new StyleTransport(linkedProjection);
+    const session = new RuntimeSession({ sessionId: "paint-style-lifecycle", projection: linkedProjection, transport, scheduleMicrotask: () => {} });
+    const style = await session.getStyleByIdAsync("S:brand-fill");
+    if (!style || style.type !== "PAINT") throw new Error("Missing PaintStyle fixture");
+
+    style.name = "Color/Brand";
+    style.description = "Primary brand surface";
+    expect(style.name).toBe("Color/Brand");
+    expect(style.descriptionMarkdown).toBe("Primary brand surface");
+    expect(isRuntimeError(capture(() => { style.description = "bad\0value"; }), "INVALID_ARGUMENT")).toBe(true);
+
+    style.remove();
+    expect(await session.getStyleByIdAsync(style.id)).toBeNull();
+    expect(session.projectionStore.getNode("rect")).toMatchObject({ fillStyleId: undefined });
+    const operations = session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)!.operations;
+    expect(operations.at(-2)).toMatchObject({ type: "update", nodeId: "rect", patch: { fillStyleId: undefined } });
+    expect(operations.at(-1)).toEqual({ type: "deletePaintStyle", id: style.id });
+
+    await session.commitAsync();
+    const reopenedProjection = transport.currentProjection();
+    expect(reopenedProjection.paintStyles?.some((candidate) => candidate.id === style.id)).toBe(false);
+    expect(reopenedProjection.nodes.find((node) => node.id === "rect")?.fillStyleId).toBeUndefined();
   });
 
   it("keeps deprecated synchronous reads behind full-document access", () => {
@@ -253,6 +291,14 @@ class StyleTransport implements RuntimeTransactionTransport {
     for (const operation of transaction.operations) {
       if (operation.type === "registerPaintStyle") {
         paintStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
+      if (operation.type === "setPaintStyle") {
+        paintStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
+      if (operation.type === "deletePaintStyle") {
+        paintStyles.delete(operation.id);
         continue;
       }
       if (operation.type !== "update") continue;

@@ -75,6 +75,37 @@ describe("protocol operation codec", () => {
     });
   });
 
+  it("serializes style updates and deletions as distinct operations", () => {
+    const textStyle = {
+      id: "S:body",
+      key: "",
+      name: "Body",
+      description: "",
+      remote: false,
+      style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+      paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+    };
+    const paintStyle = {
+      id: "S:brand",
+      key: "",
+      name: "Brand",
+      description: "",
+      remote: false,
+      paints: { layers: [] },
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
+      { type: "setTextStyle", style: textStyle },
+      { type: "deleteTextStyle", id: textStyle.id },
+      { type: "setPaintStyle", style: paintStyle },
+      { type: "deletePaintStyle", id: paintStyle.id },
+    ]));
+
+    expect(batch.operations[0]?.setTextStyle?.style).toMatchObject({ id: textStyle.id, name: "Body" });
+    expect(batch.operations[1]?.deleteTextStyle).toEqual({ styleId: textStyle.id });
+    expect(batch.operations[2]?.setPaintStyle?.style).toMatchObject({ id: paintStyle.id, name: "Brand" });
+    expect(batch.operations[3]?.deletePaintStyle).toEqual({ styleId: paintStyle.id });
+  });
+
   it("serializes variable collection and variable registrations", () => {
     const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([

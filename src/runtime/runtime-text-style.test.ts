@@ -81,7 +81,35 @@ describe("TextStyle resource runtime", () => {
     expect((await style?.getStyleConsumersAsync())?.map((entry) => ({ id: entry.node.id, fields: entry.fields }))).toEqual([{ id: "text", fields: ["textStyleId"] }]);
     expect((await figma.getLocalTextStylesAsync()).map((entry) => entry.id)).toEqual(["S:body"]);
     expect(await figma.getStyleByIdAsync("missing")).toBeNull();
-    expect(isRuntimeError(capture(() => { if (style) style.name = "Changed"; }), "UNSUPPORTED_FEATURE")).toBe(true);
+    const remote = await figma.getStyleByIdAsync("S:remote");
+    expect(isRuntimeError(capture(() => { if (remote) remote.name = "Changed"; }), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
+  it("updates local style metadata and atomically unlinks consumers before removal", async () => {
+    const transport = new StyleTransport(projection);
+    const session = new RuntimeSession({ sessionId: "text-style-lifecycle", projection, transport, scheduleMicrotask: () => {} });
+    const style = await session.getStyleByIdAsync("S:body");
+    if (!style || style.type !== "TEXT") throw new Error("Missing TextStyle fixture");
+
+    style.name = "Typography/Body";
+    style.descriptionMarkdown = "Default body copy **updated**";
+    expect(style.name).toBe("Typography/Body");
+    expect(style.description).toBe("Default body copy **updated**");
+    expect((await session.getStyleByIdAsync(style.id))?.name).toBe("Typography/Body");
+    expect(isRuntimeError(capture(() => { style.name = " "; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.name = "界".repeat(400); }), "INVALID_ARGUMENT")).toBe(true);
+
+    style.remove();
+    expect(await session.getStyleByIdAsync(style.id)).toBeNull();
+    expect(session.projectionStore.getNode("text")?.textProperties).toEqual({ runs: [], baseStyle: {} });
+    const operations = session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)!.operations;
+    expect(operations.at(-2)).toMatchObject({ type: "update", nodeId: "text" });
+    expect(operations.at(-1)).toEqual({ type: "deleteTextStyle", id: style.id });
+
+    await session.commitAsync();
+    const reopenedProjection = transport.currentProjection();
+    expect(reopenedProjection.textStyles?.some((candidate) => candidate.id === style.id)).toBe(false);
+    expect((reopenedProjection.nodes.find((node) => node.id === "text")?.textProperties as { baseStyle?: { textStyleId?: string } }).baseStyle?.textStyleId).toBeUndefined();
   });
 
   it("keeps deprecated synchronous style reads behind full-document access", () => {
@@ -263,6 +291,14 @@ class StyleTransport implements RuntimeTransactionTransport {
     for (const operation of transaction.operations) {
       if (operation.type === "registerTextStyle") {
         textStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
+      if (operation.type === "setTextStyle") {
+        textStyles.set(operation.style.id, structuredClone(operation.style));
+        continue;
+      }
+      if (operation.type === "deleteTextStyle") {
+        textStyles.delete(operation.id);
         continue;
       }
       if (operation.type !== "update") continue;

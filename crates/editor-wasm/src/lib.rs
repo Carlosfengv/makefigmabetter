@@ -303,6 +303,22 @@ impl DocumentEngine {
                         style: paint_style_resource_from_projection(&style)?,
                     });
                 }
+                BatchCommand::SetTextStyle { style } => {
+                    commands.push(Command::SetTextStyle {
+                        style: text_style_resource_from_projection(&style)?,
+                    });
+                }
+                BatchCommand::DeleteTextStyle { id } => {
+                    commands.push(Command::DeleteTextStyle { id });
+                }
+                BatchCommand::SetPaintStyle { style } => {
+                    commands.push(Command::SetPaintStyle {
+                        style: paint_style_resource_from_projection(&style)?,
+                    });
+                }
+                BatchCommand::DeletePaintStyle { id } => {
+                    commands.push(Command::DeletePaintStyle { id });
+                }
                 BatchCommand::RegisterVariableCollection { collection } => {
                     commands.push(Command::RegisterVariableCollection {
                         collection: variable_collection_from_projection(&collection)?,
@@ -2039,6 +2055,18 @@ enum BatchCommand {
     RegisterPaintStyle {
         style: ProjectionPaintStyleResource,
     },
+    SetTextStyle {
+        style: ProjectionTextStyleResource,
+    },
+    DeleteTextStyle {
+        id: String,
+    },
+    SetPaintStyle {
+        style: ProjectionPaintStyleResource,
+    },
+    DeletePaintStyle {
+        id: String,
+    },
     RegisterVariableCollection {
         collection: ProjectionVariableCollectionResource,
     },
@@ -3071,6 +3099,10 @@ impl DocumentEngine {
                 | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::RegisterTextStyle { .. }
                 | BatchCommand::RegisterPaintStyle { .. }
+                | BatchCommand::SetTextStyle { .. }
+                | BatchCommand::DeleteTextStyle { .. }
+                | BatchCommand::SetPaintStyle { .. }
+                | BatchCommand::DeletePaintStyle { .. }
                 | BatchCommand::RegisterVariableCollection { .. }
                 | BatchCommand::RegisterVariable { .. }
                 | BatchCommand::SetVariable { .. }
@@ -10814,6 +10846,116 @@ mod tests {
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")
         );
+    }
+
+    #[test]
+    fn batch_json_updates_and_deletes_local_styles() {
+        let mut engine = DocumentEngine::new();
+        let register = serde_json::json!([
+            {
+                "type": "registerTextStyle",
+                "style": {
+                    "id": "S:body",
+                    "key": "",
+                    "name": "Body",
+                    "description": "Body copy",
+                    "remote": false,
+                    "style": {
+                        "fontSize": 16.0,
+                        "fontWeight": 400,
+                        "italic": false,
+                        "letterSpacing": 0.0
+                    },
+                    "paragraph": {
+                        "alignment": "left",
+                        "lineHeight": 24.0,
+                        "paragraphSpacing": 6.0
+                    }
+                }
+            },
+            {
+                "type": "registerPaintStyle",
+                "style": {
+                    "id": "S:brand",
+                    "key": "",
+                    "name": "Brand",
+                    "description": "Brand fill",
+                    "remote": false,
+                    "paints": { "layers": [] }
+                }
+            }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000160",
+                0,
+                &register.to_string(),
+            )
+            .unwrap();
+
+        let update = serde_json::json!([
+            {
+                "type": "setTextStyle",
+                "style": {
+                    "id": "S:body",
+                    "key": "",
+                    "name": "Typography/Body",
+                    "description": "Updated body copy",
+                    "remote": false,
+                    "style": {
+                        "fontSize": 16.0,
+                        "fontWeight": 400,
+                        "italic": false,
+                        "letterSpacing": 0.0
+                    },
+                    "paragraph": {
+                        "alignment": "left",
+                        "lineHeight": 24.0,
+                        "paragraphSpacing": 6.0
+                    }
+                }
+            },
+            {
+                "type": "setPaintStyle",
+                "style": {
+                    "id": "S:brand",
+                    "key": "",
+                    "name": "Color/Brand",
+                    "description": "Updated brand fill",
+                    "remote": false,
+                    "paints": { "layers": [] }
+                }
+            }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000161",
+                1,
+                &update.to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.document.text_style("S:body").unwrap().name,
+            "Typography/Body"
+        );
+        assert_eq!(
+            engine.document.paint_style("S:brand").unwrap().name,
+            "Color/Brand"
+        );
+
+        let delete = serde_json::json!([
+            { "type": "deleteTextStyle", "id": "S:body" },
+            { "type": "deletePaintStyle", "id": "S:brand" }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000162",
+                2,
+                &delete.to_string(),
+            )
+            .unwrap();
+        assert!(engine.document.text_style("S:body").is_none());
+        assert!(engine.document.paint_style("S:brand").is_none());
     }
 
     #[test]

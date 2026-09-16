@@ -106,16 +106,28 @@ describe("RuntimeWorkerBridge", () => {
       operations: [
         { type: "registerTextStyle", style: textStyle },
         { type: "registerPaintStyle", style: paintStyle },
+        { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
+        { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
+        { type: "deleteTextStyle", id: textStyle.id },
+        { type: "deletePaintStyle", id: paintStyle.id },
       ],
     });
     const commands = posted[0]!.transaction.commands;
     expect(commands).toEqual([
       { type: "register-text-style", style: textStyle },
       { type: "register-paint-style", style: paintStyle },
+      { type: "set-text-style", style: { ...textStyle, name: "Body" } },
+      { type: "set-paint-style", style: { ...paintStyle, name: "Brand" } },
+      { type: "delete-text-style", id: textStyle.id },
+      { type: "delete-paint-style", id: paintStyle.id },
     ]);
     expect(resolveCoreBatch([], commands)?.batch).toEqual([
       { type: "registerTextStyle", style: textStyle },
       { type: "registerPaintStyle", style: paintStyle },
+      { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
+      { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
+      { type: "deleteTextStyle", id: textStyle.id },
+      { type: "deletePaintStyle", id: paintStyle.id },
     ]);
     bridge.close();
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));

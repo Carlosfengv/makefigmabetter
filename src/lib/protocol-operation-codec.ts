@@ -144,6 +144,18 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "registerPaintStyle") {
     return [{ registerPaintStyle: { style: paintStyleResourceProto(command.style) } }];
   }
+  if (command.type === "setTextStyle") {
+    return [{ setTextStyle: { style: textStyleResourceProto(command.style) } }];
+  }
+  if (command.type === "deleteTextStyle") {
+    return [{ deleteTextStyle: { styleId: command.id } }];
+  }
+  if (command.type === "setPaintStyle") {
+    return [{ setPaintStyle: { style: paintStyleResourceProto(command.style) } }];
+  }
+  if (command.type === "deletePaintStyle") {
+    return [{ deletePaintStyle: { styleId: command.id } }];
+  }
   if (command.type === "registerVariableCollection") {
     return [{ registerVariableCollection: { collection: variableCollectionResourceProto(command.collection) } }];
   }

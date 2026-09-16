@@ -1056,6 +1056,22 @@ message RegisterPaintStyle {
   PaintStyleResource style = 1;
 }
 
+message SetTextStyle {
+  TextStyleResource style = 1;
+}
+
+message DeleteTextStyle {
+  string style_id = 1;
+}
+
+message SetPaintStyle {
+  PaintStyleResource style = 1;
+}
+
+message DeletePaintStyle {
+  string style_id = 1;
+}
+
 message RegisterVariableCollection {
   VariableCollectionResource collection = 1;
 }
@@ -1235,6 +1251,10 @@ message ResolvedOperation {
     DeleteVariable delete_variable = 34;
     SetVariableCollection set_variable_collection = 35;
     DeleteVariableCollection delete_variable_collection = 36;
+    SetTextStyle set_text_style = 37;
+    DeleteTextStyle delete_text_style = 38;
+    SetPaintStyle set_paint_style = 39;
+    DeletePaintStyle delete_paint_style = 40;
   }
 }
 

@@ -95,6 +95,10 @@ fn collect_touched_node_ids(change: &AppliedChange, ids: &mut BTreeSet<NodeId>) 
         | AppliedChange::AssetRegistered { .. }
         | AppliedChange::TextStyleRegistered { .. }
         | AppliedChange::PaintStyleRegistered { .. }
+        | AppliedChange::TextStyleChanged { .. }
+        | AppliedChange::TextStyleDeleted { .. }
+        | AppliedChange::PaintStyleChanged { .. }
+        | AppliedChange::PaintStyleDeleted { .. }
         | AppliedChange::VariableCollectionRegistered { .. }
         | AppliedChange::VariableRegistered { .. }
         | AppliedChange::VariableChanged { .. }

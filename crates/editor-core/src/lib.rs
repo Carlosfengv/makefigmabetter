@@ -1456,6 +1456,18 @@ pub enum Command {
     RegisterPaintStyle {
         style: PaintStyleResource,
     },
+    SetTextStyle {
+        style: TextStyleResource,
+    },
+    DeleteTextStyle {
+        id: String,
+    },
+    SetPaintStyle {
+        style: PaintStyleResource,
+    },
+    DeletePaintStyle {
+        id: String,
+    },
     RegisterVariableCollection {
         collection: VariableCollectionResource,
     },
@@ -1621,6 +1633,20 @@ pub enum AppliedChange {
         style: TextStyleResource,
     },
     PaintStyleRegistered {
+        style: PaintStyleResource,
+    },
+    TextStyleChanged {
+        before: TextStyleResource,
+        after: TextStyleResource,
+    },
+    TextStyleDeleted {
+        style: TextStyleResource,
+    },
+    PaintStyleChanged {
+        before: PaintStyleResource,
+        after: PaintStyleResource,
+    },
+    PaintStyleDeleted {
         style: PaintStyleResource,
     },
     VariableCollectionRegistered {
@@ -2927,6 +2953,108 @@ impl Document {
         self.text_style_bytes += bytes;
         self.text_styles.insert(style.id.clone(), style);
         Ok(())
+    }
+
+    fn replace_text_style(
+        &mut self,
+        style: TextStyleResource,
+    ) -> Result<TextStyleResource, CommandError> {
+        let before = self
+            .text_styles
+            .get(&style.id)
+            .cloned()
+            .ok_or(CommandError::InvalidTextStyle)?;
+        if before.remote || style.remote || before.key != style.key {
+            return Err(CommandError::InvalidTextStyle);
+        }
+        self.text_styles.remove(&style.id);
+        self.text_style_bytes = self
+            .text_style_bytes
+            .saturating_sub(before.estimated_bytes());
+        self.insert_text_style(style)?;
+        Ok(before)
+    }
+
+    fn remove_text_style(&mut self, id: &str) -> Result<TextStyleResource, CommandError> {
+        let style = self
+            .text_styles
+            .get(id)
+            .cloned()
+            .ok_or(CommandError::InvalidTextStyle)?;
+        if style.remote || self.text_style_is_referenced(id) {
+            return Err(CommandError::InvalidTextStyle);
+        }
+        self.text_styles.remove(id);
+        self.text_style_bytes = self
+            .text_style_bytes
+            .saturating_sub(style.estimated_bytes());
+        Ok(style)
+    }
+
+    fn replace_paint_style(
+        &mut self,
+        style: PaintStyleResource,
+    ) -> Result<PaintStyleResource, CommandError> {
+        let before = self
+            .paint_styles
+            .get(&style.id)
+            .cloned()
+            .ok_or(CommandError::InvalidPaintStyle)?;
+        if before.remote || style.remote || before.key != style.key {
+            return Err(CommandError::InvalidPaintStyle);
+        }
+        self.paint_styles.remove(&style.id);
+        self.paint_style_bytes = self
+            .paint_style_bytes
+            .saturating_sub(before.estimated_bytes());
+        self.insert_paint_style(style)?;
+        Ok(before)
+    }
+
+    fn remove_paint_style(&mut self, id: &str) -> Result<PaintStyleResource, CommandError> {
+        let style = self
+            .paint_styles
+            .get(id)
+            .cloned()
+            .ok_or(CommandError::InvalidPaintStyle)?;
+        if style.remote || self.paint_style_is_referenced(id) {
+            return Err(CommandError::InvalidPaintStyle);
+        }
+        self.paint_styles.remove(id);
+        self.paint_style_bytes = self
+            .paint_style_bytes
+            .saturating_sub(style.estimated_bytes());
+        Ok(style)
+    }
+
+    fn text_style_is_referenced(&self, id: &str) -> bool {
+        self.node_text_properties.values().any(|properties| {
+            properties
+                .runs
+                .iter()
+                .any(|run| run.text_style_id.as_deref() == Some(id))
+                || properties
+                    .base_style
+                    .as_ref()
+                    .is_some_and(|style| style.text_style_id.as_deref() == Some(id))
+        })
+    }
+
+    fn paint_style_is_referenced(&self, id: &str) -> bool {
+        self.node_paint_style_links.values().any(|links| {
+            links.fill.as_deref() == Some(id)
+                || links.stroke.as_deref() == Some(id)
+                || links.background.as_deref() == Some(id)
+        }) || self.node_text_properties.values().any(|properties| {
+            properties
+                .runs
+                .iter()
+                .any(|run| run.paint_style_id.as_deref() == Some(id))
+                || properties
+                    .base_style
+                    .as_ref()
+                    .is_some_and(|style| style.paint_style_id.as_deref() == Some(id))
+        })
     }
 
     fn insert_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
@@ -4791,6 +4919,28 @@ impl Document {
                     style: style.clone(),
                 })
             }
+            Command::SetTextStyle { style } => {
+                let before = self.replace_text_style(style.clone())?;
+                Ok(AppliedChange::TextStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeleteTextStyle { id } => {
+                let style = self.remove_text_style(id)?;
+                Ok(AppliedChange::TextStyleDeleted { style })
+            }
+            Command::SetPaintStyle { style } => {
+                let before = self.replace_paint_style(style.clone())?;
+                Ok(AppliedChange::PaintStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeletePaintStyle { id } => {
+                let style = self.remove_paint_style(id)?;
+                Ok(AppliedChange::PaintStyleDeleted { style })
+            }
             Command::RegisterVariableCollection { collection } => {
                 self.insert_variable_collection(collection.clone())?;
                 Ok(AppliedChange::VariableCollectionRegistered {
@@ -4928,6 +5078,32 @@ impl Document {
                     .paint_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
+            AppliedChange::TextStyleChanged { before, after } => {
+                self.text_styles.insert(before.id.clone(), before.clone());
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_sub(after.estimated_bytes())
+                    .saturating_add(before.estimated_bytes());
+            }
+            AppliedChange::TextStyleDeleted { style } => {
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.text_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::PaintStyleChanged { before, after } => {
+                self.paint_styles.insert(before.id.clone(), before.clone());
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_sub(after.estimated_bytes())
+                    .saturating_add(before.estimated_bytes());
+            }
+            AppliedChange::PaintStyleDeleted { style } => {
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.paint_styles.insert(style.id.clone(), style.clone());
+            }
             AppliedChange::VariableCollectionRegistered { collection } => {
                 self.variable_collections.remove(&collection.id);
                 self.variable_catalog_bytes = self
@@ -5052,6 +5228,32 @@ impl Document {
                     .paint_style_bytes
                     .saturating_add(style.estimated_bytes());
                 self.paint_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::TextStyleChanged { before, after } => {
+                self.text_styles.insert(after.id.clone(), after.clone());
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_sub(before.estimated_bytes())
+                    .saturating_add(after.estimated_bytes());
+            }
+            AppliedChange::TextStyleDeleted { style } => {
+                self.text_styles.remove(&style.id);
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
+            AppliedChange::PaintStyleChanged { before, after } => {
+                self.paint_styles.insert(after.id.clone(), after.clone());
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_sub(before.estimated_bytes())
+                    .saturating_add(after.estimated_bytes());
+            }
+            AppliedChange::PaintStyleDeleted { style } => {
+                self.paint_styles.remove(&style.id);
+                self.paint_style_bytes = self
+                    .paint_style_bytes
+                    .saturating_sub(style.estimated_bytes());
             }
             AppliedChange::VariableCollectionRegistered { collection } => {
                 self.variable_catalog_bytes = self
@@ -5347,6 +5549,10 @@ impl Document {
                 | Command::RegisterAsset { .. }
                 | Command::RegisterTextStyle { .. }
                 | Command::RegisterPaintStyle { .. }
+                | Command::SetTextStyle { .. }
+                | Command::DeleteTextStyle { .. }
+                | Command::SetPaintStyle { .. }
+                | Command::DeletePaintStyle { .. }
                 | Command::RegisterVariableCollection { .. }
                 | Command::RegisterVariable { .. }
                 | Command::SetVariable { .. }
@@ -8096,6 +8302,10 @@ impl Command {
             }
             Command::RegisterTextStyle { style } => style.estimated_bytes(),
             Command::RegisterPaintStyle { style } => style.estimated_bytes(),
+            Command::SetTextStyle { style } => style.estimated_bytes(),
+            Command::DeleteTextStyle { id } => id.len(),
+            Command::SetPaintStyle { style } => style.estimated_bytes(),
+            Command::DeletePaintStyle { id } => id.len(),
             Command::RegisterVariableCollection { collection } => collection.estimated_bytes(),
             Command::RegisterVariable { variable } => variable.estimated_bytes(),
             Command::SetVariable { variable } => variable.estimated_bytes(),
@@ -8463,6 +8673,14 @@ impl AppliedChange {
             }
             AppliedChange::TextStyleRegistered { style } => style.estimated_bytes(),
             AppliedChange::PaintStyleRegistered { style } => style.estimated_bytes(),
+            AppliedChange::TextStyleChanged { before, after } => {
+                before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::TextStyleDeleted { style } => style.estimated_bytes(),
+            AppliedChange::PaintStyleChanged { before, after } => {
+                before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::PaintStyleDeleted { style } => style.estimated_bytes(),
             AppliedChange::VariableCollectionRegistered { collection } => {
                 collection.estimated_bytes()
             }
@@ -10288,6 +10506,22 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
         Command::RegisterPaintStyle { style } => {
             hasher.update([27]);
             hash_paint_style_resource(hasher, style);
+        }
+        Command::SetTextStyle { style } => {
+            hasher.update(b"makefigma/editor-core/set-text-style-v1");
+            hash_text_style_resource(hasher, style);
+        }
+        Command::DeleteTextStyle { id } => {
+            hasher.update(b"makefigma/editor-core/delete-text-style-v1");
+            hash_text(hasher, id);
+        }
+        Command::SetPaintStyle { style } => {
+            hasher.update(b"makefigma/editor-core/set-paint-style-v1");
+            hash_paint_style_resource(hasher, style);
+        }
+        Command::DeletePaintStyle { id } => {
+            hasher.update(b"makefigma/editor-core/delete-paint-style-v1");
+            hash_text(hasher, id);
         }
         Command::RegisterVariableCollection { collection } => {
             hasher.update([28]);
@@ -14146,6 +14380,210 @@ mod tests {
             document.seed_paint_style(invalid),
             Err(CommandError::InvalidPaintStyle)
         );
+    }
+
+    #[test]
+    fn local_style_updates_and_deletes_are_hashed_and_undoable() {
+        let mut text_document = Document::empty();
+        let text = text_style_resource("S:body");
+        text_document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterTextStyle {
+                        style: text.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut changed_text = text.clone();
+        changed_text.name = "Typography/Body".into();
+        text_document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetTextStyle {
+                        style: changed_text.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(text_document.text_style(&text.id), Some(&changed_text));
+        text_document.undo().unwrap();
+        assert_eq!(text_document.text_style(&text.id), Some(&text));
+        text_document.redo().unwrap();
+        assert_eq!(text_document.text_style(&text.id), Some(&changed_text));
+        text_document
+            .submit(
+                transaction(
+                    text_document.revision,
+                    vec![Command::DeleteTextStyle {
+                        id: text.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(text_document.text_style(&text.id).is_none());
+        text_document.undo().unwrap();
+        assert_eq!(text_document.text_style(&text.id), Some(&changed_text));
+        text_document.redo().unwrap();
+        assert!(text_document.text_style(&text.id).is_none());
+
+        let mut paint_document = Document::empty();
+        let paint = paint_style_resource("S:brand");
+        paint_document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterPaintStyle {
+                        style: paint.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut changed_paint = paint.clone();
+        changed_paint.name = "Color/Brand".into();
+        paint_document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetPaintStyle {
+                        style: changed_paint.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(paint_document.paint_style(&paint.id), Some(&changed_paint));
+        paint_document.undo().unwrap();
+        assert_eq!(paint_document.paint_style(&paint.id), Some(&paint));
+        paint_document.redo().unwrap();
+        assert_eq!(paint_document.paint_style(&paint.id), Some(&changed_paint));
+        paint_document
+            .submit(
+                transaction(
+                    paint_document.revision,
+                    vec![Command::DeletePaintStyle {
+                        id: paint.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(paint_document.paint_style(&paint.id).is_none());
+        paint_document.undo().unwrap();
+        assert_eq!(paint_document.paint_style(&paint.id), Some(&changed_paint));
+        paint_document.redo().unwrap();
+        assert!(paint_document.paint_style(&paint.id).is_none());
+    }
+
+    #[test]
+    fn local_styles_must_be_unlinked_before_deletion() {
+        let mut text = node(191);
+        text.kind = NodeKind::Text;
+        text.text = "A".into();
+        let text_style = text_style_resource("S:body");
+        let paint_style = paint_style_resource("S:brand");
+        let mut run = text_style.style.clone();
+        run.end = 1;
+        run.text_style_id = Some(text_style.id.clone());
+        run.paint_style_id = Some(paint_style.id.clone());
+        let linked_properties = TextProperties {
+            runs: vec![run],
+            ..TextProperties::default()
+        };
+        let linked_paints = PaintStyleLinks {
+            fill: Some(paint_style.id.clone()),
+            stroke: None,
+            background: None,
+        };
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(text),
+                        Command::RegisterTextStyle {
+                            style: text_style.clone(),
+                        },
+                        Command::RegisterPaintStyle {
+                            style: paint_style.clone(),
+                        },
+                        Command::SetTextProperties {
+                            id: NodeId(191),
+                            properties: linked_properties.clone(),
+                        },
+                        Command::SetPaintStyleLinks {
+                            id: NodeId(191),
+                            links: linked_paints,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let linked_hash = document.canonical_hash_hex();
+
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteTextStyle {
+                        id: text_style.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidTextStyle)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeletePaintStyle {
+                        id: paint_style.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidPaintStyle)
+        );
+        assert_eq!(document.canonical_hash_hex(), linked_hash);
+
+        let mut unlinked_properties = linked_properties;
+        unlinked_properties.runs[0].text_style_id = None;
+        unlinked_properties.runs[0].paint_style_id = None;
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![
+                        Command::SetTextProperties {
+                            id: NodeId(191),
+                            properties: unlinked_properties,
+                        },
+                        Command::SetPaintStyleLinks {
+                            id: NodeId(191),
+                            links: PaintStyleLinks::default(),
+                        },
+                        Command::DeleteTextStyle {
+                            id: text_style.id.clone(),
+                        },
+                        Command::DeletePaintStyle {
+                            id: paint_style.id.clone(),
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.text_style(&text_style.id).is_none());
+        assert!(document.paint_style(&paint_style.id).is_none());
     }
 
     #[test]
