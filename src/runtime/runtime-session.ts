@@ -976,7 +976,8 @@ export class RuntimeSession implements RuntimeContainerHost {
     validateRuntimeComponentPropertyOptions(options, componentId);
     if (type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     if (options?.description !== undefined && type !== "SLOT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
-    const definition = runtimeComponentPropertyDefinition(type, defaultValue, options?.description, componentId);
+    validateRuntimeComponentPropertyOptionCompatibility(type, options, componentId);
+    const definition = runtimeComponentPropertyDefinition(type, defaultValue, options, componentId);
     if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
     }
@@ -1020,9 +1021,19 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (value.description !== undefined && existing.type !== "SLOT") {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     }
+    validateRuntimeComponentPropertyOptionCompatibility(existing.type, value, componentId);
     const definition = value.defaultValue === undefined
-      ? { ...structuredClone(existing), ...(value.description === undefined ? {} : { description: value.description }) }
-      : runtimeComponentPropertyDefinition(existing.type, value.defaultValue, value.description ?? existing.description, componentId);
+      ? {
+          ...structuredClone(existing),
+          ...(value.description === undefined ? {} : { description: value.description }),
+          ...(value.preferredValues === undefined ? {} : { preferredValues: value.preferredValues.map((preferred) => ({ ...preferred })) }),
+          ...(value.slotSettings === undefined ? {} : { slotSettings: { ...value.slotSettings } }),
+        }
+      : runtimeComponentPropertyDefinition(existing.type, value.defaultValue, {
+          description: value.description ?? existing.description,
+          preferredValues: value.preferredValues ?? existing.preferredValues,
+          slotSettings: value.slotSettings ?? existing.slotSettings,
+        }, componentId);
     if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
     }
@@ -2497,9 +2508,12 @@ function validateRuntimeComponentPropertyOptions(
 ): void {
   if (options === undefined) return;
   if (!options || typeof options !== "object" || Array.isArray(options)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
-  if (options.preferredValues !== undefined || options.slotSettings !== undefined) {
-    throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
-  }
+  if (options.preferredValues !== undefined && (
+    !Array.isArray(options.preferredValues) ||
+    options.preferredValues.length > 256 ||
+    options.preferredValues.some((value) => !value || typeof value !== "object" || Array.isArray(value) || !["COMPONENT", "COMPONENT_SET"].includes(value.type) || typeof value.key !== "string" || !value.key || value.key.length > 256 || Object.keys(value).some((key) => !["type", "key"].includes(key)))
+  )) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  if (options.slotSettings !== undefined) validateRuntimeSlotSettings(options.slotSettings, nodeId);
   if (options.description !== undefined && (
     typeof options.description !== "string" ||
     options.description.includes("\0") ||
@@ -2507,10 +2521,35 @@ function validateRuntimeComponentPropertyOptions(
   )) throw runtimeError("INVALID_ARGUMENT", { nodeId });
 }
 
+function validateRuntimeComponentPropertyOptionCompatibility(
+  type: RuntimeComponentPropertyType,
+  options: RuntimeComponentPropertyOptions | RuntimeComponentPropertyEdit | undefined,
+  nodeId: string,
+): void {
+  if (options?.preferredValues !== undefined && type !== "INSTANCE_SWAP" && type !== "SLOT") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  if (options?.slotSettings !== undefined && type !== "SLOT") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+}
+
+function validateRuntimeSlotSettings(value: Readonly<Record<string, unknown>>, nodeId: string): void {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !["stretchChildOnInsert", "displayEmptyByDefault", "minChildren", "maxChildren", "allowPreferredValuesOnly"].includes(key))) {
+    throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  for (const key of ["stretchChildOnInsert", "displayEmptyByDefault", "allowPreferredValuesOnly"] as const) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  for (const key of ["minChildren", "maxChildren"] as const) {
+    const count = value[key];
+    if (count !== undefined && count !== null && (!Number.isSafeInteger(count) || (count as number) < 0)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  const min = value.minChildren;
+  const max = value.maxChildren;
+  if (typeof min === "number" && typeof max === "number" && min > max) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+}
+
 function runtimeComponentPropertyDefinition(
   type: RuntimeComponentPropertyType,
   defaultValue: string | boolean | RuntimeVariableAlias,
-  description: string | undefined,
+  options: RuntimeComponentPropertyOptions | undefined,
   nodeId: string,
 ): DocumentComponentMetadata["componentPropertyDefinitions"][string] {
   if (!["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"].includes(type)) {
@@ -2526,7 +2565,9 @@ function runtimeComponentPropertyDefinition(
   return {
     type,
     ...(type === "SLOT" ? {} : { defaultValue }),
-    ...(description === undefined ? {} : { description }),
+    ...(options?.description === undefined ? {} : { description: options.description }),
+    ...(options?.preferredValues === undefined ? {} : { preferredValues: options.preferredValues.map((preferred) => ({ ...preferred })) }),
+    ...(options?.slotSettings === undefined ? {} : { slotSettings: { ...options.slotSettings } }),
   };
 }
 

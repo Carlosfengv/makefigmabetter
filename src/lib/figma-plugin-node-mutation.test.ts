@@ -275,6 +275,12 @@ describe("Figma Plugin API node mutation adapter", () => {
     const updated = addedResult?.nextNodes[0] ?? component;
     expect(editFigmaPluginComponentProperty(updated, "Enabled#1", { description: "Show card" })).toMatchObject({ ok: true });
     expect(deleteFigmaPluginComponentProperty(updated, "Enabled#1")).toMatchObject({ ok: true });
+    expect(addFigmaPluginComponentProperty(component, "Content#1", {
+      type: "SLOT",
+      preferredValues: [{ type: "COMPONENT", key: "icon-key" }],
+      slotSettings: { minChildren: 1, maxChildren: 2, allowPreferredValuesOnly: true },
+    })).toMatchObject({ ok: true });
+    expect(addFigmaPluginComponentProperty(component, "Broken#1", { type: "TEXT", defaultValue: "Text", slotSettings: { minChildren: 1 } })).toMatchObject({ ok: false });
   });
 
   it("creates a SLOT and its matching Component property atomically", () => {

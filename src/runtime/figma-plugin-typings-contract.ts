@@ -357,6 +357,7 @@ export function assertFigmaPluginTypingsContract(
   const media: MediaNode = figma.createGif("admitted-gif-hash");
   void media.mediaData.hash;
   const slot: SlotNode = figma.createComponent().createSlot();
+  void slot.limitViolations;
   void slot.children;
   const componentForSwap = figma.createComponent();
   const instanceForSwap = figma.createComponent().createInstance();

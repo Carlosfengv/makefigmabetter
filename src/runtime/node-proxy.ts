@@ -16,9 +16,11 @@ import type {
   DocumentEmbedMetadata,
   DocumentFontReference,
   DocumentInstanceMetadata,
+  DocumentInstanceSwapPreferredValue,
   DocumentLinkUnfurlMetadata,
   DocumentPaintStyleResource,
   DocumentPaintStack,
+  DocumentSlotSettings,
   DocumentTextProperties,
   DocumentTextStyleResource,
   DocumentTextPathMetadata,
@@ -213,16 +215,16 @@ export interface RuntimeNodeHost {
 export type RuntimeComponentPropertyType = "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT";
 export type RuntimeVariableAlias = Readonly<{ type: "VARIABLE_ALIAS"; id: string }>;
 export type RuntimeComponentPropertyOptions = Readonly<{
-  preferredValues?: readonly Readonly<{ type: "COMPONENT" | "COMPONENT_SET"; key: string }>[];
+  preferredValues?: readonly Readonly<DocumentInstanceSwapPreferredValue>[];
   description?: string;
-  slotSettings?: Readonly<Record<string, unknown>>;
+  slotSettings?: Readonly<DocumentSlotSettings>;
 }>;
 export type RuntimeComponentPropertyEdit = Readonly<{
   name?: string;
   defaultValue?: string | boolean | RuntimeVariableAlias;
-  preferredValues?: readonly Readonly<{ type: "COMPONENT" | "COMPONENT_SET"; key: string }>[];
+  preferredValues?: readonly Readonly<DocumentInstanceSwapPreferredValue>[];
   description?: string;
-  slotSettings?: Readonly<Record<string, unknown>>;
+  slotSettings?: Readonly<DocumentSlotSettings>;
 }>;
 
 export type RuntimeLetterSpacing = Readonly<{ value: number; unit: "PIXELS" }>;
@@ -1715,6 +1717,46 @@ export class RuntimeNodeProxy {
    * descriptor, so expose values explicitly instead of guessing API types. */
   get componentPropertyValues(): Readonly<Record<string, string | boolean>> {
     return structuredClone(this.instanceMetadata().componentProperties);
+  }
+
+  get limitViolations(): ReadonlyArray<"BELOW_MIN" | "ABOVE_MAX" | "HAS_NON_PREFERRED"> {
+    if (this.type !== "SLOT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const propertyName = (this.read().slotMetadata as { propertyName?: unknown } | undefined)?.propertyName;
+    if (typeof propertyName !== "string") return [];
+    let owner = this.parent;
+    while (owner && owner.type !== "COMPONENT" && owner.type !== "INSTANCE") owner = owner.parent;
+    let definitions: DocumentComponentMetadata["componentPropertyDefinitions"] | undefined;
+    if (owner?.type === "COMPONENT") definitions = owner.componentMetadata().componentPropertyDefinitions;
+    if (owner?.type === "INSTANCE") {
+      const mainId = owner.instanceMetadata().mainComponentId;
+      if (this.host.hasLiveNode(mainId)) {
+        const main = this.host.proxyFor(mainId);
+        if (main.type === "COMPONENT") definitions = main.componentMetadata().componentPropertyDefinitions;
+      }
+    }
+    const definition = definitions?.[propertyName];
+    if (!definition || definition.type !== "SLOT" || !definition.slotSettings) return [];
+    const settings = definition.slotSettings;
+    const children = this.host.childrenOf(this.handle.nodeId);
+    const violations: Array<"BELOW_MIN" | "ABOVE_MAX" | "HAS_NON_PREFERRED"> = [];
+    if (typeof settings.minChildren === "number" && children.length < settings.minChildren) violations.push("BELOW_MIN");
+    else if (typeof settings.maxChildren === "number" && children.length > settings.maxChildren) violations.push("ABOVE_MAX");
+    const matchesPreferredValue = (child: RuntimeNodeProxy): boolean => {
+      let source = child;
+      if (child.type === "INSTANCE") {
+        const metadata = child.instanceMetadata();
+        if (!this.host.hasLiveNode(metadata.mainComponentId)) return false;
+        source = this.host.proxyFor(metadata.mainComponentId);
+      }
+      if (source.type === "COMPONENT" && definition.preferredValues?.some((preferred) => preferred.type === "COMPONENT" && preferred.key === source.componentMetadata().key)) return true;
+      if (source.type === "COMPONENT_SET" && definition.preferredValues?.some((preferred) => preferred.type === "COMPONENT_SET" && preferred.key === source.componentSetMetadata().key)) return true;
+      const parent = source.parent;
+      return Boolean(source.type === "COMPONENT" && parent?.type === "COMPONENT_SET" && definition.preferredValues?.some((preferred) => preferred.type === "COMPONENT_SET" && preferred.key === parent.componentSetMetadata().key));
+    };
+    if (settings.allowPreferredValuesOnly && definition.preferredValues && children.some((child) => !matchesPreferredValue(child))) {
+      violations.push("HAS_NON_PREFERRED");
+    }
+    return violations;
   }
 
   get overrides(): DocumentInstanceMetadata["overrides"] {

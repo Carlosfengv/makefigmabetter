@@ -164,7 +164,10 @@ describe("Figma REST import planning", () => {
         {
           id: "1:1", type: "COMPONENT", name: "Card", clipsContent: true,
           relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 60 },
-          componentPropertyDefinitions: { Enabled: { type: "BOOLEAN", defaultValue: true } },
+          componentPropertyDefinitions: {
+            Enabled: { type: "BOOLEAN", defaultValue: true },
+            Content: { type: "SLOT", preferredValues: [{ type: "COMPONENT", key: "icon-key" }], slotSettings: { minChildren: 1, maxChildren: 2, allowPreferredValuesOnly: true } },
+          },
           children: [{ id: "1:2", type: "RECTANGLE", componentPropertyReferences: { visible: "Enabled" }, relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 5, y: 5, width: 90, height: 50 } }],
         },
         {
@@ -199,7 +202,14 @@ describe("Figma REST import planning", () => {
     expect(plan.nodes.filter((node) => node.parentId === component.id)).toHaveLength(1);
     expect(plan.nodes.filter((node) => node.parentId === instance.id)).toHaveLength(2);
     expect(plan.nodes.filter((node) => node.parentId === set.id)).toHaveLength(2);
-    expect(component.componentMetadata).toMatchObject({ key: "card-key", description: "Reusable card", componentPropertyDefinitions: { Enabled: { type: "BOOLEAN", defaultValue: true } } });
+    expect(component.componentMetadata).toMatchObject({
+      key: "card-key",
+      description: "Reusable card",
+      componentPropertyDefinitions: {
+        Enabled: { type: "BOOLEAN", defaultValue: true },
+        Content: { type: "SLOT", preferredValues: [{ type: "COMPONENT", key: "icon-key" }], slotSettings: { minChildren: 1, maxChildren: 2, allowPreferredValuesOnly: true } },
+      },
+    });
     expect(plan.nodes.find((node) => node.parentId === component.id)?.componentPropertyReferences).toEqual({ visible: "Enabled" });
     expect(instanceChild.componentPropertyReferences).toEqual({ visible: "Enabled" });
     expect(instance.instanceMetadata).toEqual({

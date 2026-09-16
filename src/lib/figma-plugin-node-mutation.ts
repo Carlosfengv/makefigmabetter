@@ -647,7 +647,16 @@ function validComponentProperty(name: string, definition: NonNullable<CanvasNode
   return name.length > 0 && name.length <= 256 && /^[^\u0000-\u001f]+$/u.test(name)
     && ["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"].includes(definition.type)
     && (definition.defaultValue === undefined || typeof definition.defaultValue === "string" || typeof definition.defaultValue === "boolean")
-    && (definition.description === undefined || typeof definition.description === "string");
+    && (definition.description === undefined || typeof definition.description === "string")
+    && (definition.preferredValues === undefined || ((definition.type === "INSTANCE_SWAP" || definition.type === "SLOT") && definition.preferredValues.length <= 256 && definition.preferredValues.every((value) => (value.type === "COMPONENT" || value.type === "COMPONENT_SET") && typeof value.key === "string" && value.key.length > 0 && value.key.length <= 256)))
+    && (definition.slotSettings === undefined || (definition.type === "SLOT" && validSlotSettings(definition.slotSettings)));
+}
+
+function validSlotSettings(settings: NonNullable<NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["slotSettings"]>): boolean {
+  if (Object.keys(settings).some((key) => !["stretchChildOnInsert", "displayEmptyByDefault", "minChildren", "maxChildren", "allowPreferredValuesOnly"].includes(key))) return false;
+  if ([settings.stretchChildOnInsert, settings.displayEmptyByDefault, settings.allowPreferredValuesOnly].some((value) => value !== undefined && typeof value !== "boolean")) return false;
+  if ([settings.minChildren, settings.maxChildren].some((value) => value !== undefined && value !== null && (!Number.isSafeInteger(value) || value < 0))) return false;
+  return !(typeof settings.minChildren === "number" && typeof settings.maxChildren === "number" && settings.minChildren > settings.maxChildren);
 }
 
 function withoutInstanceExtensions(extensions: CanvasNode["extensions"]) {

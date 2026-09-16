@@ -552,7 +552,7 @@ describe("M1 RuntimeSession", () => {
     const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
     const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
     expect(isRuntimeError(captureError(() => component.addComponentProperty("Bound", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "variable" })), "UNSUPPORTED_FEATURE")).toBe(true);
-    expect(isRuntimeError(captureError(() => component.addComponentProperty("Preferred", "TEXT", "value", { preferredValues: [] })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.addComponentProperty("Preferred", "TEXT", "value", { preferredValues: [] })), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => component.deleteComponentProperty(renamedSlot)), "UNSUPPORTED_FEATURE")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
 
@@ -562,6 +562,42 @@ describe("M1 RuntimeSession", () => {
     await session.commitAsync();
     expect((await session.getNodeByIdAsync(component.id))?.componentPropertyDefinitions).not.toHaveProperty(renamed);
     expect((await session.getNodeByIdAsync(instance.id))?.componentPropertyValues).not.toHaveProperty(renamed);
+  });
+
+  it("stores preferred values and reports Slot setting violations", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const component = session.createComponent();
+    const preferred = session.createComponent();
+    const swap = component.addComponentProperty("Icon", "INSTANCE_SWAP", preferred.id, {
+      preferredValues: [{ type: "COMPONENT", key: preferred.key }],
+    });
+    expect(component.componentPropertyDefinitions[swap]?.preferredValues).toEqual([{ type: "COMPONENT", key: preferred.key }]);
+
+    const slot = component.createSlot();
+    const slotName = Object.keys(component.componentPropertyDefinitions).find((name) => component.componentPropertyDefinitions[name]?.type === "SLOT")!;
+    component.editComponentProperty(slotName, {
+      description: "One preferred icon",
+      preferredValues: [{ type: "COMPONENT", key: preferred.key }],
+      slotSettings: { minChildren: 1, maxChildren: 1, allowPreferredValuesOnly: true, displayEmptyByDefault: false, stretchChildOnInsert: true },
+    });
+    expect(component.componentPropertyDefinitions[slotName]).toMatchObject({
+      type: "SLOT",
+      description: "One preferred icon",
+      preferredValues: [{ type: "COMPONENT", key: preferred.key }],
+      slotSettings: { minChildren: 1, maxChildren: 1, allowPreferredValuesOnly: true, displayEmptyByDefault: false, stretchChildOnInsert: true },
+    });
+    expect(slot.limitViolations).toEqual(["BELOW_MIN"]);
+
+    slot.appendChild(preferred.createInstance());
+    expect(slot.limitViolations).toEqual([]);
+    slot.appendChild(session.createRectangle());
+    expect(slot.limitViolations).toEqual(["ABOVE_MAX", "HAS_NON_PREFERRED"]);
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => component.editComponentProperty(slotName, { slotSettings: { minChildren: 2, maxChildren: 1 } })), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.editComponentProperty(swap, { slotSettings: { minChildren: 0 } })), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
   });
 
   it("authors component property references and applies Instance values to linked sublayers", async () => {

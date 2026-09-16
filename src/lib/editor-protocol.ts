@@ -17,6 +17,16 @@ export type DocumentComponentPropertyDefinition = {
   defaultValue?: string | boolean;
   description?: string;
   variantOptions?: string[];
+  preferredValues?: DocumentInstanceSwapPreferredValue[];
+  slotSettings?: DocumentSlotSettings;
+};
+export type DocumentInstanceSwapPreferredValue = { type: "COMPONENT" | "COMPONENT_SET"; key: string };
+export type DocumentSlotSettings = {
+  stretchChildOnInsert?: boolean;
+  displayEmptyByDefault?: boolean;
+  minChildren?: number | null;
+  maxChildren?: number | null;
+  allowPreferredValuesOnly?: boolean;
 };
 export type DocumentComponentPropertyReferences = {
   visible?: string;

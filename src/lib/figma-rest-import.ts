@@ -2612,14 +2612,49 @@ function componentPropertyDefinitions(value: unknown): Readonly<{
       preserved = true;
       continue;
     }
+    const rawPreferredValues = array(definition.preferredValues);
+    const parsedPreferredValues = rawPreferredValues?.flatMap((value) => {
+      const preferred = record(value);
+      const preferredType = string(preferred?.type);
+      const key = string(preferred?.key);
+      return preferred && (preferredType === "COMPONENT" || preferredType === "COMPONENT_SET") && key
+        ? [{ type: preferredType as "COMPONENT" | "COMPONENT_SET", key }]
+        : [];
+    });
+    const preferredValues = type === "INSTANCE_SWAP" || type === "SLOT" ? parsedPreferredValues : undefined;
+    const slotSettings = type === "SLOT" ? componentSlotSettings(definition.slotSettings) : undefined;
+    if (
+      (rawPreferredValues !== undefined && (preferredValues?.length !== rawPreferredValues.length)) ||
+      (definition.slotSettings !== undefined && !slotSettings)
+    ) preserved = true;
     definitions[name] = {
       type: type as NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["type"],
       ...(defaultValue === undefined ? {} : { defaultValue }),
       ...(string(definition.description) === undefined ? {} : { description: string(definition.description) }),
       ...(variantOptions === undefined ? {} : { variantOptions: variantOptions as string[] }),
+      ...(preferredValues === undefined ? {} : { preferredValues }),
+      ...(slotSettings === undefined ? {} : { slotSettings }),
     };
   }
   return { definitions, preserved };
+}
+
+function componentSlotSettings(value: unknown): NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["slotSettings"] | undefined {
+  if (value === undefined) return undefined;
+  const settings = record(value);
+  if (!settings || Object.keys(settings).some((key) => !["stretchChildOnInsert", "displayEmptyByDefault", "minChildren", "maxChildren", "allowPreferredValuesOnly"].includes(key))) return undefined;
+  const result: NonNullable<NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["slotSettings"]> = {};
+  for (const key of ["stretchChildOnInsert", "displayEmptyByDefault", "allowPreferredValuesOnly"] as const) {
+    if (settings[key] !== undefined && typeof settings[key] !== "boolean") return undefined;
+    if (typeof settings[key] === "boolean") result[key] = settings[key];
+  }
+  for (const key of ["minChildren", "maxChildren"] as const) {
+    const count = settings[key];
+    if (count !== undefined && count !== null && (!Number.isSafeInteger(count) || (count as number) < 0)) return undefined;
+    if (count === null || typeof count === "number") result[key] = count;
+  }
+  if (typeof result.minChildren === "number" && typeof result.maxChildren === "number" && result.minChildren > result.maxChildren) return undefined;
+  return result;
 }
 
 function componentSetMetadata(

@@ -38,6 +38,7 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("addComponentProperty");
     expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("detachInstance");
     expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("ComponentSetNode.componentPropertyDefinitions");
+    expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("SlotNode.limitViolations");
     expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("componentPropertyReferences");
     expect(runtimeCapability("node.sync-write")?.property).not.toMatch(/fills|strokes/);
     expect(runtimeCapability("paint-stack.runtime")).toMatchObject({ property: "fills" });
