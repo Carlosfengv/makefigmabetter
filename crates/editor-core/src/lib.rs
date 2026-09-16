@@ -4669,7 +4669,8 @@ impl Document {
                 node.position = *position;
                 self.refresh_group_bounds(before_parent_id);
                 self.refresh_group_bounds(*parent_id);
-                let dissolved_groups = self.dissolve_empty_groups_from(before_parent_id);
+                let dissolved_containers =
+                    self.dissolve_empty_groups_and_component_sets_from(before_parent_id);
                 let mut changes = vec![AppliedChange::NodeParentChanged {
                     id: *id,
                     before_parent_id,
@@ -4686,7 +4687,7 @@ impl Document {
                     })
                 }));
                 changes.extend(
-                    dissolved_groups
+                    dissolved_containers
                         .into_iter()
                         .map(|node| AppliedChange::NodeDeleted { node }),
                 );
@@ -4741,7 +4742,8 @@ impl Document {
                 }
                 self.retired_ids.insert(*id);
                 self.refresh_group_bounds(node.parent_id);
-                let dissolved_groups = self.dissolve_empty_groups_from(node.parent_id);
+                let dissolved_containers =
+                    self.dissolve_empty_groups_and_component_sets_from(node.parent_id);
                 let mut changes = vec![AppliedChange::NodeDeleted { node }];
                 changes.extend(reference_changes);
                 changes.extend(before_bounds.into_iter().filter_map(|(group_id, before)| {
@@ -4753,7 +4755,7 @@ impl Document {
                     })
                 }));
                 changes.extend(
-                    dissolved_groups
+                    dissolved_containers
                         .into_iter()
                         .map(|node| AppliedChange::NodeDeleted { node }),
                 );
@@ -7028,19 +7030,24 @@ impl Document {
         })
     }
 
-    fn dissolve_empty_groups_from(&mut self, mut group_id: Option<NodeId>) -> Vec<Node> {
+    fn dissolve_empty_groups_and_component_sets_from(
+        &mut self,
+        mut container_id: Option<NodeId>,
+    ) -> Vec<Node> {
         let mut dissolved = Vec::new();
-        while let Some(id) = group_id {
-            let Some(group) = self.nodes.get(&id).map(|node| node.as_ref().clone()) else {
+        while let Some(id) = container_id {
+            let Some(container) = self.nodes.get(&id).map(|node| node.as_ref().clone()) else {
                 break;
             };
-            if group.kind != NodeKind::Group || self.has_children(id) {
+            if !matches!(container.kind, NodeKind::Group | NodeKind::ComponentSet)
+                || self.has_children(id)
+            {
                 break;
             }
-            group_id = group.parent_id;
+            container_id = container.parent_id;
             self.retire_node(id);
-            self.refresh_group_bounds(group_id);
-            dissolved.push(group);
+            self.refresh_group_bounds(container_id);
+            dissolved.push(container);
         }
         dissolved
     }
@@ -13597,6 +13604,106 @@ mod tests {
         assert_eq!(
             document.node(child.id).map(|node| (node.x, node.y)),
             Some((12.0, 8.0))
+        );
+    }
+
+    #[test]
+    fn moving_the_last_component_out_of_a_component_set_dissolves_it_with_history() {
+        let mut document = Document::empty();
+        let mut component_set = node(1);
+        component_set.kind = NodeKind::ComponentSet;
+        component_set.name = "Button variants".into();
+        let mut component = node(2);
+        component.kind = NodeKind::Component;
+        component.name = "State=Default".into();
+        component.parent_id = Some(component_set.id);
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(component_set.clone()),
+                        Command::Create(component.clone()),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let grouped_hash = document.canonical_hash();
+
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetNodeParent {
+                        id: component.id,
+                        parent_id: None,
+                        position: PositionId {
+                            key: 20,
+                            actor: ActorId(7),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.node(component_set.id).is_none());
+        assert_eq!(document.node(component.id).unwrap().parent_id, None);
+        let dissolved_hash = document.canonical_hash();
+
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), grouped_hash);
+        assert_eq!(
+            document.node(component.id).unwrap().parent_id,
+            Some(component_set.id)
+        );
+        assert_eq!(
+            document.node(component_set.id).unwrap().kind,
+            NodeKind::ComponentSet
+        );
+
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), dissolved_hash);
+        assert!(document.node(component_set.id).is_none());
+        assert_eq!(document.node(component.id).unwrap().parent_id, None);
+    }
+
+    #[test]
+    fn deleting_the_last_component_dissolves_its_component_set_atomically() {
+        let mut document = Document::empty();
+        let mut component_set = node(1);
+        component_set.kind = NodeKind::ComponentSet;
+        let mut component = node(2);
+        component.kind = NodeKind::Component;
+        component.parent_id = Some(component_set.id);
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(component_set.clone()),
+                        Command::Create(component.clone()),
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let before = document.canonical_hash();
+
+        document
+            .submit(
+                transaction(1, vec![Command::Delete { id: component.id }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.node(component.id).is_none());
+        assert!(document.node(component_set.id).is_none());
+
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), before);
+        assert_eq!(
+            document.node(component.id).unwrap().parent_id,
+            Some(component_set.id)
         );
     }
 

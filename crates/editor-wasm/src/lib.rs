@@ -7450,6 +7450,78 @@ mod tests {
     }
 
     #[test]
+    fn component_set_last_child_reparent_dissolves_through_the_batch_bridge() {
+        let mut engine = DocumentEngine::new();
+        let set_id = "00000000-0000-4000-8000-000000000630";
+        let component_id = "00000000-0000-4000-8000-000000000631";
+        let component_set: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": set_id, "name": "Button variants", "kind": "componentSet",
+            "x": 0.0, "y": 0.0, "width": 240.0, "height": 120.0,
+            "fill": "transparent", "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false, "contentsHidden": false,
+            "positionId": "00000000000000000000000000000063:00000000000000000000000000000000"
+        }))
+        .unwrap();
+        let mut component = component_set.clone();
+        component.id = component_id.into();
+        component.parent_id = Some(set_id.into());
+        component.name = "State=Default".into();
+        component.kind = "component".into();
+        component.width = 100.0;
+        component.height = 40.0;
+        component.position_id =
+            Some("00000000000000000000000000000064:00000000000000000000000000000000".into());
+        engine
+            .submit_batch(
+                NodeId(0x630),
+                0,
+                vec![
+                    BatchCommand::Create {
+                        node: component_set,
+                    },
+                    BatchCommand::Create { node: component },
+                ],
+            )
+            .unwrap();
+        let grouped_hash = engine.document.canonical_hash();
+
+        engine
+            .submit_batch(
+                NodeId(0x631),
+                1,
+                vec![BatchCommand::Reparent {
+                    parent_ids: vec![ParentUpdate {
+                        id: component_id.into(),
+                        parent_id: None,
+                        position_id:
+                            "00000000000000000000000000000065:00000000000000000000000000000000"
+                                .into(),
+                    }],
+                }],
+            )
+            .unwrap();
+
+        let set_core_id = parse_id(set_id).unwrap();
+        let component_core_id = parse_id(component_id).unwrap();
+        assert!(engine.document.node(set_core_id).is_none());
+        assert_eq!(
+            engine.document.node(component_core_id).unwrap().parent_id,
+            None
+        );
+
+        engine.document.undo().unwrap();
+        assert_eq!(engine.document.canonical_hash(), grouped_hash);
+        assert_eq!(
+            engine.document.node(component_core_id).unwrap().parent_id,
+            Some(set_core_id)
+        );
+        assert_eq!(
+            engine.document.node(set_core_id).unwrap().kind,
+            NodeKind::ComponentSet
+        );
+    }
+
+    #[test]
     fn parametric_shape_geometry_bridge_returns_core_derived_clockwise_outline() {
         let polygon: serde_json::Value = serde_json::from_str(
             &parametric_shape_outline_json(100.0, 80.0, r#"{"kind":"polygon","pointCount":5}"#)
