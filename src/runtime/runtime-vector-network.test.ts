@@ -104,6 +104,32 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(extensionsWithRuntimeVectorNetwork(extensions, undefined)).toEqual({ keep: [7] });
   });
 
+  it("materializes one globally styled filled loop plus open branch edges", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 10, y: 20 }, { x: -10, y: 10 }],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 }, { start: 0, end: 3 }],
+      regions: [{ windingRule: "EVENODD" as const, loops: [[0, 1, 2]] }],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `filled-${sequence++}`, {
+      strokeCapStart: "none",
+      strokeCapEnd: "none",
+      strokeJoin: "round",
+    });
+
+    expect(converted).toMatchObject({
+      network,
+      strokeJoin: "round",
+      path: {
+        fillRule: "evenOdd",
+        subpaths: [
+          { closed: true, points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 10, y: 20 }] },
+          { closed: false, points: [{ x: 0, y: 0 }, { x: -10, y: 10 }] },
+        ],
+      },
+    });
+  });
+
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
@@ -111,7 +137,7 @@ describe("Runtime VectorNetwork adapter", () => {
       vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
       regions: [{ windingRule: "NONZERO", loops: [[0, 1]] }],
-    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("regions") });
+    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("at least three") });
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0, strokeCap: "ROUND" }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],

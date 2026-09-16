@@ -291,7 +291,12 @@ function canonicalBranchedNetwork(
   allocatePointId: () => string,
   defaults: Readonly<{ strokeCapStart: StrokeCap; strokeCapEnd: StrokeCap; strokeJoin: StrokeJoin }>,
 ): NetworkConversion | { reason: string } {
-  if (input.regions?.length) return { reason: "Branched VectorNetwork regions remain outside the globally styled VectorPath subset." };
+  const regions = input.regions ?? [];
+  if (regions.length > 1) return { reason: "Branched VectorNetwork supports at most one globally styled region." };
+  const region = regions[0];
+  if (region && (!validRegion(region) || region.fills !== undefined || region.fillStyleId !== undefined)) {
+    return { reason: "Canonical VectorPath cannot represent region-local fills or fill styles." };
+  }
   if (input.vertices.some((vertex) => vertex.cornerRadius !== undefined)) return { reason: "Canonical VectorPath cannot represent per-vertex corner radii." };
   if (input.vertices.some((vertex) => vertex.strokeJoin !== undefined)) return { reason: "Branched VectorNetwork vertices cannot preserve explicit per-vertex stroke joins." };
   if (input.vertices.some((vertex) => vertex.strokeCap !== undefined) || defaults.strokeCapStart !== "none" || defaults.strokeCapEnd !== "none") {
@@ -299,7 +304,6 @@ function canonicalBranchedNetwork(
   }
   const connectedVertices = new Set(input.segments.flatMap((segment) => [segment.start, segment.end]));
   const isolated = input.vertices.map((_, index) => index).filter((index) => !connectedVertices.has(index));
-  if (input.segments.length + isolated.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
   const edgeKeys = new Set<string>();
   for (const segment of input.segments) {
     const key = segment.start < segment.end ? `${segment.start}:${segment.end}` : `${segment.end}:${segment.start}`;
@@ -317,16 +321,40 @@ function canonicalBranchedNetwork(
       pointType: vertex.handleMirroring === "ANGLE_AND_LENGTH" ? "mirrored" as const : vertex.handleMirroring === "ANGLE" ? "asymmetric" as const : "corner" as const,
     };
   };
-  const subpaths: DocumentVectorPath["subpaths"] = input.segments.map((segment) => ({
-    closed: false,
-    points: [
-      point(segment.start, undefined, segment.tangentStart),
-      point(segment.end, segment.tangentEnd, undefined),
-    ],
-  }));
+  const loopSegmentIndexes = new Set<number>();
+  const subpaths: DocumentVectorPath["subpaths"] = [];
+  for (const loop of region?.loops ?? []) {
+    if (loop.length < 3 || loop.some((segmentIndex) => segmentIndex >= input.segments.length || loopSegmentIndexes.has(segmentIndex))) {
+      return { reason: "Branched VectorNetwork region loops must contain at least three unique in-range segments." };
+    }
+    const segments = loop.map((segmentIndex) => input.segments[segmentIndex]!);
+    if (segments.some((segment, index) => segment.end !== segments[(index + 1) % segments.length]!.start)) {
+      return { reason: "Branched VectorNetwork region loops must form directed closed chains." };
+    }
+    loop.forEach((segmentIndex) => loopSegmentIndexes.add(segmentIndex));
+    subpaths.push({
+      closed: true,
+      points: segments.map((segment, index) => point(
+        segment.start,
+        segments[(index + segments.length - 1) % segments.length]!.tangentEnd,
+        segment.tangentStart,
+      )),
+    });
+  }
+  input.segments.forEach((segment, segmentIndex) => {
+    if (loopSegmentIndexes.has(segmentIndex)) return;
+    subpaths.push({
+      closed: false,
+      points: [
+        point(segment.start, undefined, segment.tangentStart),
+        point(segment.end, segment.tangentEnd, undefined),
+      ],
+    });
+  });
   isolated.forEach((vertexIndex) => subpaths.push({ closed: false, points: [point(vertexIndex)] }));
+  if (subpaths.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
   return {
-    path: { fillRule: "nonZero", subpaths },
+    path: { fillRule: region?.windingRule === "EVENODD" ? "evenOdd" : "nonZero", subpaths },
     strokeCapStart: "none",
     strokeCapEnd: "none",
     strokeJoin: defaults.strokeJoin,
