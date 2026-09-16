@@ -95,7 +95,7 @@ describe("M0 runtime capability matrix", () => {
       property: "embedData|linkUnfurlData|createLinkPreviewAsync",
       surface: "write",
     });
-    expect(runtimeCapability("node.export-async")).toMatchObject({ status: "partial", surface: "export" });
+    expect(runtimeCapability("node.export-async")).toMatchObject({ status: "partial", surface: "export", property: "exportSettings|exportAsync" });
     expect(runtimeCapability("runtime.commit-async")).toMatchObject({ status: "partial" });
     expect(runtimeCapability("plugin.sandbox")).toMatchObject({ status: "partial", surface: "plugin", errorCode: "PERMISSION_DENIED" });
     expect(runtimeCapability("widget.runtime")).toMatchObject({ status: "partial", errorCode: "PERMISSION_DENIED" });

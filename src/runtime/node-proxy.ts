@@ -102,6 +102,18 @@ export type RuntimeTextDecorationThickness =
   | Readonly<{ unit: "AUTO" }>;
 export type RuntimeLeadingTrim = "CAP_HEIGHT" | "NONE";
 export type RuntimeTextListOptions = Readonly<{ type: "ORDERED" | "UNORDERED" | "NONE" }>;
+export type RuntimeExportConstraint = Readonly<{ type: "SCALE" | "WIDTH" | "HEIGHT"; value: number }>;
+export type RuntimeExportColorProfile = "DOCUMENT" | "SRGB" | "DISPLAY_P3_V4";
+type RuntimeExportPresetBase = Readonly<{
+  contentsOnly?: boolean;
+  useAbsoluteBounds?: boolean;
+  suffix?: string;
+  colorProfile?: RuntimeExportColorProfile;
+}>;
+export type RuntimeNodeExportSetting =
+  | (RuntimeExportPresetBase & Readonly<{ format: "PNG" | "JPG"; constraint?: RuntimeExportConstraint }>)
+  | (RuntimeExportPresetBase & Readonly<{ format: "SVG"; svgOutlineText?: boolean; svgIdAttribute?: boolean; svgSimplifyStroke?: boolean }>)
+  | (RuntimeExportPresetBase & Readonly<{ format: "PDF" }>);
 
 export type M1SceneNodeType = ExternalNodeType;
 export type M1NodeType = "DOCUMENT" | "PAGE" | M1SceneNodeType;
@@ -121,6 +133,9 @@ export type RuntimeStrokeCap = "NONE" | "ROUND" | "SQUARE" | "ARROW_LINES" | "AR
 /** Stable Figma-compatible sentinel returned by properties whose projected
  * Canonical values differ. Callers compare identity with `runtime.mixed`. */
 export const RUNTIME_MIXED = Symbol("figma.mixed");
+const RUNTIME_EXPORT_SETTINGS_EXTENSION = "figma.rest.export-settings.v1";
+const MAX_RUNTIME_EXPORT_SETTINGS = 32;
+const MAX_RUNTIME_EXPORT_SETTINGS_BYTES = 64 * 1024;
 export type RuntimeStrokeCapValue = RuntimeStrokeCap | typeof RUNTIME_MIXED;
 export type RuntimeStrokeJoin = "MITER" | "BEVEL" | "ROUND";
 export type RuntimeVectorPath = Readonly<{ windingRule: "NONZERO" | "EVENODD" | "NONE"; data: string }>;
@@ -3392,11 +3407,32 @@ export class RuntimeNodeProxy {
     this.host.setRelaunchData(this.handle.nodeId, data);
   }
 
+  get exportSettings(): readonly RuntimeNodeExportSetting[] {
+    const bytes = (this.read().extensions as Record<string, unknown> | undefined)?.[RUNTIME_EXPORT_SETTINGS_EXTENSION];
+    return runtimeExportSettingsFromExtension(bytes);
+  }
+
+  set exportSettings(value: readonly RuntimeNodeExportSetting[]) {
+    this.assertLive();
+    this.assertMutable();
+    const settings = normalizeRuntimeExportSettings(value, this.handle.nodeId);
+    const encoded = [...new TextEncoder().encode(JSON.stringify(settings))];
+    if (encoded.length > MAX_RUNTIME_EXPORT_SETTINGS_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    const extensions: Record<string, number[]> = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+      ? structuredClone(node.extensions as Record<string, number[]>)
+      : {};
+    if (settings.length) extensions[RUNTIME_EXPORT_SETTINGS_EXTENSION] = encoded;
+    else delete extensions[RUNTIME_EXPORT_SETTINGS_EXTENSION];
+    this.host.enqueueUpdate(this.handle.nodeId, { extensions });
+  }
+
   /** Figma-shaped M4D export entry. The result is derived from a confirmed,
    * RevisionLease-frozen scene rather than this proxy's pending local overlay. */
+  exportAsync(): Promise<Uint8Array>;
   exportAsync(settings: RuntimeSvgExportSettings): Promise<string>;
   exportAsync(settings: RuntimePngExportSettings): Promise<Uint8Array>;
-  exportAsync(settings: RuntimeExportSettings): Promise<string | Uint8Array> {
+  exportAsync(settings: RuntimeExportSettings = { format: "PNG" }): Promise<string | Uint8Array> {
     this.assertLive();
     if (settings?.format === "SVG_STRING") return this.host.exportNodeSvgString(this.handle.nodeId);
     if (settings?.format === "PNG") return this.host.exportNodePng(this.handle.nodeId, settings);
@@ -4271,6 +4307,77 @@ const SHAPE_WITH_TEXT_TYPES = new Set<ShapeWithTextType>([
   "HEXAGON", "CHEVRON", "PENTAGON", "OCTAGON", "STAR", "PLUS", "ARROW_LEFT", "ARROW_RIGHT",
   "SUMMING_JUNCTION", "OR", "SPEECH_BUBBLE", "INTERNAL_STORAGE",
 ]);
+
+function runtimeExportSettingsFromExtension(value: unknown): readonly RuntimeNodeExportSetting[] {
+  if (!Array.isArray(value) || value.length > MAX_RUNTIME_EXPORT_SETTINGS_BYTES || !value.every(runtimeExtensionByte)) return Object.freeze([]);
+  try {
+    return Object.freeze(normalizeRuntimeExportSettings(JSON.parse(new TextDecoder().decode(Uint8Array.from(value)))));
+  } catch {
+    return Object.freeze([]);
+  }
+}
+
+function normalizeRuntimeExportSettings(value: unknown, nodeId?: string): RuntimeNodeExportSetting[] {
+  if (!Array.isArray(value)) throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  if (value.length > MAX_RUNTIME_EXPORT_SETTINGS) throw runtimeError("RESOURCE_LIMIT", nodeId ? { nodeId } : undefined);
+  return value.map((setting) => normalizeRuntimeExportSetting(setting, nodeId));
+}
+
+function normalizeRuntimeExportSetting(value: unknown, nodeId?: string): RuntimeNodeExportSetting {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  const setting = value as Record<string, unknown>;
+  const format = setting.format;
+  if (format !== "PNG" && format !== "JPG" && format !== "SVG" && format !== "PDF") {
+    throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  }
+  const allowed = new Set(["format", "contentsOnly", "useAbsoluteBounds", "suffix", "colorProfile"]);
+  if (format === "PNG" || format === "JPG") allowed.add("constraint");
+  if (format === "SVG") {
+    allowed.add("svgOutlineText");
+    allowed.add("svgIdAttribute");
+    allowed.add("svgSimplifyStroke");
+  }
+  if (Object.keys(setting).some((key) => !allowed.has(key))) throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  for (const key of ["contentsOnly", "useAbsoluteBounds"] as const) {
+    if (setting[key] !== undefined && typeof setting[key] !== "boolean") throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  }
+  if (setting.suffix !== undefined && (typeof setting.suffix !== "string" || setting.suffix.length > 256 || /[\u0000-\u001f]/u.test(setting.suffix))) {
+    throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  }
+  if (setting.colorProfile !== undefined && setting.colorProfile !== "DOCUMENT" && setting.colorProfile !== "SRGB" && setting.colorProfile !== "DISPLAY_P3_V4") {
+    throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  }
+  const normalized: Record<string, unknown> = { format };
+  for (const key of ["contentsOnly", "useAbsoluteBounds", "suffix", "colorProfile"] as const) {
+    if (setting[key] !== undefined) normalized[key] = setting[key];
+  }
+  if (format === "PNG" || format === "JPG") {
+    if (setting.constraint !== undefined) normalized.constraint = normalizeRuntimeExportConstraint(setting.constraint, nodeId);
+  } else if (format === "SVG") {
+    for (const key of ["svgOutlineText", "svgIdAttribute", "svgSimplifyStroke"] as const) {
+      if (setting[key] !== undefined && typeof setting[key] !== "boolean") throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+      if (setting[key] !== undefined) normalized[key] = setting[key];
+    }
+  }
+  return normalized as RuntimeNodeExportSetting;
+}
+
+function normalizeRuntimeExportConstraint(value: unknown, nodeId?: string): RuntimeExportConstraint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  const constraint = value as Record<string, unknown>;
+  if (Object.keys(constraint).some((key) => key !== "type" && key !== "value")) throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  const type = constraint.type;
+  const amount = constraint.value;
+  if ((type !== "SCALE" && type !== "WIDTH" && type !== "HEIGHT") || typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+    throw runtimeError("INVALID_ARGUMENT", nodeId ? { nodeId } : undefined);
+  }
+  if ((type === "SCALE" && amount > 8) || (type !== "SCALE" && amount > 32_768)) throw runtimeError("RESOURCE_LIMIT", nodeId ? { nodeId } : undefined);
+  return { type, value: amount };
+}
+
+function runtimeExtensionByte(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 255;
+}
 
 function runtimeTextWrapStyle(value: "auto" | "balance" | "pretty"): "AUTO" | "BALANCE" | "PRETTY" {
   return value === "balance" ? "BALANCE" : value === "pretty" ? "PRETTY" : "AUTO";

@@ -3998,6 +3998,39 @@ describe("M1 RuntimeSession", () => {
     await expect(session.exportNodeSvgString("missing")).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "NODE_NOT_FOUND"));
   });
 
+  it("round-trips validated per-node export presets through the ordinary transaction fence", async () => {
+    const importedSettings = [{ format: "SVG", suffix: "-source", svgOutlineText: true }];
+    const projection: RuntimeProjection = {
+      revision: 3,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", parentId: "document", name: "Page" },
+        { id: "export-preset", type: "RECTANGLE", parentId: "page", name: "Preset", extensions: { "figma.rest.export-settings.v1": [...new TextEncoder().encode(JSON.stringify(importedSettings))] } },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "export-presets", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const rectangle = (await session.getNodeByIdAsync("export-preset"))!;
+
+    expect(rectangle.exportSettings).toEqual(importedSettings);
+    rectangle.exportSettings = [
+      { format: "PNG", suffix: "@2x", constraint: { type: "SCALE", value: 2 }, colorProfile: "SRGB" },
+      { format: "PDF", contentsOnly: true },
+    ];
+    expect(rectangle.exportSettings).toEqual([
+      { format: "PNG", suffix: "@2x", colorProfile: "SRGB", constraint: { type: "SCALE", value: 2 } },
+      { format: "PDF", contentsOnly: true },
+    ]);
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => { rectangle.exportSettings = [{ format: "PNG", constraint: { type: "SCALE", value: 9 } }]; }), "RESOURCE_LIMIT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { rectangle.exportSettings = [{ format: "SVG", svgOutlineText: "yes" } as never]; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    rectangle.exportSettings = [];
+    expect(rectangle.exportSettings).toEqual([]);
+    expect(session.projectionStore.getNode("export-preset")?.extensions?.["figma.rest.export-settings.v1"]).toBeUndefined();
+  });
+
   it("requests live Boolean geometry for the frozen target subtree revision", async () => {
     const boolean = { ...createNode("booleanOperation", 30, 40), id: "exported-boolean", pageId: "page", width: 100, height: 80, fill: "#0048ff", stroke: "transparent" };
     const first = { ...createNode("vector", 0, 0), id: "boolean-first", pageId: "page", parentId: boolean.id, width: 100, height: 80 };
@@ -4036,8 +4069,10 @@ describe("M1 RuntimeSession", () => {
     const rectangle = (await session.getNodeByIdAsync(canvasRectangle.id))!;
     rectangle.x = 90;
 
+    await expect(rectangle.exportAsync()).resolves.toEqual(Uint8Array.of(137, 80, 78, 71));
+    expect(rasterizePng).toHaveBeenLastCalledWith(expect.objectContaining({ scale: 1 }));
     await expect(rectangle.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 } })).resolves.toEqual(Uint8Array.of(137, 80, 78, 71));
-    expect(rasterizePng).toHaveBeenCalledWith(expect.objectContaining({ width: 72, height: 62, scale: 2, svg: expect.stringContaining('matrix(1 0 0 1 10 20)') }));
+    expect(rasterizePng).toHaveBeenLastCalledWith(expect.objectContaining({ width: 72, height: 62, scale: 2, svg: expect.stringContaining('matrix(1 0 0 1 10 20)') }));
     await expect(rectangle.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 0 } })).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "INVALID_ARGUMENT"));
   });
 

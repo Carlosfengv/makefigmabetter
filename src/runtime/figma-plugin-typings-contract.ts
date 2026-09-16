@@ -70,6 +70,9 @@ export function assertFigmaPluginTypingsContract(
   void rectangle.getSharedPluginDataKeys("namespace");
   rectangle.setRelaunchData({ edit: "Edit this node", open: "" });
   void rectangle.getRelaunchData();
+  rectangle.exportSettings = [{ format: "PNG", suffix: "@2x", constraint: { type: "SCALE", value: 2 } }];
+  void rectangle.exportSettings;
+  void rectangle.exportAsync();
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) {
     floatVariable.setVariableCodeSyntax("WEB", "--spacing");

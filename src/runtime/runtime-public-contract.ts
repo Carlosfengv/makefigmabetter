@@ -87,6 +87,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void rectangle.getSharedPluginDataKeys("namespace");
   rectangle.setRelaunchData({ edit: "Edit this node", open: "" });
   void rectangle.getRelaunchData();
+  rectangle.exportSettings = [{ format: "PNG", suffix: "@2x", constraint: { type: "SCALE", value: 2 } }];
+  void rectangle.exportSettings;
+  void rectangle.exportAsync();
   const highlight = runtime.currentPage.findOne((candidate) => candidate.type === "HIGHLIGHT");
   if (highlight?.type === "HIGHLIGHT") {
     void highlight.vectorPaths;

@@ -248,10 +248,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
     nodeTypes: ["SCENE"],
-    property: "exportAsync",
+    property: "exportSettings|exportAsync",
     surface: "export",
     status: "partial",
-    limitation: "exportAsync({ format: SVG_STRING | PNG }) freezes the last confirmed Canvas-backed projection in a RevisionLease and reuses its shared Scene IR; PNG rasterizes that frozen SVG through the bounded export service. Structural SVG cannot sample the backdrop needed by node-level or paint-layer LINEAR_BURN/LINEAR_DODGE, so SVG and PNG report and use a Normal-compositing fallback for those modes. PDF and narrow non-Canvas projections remain unsupported.",
+    limitation: "exportSettings reads imported Figma PNG/JPG/SVG/PDF presets from their durable Canonical extension and atomically replaces them after bounded field validation; empty arrays clear the preset metadata. exportAsync() defaults to a 1x PNG, while exportAsync({ format: SVG_STRING | PNG }) freezes the last confirmed Canvas-backed projection in a RevisionLease and reuses its shared Scene IR; PNG rasterizes that frozen SVG through the bounded export service. Stored JPG/SVG/PDF presets do not imply those execution formats are available. Structural SVG cannot sample the backdrop needed by node-level or paint-layer LINEAR_BURN/LINEAR_DODGE, so SVG and PNG report and use a Normal-compositing fallback for those modes. PDF and narrow non-Canvas projections remain unsupported.",
     errorCode: "UNSUPPORTED_FEATURE",
   },
   {
