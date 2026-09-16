@@ -175,6 +175,15 @@ export interface RuntimeNodeHost {
   createInstance(componentId: string): RuntimeContainerNodeProxy;
   createSlot(componentId: string): RuntimeContainerNodeProxy;
   detachInstance(instanceId: string): RuntimeContainerNodeProxy;
+  addComponentProperty(
+    componentId: string,
+    propertyName: string,
+    type: RuntimeComponentPropertyType,
+    defaultValue: string | boolean | RuntimeVariableAlias,
+    options?: RuntimeComponentPropertyOptions,
+  ): string;
+  editComponentProperty(componentId: string, propertyName: string, value: RuntimeComponentPropertyEdit): string;
+  deleteComponentProperty(componentId: string, propertyName: string): void;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -197,6 +206,21 @@ export interface RuntimeNodeHost {
   hasImageHash(hash: string): boolean;
   allocateRuntimeId(): string;
 }
+
+export type RuntimeComponentPropertyType = "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT";
+export type RuntimeVariableAlias = Readonly<{ type: "VARIABLE_ALIAS"; id: string }>;
+export type RuntimeComponentPropertyOptions = Readonly<{
+  preferredValues?: readonly Readonly<{ type: "COMPONENT" | "COMPONENT_SET"; key: string }>[];
+  description?: string;
+  slotSettings?: Readonly<Record<string, unknown>>;
+}>;
+export type RuntimeComponentPropertyEdit = Readonly<{
+  name?: string;
+  defaultValue?: string | boolean | RuntimeVariableAlias;
+  preferredValues?: readonly Readonly<{ type: "COMPONENT" | "COMPONENT_SET"; key: string }>[];
+  description?: string;
+  slotSettings?: Readonly<Record<string, unknown>>;
+}>;
 
 export type RuntimeLetterSpacing = Readonly<{ value: number; unit: "PIXELS" }>;
 export type RuntimeLineHeight = RuntimeParagraphLineHeight;
@@ -1897,6 +1921,29 @@ export class RuntimeNodeProxy {
     if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     this.assertMutable();
     return this.host.createSlot(this.handle.nodeId);
+  }
+
+  addComponentProperty(
+    propertyName: string,
+    type: RuntimeComponentPropertyType,
+    defaultValue: string | boolean | RuntimeVariableAlias,
+    options?: RuntimeComponentPropertyOptions,
+  ): string {
+    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    return this.host.addComponentProperty(this.handle.nodeId, propertyName, type, defaultValue, options);
+  }
+
+  editComponentProperty(propertyName: string, value: RuntimeComponentPropertyEdit): string {
+    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    return this.host.editComponentProperty(this.handle.nodeId, propertyName, value);
+  }
+
+  deleteComponentProperty(propertyName: string): void {
+    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    this.host.deleteComponentProperty(this.handle.nodeId, propertyName);
   }
 
   setProperties(properties: Readonly<Record<string, string | boolean>>): void {

@@ -604,6 +604,48 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("writes Component property definitions and linked Instance defaults through Core", async () => {
+    const componentId = "00000000-0000-4000-8000-000000000046";
+    const instanceId = "00000000-0000-4000-8000-000000000047";
+    const componentMetadata = { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} };
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 120, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "component-properties-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const component = session.currentPage.children.find((node) => node.id === componentId)!;
+    const propertyName = component.addComponentProperty("Enabled", "BOOLEAN", true);
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({
+        type: "update",
+        id: componentId,
+        patch: { componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) },
+      }),
+      expect.objectContaining({
+        type: "update",
+        id: instanceId,
+        patch: { instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) },
+      }),
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: componentId, componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) }),
+      expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) }),
+    ]));
+    bridge.close();
+    await commit;
+  });
+
   it("keeps component conversion as an ordering barrier before same-turn instance creation", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

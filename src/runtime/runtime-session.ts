@@ -1,6 +1,15 @@
 import { RuntimeContainerNodeProxy, type RuntimeContainerHost } from "./container-node-proxy";
 import { NodeRegistry, type RuntimeNodeHandle } from "./node-registry";
-import { M1_NODE_TYPES, RuntimeNodeProxy, type M1NodeType, type M1SceneNodeType } from "./node-proxy";
+import {
+  M1_NODE_TYPES,
+  RuntimeNodeProxy,
+  type M1NodeType,
+  type M1SceneNodeType,
+  type RuntimeComponentPropertyEdit,
+  type RuntimeComponentPropertyOptions,
+  type RuntimeComponentPropertyType,
+  type RuntimeVariableAlias,
+} from "./node-proxy";
 import { runtimeError } from "./runtime-errors";
 import {
   RuntimeProjectionStore,
@@ -946,6 +955,135 @@ export class RuntimeSession implements RuntimeContainerHost {
     ]);
     return this.containerFor(id);
   }
+  addComponentProperty(
+    componentId: string,
+    propertyName: string,
+    type: RuntimeComponentPropertyType,
+    defaultValue: string | boolean | RuntimeVariableAlias,
+    options?: RuntimeComponentPropertyOptions,
+  ): string {
+    this.assertOpen();
+    const { metadata, linkedInstances } = this.mutableComponentPropertyContext(componentId);
+    validateRuntimeComponentPropertyBaseName(propertyName, componentId);
+    validateRuntimeComponentPropertyOptions(options, componentId);
+    if (options?.description !== undefined && type !== "SLOT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    const definition = runtimeComponentPropertyDefinition(type, defaultValue, options?.description, componentId);
+    if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    }
+    const name = `${propertyName}#${this.createId()}`;
+    if (metadata.componentPropertyDefinitions[name]) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: componentId,
+      patch: {
+        componentMetadata: {
+          ...structuredClone(metadata),
+          componentPropertyDefinitions: {
+            ...structuredClone(metadata.componentPropertyDefinitions),
+            [name]: definition,
+          },
+        },
+      },
+    }];
+    if (definition.type !== "SLOT" && definition.defaultValue !== undefined) {
+      linkedInstances.forEach((instance) => {
+        const instanceMetadata = instance.instanceMetadata as Record<string, unknown>;
+        const componentProperties = instanceMetadata.componentProperties as Record<string, string | boolean>;
+        operations.push({
+          type: "update",
+          nodeId: instance.id,
+          patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties: { ...structuredClone(componentProperties), [name]: definition.defaultValue! } } },
+        });
+      });
+    }
+    this.enqueueOperations(operations);
+    return name;
+  }
+
+  editComponentProperty(componentId: string, propertyName: string, value: RuntimeComponentPropertyEdit): string {
+    this.assertOpen();
+    const { metadata, linkedInstances } = this.mutableComponentPropertyContext(componentId);
+    const existing = metadata.componentPropertyDefinitions[propertyName];
+    if (!existing || !value || typeof value !== "object" || Array.isArray(value)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    }
+    validateRuntimeComponentPropertyOptions(value, componentId);
+    const keys = Object.keys(value);
+    if (keys.some((key) => !["name", "defaultValue", "preferredValues", "description", "slotSettings"].includes(key))) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    }
+    if (value.defaultValue !== undefined && (existing.type === "VARIANT" || existing.type === "SLOT")) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    }
+    if (value.description !== undefined && existing.type !== "SLOT") {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    }
+    const definition = value.defaultValue === undefined
+      ? { ...structuredClone(existing), ...(value.description === undefined ? {} : { description: value.description }) }
+      : runtimeComponentPropertyDefinition(existing.type, value.defaultValue, value.description ?? existing.description, componentId);
+    if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    }
+    const nextName = value.name === undefined ? propertyName : `${validatedRuntimeComponentPropertyBaseName(value.name, componentId)}#${this.createId()}`;
+    if (nextName !== propertyName && metadata.componentPropertyDefinitions[nextName]) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    }
+    const definitions = structuredClone(metadata.componentPropertyDefinitions);
+    delete definitions[propertyName];
+    definitions[nextName] = definition;
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: componentId,
+      patch: { componentMetadata: { ...structuredClone(metadata), componentPropertyDefinitions: definitions } },
+    }];
+    linkedInstances.forEach((instance) => {
+      const instanceMetadata = instance.instanceMetadata as Record<string, unknown>;
+      const componentProperties = { ...structuredClone(instanceMetadata.componentProperties as Record<string, string | boolean>) };
+      const current = componentProperties[propertyName];
+      if (nextName !== propertyName) delete componentProperties[propertyName];
+      if (definition.type !== "SLOT") {
+        const nextDefault = definition.defaultValue;
+        if (nextDefault !== undefined && (current === undefined || current === existing.defaultValue)) componentProperties[nextName] = nextDefault;
+        else if (current !== undefined) componentProperties[nextName] = current;
+      }
+      operations.push({ type: "update", nodeId: instance.id, patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties } } });
+    });
+    if (existing.type === "SLOT" && nextName !== propertyName) {
+      const roots = new Set([componentId, ...linkedInstances.map((instance) => instance.id)]);
+      this.projectionStore.listLiveNodes()
+        .filter((node) => node.type === "SLOT" && runtimeSlotPropertyName(node) === propertyName && runtimeNodeHasAncestorIn(node, roots, (id) => this.projectionStore.getNode(id)))
+        .forEach((slot) => operations.push({
+          type: "update",
+          nodeId: slot.id,
+          patch: { slotMetadata: { ...(structuredClone(slot.slotMetadata as Record<string, unknown>)), propertyName: nextName } },
+        }));
+    }
+    this.enqueueOperations(operations);
+    return nextName;
+  }
+
+  deleteComponentProperty(componentId: string, propertyName: string): void {
+    this.assertOpen();
+    const { metadata, linkedInstances } = this.mutableComponentPropertyContext(componentId);
+    const existing = metadata.componentPropertyDefinitions[propertyName];
+    if (!existing) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    if (existing.type === "SLOT" || existing.type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    const definitions = structuredClone(metadata.componentPropertyDefinitions);
+    delete definitions[propertyName];
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: componentId,
+      patch: { componentMetadata: { ...structuredClone(metadata), componentPropertyDefinitions: definitions } },
+    }];
+    linkedInstances.forEach((instance) => {
+      const instanceMetadata = instance.instanceMetadata as Record<string, unknown>;
+      const componentProperties = { ...structuredClone(instanceMetadata.componentProperties as Record<string, string | boolean>) };
+      delete componentProperties[propertyName];
+      operations.push({ type: "update", nodeId: instance.id, patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties } } });
+    });
+    this.enqueueOperations(operations);
+  }
   createTextPath(vectorProxy: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
     this.assertOpen();
     if (vectorProxy.handle.sessionId !== this.sessionId || vectorProxy.removed || !["VECTOR", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "LINE"].includes(vectorProxy.type)) {
@@ -1864,6 +2002,28 @@ export class RuntimeSession implements RuntimeContainerHost {
     void task.promise.finally(() => this.tasks.delete(task as RuntimeTask<unknown>)).catch(() => undefined);
   }
 
+  private mutableComponentPropertyContext(componentId: string): Readonly<{
+    metadata: DocumentComponentMetadata;
+    linkedInstances: readonly RuntimeProjectionNode[];
+  }> {
+    const component = this.projectionStore.getNode(componentId);
+    const metadata = component?.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!component || component.removed === true || component.type !== "COMPONENT" || !metadata) {
+      throw runtimeError("NODE_NOT_FOUND", { nodeId: componentId });
+    }
+    if (metadata.remote) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: componentId });
+    return {
+      metadata,
+      linkedInstances: this.projectionStore.listLiveNodes().filter((node) => node.type === "INSTANCE" && instanceMainComponentId(node) === componentId),
+    };
+  }
+
+  private isComponentPropertySwapTarget(value: string | boolean | undefined): boolean {
+    if (typeof value !== "string") return false;
+    const target = this.projectionStore.getNode(value);
+    return Boolean(target && target.removed !== true && target.type === "COMPONENT");
+  }
+
   private enqueueOperations(operations: readonly PendingProjectionOperation[]): void {
     this.assertOpen();
     if (!operations.length) return;
@@ -1958,6 +2118,78 @@ export class RuntimeSession implements RuntimeContainerHost {
     }
     return undefined;
   }
+}
+
+function validateRuntimeComponentPropertyBaseName(name: string, nodeId: string): void {
+  validatedRuntimeComponentPropertyBaseName(name, nodeId);
+}
+
+function validatedRuntimeComponentPropertyBaseName(name: string, nodeId: string): string {
+  if (typeof name !== "string" || name.length === 0 || name.length > 256 || /[\u0000-\u001f]/u.test(name)) {
+    throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  return name;
+}
+
+function validateRuntimeComponentPropertyOptions(
+  options: RuntimeComponentPropertyOptions | RuntimeComponentPropertyEdit | undefined,
+  nodeId: string,
+): void {
+  if (options === undefined) return;
+  if (!options || typeof options !== "object" || Array.isArray(options)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  if (options.preferredValues !== undefined || options.slotSettings !== undefined) {
+    throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
+  }
+  if (options.description !== undefined && (
+    typeof options.description !== "string" ||
+    options.description.includes("\0") ||
+    new TextEncoder().encode(options.description).byteLength > 2_048
+  )) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+}
+
+function runtimeComponentPropertyDefinition(
+  type: RuntimeComponentPropertyType,
+  defaultValue: string | boolean | RuntimeVariableAlias,
+  description: string | undefined,
+  nodeId: string,
+): DocumentComponentMetadata["componentPropertyDefinitions"][string] {
+  if (!["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"].includes(type)) {
+    throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  if (typeof defaultValue === "object") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
+  const valid = type === "BOOLEAN"
+    ? typeof defaultValue === "boolean"
+    : typeof defaultValue === "string" && !defaultValue.includes("\0") && new TextEncoder().encode(defaultValue).byteLength <= 2_048;
+  if (!valid || ((type === "INSTANCE_SWAP" || type === "VARIANT" || type === "SLOT") && defaultValue === "")) {
+    throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  }
+  return {
+    type,
+    ...(type === "SLOT" ? {} : { defaultValue }),
+    ...(description === undefined ? {} : { description }),
+  };
+}
+
+function runtimeSlotPropertyName(node: RuntimeProjectionNode): string | undefined {
+  const metadata = node.slotMetadata;
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const name = (metadata as { propertyName?: unknown }).propertyName;
+  return typeof name === "string" ? name : undefined;
+}
+
+function runtimeNodeHasAncestorIn(
+  node: RuntimeProjectionNode,
+  roots: ReadonlySet<string>,
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+): boolean {
+  const visited = new Set<string>();
+  let parentId = node.parentId;
+  while (typeof parentId === "string" && !visited.has(parentId)) {
+    if (roots.has(parentId)) return true;
+    visited.add(parentId);
+    parentId = read(parentId)?.parentId;
+  }
+  return false;
 }
 
 function instanceMainComponentId(node: RuntimeProjectionNode): string | undefined {

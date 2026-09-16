@@ -169,6 +169,9 @@ export function assertFigmaPluginTypingsContract(
   void component.descriptionMarkdown;
   void component.documentationLinks;
   void component.componentPropertyDefinitions;
+  const propertyName: string = component.addComponentProperty("Enabled", "BOOLEAN", true);
+  const renamedProperty: string = component.editComponentProperty(propertyName, { name: "Active", defaultValue: false });
+  component.deleteComponentProperty(renamedProperty);
   void component.getInstancesAsync();
   void instance.componentProperties;
   void instance.overrides;

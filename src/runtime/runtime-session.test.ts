@@ -517,6 +517,52 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
+  it("adds, edits, renames and deletes Component properties with linked Instance projection", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const target = session.createComponent();
+    const instance = component.createInstance();
+
+    const enabled = component.addComponentProperty("Enabled", "BOOLEAN", true);
+    const icon = component.addComponentProperty("Icon", "INSTANCE_SWAP", target.id);
+    expect(enabled).toMatch(/^Enabled#/);
+    expect(icon).toMatch(/^Icon#/);
+    expect(component.componentPropertyDefinitions).toMatchObject({
+      [enabled]: { type: "BOOLEAN", defaultValue: true },
+      [icon]: { type: "INSTANCE_SWAP", defaultValue: target.id },
+    });
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [icon]: target.id });
+
+    instance.setProperties({ [enabled]: false });
+    const renamed = component.editComponentProperty(enabled, { name: "Active", defaultValue: false });
+    expect(renamed).toMatch(/^Active#/);
+    expect(component.componentPropertyDefinitions).not.toHaveProperty(enabled);
+    expect(component.componentPropertyDefinitions[renamed]).toEqual({ type: "BOOLEAN", defaultValue: false });
+    expect(instance.componentPropertyValues).not.toHaveProperty(enabled);
+    expect(instance.componentPropertyValues[renamed]).toBe(false);
+
+    const slot = component.createSlot();
+    const slotName = Object.keys(component.componentPropertyDefinitions).find((name) => component.componentPropertyDefinitions[name]?.type === "SLOT")!;
+    const renamedSlot = component.editComponentProperty(slotName, { name: "Content" });
+    expect(session.projectionStore.getNode(slot.id)?.slotMetadata).toMatchObject({ propertyName: renamedSlot });
+    expect(session.projectionStore.getNode(instance.children.find((child) => child.type === "SLOT")!.id)?.slotMetadata).toMatchObject({ propertyName: renamedSlot });
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => component.addComponentProperty("Bound", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "variable" })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.addComponentProperty("Preferred", "TEXT", "value", { preferredValues: [] })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.deleteComponentProperty(renamedSlot)), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    component.deleteComponentProperty(renamed);
+    expect(component.componentPropertyDefinitions).not.toHaveProperty(renamed);
+    expect(instance.componentPropertyValues).not.toHaveProperty(renamed);
+    await session.commitAsync();
+    expect((await session.getNodeByIdAsync(component.id))?.componentPropertyDefinitions).not.toHaveProperty(renamed);
+    expect((await session.getNodeByIdAsync(instance.id))?.componentPropertyValues).not.toHaveProperty(renamed);
+  });
+
   it("validates and writes Instance component properties from the main Component definition", async () => {
     const componentMetadata = {
       key: "card-key",

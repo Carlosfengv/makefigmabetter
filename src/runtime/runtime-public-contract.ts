@@ -13,6 +13,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getVariableByIdAsync("V:spacing");
   const component = runtime.createComponent();
   component.appendChild(runtime.createRectangle());
+  const propertyName = component.addComponentProperty("Enabled", "BOOLEAN", true);
+  const renamedProperty = component.editComponentProperty(propertyName, { name: "Active", defaultValue: false });
+  component.deleteComponentProperty(renamedProperty);
   void component.key;
   void component.remote;
   const instance = component.createInstance();
