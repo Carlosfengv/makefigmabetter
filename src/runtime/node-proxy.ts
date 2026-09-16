@@ -11,7 +11,7 @@ import type {
   DocumentConstraints,
   DocumentFontReference,
   DocumentInstanceMetadata,
-  DocumentPaintStack,
+  DocumentPaintStyleResource,
   DocumentTextProperties,
   DocumentTextStyleResource,
   DocumentTextPathMetadata,
@@ -165,6 +165,7 @@ export interface RuntimeNodeHost {
   resolveFontName(fontName: RuntimeFontName): DocumentFontReference | undefined;
   fontNameForReference(font: DocumentFontReference): RuntimeFontName;
   textStyleResource(styleId: string): DocumentTextStyleResource | undefined;
+  paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined;
   assertSynchronousDocumentAccess(): void;
   hasFontReference(font: DocumentFontReference): boolean;
   hasImageHash(hash: string): boolean;
@@ -1307,7 +1308,19 @@ export class RuntimeNodeProxy {
   set fills(value: readonly RuntimePaint[]) {
     this.assertPaintsSupported("fill");
     const fillStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.write({ fillStack } satisfies { fillStack: DocumentPaintStack });
+    this.write({ fillStack, fillStyleId: undefined, backgroundStyleId: undefined });
+  }
+  get fillStyleId(): string {
+    this.assertPaintsSupported("fill");
+    return typeof this.read().fillStyleId === "string" ? this.read().fillStyleId as string : "";
+  }
+  set fillStyleId(value: string) {
+    this.host.assertSynchronousDocumentAccess();
+    this.applyPaintStyle("fill", value);
+  }
+  async setFillStyleIdAsync(styleId: string): Promise<void> {
+    this.applyPaintStyle("fill", styleId);
+    await this.host.commitAsync();
   }
   get strokes(): readonly RuntimePaint[] {
     this.assertPaintsSupported("stroke");
@@ -1316,7 +1329,30 @@ export class RuntimeNodeProxy {
   set strokes(value: readonly RuntimePaint[]) {
     this.assertPaintsSupported("stroke");
     const strokeStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.write({ strokeStack } satisfies { strokeStack: DocumentPaintStack });
+    this.write({ strokeStack, strokeStyleId: undefined });
+  }
+  get strokeStyleId(): string {
+    this.assertPaintsSupported("stroke");
+    return typeof this.read().strokeStyleId === "string" ? this.read().strokeStyleId as string : "";
+  }
+  set strokeStyleId(value: string) {
+    this.host.assertSynchronousDocumentAccess();
+    this.applyPaintStyle("stroke", value);
+  }
+  async setStrokeStyleIdAsync(styleId: string): Promise<void> {
+    this.applyPaintStyle("stroke", styleId);
+    await this.host.commitAsync();
+  }
+  get backgroundStyleId(): string {
+    this.assertBackgroundStyleSupported();
+    const node = this.read();
+    return typeof node.backgroundStyleId === "string"
+      ? node.backgroundStyleId
+      : typeof node.fillStyleId === "string" ? node.fillStyleId : "";
+  }
+  set backgroundStyleId(value: string) {
+    this.host.assertSynchronousDocumentAccess();
+    this.applyPaintStyle("background", value);
   }
   get parent(): RuntimeNodeProxy | null {
     const parentId = this.read().parentId;
@@ -2835,6 +2871,32 @@ export class RuntimeNodeProxy {
     if (!kind || !(usage === "fill" ? supportsOwnFill(kind) : supportsOwnStroke(kind))) {
       throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     }
+  }
+
+  private assertBackgroundStyleSupported(): void {
+    if (!["FRAME", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET"].includes(this.type)) {
+      throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    }
+  }
+
+  private applyPaintStyle(usage: "fill" | "stroke" | "background", styleId: string): void {
+    if (typeof styleId !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (usage === "background") this.assertBackgroundStyleSupported();
+    else this.assertPaintsSupported(usage);
+    if (!styleId) {
+      this.write(usage === "stroke"
+        ? { strokeStyleId: undefined }
+        : { fillStyleId: undefined, backgroundStyleId: undefined });
+      return;
+    }
+    const resource = this.host.paintStyleResource(styleId);
+    if (!resource || resource.id !== styleId) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    const paints = structuredClone(resource.paints);
+    this.write(usage === "stroke"
+      ? { strokeStack: paints, strokeStyleId: styleId }
+      : usage === "background"
+        ? { fillStack: paints, fillStyleId: styleId, backgroundStyleId: styleId }
+        : { fillStack: paints, fillStyleId: styleId, backgroundStyleId: undefined });
   }
 
   private assertTextCharacters(): void {

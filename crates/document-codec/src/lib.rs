@@ -8,12 +8,13 @@ use editor_core::{
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
     FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType,
     InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
-    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment, can_parent_contain_child,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -68,8 +69,9 @@ pub const OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION: u32 = 42;
 pub const TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 43;
 pub const TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 44;
 pub const PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 45;
+pub const PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 46;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -96,6 +98,7 @@ struct DecodedNode {
     auto_layout: AutoLayout,
     fill_stack: Option<PaintStack>,
     stroke_stack: Option<PaintStack>,
+    paint_style_links: PaintStyleLinks,
 }
 
 pub fn snapshot_from_document(
@@ -109,6 +112,13 @@ pub fn snapshot_from_document(
     }
     if engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.paint_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| document.paint_style_links_for_node(node.id).is_some())
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
@@ -506,6 +516,7 @@ pub fn snapshot_from_document(
                             document.auto_layout_for_node(node.id),
                             document.fill_stack_for_node(node.id),
                             document.stroke_stack_for_node(node.id),
+                            document.paint_style_links_for_node(node.id),
                         )
                         .encode_to_vec(),
                     })
@@ -637,8 +648,16 @@ pub fn document_from_snapshot_with_engine_semantics(
         for reference in chunk.nodes {
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| SnapshotError::Invalid)?;
-            let (page_id, node, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
-                node_from_proto(node_proto)?;
+            let (
+                page_id,
+                node,
+                asset_id,
+                text_properties,
+                auto_layout,
+                fill_stack,
+                stroke_stack,
+                paint_style_links,
+            ) = node_from_proto(node_proto)?;
             if declared_engine_semantics_version < PAINT_STACK_ENGINE_SEMANTICS_VERSION
                 && (fill_stack.is_some() || stroke_stack.is_some())
             {
@@ -910,6 +929,11 @@ pub fn document_from_snapshot_with_engine_semantics(
             {
                 return Err(SnapshotError::Invalid);
             }
+            if declared_engine_semantics_version < PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+                && !paint_style_links.is_empty()
+            {
+                return Err(SnapshotError::Invalid);
+            }
             if page_id != chunk_page_id
                 || page_id.0 != id(&reference.page_id)?
                 || node.id.0 != id(&reference.node_id)?
@@ -934,6 +958,7 @@ pub fn document_from_snapshot_with_engine_semantics(
                         auto_layout,
                         fill_stack,
                         stroke_stack,
+                        paint_style_links,
                     },
                 )
                 .is_some()
@@ -967,6 +992,9 @@ pub fn document_from_snapshot_with_engine_semantics(
                 decoded.fill_stack.clone(),
                 decoded.stroke_stack.clone(),
             )
+            .map_err(|_| SnapshotError::Invalid)?;
+        document
+            .seed_paint_style_links(decoded.node.id, decoded.paint_style_links.clone())
             .map_err(|_| SnapshotError::Invalid)?;
     }
     for retired_id in snapshot.retired_node_ids {
@@ -1164,6 +1192,7 @@ fn node_to_proto(
     auto_layout: AutoLayout,
     fill_stack: Option<&PaintStack>,
     stroke_stack: Option<&PaintStack>,
+    paint_style_links: Option<&PaintStyleLinks>,
 ) -> v1::SceneNode {
     v1::SceneNode {
         node_id: id_to_bytes(node.id.0),
@@ -1272,6 +1301,9 @@ fn node_to_proto(
         prototype_metadata: None,
         fill_stack: fill_stack.map(paint_stack_to_proto),
         stroke_stack: stroke_stack.map(paint_stack_to_proto),
+        fill_style_id: paint_style_links.and_then(|links| links.fill.clone()),
+        stroke_style_id: paint_style_links.and_then(|links| links.stroke.clone()),
+        background_style_id: paint_style_links.and_then(|links| links.background.clone()),
     }
 }
 fn node_from_proto(
@@ -1285,6 +1317,7 @@ fn node_from_proto(
         AutoLayout,
         Option<PaintStack>,
         Option<PaintStack>,
+        PaintStyleLinks,
     ),
     SnapshotError,
 > {
@@ -1343,6 +1376,11 @@ fn node_from_proto(
     ));
     let fill_stack = node.fill_stack.map(paint_stack_from_proto).transpose()?;
     let stroke_stack = node.stroke_stack.map(paint_stack_from_proto).transpose()?;
+    let paint_style_links = PaintStyleLinks {
+        fill: node.fill_style_id.clone(),
+        stroke: node.stroke_style_id.clone(),
+        background: node.background_style_id.clone(),
+    };
     Ok((
         page_id,
         Node {
@@ -1423,6 +1461,7 @@ fn node_from_proto(
             .unwrap_or_default(),
         fill_stack,
         stroke_stack,
+        paint_style_links,
     ))
 }
 
@@ -5822,6 +5861,51 @@ mod tests {
                 173_u128.to_be_bytes(),
                 hash,
                 PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn paint_style_links_round_trip_and_require_semantics_forty_six() {
+        let mut document = Document::with_id(DocumentId(174));
+        let frame = node(174, NodeKind::Frame, None);
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+        let links = PaintStyleLinks {
+            fill: Some("S:surface".into()),
+            stroke: Some("S:border".into()),
+            background: Some("S:surface".into()),
+        };
+        document
+            .seed_paint_style_links(NodeId(174), links.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            174_u128.to_be_bytes(),
+            hash,
+            PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.paint_style_links_for_node(NodeId(174)),
+            Some(&links)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                174_u128.to_be_bytes(),
+                hash,
+                PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

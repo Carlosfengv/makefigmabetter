@@ -7,12 +7,13 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
     Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget,
     HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
-    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
+    PaintStyleResource, ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape,
+    PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
+    TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
+    TextDecorationThickness, TextListType, TextProperties, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -480,6 +481,14 @@ pub fn snapshot_from_document(
         return Err(ServiceError::ReducerRejected);
     }
     if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+        && document
+            .nodes()
+            .any(|node| document.paint_style_links_for_node(node.id).is_some())
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && document.assets().any(|asset| !asset.font_faces.is_empty())
     {
@@ -886,6 +895,7 @@ pub fn snapshot_from_document(
                         document.auto_layout_for_node(node.id),
                         document.fill_stack_for_node(node.id),
                         document.stroke_stack_for_node(node.id),
+                        document.paint_style_links_for_node(node.id),
                     )
                     .encode_to_vec();
                     Ok(v1::SceneNodeRef {
@@ -1005,8 +1015,16 @@ pub fn document_from_snapshot(
         for reference in chunk.nodes {
             let node_proto = v1::SceneNode::decode(reference.canonical_node.as_slice())
                 .map_err(|_| ServiceError::ReducerRejected)?;
-            let (page_id, node, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
-                node_from_proto(node_proto)?;
+            let (
+                page_id,
+                node,
+                asset_id,
+                text_properties,
+                auto_layout,
+                fill_stack,
+                stroke_stack,
+                paint_style_links,
+            ) = node_from_proto(node_proto)?;
             if declared_engine_semantics_version
                 < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
                 && (fill_stack.is_some() || stroke_stack.is_some())
@@ -1230,6 +1248,12 @@ pub fn document_from_snapshot(
                 return Err(ServiceError::ReducerRejected);
             }
             if declared_engine_semantics_version
+                < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+                && !paint_style_links.is_empty()
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
                 < makefigma_document_codec::NON_LINEAR_GRADIENT_ENGINE_SEMANTICS_VERSION
                 && [fill_stack.as_ref(), stroke_stack.as_ref()]
                     .into_iter()
@@ -1339,6 +1363,9 @@ pub fn document_from_snapshot(
             document
                 .seed_paint_stacks(node_id, fill_stack, stroke_stack)
                 .map_err(|_| ServiceError::ReducerRejected)?;
+            document
+                .seed_paint_style_links(node_id, paint_style_links)
+                .map_err(|_| ServiceError::ReducerRejected)?;
         }
     }
     for retired_id in snapshot.retired_node_ids {
@@ -1444,6 +1471,7 @@ fn node_to_proto(
     auto_layout: AutoLayout,
     fill_stack: Option<&PaintStack>,
     stroke_stack: Option<&PaintStack>,
+    paint_style_links: Option<&PaintStyleLinks>,
 ) -> v1::SceneNode {
     v1::SceneNode {
         node_id: id_to_bytes(node.id.0),
@@ -1552,6 +1580,9 @@ fn node_to_proto(
         prototype_metadata: None,
         fill_stack: fill_stack.map(paint_stack_to_proto),
         stroke_stack: stroke_stack.map(paint_stack_to_proto),
+        fill_style_id: paint_style_links.and_then(|links| links.fill.clone()),
+        stroke_style_id: paint_style_links.and_then(|links| links.stroke.clone()),
+        background_style_id: paint_style_links.and_then(|links| links.background.clone()),
     }
 }
 
@@ -1566,6 +1597,7 @@ fn node_from_proto(
         AutoLayout,
         Option<PaintStack>,
         Option<PaintStack>,
+        PaintStyleLinks,
     ),
     ServiceError,
 > {
@@ -1619,6 +1651,11 @@ fn node_from_proto(
     ));
     let fill_stack = node.fill_stack.map(paint_stack_from_proto).transpose()?;
     let stroke_stack = node.stroke_stack.map(paint_stack_from_proto).transpose()?;
+    let paint_style_links = PaintStyleLinks {
+        fill: node.fill_style_id.clone(),
+        stroke: node.stroke_style_id.clone(),
+        background: node.background_style_id.clone(),
+    };
     Ok((
         page_id,
         Node {
@@ -1699,6 +1736,7 @@ fn node_from_proto(
             .unwrap_or_default(),
         fill_stack,
         stroke_stack,
+        paint_style_links,
     ))
 }
 
@@ -4593,11 +4631,20 @@ mod tests {
             AutoLayout::default(),
             None,
             None,
+            None,
         );
         assert_eq!(wire.kind, v1::NodeKind::Slice as i32);
 
-        let (page_id, restored, asset_id, text_properties, auto_layout, fill_stack, stroke_stack) =
-            node_from_proto(wire).unwrap();
+        let (
+            page_id,
+            restored,
+            asset_id,
+            text_properties,
+            auto_layout,
+            fill_stack,
+            stroke_stack,
+            paint_style_links,
+        ) = node_from_proto(wire).unwrap();
         assert_eq!(page_id, DEFAULT_PAGE_ID);
         assert_eq!(restored.kind, NodeKind::Slice);
         assert_eq!(restored.rotation, 22.5);
@@ -4606,6 +4653,7 @@ mod tests {
         assert_eq!(auto_layout, AutoLayout::default());
         assert_eq!(fill_stack, None);
         assert_eq!(stroke_stack, None);
+        assert!(paint_style_links.is_empty());
     }
 
     #[test]
@@ -4853,6 +4901,7 @@ mod tests {
                     None,
                     None,
                     AutoLayout::default(),
+                    None,
                     None,
                     None,
                 )),

@@ -9,12 +9,13 @@ use editor_core::{
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
     FontReference, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment,
     LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
-    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleResource, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, Transaction,
-    TransactionId, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    Transaction, TransactionId, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -315,6 +316,7 @@ impl DocumentEngine {
                         .as_ref()
                         .map(paint_stack_from_projection)
                         .transpose()?;
+                    let paint_style_links = paint_style_links_from_projection(&node);
                     let page_id = node
                         .page_id
                         .as_deref()
@@ -360,6 +362,12 @@ impl DocumentEngine {
                             stroke_stack,
                         });
                     }
+                    if !paint_style_links.is_empty() {
+                        commands.push(Command::SetPaintStyleLinks {
+                            id: node_id,
+                            links: paint_style_links,
+                        });
+                    }
                 }
                 BatchCommand::Restore { node } => {
                     let text_properties =
@@ -375,6 +383,7 @@ impl DocumentEngine {
                         .as_ref()
                         .map(paint_stack_from_projection)
                         .transpose()?;
+                    let paint_style_links = paint_style_links_from_projection(&node);
                     let page_id = node
                         .page_id
                         .as_deref()
@@ -406,6 +415,12 @@ impl DocumentEngine {
                             id: node_id,
                             fill_stack,
                             stroke_stack,
+                        });
+                    }
+                    if !paint_style_links.is_empty() {
+                        commands.push(Command::SetPaintStyleLinks {
+                            id: node_id,
+                            links: paint_style_links,
                         });
                     }
                 }
@@ -462,6 +477,7 @@ impl DocumentEngine {
                         .as_ref()
                         .map(paint_stack_from_projection)
                         .transpose()?;
+                    let paint_style_links = paint_style_links_from_projection(&node);
                     let asset_id = node
                         .asset_id
                         .as_deref()
@@ -502,6 +518,18 @@ impl DocumentEngine {
                             });
                         }
                         continue;
+                    }
+                    if self
+                        .document
+                        .paint_style_links_for_node(node.id)
+                        .cloned()
+                        .unwrap_or_default()
+                        != paint_style_links
+                    {
+                        commands.push(Command::SetPaintStyleLinks {
+                            id: node.id,
+                            links: paint_style_links,
+                        });
                     }
                     let boolean_operation = node.boolean_operation;
                     let appearance = Appearance {
@@ -854,7 +882,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=60).contains(&snapshot.schema_version)
+    if !(1..=61).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 61
+            && snapshot.nodes.iter().any(|node| {
+                node.fill_style_id.is_some()
+                    || node.stroke_style_id.is_some()
+                    || node.background_style_id.is_some()
+            }))
         || (snapshot.schema_version < 60
             && snapshot
                 .paint_styles
@@ -1300,6 +1334,8 @@ struct ProjectionNode {
     /// deliberately differs from an absent legacy stack.
     #[serde(default)]
     fill_stack: Option<ProjectionPaintStack>,
+    #[serde(default)]
+    fill_style_id: Option<String>,
     /// v9 persists Canonical stroke paint and width. The CSS value is only the
     /// deterministic Canvas/Inspector projection fallback.
     #[serde(default = "default_transparent_css")]
@@ -1312,6 +1348,10 @@ struct ProjectionNode {
     strokes: Vec<ProjectionPaint>,
     #[serde(default)]
     stroke_stack: Option<ProjectionPaintStack>,
+    #[serde(default)]
+    stroke_style_id: Option<String>,
+    #[serde(default)]
+    background_style_id: Option<String>,
     #[serde(default)]
     stroke_width: f64,
     /// v16 persists Figma-compatible open-path endpoint styles, v17 adds
@@ -2034,7 +2074,13 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.paint_styles().next().is_some() {
+        let schema_version = if self
+            .document
+            .nodes()
+            .any(|node| self.document.paint_style_links_for_node(node.id).is_some())
+        {
+            61
+        } else if self.document.paint_styles().next().is_some() {
             60
         } else if self.document.text_styles().next().is_some() {
             59
@@ -2348,6 +2394,7 @@ impl DocumentEngine {
                         self.document.auto_layout_for_node(node.id),
                         self.document.fill_stack_for_node(node.id),
                         self.document.stroke_stack_for_node(node.id),
+                        self.document.paint_style_links_for_node(node.id),
                     )
                 })
                 .collect(),
@@ -2702,6 +2749,7 @@ impl DocumentEngine {
                 .as_ref()
                 .map(paint_stack_from_projection)
                 .transpose()?;
+            let paint_style_links = paint_style_links_from_projection(&node);
             let node = node_from_projection(node)?;
             let node_id = node.id;
             if let Some(asset_id) = asset_id {
@@ -2720,6 +2768,9 @@ impl DocumentEngine {
                 .map_err(core_error)?;
             document
                 .seed_paint_stacks(node_id, fill_stack, stroke_stack)
+                .map_err(core_error)?;
+            document
+                .seed_paint_style_links(node_id, paint_style_links)
                 .map_err(core_error)?;
         }
         for id in snapshot.retired_ids.clone().unwrap_or_default() {
@@ -2792,6 +2843,7 @@ impl DocumentEngine {
                         .as_ref()
                         .map(paint_stack_from_projection)
                         .transpose()?;
+                    let paint_style_links = paint_style_links_from_projection(&node);
                     let node = node_from_projection(node)?;
                     let node_id = node.id;
                     if let Some(asset_id) = asset_id {
@@ -2811,6 +2863,9 @@ impl DocumentEngine {
                         .map_err(core_error)?;
                     self.document
                         .seed_paint_stacks(node_id, fill_stack, stroke_stack)
+                        .map_err(core_error)?;
+                    self.document
+                        .seed_paint_style_links(node_id, paint_style_links)
                         .map_err(core_error)?;
                 }
                 BatchCommand::SetMask { id, enabled } => {
@@ -3375,6 +3430,7 @@ impl DocumentEngine {
                     preview.document.auto_layout_for_node(node.id),
                     preview.document.fill_stack_for_node(node.id),
                     preview.document.stroke_stack_for_node(node.id),
+                    preview.document.paint_style_links_for_node(node.id),
                 )
             })
             .collect::<Vec<_>>();
@@ -5416,6 +5472,7 @@ fn projection_node(
     auto_layout: AutoLayout,
     fill_stack: Option<&PaintStack>,
     stroke_stack: Option<&PaintStack>,
+    paint_style_links: Option<&PaintStyleLinks>,
 ) -> ProjectionNode {
     let project_paint = |paint: &Paint| match paint {
         Paint::Solid(color) => (
@@ -5507,6 +5564,7 @@ fn projection_node(
             })
             .collect(),
         fill_stack: fill_stack.map(projection_paint_stack),
+        fill_style_id: paint_style_links.and_then(|links| links.fill.clone()),
         stroke,
         stroke_color,
         stroke_gradient,
@@ -5524,6 +5582,8 @@ fn projection_node(
             })
             .collect(),
         stroke_stack: stroke_stack.map(projection_paint_stack),
+        stroke_style_id: paint_style_links.and_then(|links| links.stroke.clone()),
+        background_style_id: paint_style_links.and_then(|links| links.background.clone()),
         stroke_width: node.stroke_width,
         stroke_cap_start: format_stroke_cap(node.stroke_cap_start),
         stroke_cap_end: format_stroke_cap(node.stroke_cap_end),
@@ -6277,6 +6337,20 @@ fn font_from_projection(font: &ProjectionFontReference) -> Result<FontReference,
             .map(|axis| Ok((axis.tag.clone(), axis.value)))
             .collect::<Result<_, JsValue>>()?,
     })
+}
+
+fn paint_style_links_from_projection(node: &ProjectionNode) -> PaintStyleLinks {
+    PaintStyleLinks {
+        fill: node.fill_style_id.clone().filter(|value| !value.is_empty()),
+        stroke: node
+            .stroke_style_id
+            .clone()
+            .filter(|value| !value.is_empty()),
+        background: node
+            .background_style_id
+            .clone()
+            .filter(|value| !value.is_empty()),
+    }
 }
 
 fn node_from_projection(node: ProjectionNode) -> Result<Node, JsValue> {
@@ -9383,6 +9457,9 @@ mod tests {
             text_properties: None,
             fill_stack: None,
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -9649,6 +9726,9 @@ mod tests {
             text_properties: None,
             fill_stack: None,
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
             x: 0.0,
             y: 0.0,
             width: 320.0,
@@ -9770,6 +9850,9 @@ mod tests {
             text_properties: None,
             fill_stack: None,
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -9926,6 +10009,9 @@ mod tests {
             }),
             fill_stack: None,
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
             x: 0.0,
             y: 0.0,
             width: 240.0,
@@ -10162,6 +10248,50 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 59;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v61_round_trips_paint_style_links_and_v60_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let node: ProjectionNode = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000061",
+            "name": "Styled frame", "kind": "frame",
+            "x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0,
+            "fill": "#ffffff", "stroke": "#00000000", "strokeWidth": 0.0,
+            "fillStyleId": "S:surface", "strokeStyleId": "S:border",
+            "backgroundStyleId": "S:surface",
+            "opacity": 1.0, "cornerRadius": 0.0,
+            "text": "", "visible": true, "locked": false
+        }))
+        .unwrap();
+        engine
+            .submit_batch(NodeId(61), 0, vec![BatchCommand::Create { node }])
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":61"));
+        assert!(snapshot.contains("\"fillStyleId\":\"S:surface\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored
+                .document
+                .paint_style_links_for_node(
+                    parse_id("00000000-0000-4000-8000-000000000061").unwrap()
+                )
+                .unwrap()
+                .stroke
+                .as_deref(),
+            Some("S:border")
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 60;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")
@@ -10464,6 +10594,9 @@ mod tests {
             text_properties: None,
             fill_stack: None,
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -12337,6 +12470,9 @@ mod tests {
                         text_properties: None,
                         fill_stack: None,
                         stroke_stack: None,
+                        fill_style_id: None,
+                        stroke_style_id: None,
+                        background_style_id: None,
                         x: 0.0,
                         y: 0.0,
                         width: 100.0,
@@ -12730,6 +12866,9 @@ mod tests {
                     text_properties: None,
                     fill_stack: None,
                     stroke_stack: None,
+                    fill_style_id: None,
+                    stroke_style_id: None,
+                    background_style_id: None,
                     x: index as f64,
                     y: -(index as f64),
                     width: 100.0,

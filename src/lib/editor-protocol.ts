@@ -384,6 +384,8 @@ export interface CanvasNode {
   /** Empty retains the legacy singular fill fields; otherwise composites in order. */
   fills?: DocumentPaint[];
   fillStack?: DocumentPaintStack;
+  /** Canonical identity of the PaintStyle currently applied to fills. */
+  fillStyleId?: string;
   /** Canonical sibling-order key, opaque to presentation components. */
   positionId?: string;
   stroke: string;
@@ -393,6 +395,10 @@ export interface CanvasNode {
   /** Empty retains the legacy singular stroke fields; otherwise composites in order. */
   strokes?: DocumentPaint[];
   strokeStack?: DocumentPaintStack;
+  /** Canonical identity of the PaintStyle currently applied to strokes. */
+  strokeStyleId?: string;
+  /** Deprecated Figma alias for a frame-like node's fill style. */
+  backgroundStyleId?: string;
   strokeWidth: number;
   strokeCapStart?: StrokeCap;
   strokeCapEnd?: StrokeCap;
@@ -501,7 +507,7 @@ export interface DocumentAsset {
 /** A fully resolved Core mutation. It is intentionally byte-free so a pending
  * remote operation can be reapplied to a newer canonical snapshot after a
  * rejected base revision. */
-export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "fillStack" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeStack" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
+export type CoreProjectionNode = Pick<CanvasNode, "id" | "pageId" | "parentId" | "name" | "kind" | "x" | "y" | "width" | "height" | "rotation" | "fill" | "fillColor" | "fillGradient" | "fills" | "fillStack" | "fillStyleId" | "positionId" | "stroke" | "strokeColor" | "strokeGradient" | "strokes" | "strokeStack" | "strokeStyleId" | "backgroundStyleId" | "strokeWidth" | "strokeCapStart" | "strokeCapEnd" | "strokeJoin" | "strokeMiterLimit" | "strokeDashPattern" | "strokeWeights" | "strokeAlign" | "arcData" | "parametricShape" | "vectorPath" | "booleanOperation" | "cornerRadii" | "cornerSmoothing" | "constraints" | "autoLayout" | "relativeTransform" | "opacity" | "blendMode" | "dropShadow" | "effectStack" | "visible" | "locked" | "contentsHidden" | "clipsContent" | "isMask" | "assetId" | "textProperties" | "extensions"> & { cornerRadius: number; text: string };
 export type CoreBatchCommand =
   /** External imports create ordered Pages and their scene tree in the same
    * Canonical transaction; ordinary UI page creation remains a convenience

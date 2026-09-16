@@ -574,6 +574,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   normalizeImportedAlphaMasks(nodes, issues);
   const textStyles = importedTextStyleResources(sourceStyles, nodes, issues);
   const paintStyles = importedPaintStyleResources(sourceStyles, nodes, sourceNodeByCanonicalId, issues);
+  applyImportedPaintStyleLinks(nodes, paintStyles, sourceNodeByCanonicalId, issues);
   const pageCommands = pages.map((page) => ({ type: "create-page" as const, id: page.id, name: page.name, positionId: page.positionId }));
   const nodeCommands = nodes.map((node) => ({ type: "create" as const, node }));
   // The import path contains only Page/Create/SetMask commands. Build its
@@ -1500,6 +1501,38 @@ function importedPaintStyleResources(
     resources.push({ id, key, name, description, remote, paints: first });
   }
   return resources.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function applyImportedPaintStyleLinks(
+  nodes: CanvasNode[],
+  resources: readonly DocumentPaintStyleResource[],
+  sourceNodeByCanonicalId: ReadonlyMap<string, JsonRecord>,
+  issues: FigmaImportIssue[],
+): void {
+  const available = new Set(resources.map((resource) => resource.id));
+  for (const node of nodes) {
+    const source = sourceNodeByCanonicalId.get(node.id);
+    const styles = record(source?.styles);
+    const fill = string(styles?.fill);
+    const stroke = string(styles?.stroke);
+    if (fill && available.has(fill)) {
+      node.fillStyleId = fill;
+      if (["frame", "component", "instance", "slot", "componentSet"].includes(node.kind)) {
+        node.backgroundStyleId = fill;
+      }
+    } else if (fill) {
+      node.extensions ??= {};
+      node.extensions["figma.rest.paint-style-links.v1"] = jsonBytes({ fill, stroke });
+      issues.push({ sourceId: string(source?.id), capability: "paint-style-link", outcome: "preserved-extension", reason: "The fill PaintStyle could not be reconstructed as one complete Canonical resource, so its source identity was preserved without creating a dangling link." });
+    }
+    if (stroke && available.has(stroke)) {
+      node.strokeStyleId = stroke;
+    } else if (stroke) {
+      node.extensions ??= {};
+      node.extensions["figma.rest.paint-style-links.v1"] = jsonBytes({ fill, stroke });
+      issues.push({ sourceId: string(source?.id), capability: "paint-style-link", outcome: "preserved-extension", reason: "The stroke PaintStyle could not be reconstructed as one complete Canonical resource, so its source identity was preserved without creating a dangling link." });
+    }
+  }
 }
 
 function importedTextStyleResources(

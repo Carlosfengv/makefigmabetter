@@ -6,12 +6,12 @@ use editor_core::{
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
     FontFaceMetadata, FontNameAlias, FontReference, HyperlinkTarget, HyperlinkType, InnerShadow,
     LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
-    NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleResource, ParagraphListType,
-    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
-    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
-    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
-    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
+    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
+    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
+    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -61,6 +61,14 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(operation_has_paint_style_links)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
@@ -419,12 +427,38 @@ pub fn commands_from_payload_with_semantics(
     let mut commands = Vec::with_capacity(batch.operations.len());
     for operation in batch.operations {
         let paint_stacks = paint_stack_command(&operation)?;
+        let paint_style_links = paint_style_links_command(&operation)?;
         commands.push(command_from_proto(operation)?);
         if let Some(command) = paint_stacks {
             commands.push(command);
         }
+        if let Some(command) = paint_style_links {
+            commands.push(command);
+        }
     }
     Ok(commands)
+}
+
+fn operation_has_paint_style_links(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref() {
+        Some(Kind::SetPaintStyleLinks(_)) => true,
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .is_some_and(scene_node_has_paint_style_links),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .is_some_and(scene_node_has_paint_style_links),
+        _ => false,
+    }
+}
+
+fn scene_node_has_paint_style_links(node: &v1::SceneNode) -> bool {
+    node.fill_style_id.is_some()
+        || node.stroke_style_id.is_some()
+        || node.background_style_id.is_some()
 }
 
 fn operation_has_paint_stack(operation: &v1::ResolvedOperation) -> bool {
@@ -1305,6 +1339,42 @@ fn paint_stack_command(operation: &v1::ResolvedOperation) -> Result<Option<Comma
     }))
 }
 
+fn paint_style_links_command(
+    operation: &v1::ResolvedOperation,
+) -> Result<Option<Command>, ServiceError> {
+    use v1::resolved_operation::Kind;
+    let (id, links) = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => {
+            let node = value.node.as_ref().ok_or(ServiceError::InvalidEnvelope)?;
+            (
+                node_id(&node.node_id)?,
+                paint_style_links_from_scene_node(node),
+            )
+        }
+        Some(Kind::RestoreNode(value)) => {
+            let node = value.node.as_ref().ok_or(ServiceError::InvalidEnvelope)?;
+            (
+                node_id(&node.node_id)?,
+                paint_style_links_from_scene_node(node),
+            )
+        }
+        _ => return Ok(None),
+    };
+    Ok((!links.is_empty()).then_some(Command::SetPaintStyleLinks { id, links }))
+}
+
+fn paint_style_links_from_scene_node(node: &v1::SceneNode) -> PaintStyleLinks {
+    PaintStyleLinks {
+        fill: nonempty_style_id(node.fill_style_id.clone()),
+        stroke: nonempty_style_id(node.stroke_style_id.clone()),
+        background: nonempty_style_id(node.background_style_id.clone()),
+    }
+}
+
+fn nonempty_style_id(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
 fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, ServiceError> {
     use v1::resolved_operation::Kind;
     match operation.kind.ok_or(ServiceError::InvalidEnvelope)? {
@@ -1576,6 +1646,14 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             style: paint_style_resource_from_proto(
                 value.style.ok_or(ServiceError::InvalidEnvelope)?,
             )?,
+        }),
+        Kind::SetPaintStyleLinks(value) => Ok(Command::SetPaintStyleLinks {
+            id: node_id(&value.node_id)?,
+            links: PaintStyleLinks {
+                fill: nonempty_style_id(value.fill_style_id),
+                stroke: nonempty_style_id(value.stroke_style_id),
+                background: nonempty_style_id(value.background_style_id),
+            },
         }),
     }
 }
@@ -2643,10 +2721,10 @@ fn id(value: &[u8]) -> Result<u128, ServiceError> {
 #[cfg(test)]
 mod tests {
     use editor_core::{
-        Command, Document, HyperlinkType, LeadingTrim, LineHeightUnit, Origin, ParagraphListType,
-        ParagraphStyleRun, PointId, TextDecoration, TextDecorationColor, TextDecorationOffset,
-        TextDecorationStyle, TextDecorationThickness, TextListType, TextTruncation, TextWrapStyle,
-        Transaction, TransactionId, geometry::Point,
+        Command, Document, HyperlinkType, LeadingTrim, LineHeightUnit, NodeId, Origin,
+        ParagraphListType, ParagraphStyleRun, PointId, TextDecoration, TextDecorationColor,
+        TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+        TextTruncation, TextWrapStyle, Transaction, TransactionId, geometry::Point,
     };
     use makefigma_protocol::v1;
     use prost::Message;
@@ -3143,6 +3221,9 @@ mod tests {
             prototype_metadata: None,
             fill_stack: Some(v1::PaintStack { layers: Vec::new() }),
             stroke_stack: None,
+            fill_style_id: None,
+            stroke_style_id: None,
+            background_style_id: None,
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![
@@ -3219,6 +3300,9 @@ mod tests {
                             prototype_metadata: None,
                             fill_stack: None,
                             stroke_stack: None,
+                            fill_style_id: None,
+                            stroke_style_id: None,
+                            background_style_id: None,
                         }),
                     })),
                 },
@@ -4886,6 +4970,39 @@ mod tests {
                 if style.id == "S:brand-fill"
                     && style.key == "library-paint-key"
                     && style.paints.layers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn paint_style_link_operations_require_semantics_forty_six() {
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetPaintStyleLinks(
+                    v1::SetPaintStyleLinks {
+                        node_id: 15_u128.to_be_bytes().to_vec(),
+                        fill_style_id: Some("S:surface".into()),
+                        stroke_style_id: Some("S:border".into()),
+                        background_style_id: None,
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetPaintStyleLinks { id, links }]
+                if *id == NodeId(15)
+                    && links.fill.as_deref() == Some("S:surface")
+                    && links.stroke.as_deref() == Some("S:border")
+                    && links.background.is_none()
         ));
     }
 

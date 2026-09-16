@@ -918,6 +918,15 @@ pub struct PaintStyleResource {
     pub paints: PaintStack,
 }
 
+/// Stable node-level PaintStyle link identities. Background is retained as a
+/// deprecated Frame alias and must match fill when both are present.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaintStyleLinks {
+    pub fill: Option<String>,
+    pub stroke: Option<String>,
+    pub background: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextTruncation {
     #[default]
@@ -1132,6 +1141,7 @@ pub struct Document {
     /// Presence-bearing Paint Stack records. A map entry with zero layers is
     /// canonical explicit-empty state; no entry selects the legacy fields.
     node_paint_stacks: SharedOrdMap<(NodeId, bool), PaintStack>,
+    node_paint_style_links: SharedOrdMap<NodeId, PaintStyleLinks>,
     /// Explicit entries only; omitted records are exactly `AutoLayout::default`.
     node_auto_layout: SharedOrdMap<NodeId, AutoLayout>,
     /// Retained page membership for node tombstones; undo/redo therefore restores
@@ -1141,6 +1151,7 @@ pub struct Document {
     retired_node_text_properties: SharedOrdMap<NodeId, TextProperties>,
     retired_node_auto_layout: SharedOrdMap<NodeId, AutoLayout>,
     retired_node_paint_stacks: SharedOrdMap<(NodeId, bool), PaintStack>,
+    retired_node_paint_style_links: SharedOrdMap<NodeId, PaintStyleLinks>,
     nodes: SharedOrdMap<NodeId, SharedNode>,
     /// Versioned Resource Index. Asset references are canonical state even before
     /// an Image/Text node consumes them, so cache eviction cannot alter a document.
@@ -1238,6 +1249,10 @@ pub enum Command {
         id: NodeId,
         fill_stack: Option<PaintStack>,
         stroke_stack: Option<PaintStack>,
+    },
+    SetPaintStyleLinks {
+        id: NodeId,
+        links: PaintStyleLinks,
     },
     /// Replaces a complete validated VectorPath in one history/replication
     /// unit. This remains the import/snapshot escape hatch for vector edits.
@@ -1448,6 +1463,11 @@ pub enum AppliedChange {
         before_stroke: Option<PaintStack>,
         after_fill: Option<PaintStack>,
         after_stroke: Option<PaintStack>,
+    },
+    PaintStyleLinksChanged {
+        id: NodeId,
+        before: Option<PaintStyleLinks>,
+        after: Option<PaintStyleLinks>,
     },
     AutoLayoutChanged {
         id: NodeId,
@@ -1707,6 +1727,7 @@ pub enum CommandError {
         id: String,
     },
     InvalidPaintStyle,
+    InvalidPaintStyleLinks,
 }
 
 impl Document {
@@ -1735,12 +1756,14 @@ impl Document {
             node_assets: SharedOrdMap::new(),
             node_text_properties: SharedOrdMap::new(),
             node_paint_stacks: SharedOrdMap::new(),
+            node_paint_style_links: SharedOrdMap::new(),
             node_auto_layout: SharedOrdMap::new(),
             retired_node_pages: SharedOrdMap::new(),
             retired_node_assets: SharedOrdMap::new(),
             retired_node_text_properties: SharedOrdMap::new(),
             retired_node_auto_layout: SharedOrdMap::new(),
             retired_node_paint_stacks: SharedOrdMap::new(),
+            retired_node_paint_style_links: SharedOrdMap::new(),
             nodes: SharedOrdMap::new(),
             assets: SharedOrdMap::new(),
             text_styles: SharedOrdMap::new(),
@@ -1779,12 +1802,14 @@ impl Document {
             && self.node_assets.is_empty()
             && self.node_text_properties.is_empty()
             && self.node_paint_stacks.is_empty()
+            && self.node_paint_style_links.is_empty()
             && self.node_auto_layout.is_empty()
             && self.retired_node_pages.is_empty()
             && self.retired_node_assets.is_empty()
             && self.retired_node_text_properties.is_empty()
             && self.retired_node_auto_layout.is_empty()
             && self.retired_node_paint_stacks.is_empty()
+            && self.retired_node_paint_style_links.is_empty()
             && self.assets.is_empty()
             && self.text_styles.is_empty()
             && self.retired_ids.is_empty()
@@ -1831,6 +1856,10 @@ impl Document {
 
     pub fn stroke_stack_for_node(&self, id: NodeId) -> Option<&PaintStack> {
         self.node_paint_stacks.get(&(id, true))
+    }
+
+    pub fn paint_style_links_for_node(&self, id: NodeId) -> Option<&PaintStyleLinks> {
+        self.node_paint_style_links.get(&id)
     }
 
     /// An absent record is exactly the stable Auto Layout default.
@@ -2078,6 +2107,16 @@ impl Document {
             }
         }
         hash_document_paint_stacks(&mut hasher, &self.node_paint_stacks);
+        if !self.node_paint_style_links.is_empty() {
+            hasher.update(b"makefigma/editor-core/node-paint-style-links-v1");
+            hash_len(&mut hasher, self.node_paint_style_links.len());
+            for (node_id, links) in &self.node_paint_style_links {
+                hasher.update(node_id.0.to_be_bytes());
+                hash_optional_style_id(&mut hasher, links.fill.as_deref());
+                hash_optional_style_id(&mut hasher, links.stroke.as_deref());
+                hash_optional_style_id(&mut hasher, links.background.as_deref());
+            }
+        }
         if !self.node_auto_layout.is_empty() {
             hasher.update(b"makefigma/editor-core/auto-layout-v1");
             hash_len(&mut hasher, self.node_auto_layout.len());
@@ -2210,6 +2249,16 @@ impl Document {
     ) -> Result<(), CommandError> {
         self.validate_paint_stacks(id, fill_stack.as_ref(), stroke_stack.as_ref())?;
         self.replace_paint_stacks(id, fill_stack, stroke_stack)?;
+        Ok(())
+    }
+
+    pub fn seed_paint_style_links(
+        &mut self,
+        id: NodeId,
+        links: PaintStyleLinks,
+    ) -> Result<(), CommandError> {
+        self.validate_paint_style_links(id, &links)?;
+        self.replace_paint_style_links(id, links)?;
         Ok(())
     }
 
@@ -3445,6 +3494,17 @@ impl Document {
                     after_stroke: stroke_stack.clone(),
                 })
             }
+            Command::SetPaintStyleLinks { id, links } => {
+                self.assert_mutable(*id)?;
+                self.validate_paint_style_links(*id, links)?;
+                let before = self.node_paint_style_links.get(id).cloned();
+                self.replace_paint_style_links(*id, links.clone())?;
+                Ok(AppliedChange::PaintStyleLinksChanged {
+                    id: *id,
+                    before,
+                    after: (!links.is_empty()).then_some(links.clone()),
+                })
+            }
             Command::SetVectorPath { id, path } => {
                 self.assert_mutable(*id)?;
                 self.replace_vector_path(*id, path.clone())
@@ -4158,6 +4218,10 @@ impl Document {
                         self.retired_node_paint_stacks.insert((*id, stroke), stack);
                     }
                 }
+                if let Some(links) = self.node_paint_style_links.remove(id) {
+                    self.node_bytes = self.node_bytes.saturating_sub(links.estimated_bytes());
+                    self.retired_node_paint_style_links.insert(*id, links);
+                }
                 let page_id = self.node_pages.remove(id).unwrap_or(DEFAULT_PAGE_ID);
                 self.unindex_child(page_id, node.parent_id, node.position, node.id);
                 self.retired_node_pages.insert(*id, page_id);
@@ -4249,6 +4313,9 @@ impl Document {
             } => {
                 let _ = self.replace_paint_stacks(*id, before_fill.clone(), before_stroke.clone());
             }
+            AppliedChange::PaintStyleLinksChanged { id, before, .. } => {
+                let _ = self.replace_paint_style_links(*id, before.clone().unwrap_or_default());
+            }
             AppliedChange::AutoLayoutChanged { id, before, .. } => {
                 self.replace_auto_layout_option(*id, before.clone());
             }
@@ -4336,6 +4403,9 @@ impl Document {
                 ..
             } => {
                 let _ = self.replace_paint_stacks(*id, after_fill.clone(), after_stroke.clone());
+            }
+            AppliedChange::PaintStyleLinksChanged { id, after, .. } => {
+                let _ = self.replace_paint_style_links(*id, after.clone().unwrap_or_default());
             }
             AppliedChange::AutoLayoutChanged { id, after, .. } => {
                 self.replace_auto_layout_option(*id, after.clone());
@@ -4536,6 +4606,60 @@ impl Document {
         Ok(())
     }
 
+    fn validate_paint_style_links(
+        &self,
+        id: NodeId,
+        links: &PaintStyleLinks,
+    ) -> Result<(), CommandError> {
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(CommandError::MissingNode { id })?;
+        let valid_id = |value: &Option<String>| {
+            value.as_ref().is_none_or(|value| {
+                !value.is_empty() && value.len() <= MAX_STYLE_ID_BYTES && !value.contains('\0')
+            })
+        };
+        if !valid_id(&links.fill)
+            || !valid_id(&links.stroke)
+            || !valid_id(&links.background)
+            || (links.background.is_some() && !is_frame_like(&node.kind))
+            || (links.fill.is_some()
+                && links.background.is_some()
+                && links.fill != links.background)
+        {
+            return Err(CommandError::InvalidPaintStyleLinks);
+        }
+        Ok(())
+    }
+
+    fn replace_paint_style_links(
+        &mut self,
+        id: NodeId,
+        links: PaintStyleLinks,
+    ) -> Result<(), CommandError> {
+        let before_bytes = self
+            .node_paint_style_links
+            .get(&id)
+            .map(PaintStyleLinks::estimated_bytes)
+            .unwrap_or(0);
+        let after_bytes = links.estimated_bytes();
+        let next_document_bytes = self
+            .node_bytes
+            .saturating_sub(before_bytes)
+            .saturating_add(after_bytes);
+        if next_document_bytes > MAX_DOCUMENT_BYTES {
+            return Err(CommandError::ResourceLimit);
+        }
+        if links.is_empty() {
+            self.node_paint_style_links.remove(&id);
+        } else {
+            self.node_paint_style_links.insert(id, links);
+        }
+        self.node_bytes = next_document_bytes;
+        Ok(())
+    }
+
     /// The dirty set follows touched nodes only through their ancestor chain;
     /// it never defaults to an all-page layout scan.
     fn auto_layout_dirty_frames(
@@ -4559,6 +4683,7 @@ impl Document {
                 | Command::Rename { id, .. }
                 | Command::SetAppearance { id, .. }
                 | Command::SetPaintStacks { id, .. }
+                | Command::SetPaintStyleLinks { id, .. }
                 | Command::SetVectorPath { id, .. }
                 | Command::ConvertToTextPath { id, .. }
                 | Command::SetBooleanOperation { id, .. }
@@ -6677,6 +6802,10 @@ impl Document {
                 self.retired_node_paint_stacks.insert((id, stroke), stack);
             }
         }
+        if let Some(links) = self.node_paint_style_links.remove(&id) {
+            self.node_bytes = self.node_bytes.saturating_sub(links.estimated_bytes());
+            self.retired_node_paint_style_links.insert(id, links);
+        }
         self.retired_node_pages.insert(id, page_id);
         if let Some(asset_id) = self.node_assets.remove(&id) {
             self.retired_node_assets.insert(id, asset_id);
@@ -6803,6 +6932,7 @@ impl Document {
         self.retired_node_text_properties.remove(&node.id);
         self.retired_node_paint_stacks.remove(&(node.id, false));
         self.retired_node_paint_stacks.remove(&(node.id, true));
+        self.retired_node_paint_style_links.remove(&node.id);
         self.node_bytes += node.estimated_bytes();
         Ok(AppliedChange::NodeCreated { node })
     }
@@ -6828,6 +6958,10 @@ impl Document {
                 self.node_bytes = self.node_bytes.saturating_add(stack.estimated_bytes());
                 self.node_paint_stacks.insert((node.id, stroke), stack);
             }
+        }
+        if let Some(links) = self.retired_node_paint_style_links.remove(&node.id) {
+            self.node_bytes = self.node_bytes.saturating_add(links.estimated_bytes());
+            self.node_paint_style_links.insert(node.id, links);
         }
         self.node_bytes += node.estimated_bytes();
         self.retired_ids.remove(&node.id);
@@ -6899,6 +7033,7 @@ impl Document {
         self.retired_node_text_properties.remove(&node.id);
         self.retired_node_paint_stacks.remove(&(node.id, false));
         self.retired_node_paint_stacks.remove(&(node.id, true));
+        self.retired_node_paint_style_links.remove(&node.id);
         self.retired_ids.remove(&node.id);
         self.node_bytes = self
             .node_bytes
@@ -7164,6 +7299,9 @@ impl Command {
                         .map(TextProperties::estimated_bytes)
                         .unwrap_or(0)
             }
+            Command::SetPaintStyleLinks { links, .. } => {
+                std::mem::size_of::<NodeId>() + links.estimated_bytes()
+            }
             Command::Create(node) => node.estimated_bytes(),
             Command::UpdateGeometry { .. } | Command::UpdateGeometryWithoutConstraints { .. } => {
                 std::mem::size_of::<Geometry>() + std::mem::size_of::<NodeId>()
@@ -7427,6 +7565,19 @@ impl PaintStyleResource {
     }
 }
 
+impl PaintStyleLinks {
+    pub fn is_empty(&self) -> bool {
+        self.fill.is_none() && self.stroke.is_none() && self.background.is_none()
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.fill.as_ref().map_or(0, String::len)
+            + self.stroke.as_ref().map_or(0, String::len)
+            + self.background.as_ref().map_or(0, String::len)
+    }
+}
+
 impl FontReference {
     fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -7470,6 +7621,11 @@ impl AppliedChange {
                         .flatten()
                         .map(PaintStack::estimated_bytes)
                         .sum::<usize>()
+            }
+            AppliedChange::PaintStyleLinksChanged { before, after, .. } => {
+                std::mem::size_of::<NodeId>()
+                    + before.as_ref().map_or(0, PaintStyleLinks::estimated_bytes)
+                    + after.as_ref().map_or(0, PaintStyleLinks::estimated_bytes)
             }
             AppliedChange::AutoLayoutChanged { .. } => {
                 std::mem::size_of::<NodeId>() + std::mem::size_of::<Option<AutoLayout>>() * 2
@@ -8052,6 +8208,16 @@ fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource)
     hash_text(hasher, &resource.description);
     hasher.update([u8::from(resource.remote)]);
     hash_versioned_paint_stack(hasher, &resource.paints);
+}
+
+fn hash_optional_style_id(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_text(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
 }
 
 fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
@@ -9010,6 +9176,13 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                     None => hasher.update([0]),
                 }
             }
+        }
+        Command::SetPaintStyleLinks { id, links } => {
+            hasher.update(b"makefigma/editor-core/set-paint-style-links-v1");
+            hasher.update(id.0.to_be_bytes());
+            hash_optional_style_id(hasher, links.fill.as_deref());
+            hash_optional_style_id(hasher, links.stroke.as_deref());
+            hash_optional_style_id(hasher, links.background.as_deref());
         }
         Command::SetVectorPath { id, path } => {
             hasher.update([16]);
@@ -12968,6 +13141,82 @@ mod tests {
         assert_eq!(
             document.seed_paint_style(invalid),
             Err(CommandError::InvalidPaintStyle)
+        );
+    }
+
+    #[test]
+    fn paint_style_links_are_hashed_undoable_and_follow_tombstones() {
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(node(1))]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let baseline = document.canonical_hash_hex();
+        let links = PaintStyleLinks {
+            fill: Some("S:surface".into()),
+            stroke: Some("S:border".into()),
+            background: Some("S:surface".into()),
+        };
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetPaintStyleLinks {
+                        id: NodeId(1),
+                        links: links.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.paint_style_links_for_node(NodeId(1)), Some(&links));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert!(document.paint_style_links_for_node(NodeId(1)).is_none());
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.paint_style_links_for_node(NodeId(1)), Some(&links));
+
+        document
+            .submit(
+                transaction(document.revision, vec![Command::Delete { id: NodeId(1) }]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.paint_style_links_for_node(NodeId(1)).is_none());
+        document.undo().unwrap();
+        assert_eq!(document.paint_style_links_for_node(NodeId(1)), Some(&links));
+    }
+
+    #[test]
+    fn background_style_link_is_limited_to_frame_like_nodes() {
+        let mut rectangle = node(2);
+        rectangle.kind = NodeKind::Rectangle;
+        let mut document = Document::empty();
+        document
+            .submit(
+                transaction(0, vec![Command::Create(rectangle)]),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetPaintStyleLinks {
+                        id: NodeId(2),
+                        links: PaintStyleLinks {
+                            fill: Some("S:surface".into()),
+                            stroke: None,
+                            background: Some("S:surface".into()),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidPaintStyleLinks)
         );
     }
 

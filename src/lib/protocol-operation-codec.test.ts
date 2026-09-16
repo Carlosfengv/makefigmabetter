@@ -75,6 +75,34 @@ describe("protocol operation codec", () => {
     });
   });
 
+  it("serializes PaintStyle identities on create and clears them explicitly on update", () => {
+    const node = {
+      ...createNode("frame", 10, 20),
+      id,
+      fillStyleId: "S:surface",
+      strokeStyleId: "S:border",
+      backgroundStyleId: "S:surface",
+    };
+    const created = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
+    expect(created.operations[0].createNode?.node).toMatchObject({
+      fillStyleId: "S:surface",
+      strokeStyleId: "S:border",
+      backgroundStyleId: "S:surface",
+    });
+
+    const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{
+      type: "update",
+      id,
+      patch: { fillStyleId: undefined, strokeStyleId: undefined, backgroundStyleId: undefined },
+    }])!.batch));
+    expect(updated.operations[2].setPaintStyleLinks).toEqual({
+      nodeId: idBytes(id),
+      fillStyleId: undefined,
+      strokeStyleId: undefined,
+      backgroundStyleId: undefined,
+    });
+  });
+
   it("serializes a zero-height line with the generated Line node kind", () => {
     const node = { ...createNode("line", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const resolved = resolveCoreBatch([], [{ type: "create", node }]);
@@ -602,7 +630,7 @@ describe("protocol operation codec", () => {
     const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { blendMode: "linear-dodge" } }])!.batch));
 
     expect(created.operations[0].createNode?.node?.blendMode).toBe(BlendMode.BLEND_MODE_COLOR_DODGE);
-    expect(updated.operations[2].setAppearance?.blendMode).toBe(BlendMode.BLEND_MODE_LINEAR_DODGE);
+    expect(updated.operations[3].setAppearance?.blendMode).toBe(BlendMode.BLEND_MODE_LINEAR_DODGE);
   });
 
   it("serializes a live BooleanOperation selector on the created structural node", () => {
@@ -658,8 +686,8 @@ describe("protocol operation codec", () => {
     const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { dropShadow } }])!.batch));
     expect(created.operations[0].createNode?.node?.dropShadow).toMatchObject({ offsetX: 4, offsetY: 8, blurRadius: 12, spread: 2, visible: true, color: { alpha: .25 } });
     expect(created.operations[0].createNode?.node?.effectStack).toEqual([expect.objectContaining({ dropShadow: expect.objectContaining({ offsetX: 4, offsetY: 8 }) })]);
-    expect(updated.operations[2].setAppearance?.dropShadow).toMatchObject({ offsetX: 4, offsetY: 8, blurRadius: 12, spread: 2, visible: true, color: { alpha: .25 } });
-    expect(updated.operations[2].setAppearance?.effectStack).toEqual([expect.objectContaining({ dropShadow: expect.objectContaining({ blurRadius: 12 }) })]);
+    expect(updated.operations[3].setAppearance?.dropShadow).toMatchObject({ offsetX: 4, offsetY: 8, blurRadius: 12, spread: 2, visible: true, color: { alpha: .25 } });
+    expect(updated.operations[3].setAppearance?.effectStack).toEqual([expect.objectContaining({ dropShadow: expect.objectContaining({ blurRadius: 12 }) })]);
   });
 
   it("serializes Layer Blur in the ordered Effect Stack", () => {
@@ -898,10 +926,10 @@ describe("protocol operation codec", () => {
     const node = { ...createNode("text", 10, 20), id, text: "before" };
     const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { name: "Headline", x: 44, text: "after" } }]);
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
-    expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setAppearance", "setText", "setTextProperties"]);
-    expect(batch.operations[3].setText).toMatchObject({ nodeId: idBytes(id), text: "after" });
-    expect(batch.operations[4].setTextProperties?.properties).toMatchObject({ autoSize: 1, paragraph: { alignment: 1 } });
-    expect(batch.operations[4].setTextProperties?.properties?.paragraph?.lineHeight).toBe(20);
+    expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setPaintStyleLinks", "setAppearance", "setText", "setTextProperties"]);
+    expect(batch.operations[4].setText).toMatchObject({ nodeId: idBytes(id), text: "after" });
+    expect(batch.operations[5].setTextProperties?.properties).toMatchObject({ autoSize: 1, paragraph: { alignment: 1 } });
+    expect(batch.operations[5].setTextProperties?.properties?.paragraph?.lineHeight).toBe(20);
   });
 
   it("serializes the resizeWithoutConstraints intent on GeometryUpdate", () => {
@@ -918,8 +946,8 @@ describe("protocol operation codec", () => {
     const resolved = resolveCoreBatch([node], [{ type: "update", id, patch: { assetId } }]);
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolved!.batch));
 
-    expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setAppearance", "setImageFill"]);
-    expect(batch.operations[3].setImageFill).toEqual({ nodeId: idBytes(id), assetId: idBytes(assetId) });
+    expect(batch.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setPaintStyleLinks", "setAppearance", "setImageFill"]);
+    expect(batch.operations[4].setImageFill).toEqual({ nodeId: idBytes(id), assetId: idBytes(assetId) });
   });
 
   it("serializes Polygon and Star parameters as canonical protobuf fields", () => {
@@ -940,8 +968,8 @@ describe("protocol operation codec", () => {
 
     expect(created.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_VECTOR, vectorPath: { fillRule: 1 } });
     expect(created.operations[0].createNode?.node?.vectorPath?.subpaths[0]).toMatchObject({ closed: true, points: expect.arrayContaining([expect.objectContaining({ pointType: 1 })]) });
-    expect(updated.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setAppearance", "setVectorPath"]);
-    expect(updated.operations[3].setVectorPath).toMatchObject({ nodeId: idBytes(id), vectorPath: { fillRule: 2 } });
+    expect(updated.operations.map((operation) => Object.keys(operation).find((key) => operation[key as keyof typeof operation] !== undefined))).toEqual(["updateGeometry", "renameNode", "setPaintStyleLinks", "setAppearance", "setVectorPath"]);
+    expect(updated.operations[4].setVectorPath).toMatchObject({ nodeId: idBytes(id), vectorPath: { fillRule: 2 } });
   });
 
   it("serializes named Vector point edits without replacing the path", () => {

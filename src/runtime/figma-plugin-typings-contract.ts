@@ -37,6 +37,11 @@ export function assertFigmaPluginTypingsContract(
   }];
   const paints: readonly Paint[] = rectangle.fills;
   void paints;
+  rectangle.fillStyleId = "S:brand-fill";
+  rectangle.strokeStyleId = "S:brand-stroke";
+  if (false) void rectangle.setFillStyleIdAsync("S:brand-fill");
+  if (false) void rectangle.setStrokeStyleIdAsync("S:brand-stroke");
+  component.backgroundStyleId = "S:brand-fill";
   text.textAutoResize = "HEIGHT";
   text.textTruncation = "ENDING";
   text.maxLines = 2;

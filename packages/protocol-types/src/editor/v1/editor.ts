@@ -1130,6 +1130,9 @@ export interface SceneNode {
   prototypeMetadata?: PrototypeMetadata | undefined;
   fillStack?: PaintStack | undefined;
   strokeStack?: PaintStack | undefined;
+  fillStyleId?: string | undefined;
+  strokeStyleId?: string | undefined;
+  backgroundStyleId?: string | undefined;
 }
 
 export interface SceneNode_ExtensionsEntry {
@@ -1267,6 +1270,13 @@ export interface RegisterTextStyle {
 
 export interface RegisterPaintStyle {
   style?: PaintStyleResource | undefined;
+}
+
+export interface SetPaintStyleLinks {
+  nodeId: Uint8Array;
+  fillStyleId?: string | undefined;
+  strokeStyleId?: string | undefined;
+  backgroundStyleId?: string | undefined;
 }
 
 /**
@@ -1437,6 +1447,7 @@ export interface ResolvedOperation {
   convertToTextPath?: ConvertToTextPath | undefined;
   registerTextStyle?: RegisterTextStyle | undefined;
   registerPaintStyle?: RegisterPaintStyle | undefined;
+  setPaintStyleLinks?: SetPaintStyleLinks | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -6861,6 +6872,9 @@ function createBaseSceneNode(): SceneNode {
     prototypeMetadata: undefined,
     fillStack: undefined,
     strokeStack: undefined,
+    fillStyleId: undefined,
+    strokeStyleId: undefined,
+    backgroundStyleId: undefined,
   };
 }
 
@@ -7021,6 +7035,15 @@ export const SceneNode: MessageFns<SceneNode> = {
     }
     if (message.strokeStack !== undefined) {
       PaintStack.encode(message.strokeStack, writer.uint32(402).fork()).join();
+    }
+    if (message.fillStyleId !== undefined) {
+      writer.uint32(410).string(message.fillStyleId);
+    }
+    if (message.strokeStyleId !== undefined) {
+      writer.uint32(418).string(message.strokeStyleId);
+    }
+    if (message.backgroundStyleId !== undefined) {
+      writer.uint32(426).string(message.backgroundStyleId);
     }
     return writer;
   },
@@ -7465,6 +7488,30 @@ export const SceneNode: MessageFns<SceneNode> = {
           message.strokeStack = PaintStack.decode(reader, reader.uint32());
           continue;
         }
+        case 51: {
+          if (tag !== 410) {
+            break;
+          }
+
+          message.fillStyleId = reader.string();
+          continue;
+        }
+        case 52: {
+          if (tag !== 418) {
+            break;
+          }
+
+          message.strokeStyleId = reader.string();
+          continue;
+        }
+        case 53: {
+          if (tag !== 426) {
+            break;
+          }
+
+          message.backgroundStyleId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7565,6 +7612,9 @@ export const SceneNode: MessageFns<SceneNode> = {
     message.strokeStack = (object.strokeStack !== undefined && object.strokeStack !== null)
       ? PaintStack.fromPartial(object.strokeStack)
       : undefined;
+    message.fillStyleId = object.fillStyleId ?? undefined;
+    message.strokeStyleId = object.strokeStyleId ?? undefined;
+    message.backgroundStyleId = object.backgroundStyleId ?? undefined;
     return message;
   },
 };
@@ -8994,6 +9044,88 @@ export const RegisterPaintStyle: MessageFns<RegisterPaintStyle> = {
   },
 };
 
+function createBaseSetPaintStyleLinks(): SetPaintStyleLinks {
+  return { nodeId: new Uint8Array(0), fillStyleId: undefined, strokeStyleId: undefined, backgroundStyleId: undefined };
+}
+
+export const SetPaintStyleLinks: MessageFns<SetPaintStyleLinks> = {
+  encode(message: SetPaintStyleLinks, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId.length !== 0) {
+      writer.uint32(10).bytes(message.nodeId);
+    }
+    if (message.fillStyleId !== undefined) {
+      writer.uint32(18).string(message.fillStyleId);
+    }
+    if (message.strokeStyleId !== undefined) {
+      writer.uint32(26).string(message.strokeStyleId);
+    }
+    if (message.backgroundStyleId !== undefined) {
+      writer.uint32(34).string(message.backgroundStyleId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetPaintStyleLinks {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetPaintStyleLinks();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.fillStyleId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.strokeStyleId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.backgroundStyleId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetPaintStyleLinks>, I>>(base?: I): SetPaintStyleLinks {
+    return SetPaintStyleLinks.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetPaintStyleLinks>, I>>(object: I): SetPaintStyleLinks {
+    const message = createBaseSetPaintStyleLinks();
+    message.nodeId = object.nodeId ?? new Uint8Array(0);
+    message.fillStyleId = object.fillStyleId ?? undefined;
+    message.strokeStyleId = object.strokeStyleId ?? undefined;
+    message.backgroundStyleId = object.backgroundStyleId ?? undefined;
+    return message;
+  },
+};
+
 function createBaseImageFillUpdate(): ImageFillUpdate {
   return { nodeId: new Uint8Array(0), assetId: undefined };
 }
@@ -10070,6 +10202,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     convertToTextPath: undefined,
     registerTextStyle: undefined,
     registerPaintStyle: undefined,
+    setPaintStyleLinks: undefined,
   };
 }
 
@@ -10161,6 +10294,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.registerPaintStyle !== undefined) {
       RegisterPaintStyle.encode(message.registerPaintStyle, writer.uint32(234).fork()).join();
+    }
+    if (message.setPaintStyleLinks !== undefined) {
+      SetPaintStyleLinks.encode(message.setPaintStyleLinks, writer.uint32(242).fork()).join();
     }
     return writer;
   },
@@ -10404,6 +10540,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.registerPaintStyle = RegisterPaintStyle.decode(reader, reader.uint32());
           continue;
         }
+        case 30: {
+          if (tag !== 242) {
+            break;
+          }
+
+          message.setPaintStyleLinks = SetPaintStyleLinks.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10508,6 +10652,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.registerPaintStyle = (object.registerPaintStyle !== undefined && object.registerPaintStyle !== null)
       ? RegisterPaintStyle.fromPartial(object.registerPaintStyle)
+      : undefined;
+    message.setPaintStyleLinks = (object.setPaintStyleLinks !== undefined && object.setPaintStyleLinks !== null)
+      ? SetPaintStyleLinks.fromPartial(object.setPaintStyleLinks)
       : undefined;
     return message;
   },

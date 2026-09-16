@@ -314,11 +314,17 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   private paintStyleHost() {
     return {
-      // Node style-link identities are introduced with the application API.
-      consumersForPaintStyle: (styleId: string) => {
-        void styleId;
-        return Object.freeze([]);
-      },
+      consumersForPaintStyle: (styleId: string) => Object.freeze(this.projectionStore
+        .listLiveNodes()
+        .filter((node) => this.isNodeVisible(node))
+        .map((node) => {
+          const fields: string[] = [];
+          if (node.fillStyleId === styleId) fields.push("fillStyleId");
+          if (node.strokeStyleId === styleId) fields.push("strokeStyleId");
+          if (node.backgroundStyleId === styleId) fields.push("backgroundStyleId");
+          return fields.length ? { node: this.proxyFor(node.id), fields: Object.freeze(fields) } : undefined;
+        })
+        .filter((consumer): consumer is { node: RuntimeNodeProxy; fields: readonly string[] } => consumer !== undefined)),
     };
   }
 

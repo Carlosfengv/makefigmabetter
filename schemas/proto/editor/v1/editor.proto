@@ -868,6 +868,9 @@ message SceneNode {
   optional PrototypeMetadata prototype_metadata = 48;
   optional PaintStack fill_stack = 49;
   optional PaintStack stroke_stack = 50;
+  optional string fill_style_id = 51;
+  optional string stroke_style_id = 52;
+  optional string background_style_id = 53;
 }
 
 message GeometryUpdate {
@@ -990,6 +993,13 @@ message RegisterTextStyle {
 
 message RegisterPaintStyle {
   PaintStyleResource style = 1;
+}
+
+message SetPaintStyleLinks {
+  bytes node_id = 1;
+  optional string fill_style_id = 2;
+  optional string stroke_style_id = 3;
+  optional string background_style_id = 4;
 }
 
 // Assigns or clears an image fill on a Frame, Rectangle, Ellipse, or Image
@@ -1132,6 +1142,7 @@ message ResolvedOperation {
     ConvertToTextPath convert_to_text_path = 27;
     RegisterTextStyle register_text_style = 28;
     RegisterPaintStyle register_paint_style = 29;
+    SetPaintStyleLinks set_paint_style_links = 30;
   }
 }
 

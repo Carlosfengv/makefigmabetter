@@ -17,6 +17,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   }];
   void rectangle.fills;
   void rectangle.strokes;
+  rectangle.fillStyleId = "S:brand-fill";
+  rectangle.strokeStyleId = "S:brand-stroke";
+  if (false) void rectangle.setFillStyleIdAsync("S:brand-fill");
+  if (false) void rectangle.setStrokeStyleIdAsync("S:brand-stroke");
   const text = runtime.createText();
   text.textAutoResize = "HEIGHT";
   text.textTruncation = "ENDING";

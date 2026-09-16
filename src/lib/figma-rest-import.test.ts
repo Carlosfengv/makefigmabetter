@@ -1124,6 +1124,7 @@ describe("Figma REST import planning", () => {
       remote: true,
       paints: { layers: [{ visible: true, opacity: .75, blendMode: "normal", paint: { css: "#ff0000", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
     }]);
+    expect(plan.nodes[0]?.fillStyleId).toBe("S:brand-fill");
     expect(resolveFigmaRestImportBatch(plan)?.batch.map((command) => command.type)).toEqual([
       "createPage",
       "registerPaintStyle",
