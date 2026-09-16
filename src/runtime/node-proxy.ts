@@ -12,8 +12,10 @@ import type {
   DocumentColor,
   DocumentConstraints,
   DocumentEffect,
+  DocumentEmbedMetadata,
   DocumentFontReference,
   DocumentInstanceMetadata,
+  DocumentLinkUnfurlMetadata,
   DocumentPaintStyleResource,
   DocumentPaintStack,
   DocumentTextProperties,
@@ -1958,6 +1960,29 @@ export class RuntimeNodeProxy {
     const nextEnd = canonicalConnectorEndpoint(end, metadata.end);
     if (!nextStart || !nextEnd) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.writeConnectorMetadata({ start: nextStart, end: nextEnd });
+  }
+
+  get embedData(): DocumentEmbedMetadata {
+    if (this.type !== "EMBED") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const metadata = this.read().embedMetadata as DocumentEmbedMetadata | undefined;
+    if (!metadata) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    return structuredClone(metadata);
+  }
+
+  get linkUnfurlData(): DocumentLinkUnfurlMetadata {
+    if (this.type !== "LINK_UNFURL") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const metadata = this.read().linkUnfurlMetadata as DocumentLinkUnfurlMetadata | undefined;
+    if (!metadata) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    return structuredClone(metadata);
+  }
+
+  get mediaData(): Readonly<{ hash: string }> {
+    if (this.type !== "MEDIA") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const metadata = this.read().mediaMetadata as { hash?: unknown } | undefined;
+    if (!metadata || typeof metadata.hash !== "string" || !metadata.hash) {
+      throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    }
+    return { hash: metadata.hash };
   }
 
   get shapeType(): ShapeWithTextType {

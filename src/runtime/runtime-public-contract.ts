@@ -24,7 +24,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void convertedComponent.children;
   const slice = runtime.createSlice();
   slice.resize(320, 180);
-  if (false) void runtime.createGif("admitted-gif-hash");
+  if (false) {
+    const media = runtime.createGif("admitted-gif-hash");
+    void media.mediaData.hash;
+  }
   const rectangle = runtime.createRectangle();
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
   if (runtimeVariable) {

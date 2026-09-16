@@ -2477,6 +2477,7 @@ describe("M1 RuntimeSession", () => {
 
     const media = session.createGif("gif-1");
     expect(media.type).toBe("MEDIA");
+    expect(media.mediaData).toEqual({ hash: "gif-1" });
     expect(session.projectionStore.getNode(media.id)).toMatchObject({
       type: "MEDIA",
       assetId: "gif-1",
@@ -2489,6 +2490,40 @@ describe("M1 RuntimeSession", () => {
 
     await session.commitAsync();
     expect(session.projectionStore.getNode(media.id)?.removed).not.toBe(true);
+  });
+
+  it("projects readonly Embed and LinkUnfurl metadata on live node proxies", async () => {
+    const projection: RuntimeProjection = {
+      revision: 0,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        {
+          id: "embed",
+          type: "EMBED",
+          name: "Video",
+          parentId: "page",
+          siblingIndex: 0,
+          embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" },
+        },
+        {
+          id: "link",
+          type: "LINK_UNFURL",
+          name: "Story",
+          parentId: "page",
+          siblingIndex: 1,
+          linkUnfurlMetadata: { url: "https://example.com/story", title: "Story", description: "Summary", provider: "Example" },
+        },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "preview-metadata", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const embed = (await session.getNodeByIdAsync("embed"))!;
+    const link = (await session.getNodeByIdAsync("link"))!;
+
+    expect(embed.embedData).toEqual({ srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" });
+    expect(link.linkUnfurlData).toEqual({ url: "https://example.com/story", title: "Story", description: "Summary", provider: "Example" });
+    expect(isRuntimeError(captureError(() => embed.linkUnfurlData), "UNSUPPORTED_PROPERTY")).toBe(true);
+    expect(isRuntimeError(captureError(() => link.mediaData), "UNSUPPORTED_PROPERTY")).toBe(true);
   });
 
   it("does not register an image when cancellation wins during admission", async () => {
