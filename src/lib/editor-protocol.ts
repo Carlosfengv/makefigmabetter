@@ -548,6 +548,8 @@ export type CoreBatchCommand =
   | { type: "registerPaintStyle"; style: DocumentPaintStyleResource }
   | { type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }
   | { type: "registerVariable"; variable: DocumentVariableResource }
+  | { type: "setVariable"; variable: DocumentVariableResource }
+  | { type: "deleteVariable"; id: string }
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
@@ -843,6 +845,8 @@ export type EditorCommand =
   | { type: "create-page"; id: string; name: string; positionId?: string }
   | { type: "register-variable-collection"; collection: DocumentVariableCollectionResource }
   | { type: "register-variable"; variable: DocumentVariableResource }
+  | { type: "set-variable"; variable: DocumentVariableResource }
+  | { type: "delete-variable"; id: string }
   | { type: "select-page"; id: string }
   | { type: "create"; node: CanvasNode }
   | { type: "update"; id: string; patch: Partial<CanvasNode> }

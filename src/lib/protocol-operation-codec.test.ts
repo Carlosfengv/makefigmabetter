@@ -80,6 +80,8 @@ describe("protocol operation codec", () => {
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
       { type: "registerVariableCollection", collection },
       { type: "registerVariable", variable: { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"] } },
+      { type: "setVariable", variable: { id: "V:spacing", key: "", name: "Space", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 8 }, scopes: ["GAP"] } },
+      { type: "deleteVariable", id: "V:spacing" },
     ]));
 
     expect(batch.operations[0]?.registerVariableCollection?.collection).toMatchObject({ id: "VC:tokens", defaultModeId: "default" });
@@ -89,6 +91,8 @@ describe("protocol operation codec", () => {
       resolvedType: VariableResolvedType.VARIABLE_RESOLVED_TYPE_FLOAT,
       valuesByMode: [{ modeId: "default", value: { floatValue: 0 } }],
     });
+    expect(batch.operations[2]?.setVariable?.variable).toMatchObject({ name: "Space", valuesByMode: [{ modeId: "default", value: { floatValue: 8 } }] });
+    expect(batch.operations[3]?.deleteVariable).toEqual({ variableId: "V:spacing" });
   });
 
   it("serializes PaintStyle identities on create and clears them explicitly on update", () => {

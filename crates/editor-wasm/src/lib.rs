@@ -313,6 +313,14 @@ impl DocumentEngine {
                         variable: variable_resource_from_projection(&variable)?,
                     });
                 }
+                BatchCommand::SetVariable { variable } => {
+                    commands.push(Command::SetVariable {
+                        variable: variable_resource_from_projection(&variable)?,
+                    });
+                }
+                BatchCommand::DeleteVariable { id } => {
+                    commands.push(Command::DeleteVariable { id });
+                }
                 BatchCommand::Create { node } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
@@ -2016,6 +2024,12 @@ enum BatchCommand {
     RegisterVariable {
         variable: ProjectionVariableResource,
     },
+    SetVariable {
+        variable: ProjectionVariableResource,
+    },
+    DeleteVariable {
+        id: String,
+    },
     Create {
         node: ProjectionNode,
     },
@@ -3025,6 +3039,8 @@ impl DocumentEngine {
                 | BatchCommand::RegisterPaintStyle { .. }
                 | BatchCommand::RegisterVariableCollection { .. }
                 | BatchCommand::RegisterVariable { .. }
+                | BatchCommand::SetVariable { .. }
+                | BatchCommand::DeleteVariable { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }
@@ -13464,6 +13480,36 @@ mod tests {
         let after = engine.canonical_hash();
         assert_ne!(before, after);
 
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000001117",
+                1,
+                &serde_json::json!([{
+                    "type": "setVariable",
+                    "variable": {
+                        "id": "V:spacing", "key": "", "name": "Space", "description": "",
+                        "remote": false, "hiddenFromPublishing": false, "collectionId": "VC:tokens",
+                        "resolvedType": "FLOAT", "valuesByMode": { "default": 8.0 }, "scopes": ["GAP"]
+                    }
+                }]).to_string(),
+            )
+            .unwrap();
+        let changed: CoreSnapshot = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert_eq!(changed.variables.unwrap()[0].name, "Space");
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000001118",
+                2,
+                &serde_json::json!([{ "type": "deleteVariable", "id": "V:spacing" }]).to_string(),
+            )
+            .unwrap();
+        let deleted: CoreSnapshot = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert!(deleted.variables.unwrap().is_empty());
+        engine.undo().unwrap();
+        let restored: CoreSnapshot = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert_eq!(restored.variables.unwrap()[0].name, "Space");
+
+        engine.undo().unwrap();
         engine.undo().unwrap();
         assert_eq!(engine.canonical_hash(), before);
         engine.redo().unwrap();

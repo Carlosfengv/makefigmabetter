@@ -23,6 +23,8 @@ export type RuntimeProjection = Readonly<{
 export type PendingProjectionOperation =
   | Readonly<{ type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }>
   | Readonly<{ type: "registerVariable"; variable: DocumentVariableResource }>
+  | Readonly<{ type: "setVariable"; variable: DocumentVariableResource }>
+  | Readonly<{ type: "deleteVariable"; id: string }>
   | Readonly<{ type: "create"; node: RuntimeProjectionNode }>
   | Readonly<{ type: "update"; nodeId: string; patch: Readonly<Record<string, unknown>>; ignoreConstraints?: true; convertToTextPath?: true }>
   | Readonly<{ type: "remove"; nodeId: string }>
@@ -191,6 +193,8 @@ export class RuntimeProjectionStore {
     for (const { transaction } of this.pending.values()) {
       for (const operation of transaction.operations) {
         if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
+        if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
+        if (operation.type === "deleteVariable") variables.delete(operation.id);
       }
     }
     return [...variables.values()];
@@ -247,8 +251,44 @@ function validateResourceOperations(
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       variables.set(value.id, value);
+      validateVariableAliases(variables, transactionId);
+    } else if (operation.type === "setVariable") {
+      const value = operation.variable;
+      const before = variables.get(value.id);
+      const collection = collections.get(value.collectionId);
+      if (!before || before.remote || !collection || before.key !== value.key || before.remote !== value.remote || before.collectionId !== value.collectionId || before.resolvedType !== value.resolvedType || !value.name.trim() || collection.modes.some((mode) => value.valuesByMode[mode.modeId] === undefined)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      variables.set(value.id, value);
+      validateVariableAliases(variables, transactionId);
+    } else if (operation.type === "deleteVariable") {
+      if (variables.get(operation.id)?.remote !== false || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      variables.delete(operation.id);
     }
   }
+}
+
+function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariableResource>, transactionId: string): void {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): void => {
+    if (visiting.has(id)) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+    if (visited.has(id)) return;
+    const variable = variables.get(id);
+    if (!variable) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+    visiting.add(id);
+    for (const value of Object.values(variable.valuesByMode)) {
+      if (typeof value !== "object" || value === null || !("type" in value) || value.type !== "VARIABLE_ALIAS") continue;
+      const target = variables.get(value.id);
+      if (!target || target.resolvedType !== variable.resolvedType) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      visit(target.id);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  };
+  variables.forEach((_value, id) => visit(id));
 }
 
 function applyResourceOperations(
@@ -259,6 +299,8 @@ function applyResourceOperations(
   for (const operation of operations) {
     if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
     if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
+    if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
+    if (operation.type === "deleteVariable") variables.delete(operation.id);
   }
 }
 
@@ -270,7 +312,7 @@ function validateOperations(
   const overlay = new Map<string, RuntimeProjectionNode>();
   const read = (nodeId: string) => overlay.get(nodeId) ?? base.get(nodeId);
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable") continue;
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -330,7 +372,7 @@ function applyOperations(
   transactionId: string,
 ): void {
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable") continue;
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });

@@ -1343,6 +1343,14 @@ export interface RegisterVariable {
   variable?: VariableResource | undefined;
 }
 
+export interface SetVariable {
+  variable?: VariableResource | undefined;
+}
+
+export interface DeleteVariable {
+  variableId: string;
+}
+
 export interface SetPaintStyleLinks {
   nodeId: Uint8Array;
   fillStyleId?: string | undefined;
@@ -1521,6 +1529,8 @@ export interface ResolvedOperation {
   setPaintStyleLinks?: SetPaintStyleLinks | undefined;
   registerVariableCollection?: RegisterVariableCollection | undefined;
   registerVariable?: RegisterVariable | undefined;
+  setVariable?: SetVariable | undefined;
+  deleteVariable?: DeleteVariable | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -9756,6 +9766,100 @@ export const RegisterVariable: MessageFns<RegisterVariable> = {
   },
 };
 
+function createBaseSetVariable(): SetVariable {
+  return { variable: undefined };
+}
+
+export const SetVariable: MessageFns<SetVariable> = {
+  encode(message: SetVariable, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.variable !== undefined) {
+      VariableResource.encode(message.variable, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVariable {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVariable();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.variable = VariableResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetVariable>, I>>(base?: I): SetVariable {
+    return SetVariable.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVariable>, I>>(object: I): SetVariable {
+    const message = createBaseSetVariable();
+    message.variable = (object.variable !== undefined && object.variable !== null)
+      ? VariableResource.fromPartial(object.variable)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeleteVariable(): DeleteVariable {
+  return { variableId: "" };
+}
+
+export const DeleteVariable: MessageFns<DeleteVariable> = {
+  encode(message: DeleteVariable, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.variableId !== "") {
+      writer.uint32(10).string(message.variableId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteVariable {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteVariable();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.variableId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteVariable>, I>>(base?: I): DeleteVariable {
+    return DeleteVariable.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteVariable>, I>>(object: I): DeleteVariable {
+    const message = createBaseDeleteVariable();
+    message.variableId = object.variableId ?? "";
+    return message;
+  },
+};
+
 function createBaseSetPaintStyleLinks(): SetPaintStyleLinks {
   return { nodeId: new Uint8Array(0), fillStyleId: undefined, strokeStyleId: undefined, backgroundStyleId: undefined };
 }
@@ -10917,6 +11021,8 @@ function createBaseResolvedOperation(): ResolvedOperation {
     setPaintStyleLinks: undefined,
     registerVariableCollection: undefined,
     registerVariable: undefined,
+    setVariable: undefined,
+    deleteVariable: undefined,
   };
 }
 
@@ -11017,6 +11123,12 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.registerVariable !== undefined) {
       RegisterVariable.encode(message.registerVariable, writer.uint32(258).fork()).join();
+    }
+    if (message.setVariable !== undefined) {
+      SetVariable.encode(message.setVariable, writer.uint32(266).fork()).join();
+    }
+    if (message.deleteVariable !== undefined) {
+      DeleteVariable.encode(message.deleteVariable, writer.uint32(274).fork()).join();
     }
     return writer;
   },
@@ -11284,6 +11396,22 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.registerVariable = RegisterVariable.decode(reader, reader.uint32());
           continue;
         }
+        case 33: {
+          if (tag !== 266) {
+            break;
+          }
+
+          message.setVariable = SetVariable.decode(reader, reader.uint32());
+          continue;
+        }
+        case 34: {
+          if (tag !== 274) {
+            break;
+          }
+
+          message.deleteVariable = DeleteVariable.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11398,6 +11526,12 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
         : undefined;
     message.registerVariable = (object.registerVariable !== undefined && object.registerVariable !== null)
       ? RegisterVariable.fromPartial(object.registerVariable)
+      : undefined;
+    message.setVariable = (object.setVariable !== undefined && object.setVariable !== null)
+      ? SetVariable.fromPartial(object.setVariable)
+      : undefined;
+    message.deleteVariable = (object.deleteVariable !== undefined && object.deleteVariable !== null)
+      ? DeleteVariable.fromPartial(object.deleteVariable)
       : undefined;
     return message;
   },

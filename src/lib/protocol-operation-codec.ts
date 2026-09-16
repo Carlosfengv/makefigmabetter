@@ -150,6 +150,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "registerVariable") {
     return [{ registerVariable: { variable: variableResourceProto(command.variable) } }];
   }
+  if (command.type === "setVariable") {
+    return [{ setVariable: { variable: variableResourceProto(command.variable) } }];
+  }
+  if (command.type === "deleteVariable") {
+    return [{ deleteVariable: { variableId: command.id } }];
+  }
   if (command.type === "create") {
     const operations: ResolvedOperation[] = [{ createNode: { node: nodeProto(command.node) } }];
     const layout = autoLayoutOperation(command.node);

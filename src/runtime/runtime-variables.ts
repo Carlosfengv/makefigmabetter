@@ -25,6 +25,9 @@ export type RuntimeVariableHost = Readonly<{
   allocateRuntimeId(): string;
   registerVariableCollection(collection: DocumentVariableCollectionResource): void;
   registerVariable(variable: DocumentVariableResource): void;
+  setVariable(variable: DocumentVariableResource): void;
+  deleteVariable(id: string): void;
+  variableIsBound(id: string): boolean;
 }>;
 
 function runtimeColor(value: DocumentColor): RuntimeVariableColor {
@@ -43,44 +46,111 @@ function runtimeValue(value: DocumentVariableValue): RuntimeVariableValue {
 }
 
 export class RuntimeVariable {
-  constructor(private readonly resource: DocumentVariableResource, private readonly host: RuntimeVariableHost) {}
+  private removed = false;
+  constructor(private resource: DocumentVariableResource, private readonly host: RuntimeVariableHost) {}
 
   get id(): string { return this.resource.id; }
-  get key(): string { return this.resource.key; }
-  get remote(): boolean { return this.resource.remote; }
-  get variableCollectionId(): string { return this.resource.collectionId; }
-  get resolvedType(): DocumentVariableResolvedType { return this.resource.resolvedType; }
-  get name(): string { return this.resource.name; }
-  set name(_value: string) { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  get description(): string { return this.resource.description; }
-  set description(_value: string) { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  get hiddenFromPublishing(): boolean { return this.resource.hiddenFromPublishing; }
-  set hiddenFromPublishing(_value: boolean) { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  get scopes(): readonly string[] { return Object.freeze([...this.resource.scopes]); }
-  set scopes(_value: readonly string[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  get key(): string { return this.read().key; }
+  get remote(): boolean { return this.read().remote; }
+  get variableCollectionId(): string { return this.read().collectionId; }
+  get resolvedType(): DocumentVariableResolvedType { return this.read().resolvedType; }
+  get name(): string { return this.read().name; }
+  set name(value: string) {
+    if (typeof value !== "string" || !value.trim()) throw runtimeError("INVALID_ARGUMENT");
+    this.update({ name: value });
+  }
+  get description(): string { return this.read().description; }
+  set description(value: string) {
+    if (typeof value !== "string") throw runtimeError("INVALID_ARGUMENT");
+    this.update({ description: value });
+  }
+  get hiddenFromPublishing(): boolean { return this.read().hiddenFromPublishing; }
+  set hiddenFromPublishing(value: boolean) {
+    if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT");
+    this.update({ hiddenFromPublishing: value });
+  }
+  get scopes(): readonly string[] { return Object.freeze([...this.read().scopes]); }
+  set scopes(value: readonly string[]) {
+    if (!Array.isArray(value) || value.length > 16 || value.some((scope) => typeof scope !== "string" || !scope || scope.length > 128)) throw runtimeError("INVALID_ARGUMENT");
+    this.update({ scopes: [...value] });
+  }
   get valuesByMode(): Readonly<Record<string, RuntimeVariableValue>> {
-    return Object.freeze(Object.fromEntries(Object.entries(this.resource.valuesByMode).map(([mode, value]) => [mode, runtimeValue(value)])));
+    return Object.freeze(Object.fromEntries(Object.entries(this.read().valuesByMode).map(([mode, value]) => [mode, runtimeValue(value)])));
   }
   get codeSyntax(): Readonly<Record<string, string>> { return Object.freeze({}); }
 
   resolveForConsumer(_consumer: unknown): Readonly<{ value: RuntimeVariableValue; resolvedType: DocumentVariableResolvedType }> {
     this.host.assertOpen();
     const nodeId = _consumer && typeof _consumer === "object" && "id" in _consumer && typeof _consumer.id === "string" ? _consumer.id : undefined;
-    const resolved = this.host.resolveVariableValue(this.resource.id, nodeId);
+    const resolved = this.host.resolveVariableValue(this.id, nodeId);
     return Object.freeze({ value: runtimeValue(resolved.value), resolvedType: resolved.resolvedType });
   }
 
-  async getPublishStatusAsync(): Promise<"UNPUBLISHED" | "CURRENT"> { return this.resource.key ? "CURRENT" : "UNPUBLISHED"; }
-  setValueForMode(_modeId: string, _value: RuntimeVariableValue): never { void _modeId; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
+  async getPublishStatusAsync(): Promise<"UNPUBLISHED" | "CURRENT"> { return this.read().key ? "CURRENT" : "UNPUBLISHED"; }
+  setValueForMode(modeId: string, value: RuntimeVariableValue): void {
+    this.assertMutable();
+    const current = this.read();
+    const collection = this.host.variableCollectionResource(current.collectionId);
+    if (!collection?.modes.some((mode) => mode.modeId === modeId)) throw runtimeError("INVALID_ARGUMENT");
+    let documentValue: DocumentVariableValue;
+    if (current.resolvedType === "BOOLEAN" && typeof value === "boolean") documentValue = value;
+    else if (current.resolvedType === "FLOAT" && typeof value === "number" && Number.isFinite(value)) documentValue = value;
+    else if (current.resolvedType === "STRING" && typeof value === "string") documentValue = value;
+    else if (current.resolvedType === "COLOR" && isRuntimeColor(value)) {
+      documentValue = { space: "srgb", components: [value.r, value.g, value.b], alpha: value.a ?? 1 };
+    } else if (isVariableAlias(value)) {
+      const target = this.host.variableResource(value.id);
+      if (!target || target.id === this.id || target.resolvedType !== this.resolvedType) throw runtimeError("INVALID_ARGUMENT");
+      documentValue = { type: "VARIABLE_ALIAS", id: target.id };
+    } else throw runtimeError("INVALID_ARGUMENT");
+    this.update({ valuesByMode: { ...current.valuesByMode, [modeId]: documentValue } });
+  }
   setVariableCodeSyntax(_platform: string, _value: string): never { void _platform; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
   removeVariableCodeSyntax(_platform: string): never { void _platform; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  remove(): never { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  remove(): void {
+    this.assertMutable();
+    if (this.host.variableIsBound(this.id)) throw runtimeError("INVALID_ARGUMENT");
+    this.host.deleteVariable(this.id);
+    this.removed = true;
+  }
   getPluginData(_key: string): string { void _key; return ""; }
   setPluginData(_key: string, _value: string): never { void _key; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
   getPluginDataKeys(): string[] { return []; }
   getSharedPluginData(_namespace: string, _key: string): string { void _namespace; void _key; return ""; }
   setSharedPluginData(_namespace: string, _key: string, _value: string): never { void _namespace; void _key; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
   getSharedPluginDataKeys(_namespace: string): string[] { void _namespace; return []; }
+
+  private assertCurrent(): void {
+    this.host.assertOpen();
+    if (this.removed || !this.host.variableResource(this.id)) throw runtimeError("RESOURCE_UNAVAILABLE");
+  }
+
+  private read(): DocumentVariableResource {
+    const current = this.host.variableResource(this.resource.id);
+    if (current) this.resource = current;
+    return this.resource;
+  }
+
+  private assertMutable(): void {
+    this.assertCurrent();
+    if (this.read().remote) throw runtimeError("INVALID_ARGUMENT");
+  }
+
+  private update(patch: Partial<DocumentVariableResource>): void {
+    this.assertMutable();
+    const next = { ...this.read(), ...patch };
+    this.host.setVariable(next);
+    this.resource = next;
+  }
+}
+
+function isVariableAlias(value: RuntimeVariableValue): value is DocumentVariableAlias {
+  return typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS" && typeof value.id === "string";
+}
+
+function isRuntimeColor(value: RuntimeVariableValue): value is RuntimeVariableColor {
+  return typeof value === "object" && value !== null && "r" in value && "g" in value && "b" in value
+    && [value.r, value.g, value.b, value.a ?? 1].every((component) => typeof component === "number" && Number.isFinite(component) && component >= 0 && component <= 1);
 }
 
 export class RuntimeVariableCollection {

@@ -58,12 +58,16 @@ describe("RuntimeWorkerBridge", () => {
       operations: [
         { type: "registerVariableCollection", collection },
         { type: "registerVariable", variable },
+        { type: "setVariable", variable: { ...variable, name: "Space" } },
+        { type: "deleteVariable", id: variable.id },
       ],
     });
 
     expect(posted[0]?.transaction.commands).toEqual([
       { type: "register-variable-collection", collection },
       { type: "register-variable", variable },
+      { type: "set-variable", variable: { ...variable, name: "Space" } },
+      { type: "delete-variable", id: variable.id },
     ]);
     bridge.close();
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));

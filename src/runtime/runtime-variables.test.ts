@@ -68,6 +68,17 @@ describe("Variables resource runtime", () => {
     expect(surface.valuesByMode[collection.defaultModeId]).toEqual({ r: 0, g: 0, b: 0 });
     expect(session.variables.getLocalVariableCollections().at(-1)?.id).toBe(collection.id);
     expect(session.variables.getLocalVariables().slice(-2).map((value) => value.id)).toEqual([spacing.id, surface.id]);
+    spacing.name = "Space";
+    spacing.description = "Layout spacing";
+    spacing.hiddenFromPublishing = true;
+    spacing.scopes = ["GAP"];
+    spacing.setValueForMode(collection.defaultModeId, 8);
+    surface.setValueForMode(collection.defaultModeId, { r: 1, g: .5, b: 0, a: .75 });
+    expect(spacing).toMatchObject({ name: "Space", description: "Layout spacing", hiddenFromPublishing: true, scopes: ["GAP"] });
+    expect(spacing.valuesByMode[collection.defaultModeId]).toBe(8);
+    expect(surface.valuesByMode[collection.defaultModeId]).toEqual({ r: 1, g: .5, b: 0, a: .75 });
+    surface.remove();
+    expect(await session.variables.getVariableByIdAsync(surface.id)).toBeNull();
 
     await session.commitAsync();
     expect(transport.submitted).toHaveLength(1);
@@ -75,8 +86,15 @@ describe("Variables resource runtime", () => {
       "registerVariableCollection",
       "registerVariable",
       "registerVariable",
+      "setVariable",
+      "setVariable",
+      "setVariable",
+      "setVariable",
+      "setVariable",
+      "setVariable",
+      "deleteVariable",
     ]);
-    expect((await session.variables.getVariableByIdAsync(spacing.id))?.name).toBe("Spacing");
+    expect((await session.variables.getVariableByIdAsync(spacing.id))?.name).toBe("Space");
   });
 
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
@@ -278,6 +296,14 @@ class UpdatingTransport implements RuntimeTransactionTransport {
     for (const operation of transaction.operations) {
       if (operation.type === "registerVariableCollection") variableCollections.push(structuredClone(operation.collection));
       if (operation.type === "registerVariable") variables.push(structuredClone(operation.variable));
+      if (operation.type === "setVariable") {
+        const index = variables.findIndex((variable) => variable.id === operation.variable.id);
+        if (index >= 0) variables[index] = structuredClone(operation.variable);
+      }
+      if (operation.type === "deleteVariable") {
+        const index = variables.findIndex((variable) => variable.id === operation.id);
+        if (index >= 0) variables.splice(index, 1);
+      }
     }
     this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], variableCollections, variables };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };

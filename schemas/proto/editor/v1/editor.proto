@@ -1061,6 +1061,14 @@ message RegisterVariable {
   VariableResource variable = 1;
 }
 
+message SetVariable {
+  VariableResource variable = 1;
+}
+
+message DeleteVariable {
+  string variable_id = 1;
+}
+
 message SetPaintStyleLinks {
   bytes node_id = 1;
   optional string fill_style_id = 2;
@@ -1211,6 +1219,8 @@ message ResolvedOperation {
     SetPaintStyleLinks set_paint_style_links = 30;
     RegisterVariableCollection register_variable_collection = 31;
     RegisterVariable register_variable = 32;
+    SetVariable set_variable = 33;
+    DeleteVariable delete_variable = 34;
   }
 }
 

@@ -1460,6 +1460,12 @@ pub enum Command {
     RegisterVariable {
         variable: VariableResource,
     },
+    SetVariable {
+        variable: VariableResource,
+    },
+    DeleteVariable {
+        id: String,
+    },
     Delete {
         id: NodeId,
     },
@@ -1612,6 +1618,13 @@ pub enum AppliedChange {
         collection: VariableCollectionResource,
     },
     VariableRegistered {
+        variable: VariableResource,
+    },
+    VariableChanged {
+        before: VariableResource,
+        after: VariableResource,
+    },
+    VariableDeleted {
         variable: VariableResource,
     },
     NodeDeleted {
@@ -2553,6 +2566,67 @@ impl Document {
         self.variable_catalog_bytes += bytes;
         self.variables.insert(variable.id.clone(), variable);
         Ok(())
+    }
+
+    fn replace_variable(
+        &mut self,
+        variable: VariableResource,
+    ) -> Result<VariableResource, CommandError> {
+        let Some(before) = self.variables.get(&variable.id).cloned() else {
+            return Err(CommandError::InvalidVariable);
+        };
+        if before.remote
+            || before.key != variable.key
+            || before.remote != variable.remote
+            || before.collection_id != variable.collection_id
+            || before.resolved_type != variable.resolved_type
+        {
+            return Err(CommandError::InvalidVariable);
+        }
+        self.variables.remove(&before.id);
+        self.variable_catalog_bytes = self
+            .variable_catalog_bytes
+            .saturating_sub(before.estimated_bytes());
+        if let Err(error) = self.insert_variable(variable, true) {
+            self.variable_catalog_bytes += before.estimated_bytes();
+            self.variables.insert(before.id.clone(), before);
+            return Err(error);
+        }
+        if let Err(error) = self.validate_variable_catalog() {
+            let inserted = self
+                .variables
+                .remove(&before.id)
+                .expect("inserted variable");
+            self.variable_catalog_bytes = self
+                .variable_catalog_bytes
+                .saturating_sub(inserted.estimated_bytes());
+            self.variable_catalog_bytes += before.estimated_bytes();
+            self.variables.insert(before.id.clone(), before);
+            return Err(error);
+        }
+        Ok(before)
+    }
+
+    fn remove_variable(&mut self, id: &str) -> Result<VariableResource, CommandError> {
+        let Some(variable) = self.variables.get(id).cloned() else {
+            return Err(CommandError::InvalidVariable);
+        };
+        if variable.remote {
+            return Err(CommandError::InvalidVariable);
+        }
+        if self.variables.values().any(|candidate| {
+            candidate.id != id
+                && candidate.values_by_mode.values().any(
+                    |value| matches!(value, VariableValue::Alias(target_id) if target_id == id),
+                )
+        }) {
+            return Err(CommandError::InvalidVariable);
+        }
+        self.variables.remove(id);
+        self.variable_catalog_bytes = self
+            .variable_catalog_bytes
+            .saturating_sub(variable.estimated_bytes());
+        Ok(variable)
     }
 
     pub fn validate_variable_catalog(&self) -> Result<(), CommandError> {
@@ -4550,6 +4624,17 @@ impl Document {
                     variable: variable.clone(),
                 })
             }
+            Command::SetVariable { variable } => {
+                let before = self.replace_variable(variable.clone())?;
+                Ok(AppliedChange::VariableChanged {
+                    before,
+                    after: variable.clone(),
+                })
+            }
+            Command::DeleteVariable { id } => {
+                let variable = self.remove_variable(id)?;
+                Ok(AppliedChange::VariableDeleted { variable })
+            }
         }
     }
 
@@ -4656,6 +4741,19 @@ impl Document {
                     .variable_catalog_bytes
                     .saturating_sub(variable.estimated_bytes());
             }
+            AppliedChange::VariableChanged { before, after } => {
+                self.variables.insert(before.id.clone(), before.clone());
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_sub(after.estimated_bytes())
+                    .saturating_add(before.estimated_bytes());
+            }
+            AppliedChange::VariableDeleted { variable } => {
+                self.variables.insert(variable.id.clone(), variable.clone());
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_add(variable.estimated_bytes());
+            }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
             AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
@@ -4753,6 +4851,19 @@ impl Document {
                     .variable_catalog_bytes
                     .saturating_add(variable.estimated_bytes());
                 self.variables.insert(variable.id.clone(), variable.clone());
+            }
+            AppliedChange::VariableChanged { before, after } => {
+                self.variables.insert(after.id.clone(), after.clone());
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_sub(before.estimated_bytes())
+                    .saturating_add(after.estimated_bytes());
+            }
+            AppliedChange::VariableDeleted { variable } => {
+                self.variables.remove(&variable.id);
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_sub(variable.estimated_bytes());
             }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
             AppliedChange::NodeRestored { node } => self.restore_node(node),
@@ -5008,7 +5119,9 @@ impl Document {
                 | Command::RegisterTextStyle { .. }
                 | Command::RegisterPaintStyle { .. }
                 | Command::RegisterVariableCollection { .. }
-                | Command::RegisterVariable { .. } => {}
+                | Command::RegisterVariable { .. }
+                | Command::SetVariable { .. }
+                | Command::DeleteVariable { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -7749,6 +7862,8 @@ impl Command {
             Command::RegisterPaintStyle { style } => style.estimated_bytes(),
             Command::RegisterVariableCollection { collection } => collection.estimated_bytes(),
             Command::RegisterVariable { variable } => variable.estimated_bytes(),
+            Command::SetVariable { variable } => variable.estimated_bytes(),
+            Command::DeleteVariable { id } => id.len(),
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -8100,6 +8215,10 @@ impl AppliedChange {
                 collection.estimated_bytes()
             }
             AppliedChange::VariableRegistered { variable } => variable.estimated_bytes(),
+            AppliedChange::VariableChanged { before, after } => {
+                before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::VariableDeleted { variable } => variable.estimated_bytes(),
         }
     }
 }
@@ -9891,6 +10010,14 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
         Command::RegisterVariable { variable } => {
             hasher.update([29]);
             hash_variable_resource(hasher, variable);
+        }
+        Command::SetVariable { variable } => {
+            hasher.update([30]);
+            hash_variable_resource(hasher, variable);
+        }
+        Command::DeleteVariable { id } => {
+            hasher.update([31]);
+            hash_text(hasher, id);
         }
         Command::SetDocumentColorProfile { profile } => {
             hasher.update([6]);
@@ -22306,6 +22433,85 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash(), after);
         assert_eq!(document.variable(&variable.id), Some(&variable));
+    }
+
+    #[test]
+    fn variable_changes_and_deletion_preserve_history_and_alias_integrity() {
+        let mut document = Document::with_id(DocumentId(918));
+        let collection = VariableCollectionResource {
+            id: "VC:tokens".into(),
+            key: String::new(),
+            name: "Tokens".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Mode 1".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:spacing".into(),
+            key: String::new(),
+            name: "Spacing".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(0.0))].into(),
+            scopes: vec!["ALL_SCOPES".into()],
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::RegisterVariableCollection { collection },
+                        Command::RegisterVariable {
+                            variable: variable.clone(),
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let mut changed = variable.clone();
+        changed.name = "Space".into();
+        changed
+            .values_by_mode
+            .insert("default".into(), VariableValue::Float(8.0));
+        document
+            .submit(
+                transaction(
+                    1,
+                    vec![Command::SetVariable {
+                        variable: changed.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.variable(&changed.id), Some(&changed));
+        document.undo().unwrap();
+        assert_eq!(document.variable(&variable.id), Some(&variable));
+        document.redo().unwrap();
+        assert_eq!(document.variable(&changed.id), Some(&changed));
+
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariable {
+                        id: changed.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.variable(&changed.id).is_none());
+        document.undo().unwrap();
+        assert_eq!(document.variable(&changed.id), Some(&changed));
     }
 
     #[test]

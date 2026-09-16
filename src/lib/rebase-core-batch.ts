@@ -47,6 +47,12 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
     if (command.type === "registerVariable") {
       return { type: "registerVariable", variable: structuredClone(command.variable) };
     }
+    if (command.type === "setVariable") {
+      return { type: "setVariable", variable: structuredClone(command.variable) };
+    }
+    if (command.type === "deleteVariable") {
+      return { type: "deleteVariable", id: command.id };
+    }
     if (command.type === "createPage" || command.type === "registerAsset" || command.type === "moveVectorPoint" || command.type === "setVectorSubpathClosed" || command.type === "insertVectorPoint" || command.type === "splitVectorSegment" || command.type === "connectVectorEndpoints" || command.type === "setMask" || command.type === "deleteVectorPoint" || command.type === "setVectorPointHandles" || command.type === "setExtensions") {
       return { ...command };
     }

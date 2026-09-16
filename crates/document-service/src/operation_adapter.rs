@@ -79,6 +79,8 @@ pub fn commands_from_payload_with_semantics(
                 operation.kind,
                 Some(v1::resolved_operation::Kind::RegisterVariableCollection(_))
                     | Some(v1::resolved_operation::Kind::RegisterVariable(_))
+                    | Some(v1::resolved_operation::Kind::SetVariable(_))
+                    | Some(v1::resolved_operation::Kind::DeleteVariable(_))
             )
         })
     {
@@ -1692,6 +1694,14 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             variable: variable_resource_from_proto(
                 value.variable.ok_or(ServiceError::InvalidEnvelope)?,
             )?,
+        }),
+        Kind::SetVariable(value) => Ok(Command::SetVariable {
+            variable: variable_resource_from_proto(
+                value.variable.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::DeleteVariable(value) => Ok(Command::DeleteVariable {
+            id: value.variable_id,
         }),
         Kind::SetPaintStyleLinks(value) => Ok(Command::SetPaintStyleLinks {
             id: node_id(&value.node_id)?,
@@ -5183,7 +5193,22 @@ mod tests {
                 v1::ResolvedOperation {
                     kind: Some(v1::resolved_operation::Kind::RegisterVariable(
                         v1::RegisterVariable {
-                            variable: Some(variable),
+                            variable: Some(variable.clone()),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetVariable(v1::SetVariable {
+                        variable: Some(v1::VariableResource {
+                            name: "Space".into(),
+                            ..variable
+                        }),
+                    })),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeleteVariable(
+                        v1::DeleteVariable {
+                            variable_id: "V:spacing".into(),
                         },
                     )),
                 },
@@ -5200,10 +5225,12 @@ mod tests {
             )
             .unwrap()
             .as_slice(),
-            [Command::RegisterVariableCollection { collection }, Command::RegisterVariable { variable }]
+            [Command::RegisterVariableCollection { collection }, Command::RegisterVariable { variable }, Command::SetVariable { variable: changed }, Command::DeleteVariable { id }]
                 if collection.id == "VC:tokens"
                     && variable.collection_id == "VC:tokens"
                     && variable.values_by_mode.get("default") == Some(&editor_core::VariableValue::Float(0.0))
+                    && changed.name == "Space"
+                    && id == "V:spacing"
         ));
     }
 

@@ -42,7 +42,7 @@ import { RevisionLeasePool, type RevisionLeaseResource } from "./revision-lease"
 import { exportRuntimeNodeSvgResult, rasterizeRuntimePng, runtimePngScale, type RuntimePngExportSettings, type RuntimePngRasterizer } from "./runtime-svg-export";
 import { isBoundedTransformGroupRepeatForest, isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 import { RuntimeVariablesAPI } from "./runtime-variables";
-import { variableModesFromExtensions } from "./runtime-variable-bindings";
+import { variableBindingsFromExtensions, variableEffectBindingsFromExtensions, variableModesFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
 
 const CONTAINER_TYPES = new Set<M1NodeType>([
   "DOCUMENT", "PAGE", "FRAME", "GROUP", "SECTION", "BOOLEAN_OPERATION", "COMPONENT", "INSTANCE", "SLOT",
@@ -337,6 +337,22 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   registerVariable(variable: DocumentVariableResource): void {
     this.enqueueOperations([{ type: "registerVariable", variable }]);
+  }
+
+  setVariable(variable: DocumentVariableResource): void {
+    this.enqueueOperations([{ type: "setVariable", variable }]);
+  }
+
+  deleteVariable(id: string): void {
+    this.enqueueOperations([{ type: "deleteVariable", id }]);
+  }
+
+  variableIsBound(id: string): boolean {
+    return this.projectionStore.listLiveNodes().some((node) => [
+      variableBindingsFromExtensions(node.extensions),
+      variablePaintBindingsFromExtensions(node.extensions),
+      variableEffectBindingsFromExtensions(node.extensions),
+    ].some((bindings) => Object.values(bindings).includes(id)));
   }
 
   assertSynchronousDocumentAccess(): void {
