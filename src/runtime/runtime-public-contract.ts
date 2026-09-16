@@ -35,6 +35,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const componentVariant = runtime.createComponent();
   void instance.mainComponent;
   instance.mainComponent = componentVariant;
+  instance.resetOverrides();
   const componentSet = runtime.combineAsVariants([component, componentVariant], runtime.currentPage);
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;

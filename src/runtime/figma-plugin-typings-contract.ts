@@ -192,6 +192,7 @@ export function assertFigmaPluginTypingsContract(
   void instance.exposedInstances;
   instance.isExposedInstance = instance.isExposedInstance;
   void instance.getMainComponentAsync();
+  instance.resetOverrides();
   instance.removeOverrides();
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;

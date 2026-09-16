@@ -181,6 +181,7 @@ export interface RuntimeNodeHost {
   resetSlot(slotId: string): void;
   detachInstance(instanceId: string): RuntimeContainerNodeProxy;
   swapInstanceComponent(instanceId: string, componentId: string, preserveOverrides: boolean): void;
+  removeInstanceOverrides(instanceId: string): void;
   addComponentProperty(
     componentId: string,
     propertyName: string,
@@ -2134,8 +2135,13 @@ export class RuntimeNodeProxy {
   }
 
   removeOverrides(): void {
-    const metadata = this.instanceMetadata();
-    this.write({ instanceMetadata: { ...structuredClone(metadata), overrides: [] } });
+    this.instanceMetadata();
+    this.assertMutable();
+    this.host.removeInstanceOverrides(this.handle.nodeId);
+  }
+
+  resetOverrides(): void {
+    this.removeOverrides();
   }
 
   get characters(): string {

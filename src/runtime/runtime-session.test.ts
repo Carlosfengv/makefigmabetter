@@ -182,8 +182,10 @@ describe("M1 RuntimeSession", () => {
 
     instance.removeOverrides();
     expect(instance.overrides).toEqual([]);
+    expect(instance.componentPropertyValues).toEqual({ Enabled: true });
     await session.commitAsync();
     expect(instance.overrides).toEqual([]);
+    expect(instance.componentPropertyValues).toEqual({ Enabled: true });
   });
 
   it("keeps one proxy identity and coalesces synchronous setters into one fenced transaction", async () => {
@@ -1028,12 +1030,21 @@ describe("M1 RuntimeSession", () => {
     expect(oldSurface.removed).toBe(true);
     await session.commitAsync();
 
+    instance.resetOverrides();
+    const resetSurface = instance.children[0]!;
+    expect(instance.mainComponent).toBe(target);
+    expect(instance.componentPropertyValues).toEqual({ [propertyName]: "Target" });
+    expect(resetSurface).toMatchObject({ name: "Surface", opacity: 0.8 });
+    expect(instance.overrides).toEqual([]);
+    expect(swappedSurface.removed).toBe(true);
+    await session.commitAsync();
+
     instance.mainComponent = base;
     expect(instance.mainComponent).toBe(base);
     expect(instance.componentPropertyValues).toEqual({ [propertyName]: "Base" });
     expect(instance.children[0]).toMatchObject({ name: "Surface", opacity: 1 });
     expect(instance.overrides).toEqual([]);
-    expect(swappedSurface.removed).toBe(true);
+    expect(resetSurface.removed).toBe(true);
     await session.commitAsync();
 
     expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
@@ -1041,6 +1052,10 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: "instance", name: "Surface", opacity: 0.35 }) }),
     ]));
     expect(transport.submitted[1]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: "instance", patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: "target", componentProperties: { [propertyName]: "Target" }, overrides: [] }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: "instance", name: "Surface", opacity: 0.8 }) }),
+    ]));
+    expect(transport.submitted[2]?.operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "update", nodeId: "instance", patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: "base", componentProperties: { [propertyName]: "Base" }, overrides: [] }) }) }),
       expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: "instance", name: "Surface", opacity: 1 }) }),
     ]));

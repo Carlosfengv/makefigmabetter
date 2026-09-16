@@ -942,6 +942,13 @@ export class RuntimeSession implements RuntimeContainerHost {
       },
     }, ...subtreeOperations]);
   }
+  removeInstanceOverrides(instanceId: string): void {
+    this.assertOpen();
+    const instance = this.projectionStore.getNode(instanceId);
+    const componentId = instance && instance.type === "INSTANCE" ? instanceMainComponentId(instance) : undefined;
+    if (!instance || instance.removed === true || !componentId) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+    this.swapInstanceComponent(instanceId, componentId, false);
+  }
   detachInstance(instanceId: string): RuntimeContainerNodeProxy {
     this.assertOpen();
     const instance = this.projectionStore.getNode(instanceId);
