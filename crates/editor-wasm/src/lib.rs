@@ -12,9 +12,9 @@ use editor_core::{
     OperationEnvelope, OperationId, Origin, Page, PageId, ParagraphListType, ParagraphStyle,
     ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
     TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
-    TextTruncation, TextWrapStyle, Transaction, TransactionId, VectorPath, VectorPoint,
-    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
+    TextStyleRun, TextTruncation, TextWrapStyle, Transaction, TransactionId, VectorPath,
+    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -289,6 +289,11 @@ impl DocumentEngine {
                 BatchCommand::RegisterAsset { asset } => {
                     commands.push(Command::RegisterAsset {
                         asset: asset_from_projection(asset)?,
+                    });
+                }
+                BatchCommand::RegisterTextStyle { style } => {
+                    commands.push(Command::RegisterTextStyle {
+                        style: text_style_resource_from_projection(&style)?,
                     });
                 }
                 BatchCommand::Create { node } => {
@@ -834,13 +839,20 @@ struct CoreSnapshot {
     pages: Option<Vec<ProjectionPage>>,
     #[serde(default)]
     resource_index: Option<Vec<ProjectionAsset>>,
+    #[serde(default)]
+    text_styles: Option<Vec<ProjectionTextStyleResource>>,
     nodes: Vec<ProjectionNode>,
     #[serde(default)]
     retired_ids: Option<Vec<String>>,
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=58).contains(&snapshot.schema_version)
+    if !(1..=59).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 59
+            && snapshot
+                .text_styles
+                .as_ref()
+                .is_some_and(|styles| !styles.is_empty()))
         || (snapshot.schema_version < 58
             && snapshot.nodes.iter().any(|node| {
                 node.text_properties.as_ref().is_some_and(|properties| {
@@ -1576,6 +1588,21 @@ struct ProjectionTextStyle {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionTextStyleResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    remote: bool,
+    style: ProjectionTextStyle,
+    paragraph: ProjectionParagraphStyle,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionTextDecorationOffset {
     value: f64,
     unit: String,
@@ -1811,6 +1838,9 @@ enum BatchCommand {
     RegisterAsset {
         asset: ProjectionAsset,
     },
+    RegisterTextStyle {
+        style: ProjectionTextStyleResource,
+    },
     Create {
         node: ProjectionNode,
     },
@@ -1975,7 +2005,9 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.nodes().any(|node| {
+        let schema_version = if self.document.text_styles().next().is_some() {
+            59
+        } else if self.document.nodes().any(|node| {
             self.document
                 .text_properties_for_node(node.id)
                 .is_some_and(|properties| {
@@ -2258,6 +2290,12 @@ impl DocumentEngine {
             color_profile: format_document_color_profile(self.document.color_profile()),
             pages: Some(self.document.pages().map(projection_page).collect()),
             resource_index: Some(self.document.assets().map(projection_asset).collect()),
+            text_styles: Some(
+                self.document
+                    .text_styles()
+                    .map(projection_text_style_resource)
+                    .collect(),
+            ),
             nodes: self
                 .document
                 .ordered_nodes()
@@ -2592,6 +2630,11 @@ impl DocumentEngine {
                 .seed_asset(asset_from_projection(asset)?)
                 .map_err(core_error)?;
         }
+        for style in snapshot.text_styles.clone().unwrap_or_default() {
+            document
+                .seed_text_style(text_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -2733,6 +2776,7 @@ impl DocumentEngine {
                 }
                 BatchCommand::CreatePage { .. }
                 | BatchCommand::RegisterAsset { .. }
+                | BatchCommand::RegisterTextStyle { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }
@@ -5678,6 +5722,52 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                 text_style_id: style.text_style_id.clone(),
             }),
     }
+}
+
+fn projection_text_style_resource(resource: &TextStyleResource) -> ProjectionTextStyleResource {
+    let mut properties = TextProperties::default();
+    properties.paragraph = resource.paragraph.clone();
+    properties.base_style = Some(resource.style.clone());
+    let projected = projection_text_properties(&properties);
+    ProjectionTextStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        style: projected
+            .base_style
+            .expect("text style projection always has a base style"),
+        paragraph: projected.paragraph,
+    }
+}
+
+fn text_style_resource_from_projection(
+    resource: &ProjectionTextStyleResource,
+) -> Result<TextStyleResource, JsValue> {
+    let projected = ProjectionTextProperties {
+        runs: Vec::new(),
+        paragraph: resource.paragraph.clone(),
+        paragraph_style_runs: Vec::new(),
+        auto_size: "fixed".into(),
+        fallback_fonts: Vec::new(),
+        text_truncation: None,
+        max_lines: None,
+        base_style: Some(resource.style.clone()),
+    };
+    let properties = text_properties_from_projection(Some(&projected))?
+        .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_RESOURCE"))?;
+    Ok(TextStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        style: properties
+            .base_style
+            .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_RESOURCE"))?,
+        paragraph: properties.paragraph,
+    })
 }
 
 fn projection_font_reference(font: &FontReference) -> ProjectionFontReference {
@@ -9918,6 +10008,54 @@ mod tests {
         mislabeled_link.schema_version = 57;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled_link),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v59_round_trips_the_text_style_catalog_and_v58_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([{
+            "type": "registerTextStyle",
+            "style": {
+                "id": "S:body",
+                "key": "library-key",
+                "name": "Body",
+                "description": "Body copy",
+                "remote": true,
+                "style": {
+                    "fontSize": 16.0,
+                    "fontWeight": 400,
+                    "italic": false,
+                    "letterSpacing": 0.0
+                },
+                "paragraph": {
+                    "alignment": "left",
+                    "lineHeight": 24.0,
+                    "paragraphSpacing": 6.0
+                }
+            }
+        }]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000059",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":59"));
+        assert!(snapshot.contains("\"textStyles\":[{\"id\":\"S:body\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(restored.document.text_style("S:body").unwrap().name, "Body");
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 58;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")
         );
     }

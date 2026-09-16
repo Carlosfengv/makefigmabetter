@@ -477,6 +477,11 @@ export interface DocumentSnapshot {
   extensions: { [key: string]: Uint8Array };
   documentColorProfile: DocumentColorProfile;
   retiredNodeIds: Uint8Array[];
+  /**
+   * Complete document-owned TextStyle values. IDs intentionally remain
+   * strings because Figma style identities are not UUIDs.
+   */
+  textStyles: TextStyleResource[];
 }
 
 export interface DocumentSnapshot_ExtensionsEntry {
@@ -954,6 +959,16 @@ export interface TextProperties {
   paragraphStyleRuns: ParagraphStyleRun[];
 }
 
+export interface TextStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  style?: TextStyleRun | undefined;
+  paragraph?: ParagraphStyle | undefined;
+}
+
 /**
  * M3 prototype vocabulary. These records are append-only and intentionally
  * separate from Player's transient navigation/overlay state. The current Core
@@ -1235,6 +1250,10 @@ export interface RegisterResource {
   resource?: ResourceIndexEntry | undefined;
 }
 
+export interface RegisterTextStyle {
+  style?: TextStyleResource | undefined;
+}
+
 /**
  * Assigns or clears an image fill on a Frame, Rectangle, Ellipse, or Image
  * node. The asset must already be a registered document resource.
@@ -1401,6 +1420,7 @@ export interface ResolvedOperation {
   connectVectorEndpoints?: ConnectVectorEndpoints | undefined;
   setNodeExtensions?: SetNodeExtensions | undefined;
   convertToTextPath?: ConvertToTextPath | undefined;
+  registerTextStyle?: RegisterTextStyle | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -2192,6 +2212,7 @@ function createBaseDocumentSnapshot(): DocumentSnapshot {
     extensions: {},
     documentColorProfile: 0,
     retiredNodeIds: [],
+    textStyles: [],
   };
 }
 
@@ -2226,6 +2247,9 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     }
     for (const v of message.retiredNodeIds) {
       writer.uint32(138).bytes(v!);
+    }
+    for (const v of message.textStyles) {
+      TextStyleResource.encode(v!, writer.uint32(146).fork()).join();
     }
     return writer;
   },
@@ -2320,6 +2344,14 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
           message.retiredNodeIds.push(reader.bytes());
           continue;
         }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.textStyles.push(TextStyleResource.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2352,6 +2384,7 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     );
     message.documentColorProfile = object.documentColorProfile ?? 0;
     message.retiredNodeIds = object.retiredNodeIds?.map((e) => e) || [];
+    message.textStyles = object.textStyles?.map((e) => TextStyleResource.fromPartial(e)) || [];
     return message;
   },
 };
@@ -5701,6 +5734,128 @@ export const TextProperties: MessageFns<TextProperties> = {
   },
 };
 
+function createBaseTextStyleResource(): TextStyleResource {
+  return { id: "", key: "", name: "", description: "", remote: false, style: undefined, paragraph: undefined };
+}
+
+export const TextStyleResource: MessageFns<TextStyleResource> = {
+  encode(message: TextStyleResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.description !== "") {
+      writer.uint32(34).string(message.description);
+    }
+    if (message.remote !== false) {
+      writer.uint32(40).bool(message.remote);
+    }
+    if (message.style !== undefined) {
+      TextStyleRun.encode(message.style, writer.uint32(50).fork()).join();
+    }
+    if (message.paragraph !== undefined) {
+      ParagraphStyle.encode(message.paragraph, writer.uint32(58).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextStyleResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextStyleResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.style = TextStyleRun.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.paragraph = ParagraphStyle.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<TextStyleResource>, I>>(base?: I): TextStyleResource {
+    return TextStyleResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TextStyleResource>, I>>(object: I): TextStyleResource {
+    const message = createBaseTextStyleResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.remote = object.remote ?? false;
+    message.style = (object.style !== undefined && object.style !== null)
+      ? TextStyleRun.fromPartial(object.style)
+      : undefined;
+    message.paragraph = (object.paragraph !== undefined && object.paragraph !== null)
+      ? ParagraphStyle.fromPartial(object.paragraph)
+      : undefined;
+    return message;
+  },
+};
+
 function createBasePrototypeEmpty(): PrototypeEmpty {
   return {};
 }
@@ -8606,6 +8761,54 @@ export const RegisterResource: MessageFns<RegisterResource> = {
   },
 };
 
+function createBaseRegisterTextStyle(): RegisterTextStyle {
+  return { style: undefined };
+}
+
+export const RegisterTextStyle: MessageFns<RegisterTextStyle> = {
+  encode(message: RegisterTextStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      TextStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterTextStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterTextStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = TextStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterTextStyle>, I>>(base?: I): RegisterTextStyle {
+    return RegisterTextStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterTextStyle>, I>>(object: I): RegisterTextStyle {
+    const message = createBaseRegisterTextStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? TextStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseImageFillUpdate(): ImageFillUpdate {
   return { nodeId: new Uint8Array(0), assetId: undefined };
 }
@@ -9680,6 +9883,7 @@ function createBaseResolvedOperation(): ResolvedOperation {
     connectVectorEndpoints: undefined,
     setNodeExtensions: undefined,
     convertToTextPath: undefined,
+    registerTextStyle: undefined,
   };
 }
 
@@ -9765,6 +9969,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.convertToTextPath !== undefined) {
       ConvertToTextPath.encode(message.convertToTextPath, writer.uint32(218).fork()).join();
+    }
+    if (message.registerTextStyle !== undefined) {
+      RegisterTextStyle.encode(message.registerTextStyle, writer.uint32(226).fork()).join();
     }
     return writer;
   },
@@ -9992,6 +10199,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.convertToTextPath = ConvertToTextPath.decode(reader, reader.uint32());
           continue;
         }
+        case 28: {
+          if (tag !== 226) {
+            break;
+          }
+
+          message.registerTextStyle = RegisterTextStyle.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10090,6 +10305,9 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.convertToTextPath = (object.convertToTextPath !== undefined && object.convertToTextPath !== null)
       ? ConvertToTextPath.fromPartial(object.convertToTextPath)
+      : undefined;
+    message.registerTextStyle = (object.registerTextStyle !== undefined && object.registerTextStyle !== null)
+      ? RegisterTextStyle.fromPartial(object.registerTextStyle)
       : undefined;
     return message;
   },

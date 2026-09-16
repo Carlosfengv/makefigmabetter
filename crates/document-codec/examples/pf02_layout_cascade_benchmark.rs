@@ -92,7 +92,8 @@ fn collect_touched_node_ids(change: &AppliedChange, ids: &mut BTreeSet<NodeId>) 
         }
         AppliedChange::PageCreated { .. }
         | AppliedChange::DocumentColorProfileChanged { .. }
-        | AppliedChange::AssetRegistered { .. } => {}
+        | AppliedChange::AssetRegistered { .. }
+        | AppliedChange::TextStyleRegistered { .. } => {}
     }
 }
 

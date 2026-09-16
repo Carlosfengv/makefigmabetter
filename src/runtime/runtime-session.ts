@@ -17,6 +17,7 @@ import {
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
   type DocumentFontReference,
+  type DocumentTextStyleResource,
   type DocumentTextPathMetadata,
   type DocumentTransformModifier,
   type ShapeWithTextType,
@@ -24,7 +25,8 @@ import {
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
-import { isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
+import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
+import { RuntimeTextStyle } from "./runtime-text-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
 import type { RuntimeWorkerViewState } from "./runtime-worker-bridge";
@@ -233,6 +235,55 @@ export class RuntimeSession implements RuntimeContainerHost {
   fontNameForReference(font: DocumentFontReference): RuntimeFontName {
     this.assertOpen();
     return runtimeFontNameForReference(font, this.fontAssets());
+  }
+
+  getStyleById(styleId: string): RuntimeTextStyle | null {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+    return this.textStyleForId(styleId);
+  }
+
+  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | null> {
+    this.assertOpen();
+    if (typeof styleId !== "string" || !styleId) throw runtimeError("INVALID_ARGUMENT");
+    await Promise.resolve();
+    return this.textStyleForId(styleId);
+  }
+
+  getLocalTextStyles(): readonly RuntimeTextStyle[] {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+    return this.localTextStyles();
+  }
+
+  async getLocalTextStylesAsync(): Promise<readonly RuntimeTextStyle[]> {
+    this.assertOpen();
+    await Promise.resolve();
+    return this.localTextStyles();
+  }
+
+  private textStyleForId(styleId: string): RuntimeTextStyle | null {
+    const resource = this.projectionStore.confirmedProjection.textStyles?.find((style) => style.id === styleId);
+    return resource ? new RuntimeTextStyle(resource, this.textStyleHost()) : null;
+  }
+
+  private localTextStyles(): readonly RuntimeTextStyle[] {
+    const host = this.textStyleHost();
+    return Object.freeze((this.projectionStore.confirmedProjection.textStyles ?? [])
+      .filter((style) => !style.remote)
+      .map((style) => new RuntimeTextStyle(style, host)));
+  }
+
+  private textStyleHost() {
+    return {
+      fontNameForStyle: (style: DocumentTextStyleResource): RuntimeFontName => style.style.font
+        ? this.fontNameForReference(style.style.font)
+        : DEFAULT_RUNTIME_FONT_NAME,
+      consumersForTextStyle: (styleId: string): readonly RuntimeNodeProxy[] => this.projectionStore
+        .listLiveNodes()
+        .filter((node) => this.isNodeVisible(node) && runtimeNodeUsesTextStyle(node, styleId))
+        .map((node) => this.proxyFor(node.id)),
+    };
   }
 
   hasFontReference(font: DocumentFontReference): boolean {
@@ -1386,6 +1437,17 @@ function finiteNodeNumber(value: unknown, fallback: number): number {
 
 function nodeIdByType(nodes: readonly RuntimeProjectionNode[], type: M1NodeType): string | undefined {
   return nodes.find((node) => node.type === type && node.removed !== true)?.id;
+}
+
+function runtimeNodeUsesTextStyle(node: RuntimeProjectionNode, styleId: string): boolean {
+  const properties = node.textProperties;
+  if (!properties || typeof properties !== "object") return false;
+  const value = properties as {
+    baseStyle?: { textStyleId?: unknown };
+    runs?: readonly { textStyleId?: unknown }[];
+  };
+  return value.baseStyle?.textStyleId === styleId
+    || value.runs?.some((run) => run.textStyleId === styleId) === true;
 }
 
 function runtimeSubtreeBooleanIds(projection: RuntimeProjection, rootNodeId: string): string[] {

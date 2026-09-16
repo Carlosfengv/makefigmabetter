@@ -9,9 +9,9 @@ use editor_core::{
     NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
     ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
     TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
-    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
+    TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType,
+    VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -36,6 +36,19 @@ pub fn commands_from_payload_with_semantics(
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::RegisterTextStyle(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        });
     }
     if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(operation_has_paint_stack)
@@ -1541,6 +1554,11 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
         Kind::RegisterResource(value) => Ok(Command::RegisterAsset {
             asset: asset_from_proto(value.resource.ok_or(ServiceError::InvalidEnvelope)?)?,
         }),
+        Kind::RegisterTextStyle(value) => Ok(Command::RegisterTextStyle {
+            style: text_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
     }
 }
 
@@ -2168,6 +2186,30 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
             .into_iter()
             .map(font_from_proto)
             .collect::<Result<_, ServiceError>>()?,
+    })
+}
+
+fn text_style_resource_from_proto(
+    resource: v1::TextStyleResource,
+) -> Result<TextStyleResource, ServiceError> {
+    let properties = text_properties_from_proto(v1::TextProperties {
+        runs: Vec::new(),
+        paragraph: resource.paragraph,
+        auto_size: v1::TextAutoSize::Fixed as i32,
+        fallback_fonts: Vec::new(),
+        text_truncation: None,
+        max_lines: None,
+        base_style: resource.style,
+        paragraph_style_runs: Vec::new(),
+    })?;
+    Ok(TextStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
+        paragraph: properties.paragraph,
     })
 }
 
@@ -4733,6 +4775,52 @@ mod tests {
         assert!(
             matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(), [Command::SetTextProperties { properties, .. }] if properties.runs[0].text_style_id.as_deref() == Some("S:heading"))
         );
+    }
+
+    #[test]
+    fn text_style_catalog_operations_require_semantics_forty_four() {
+        let style = v1::TextStyleResource {
+            id: "S:body".into(),
+            key: "library-key".into(),
+            name: "Body".into(),
+            description: "Body copy".into(),
+            remote: true,
+            style: Some(v1::TextStyleRun {
+                font_size: 16.0,
+                font_weight: 400,
+                ..Default::default()
+            }),
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                paragraph_spacing: 6.0,
+                ..Default::default()
+            }),
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::RegisterTextStyle(
+                    v1::RegisterTextStyle { style: Some(style) },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::RegisterTextStyle { style }]
+                if style.id == "S:body"
+                    && style.key == "library-key"
+                    && style.style.font_size == 16.0
+                    && style.paragraph.line_height == Some(24.0)
+        ));
     }
 
     #[test]

@@ -11,9 +11,9 @@ use editor_core::{
     Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, ParagraphListType, ParagraphStyle,
     ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
     TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleRun,
-    TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment, can_parent_contain_child,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties, TextStyleResource,
+    TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint, VectorPointType,
+    VectorSubpath, WrapTrackAlignment, can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -66,8 +66,9 @@ pub const FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 40;
 pub const FONT_NAME_ALIASES_ENGINE_SEMANTICS_VERSION: u32 = 41;
 pub const OPEN_TYPE_FEATURES_ENGINE_SEMANTICS_VERSION: u32 = 42;
 pub const TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 43;
+pub const TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 44;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -100,6 +101,11 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.text_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && document.assets().any(|asset| !asset.font_faces.is_empty())
     {
@@ -519,6 +525,10 @@ pub fn snapshot_from_document(
         extensions: Default::default(),
         document_color_profile: profile_to_proto(document.color_profile()) as i32,
         retired_node_ids: document.retired_ids().map(|id| id_to_bytes(id.0)).collect(),
+        text_styles: document
+            .text_styles()
+            .map(text_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -569,6 +579,16 @@ pub fn document_from_snapshot_with_engine_semantics(
         }
         document
             .seed_asset(asset_from_proto(asset)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    if declared_engine_semantics_version < TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.text_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    for style in snapshot.text_styles {
+        document
+            .seed_text_style(text_style_resource_from_proto(style)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
     let mut page_hashes = BTreeMap::new();
@@ -2242,6 +2262,46 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
     })
 }
 
+fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleResource {
+    let mut properties = TextProperties::default();
+    properties.paragraph = resource.paragraph.clone();
+    properties.base_style = Some(resource.style.clone());
+    let encoded = text_properties_to_proto(&properties);
+    v1::TextStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        style: encoded.base_style,
+        paragraph: encoded.paragraph,
+    }
+}
+
+fn text_style_resource_from_proto(
+    resource: v1::TextStyleResource,
+) -> Result<TextStyleResource, SnapshotError> {
+    let properties = text_properties_from_proto(v1::TextProperties {
+        runs: Vec::new(),
+        paragraph: resource.paragraph,
+        auto_size: v1::TextAutoSize::Fixed as i32,
+        fallback_fonts: Vec::new(),
+        text_truncation: None,
+        max_lines: None,
+        base_style: resource.style,
+        paragraph_style_runs: Vec::new(),
+    })?;
+    Ok(TextStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        style: properties.base_style.ok_or(SnapshotError::Invalid)?,
+        paragraph: properties.paragraph,
+    })
+}
+
 fn text_properties_has_truncation(properties: &TextProperties) -> bool {
     properties.text_truncation == TextTruncation::Ending || properties.max_lines.is_some()
 }
@@ -3021,8 +3081,8 @@ mod tests {
     use super::*;
     use editor_core::{
         AssetId, AssetReference, DEFAULT_PAGE_ID, DropShadow, Effect, NodeKind, Page, PageId,
-        ParagraphStyle, TextAlign, TextAutoSize, TextProperties, TextStyleRun, color::Color,
-        geometry::AffineTransform,
+        ParagraphStyle, TextAlign, TextAutoSize, TextProperties, TextStyleResource, TextStyleRun,
+        color::Color, geometry::AffineTransform,
     };
 
     fn node(id: u128, kind: NodeKind, parent_id: Option<NodeId>) -> Node {
@@ -5614,6 +5674,69 @@ mod tests {
                 171_u128.to_be_bytes(),
                 linked_hash,
                 TEXT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_style_catalog_round_trips_and_requires_semantics_forty_four() {
+        let mut document = Document::with_id(DocumentId(172));
+        let paragraph = TextProperties::default().paragraph;
+        let style = TextStyleResource {
+            id: "S:body".into(),
+            key: "library-key".into(),
+            name: "Body".into(),
+            description: "Body text".into(),
+            remote: true,
+            style: TextStyleRun {
+                start: 0,
+                end: 0,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                open_type_features: Vec::new(),
+                text_style_id: None,
+            },
+            paragraph,
+        };
+        document.seed_text_style(style.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1,),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            172_u128.to_be_bytes(),
+            hash,
+            TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.text_style("S:body"), Some(&style));
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                172_u128.to_be_bytes(),
+                hash,
+                TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

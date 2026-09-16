@@ -1044,6 +1044,55 @@ describe("Figma REST import planning", () => {
     expect(decode(plan.nodes[0]?.extensions?.["figma.rest.text-overrides.v1"])).toContain('"liga":2');
   });
 
+  it("builds a canonical TextStyle catalog from REST metadata and linked text values", () => {
+    const plan = planFigmaRestImport({
+      version: "text-style-catalog",
+      styles: {
+        "S:body": {
+          key: "published-body-key",
+          name: "Typography/Body",
+          description: "Primary body copy",
+          styleType: "TEXT",
+          remote: true,
+        },
+      },
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1",
+        type: "TEXT",
+        characters: "Body",
+        relativeTransform: [[1, 0, 0], [0, 1, 0]],
+        absoluteBoundingBox: { x: 0, y: 0, width: 120, height: 24 },
+        styles: { text: "S:body" },
+        style: {
+          fontSize: 16,
+          fontWeight: 450,
+          italic: false,
+          letterSpacing: .2,
+          textAlignHorizontal: "LEFT",
+          lineHeightPx: 24,
+          paragraphSpacing: 6,
+        },
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.textStyles).toEqual([{
+      id: "S:body",
+      key: "published-body-key",
+      name: "Typography/Body",
+      description: "Primary body copy",
+      remote: true,
+      style: { fontSize: 16, fontWeight: 450, italic: false, letterSpacing: .2 },
+      paragraph: { alignment: "left", lineHeight: 24, paragraphSpacing: 6 },
+    }]);
+    expect(plan.nodes[0]?.textProperties?.baseStyle?.textStyleId).toBe("S:body");
+    expect(resolveFigmaRestImportBatch(plan)?.batch.map((command) => command.type)).toEqual([
+      "createPage",
+      "registerTextStyle",
+      "create",
+    ]);
+  });
+
   it("preserves an empty Figma Text node style as its Canonical insertion style", () => {
     const plan = planFigmaRestImport({
       version: "empty-text-style",

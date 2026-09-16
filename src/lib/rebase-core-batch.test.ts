@@ -17,4 +17,23 @@ describe("core batch reconciliation", () => {
     expect((rebased[0] as Extract<CoreBatchCommand, { type: "create" }>).node.positionId).not.toBe(position);
     expect((batch[0] as Extract<CoreBatchCommand, { type: "create" }>).node.positionId).toBe(position);
   });
+
+  it("preserves a TextStyle registration because it has no layer position to rebase", () => {
+    const command: Extract<CoreBatchCommand, { type: "registerTextStyle" }> = {
+      type: "registerTextStyle",
+      style: {
+        id: "S:body",
+        key: "",
+        name: "Body",
+        description: "",
+        remote: false,
+        style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+        paragraph: { alignment: "left", lineHeight: 24, paragraphSpacing: 0 },
+      },
+    };
+
+    const rebased = rebaseCoreBatchForSnapshot([], [command]);
+    expect(rebased).toEqual([command]);
+    expect((rebased[0] as typeof command).style).not.toBe(command.style);
+  });
 });

@@ -332,6 +332,18 @@ export interface DocumentTextProperties {
   baseStyle?: DocumentTextStyle;
 }
 
+/** Complete document-owned TextStyle resource. Imported Figma string IDs and
+ * published keys are retained without remapping. */
+export interface DocumentTextStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  style: DocumentTextStyle;
+  paragraph: DocumentTextProperties["paragraph"];
+}
+
 /** M3's durable prototype contract.  It intentionally lives beside the Canvas
  * projection rather than in UI state, and is encoded through the Canonical
  * extension map by transaction-batch. */
@@ -488,6 +500,7 @@ export type CoreBatchCommand =
   /** An Asset Service-admitted resource may be registered in the same Core
    * transaction as nodes that first reference it (cross-document paste). */
   | { type: "registerAsset"; asset: DocumentAsset }
+  | { type: "registerTextStyle"; style: DocumentTextStyleResource }
   | { type: "create"; node: CoreProjectionNode }
   /** Explicit history replay; only a Core tombstone may be restored. */
   | { type: "restore"; node: CoreProjectionNode }
@@ -749,6 +762,7 @@ export interface EditorSnapshot {
   performance?: RenderPerformanceSummary;
   nodes: CanvasNode[];
   assets?: DocumentAsset[];
+  textStyles?: DocumentTextStyleResource[];
   /** Runtime-only FontFace loading state. It never enters Canonical snapshots. */
   fontAvailability?: Record<string, "idle" | "loading" | "ready" | "unavailable">;
   pages: CanvasPage[];

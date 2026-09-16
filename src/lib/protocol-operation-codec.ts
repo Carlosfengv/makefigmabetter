@@ -35,7 +35,7 @@ import {
   type PaintStack as ProtoPaintStack,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentParametricShape, type DocumentTextProperties, type DocumentVectorPath } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVectorPath } from "./editor-protocol";
 import { sha256Bytes } from "./sha256";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
 import { clipsChildren } from "./node-capabilities";
@@ -137,6 +137,9 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
       })),
     } } }];
   }
+  if (command.type === "registerTextStyle") {
+    return [{ registerTextStyle: { style: textStyleResourceProto(command.style) } }];
+  }
   if (command.type === "create") {
     const operations: ResolvedOperation[] = [{ createNode: { node: nodeProto(command.node) } }];
     const layout = autoLayoutOperation(command.node);
@@ -219,6 +222,24 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
     operations.push({ setText: { nodeId: idBytes(node.id), text: node.text } });
   }
   return operations;
+}
+
+function textStyleResourceProto(resource: DocumentTextStyleResource) {
+  const properties = textPropertiesProto({
+    runs: [],
+    paragraph: resource.paragraph,
+    autoSize: "fixed",
+    baseStyle: resource.style,
+  });
+  return {
+    id: resource.id,
+    key: resource.key,
+    name: resource.name,
+    description: resource.description,
+    remote: resource.remote,
+    style: properties.baseStyle,
+    paragraph: properties.paragraph,
+  };
 }
 
 function nodeProto(node: CoreProjectionNode, includeTextProperties = false) {

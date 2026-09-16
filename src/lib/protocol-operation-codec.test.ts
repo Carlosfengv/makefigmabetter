@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -23,6 +23,32 @@ describe("protocol operation codec", () => {
 
     expect(batch.operations[0].createPage?.page).toMatchObject({ pageId: idBytes(page.id), name: "Imported" });
     expect(batch.operations[1].createNode?.node).toMatchObject({ pageId: idBytes(page.id), nodeId: idBytes(id) });
+  });
+
+  it("serializes canonical TextStyle registration with identity and values", () => {
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{
+      type: "registerTextStyle",
+      style: {
+        id: "S:body",
+        key: "library-key",
+        name: "Body",
+        description: "Body copy",
+        remote: true,
+        style: { fontSize: 16, fontWeight: 450, italic: false, letterSpacing: .25, textCase: "smallCaps" },
+        paragraph: { alignment: "left", lineHeight: 150, lineHeightUnit: "percent", paragraphSpacing: 6 },
+      },
+    }]));
+
+    expect(batch.operations).toHaveLength(1);
+    expect(batch.operations[0]?.registerTextStyle?.style).toMatchObject({
+      id: "S:body",
+      key: "library-key",
+      name: "Body",
+      description: "Body copy",
+      remote: true,
+      style: { fontSize: 16, fontWeight: 450, letterSpacing: .25, textCase: TextCase.TEXT_CASE_SMALL_CAPS },
+      paragraph: { alignment: TextAlignment.TEXT_ALIGNMENT_LEFT, lineHeight: 150, lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_PERCENT, paragraphSpacing: 6 },
+    });
   });
 
   it("serializes a zero-height line with the generated Line node kind", () => {

@@ -1,5 +1,6 @@
 import { runtimeError } from "./runtime-errors";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
+import type { DocumentTextStyleResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 
 export type RuntimeProjectionNode = Readonly<{
@@ -13,6 +14,7 @@ export type RuntimeProjectionNode = Readonly<{
 export type RuntimeProjection = Readonly<{
   revision: number;
   nodes: readonly RuntimeProjectionNode[];
+  textStyles?: readonly DocumentTextStyleResource[];
 }>;
 
 export type PendingProjectionOperation =
@@ -442,7 +444,12 @@ function freezeProjection(projection: RuntimeProjection): RuntimeProjection {
     ids.add(node.id);
     return cloneNode(node);
   });
-  return Object.freeze({ revision: projection.revision, nodes: Object.freeze(nodes) });
+  const textStyles = projection.textStyles?.map((style) => deepFreeze(structuredClone(style)));
+  return Object.freeze({
+    revision: projection.revision,
+    nodes: Object.freeze(nodes),
+    ...(textStyles ? { textStyles: Object.freeze(textStyles) } : {}),
+  });
 }
 
 function freezeTransaction(transaction: PendingProjectionTransaction): PendingProjectionTransaction {

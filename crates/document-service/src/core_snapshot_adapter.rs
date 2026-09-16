@@ -11,8 +11,8 @@ use editor_core::{
     ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
     StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
     TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-    TextProperties, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath, VectorPoint,
-    VectorPointType, VectorSubpath, WrapTrackAlignment,
+    TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VectorPath,
+    VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -468,6 +468,12 @@ pub fn snapshot_from_document(
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
     if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.text_styles().next().is_some()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::FONT_FACE_METADATA_ENGINE_SEMANTICS_VERSION
         && document.assets().any(|asset| !asset.font_faces.is_empty())
     {
@@ -905,6 +911,10 @@ pub fn snapshot_from_document(
         extensions: Default::default(),
         document_color_profile: profile_to_proto(document.color_profile()) as i32,
         retired_node_ids: document.retired_ids().map(|id| id_to_bytes(id.0)).collect(),
+        text_styles: document
+            .text_styles()
+            .map(text_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -946,6 +956,17 @@ pub fn document_from_snapshot(
         }
         document
             .seed_asset(asset_from_proto(asset)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.text_styles.is_empty()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    for style in snapshot.text_styles {
+        document
+            .seed_text_style(text_style_resource_from_proto(style)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
     }
     let mut page_hashes = Vec::new();
@@ -2519,6 +2540,46 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
             .into_iter()
             .map(font_from_proto)
             .collect::<Result<_, ServiceError>>()?,
+    })
+}
+
+fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleResource {
+    let mut properties = TextProperties::default();
+    properties.paragraph = resource.paragraph.clone();
+    properties.base_style = Some(resource.style.clone());
+    let encoded = text_properties_to_proto(&properties);
+    v1::TextStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        style: encoded.base_style,
+        paragraph: encoded.paragraph,
+    }
+}
+
+fn text_style_resource_from_proto(
+    resource: v1::TextStyleResource,
+) -> Result<TextStyleResource, ServiceError> {
+    let properties = text_properties_from_proto(v1::TextProperties {
+        runs: Vec::new(),
+        paragraph: resource.paragraph,
+        auto_size: v1::TextAutoSize::Fixed as i32,
+        fallback_fonts: Vec::new(),
+        text_truncation: None,
+        max_lines: None,
+        base_style: resource.style,
+        paragraph_style_runs: Vec::new(),
+    })?;
+    Ok(TextStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        remote: resource.remote,
+        style: properties.base_style.ok_or(ServiceError::ReducerRejected)?,
+        paragraph: properties.paragraph,
     })
 }
 

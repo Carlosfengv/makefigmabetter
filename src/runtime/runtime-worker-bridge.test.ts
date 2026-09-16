@@ -71,6 +71,22 @@ describe("RuntimeWorkerBridge", () => {
     ]));
   });
 
+  it("carries the canonical TextStyle catalog into the runtime projection", () => {
+    const textStyles = [{
+      id: "S:body",
+      key: "",
+      name: "Body",
+      description: "Body copy",
+      remote: false,
+      style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+      paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+    }];
+    const projection = runtimeProjectionFromEditorSnapshot({ ...snapshotAt(4), textStyles });
+
+    expect(projection.textStyles).toEqual(textStyles);
+    expect(projection.textStyles).not.toBe(textStyles);
+  });
+
   it.each([1_000, 5_000, 10_000, 100_000])("assigns sibling indexes in one pass for %i flat nodes", (nodeCount) => {
     let parentReads = 0;
     const nodes: EditorSnapshot["nodes"] = Array.from({ length: nodeCount }, (_, index) => {

@@ -23,6 +23,7 @@ export function runtimeProjectionFromEditorSnapshot(snapshot: EditorSnapshot): R
   });
   return {
     revision: snapshot.revision,
+    textStyles: structuredClone(snapshot.textStyles ?? []),
     nodes: [
       {
         id: documentId,

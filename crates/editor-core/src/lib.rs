@@ -38,6 +38,12 @@ pub const MAX_TEXT_HYPERLINK_BYTES: usize = 2_048;
 pub const MAX_FONT_VARIATION_AXES: usize = 16;
 pub const MAX_OPEN_TYPE_FEATURES: usize = 128;
 pub const MAX_STYLE_ID_BYTES: usize = 2_048;
+pub const MAX_TEXT_STYLE_RESOURCES: usize = 4_096;
+pub const MAX_TEXT_STYLE_RESOURCE_BYTES: usize = 64 * 1024;
+pub const MAX_TEXT_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
+pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
+pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentId(pub u128);
@@ -881,6 +887,22 @@ pub struct TextProperties {
     pub base_style: Option<TextStyleRun>,
 }
 
+/// A complete, document-owned Figma TextStyle resource. IDs are strings so
+/// imported Figma identities such as `S:…` survive without lossy remapping.
+/// `style.start/end` are always zero because this value is independent of a
+/// text node's UTF-8 coordinate space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextStyleResource {
+    pub id: String,
+    /// Published library key. Local unpublished styles retain an empty key.
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub remote: bool,
+    pub style: TextStyleRun,
+    pub paragraph: ParagraphStyle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextTruncation {
     #[default]
@@ -1108,6 +1130,9 @@ pub struct Document {
     /// Versioned Resource Index. Asset references are canonical state even before
     /// an Image/Text node consumes them, so cache eviction cannot alter a document.
     assets: SharedOrdMap<AssetId, AssetReference>,
+    /// Complete TextStyle values keyed by their stable Figma-compatible ID.
+    text_styles: SharedOrdMap<String, TextStyleResource>,
+    text_style_bytes: usize,
     node_bytes: usize,
     /// IDs are never allocated to an unrelated new node after deletion.
     retired_ids: SharedOrdSet<NodeId>,
@@ -1329,6 +1354,9 @@ pub enum Command {
     RegisterAsset {
         asset: AssetReference,
     },
+    RegisterTextStyle {
+        style: TextStyleResource,
+    },
     Delete {
         id: NodeId,
     },
@@ -1465,6 +1493,9 @@ pub enum AppliedChange {
     },
     AssetRegistered {
         asset: AssetReference,
+    },
+    TextStyleRegistered {
+        style: TextStyleResource,
     },
     NodeDeleted {
         node: Node,
@@ -1644,6 +1675,10 @@ pub enum CommandError {
         id: AssetId,
     },
     InvalidAsset,
+    DuplicateTextStyle {
+        id: String,
+    },
+    InvalidTextStyle,
 }
 
 impl Document {
@@ -1680,6 +1715,8 @@ impl Document {
             retired_node_paint_stacks: SharedOrdMap::new(),
             nodes: SharedOrdMap::new(),
             assets: SharedOrdMap::new(),
+            text_styles: SharedOrdMap::new(),
+            text_style_bytes: 0,
             node_bytes: 0,
             retired_ids: SharedOrdSet::new(),
             undo_stack: SharedVector::new(),
@@ -1719,6 +1756,7 @@ impl Document {
             && self.retired_node_auto_layout.is_empty()
             && self.retired_node_paint_stacks.is_empty()
             && self.assets.is_empty()
+            && self.text_styles.is_empty()
             && self.retired_ids.is_empty()
             && self.undo_stack.is_empty()
             && self.redo_stack.is_empty()
@@ -1907,6 +1945,14 @@ impl Document {
         self.assets.values()
     }
 
+    pub fn text_styles(&self) -> impl Iterator<Item = &TextStyleResource> {
+        self.text_styles.values()
+    }
+
+    pub fn text_style(&self, id: &str) -> Option<&TextStyleResource> {
+        self.text_styles.get(id)
+    }
+
     pub fn asset(&self, id: AssetId) -> Option<&AssetReference> {
         self.assets.get(&id)
     }
@@ -2032,6 +2078,13 @@ impl Document {
                         }
                     }
                 }
+            }
+        }
+        if !self.text_styles.is_empty() {
+            hasher.update(b"makefigma/editor-core/text-style-catalog-v1");
+            hash_len(&mut hasher, self.text_styles.len());
+            for style in self.text_styles.values() {
+                hash_text_style_resource(&mut hasher, style);
             }
         }
         hash_len(&mut hasher, self.retired_ids.len());
@@ -2180,6 +2233,47 @@ impl Document {
     /// deliberately separate from raw bytes and cache lifetime.
     pub fn seed_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
         self.insert_asset(asset)
+    }
+
+    /// Installs one verified style while hydrating a trusted snapshot.
+    pub fn seed_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
+        self.insert_text_style(style)
+    }
+
+    fn insert_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
+        if self.text_styles.contains_key(&style.id) {
+            return Err(CommandError::DuplicateTextStyle { id: style.id });
+        }
+        let bytes = style.estimated_bytes();
+        let mut properties = TextProperties::default();
+        properties.paragraph = style.paragraph.clone();
+        properties.base_style = Some(style.style.clone());
+        let valid_identity = !style.id.is_empty()
+            && style.id.len() <= MAX_STYLE_ID_BYTES
+            && !style.id.contains('\0')
+            && style.key.len() <= MAX_STYLE_KEY_BYTES
+            && !style.key.contains('\0')
+            && (!style.remote || !style.key.is_empty())
+            && !style.name.trim().is_empty()
+            && style.name.len() <= MAX_STYLE_NAME_BYTES
+            && !style.name.contains('\0')
+            && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description.contains('\0');
+        if !valid_identity
+            || bytes > MAX_TEXT_STYLE_RESOURCE_BYTES
+            || self.text_styles.len() >= MAX_TEXT_STYLE_RESOURCES
+            || self.text_style_bytes.saturating_add(bytes) > MAX_TEXT_STYLE_CATALOG_BYTES
+            || style.style.start != 0
+            || style.style.end != 0
+            || style.style.text_style_id.is_some()
+            || style.style.hyperlink.is_some()
+            || !self.valid_text_properties("", &properties)
+        {
+            return Err(CommandError::InvalidTextStyle);
+        }
+        self.text_style_bytes += bytes;
+        self.text_styles.insert(style.id.clone(), style);
+        Ok(())
     }
 
     fn insert_asset(&mut self, asset: AssetReference) -> Result<(), CommandError> {
@@ -4015,6 +4109,12 @@ impl Document {
                     asset: asset.clone(),
                 })
             }
+            Command::RegisterTextStyle { style } => {
+                self.insert_text_style(style.clone())?;
+                Ok(AppliedChange::TextStyleRegistered {
+                    style: style.clone(),
+                })
+            }
         }
     }
 
@@ -4094,6 +4194,12 @@ impl Document {
             AppliedChange::AssetRegistered { asset } => {
                 self.assets.remove(&asset.asset_id);
             }
+            AppliedChange::TextStyleRegistered { style } => {
+                self.text_styles.remove(&style.id);
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
             AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
@@ -4163,6 +4269,12 @@ impl Document {
             AppliedChange::DocumentColorProfileChanged { after, .. } => self.color_profile = *after,
             AppliedChange::AssetRegistered { asset } => {
                 self.assets.insert(asset.asset_id, asset.clone());
+            }
+            AppliedChange::TextStyleRegistered { style } => {
+                self.text_style_bytes = self
+                    .text_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.text_styles.insert(style.id.clone(), style.clone());
             }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
             AppliedChange::NodeRestored { node } => self.restore_node(node),
@@ -4359,7 +4471,8 @@ impl Document {
                 }
                 Command::CreatePage(_)
                 | Command::SetDocumentColorProfile { .. }
-                | Command::RegisterAsset { .. } => {}
+                | Command::RegisterAsset { .. }
+                | Command::RegisterTextStyle { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -7053,6 +7166,7 @@ impl Command {
                         })
                         .sum::<usize>()
             }
+            Command::RegisterTextStyle { style } => style.estimated_bytes(),
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -7172,6 +7286,20 @@ impl TextProperties {
                 .iter()
                 .map(FontReference::estimated_bytes)
                 .sum::<usize>()
+    }
+}
+
+impl TextStyleResource {
+    pub fn estimated_bytes(&self) -> usize {
+        let mut properties = TextProperties::default();
+        properties.paragraph = self.paragraph.clone();
+        properties.base_style = Some(self.style.clone());
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.description.len()
+            + properties.estimated_bytes()
     }
 }
 
@@ -7311,6 +7439,7 @@ impl AppliedChange {
                         })
                         .sum::<usize>()
             }
+            AppliedChange::TextStyleRegistered { style } => style.estimated_bytes(),
         }
     }
 }
@@ -7777,6 +7906,18 @@ fn hash_text_style_payload(hasher: &mut Sha256, style: &TextStyleRun) {
         }
         None => hasher.update([0]),
     }
+}
+
+fn hash_text_style_resource(hasher: &mut Sha256, resource: &TextStyleResource) {
+    hash_text(hasher, &resource.id);
+    hash_text(hasher, &resource.key);
+    hash_text(hasher, &resource.name);
+    hash_text(hasher, &resource.description);
+    hasher.update([u8::from(resource.remote)]);
+    let mut properties = TextProperties::default();
+    properties.paragraph = resource.paragraph.clone();
+    properties.base_style = Some(resource.style.clone());
+    hash_text_properties(hasher, &properties);
 }
 
 fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
@@ -8967,6 +9108,10 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
                 }
             }
         }
+        Command::RegisterTextStyle { style } => {
+            hasher.update([26]);
+            hash_text_style_resource(hasher, style);
+        }
         Command::SetDocumentColorProfile { profile } => {
             hasher.update([6]);
             hash_document_color_profile(hasher, *profile);
@@ -9989,6 +10134,39 @@ mod tests {
             id: TransactionId(base_revision as u128 + 7),
             base_revision,
             commands,
+        }
+    }
+
+    fn text_style_resource(id: &str) -> TextStyleResource {
+        TextStyleResource {
+            id: id.into(),
+            key: String::new(),
+            name: "Body".into(),
+            description: "Body text".into(),
+            remote: false,
+            style: TextStyleRun {
+                start: 0,
+                end: 0,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                open_type_features: Vec::new(),
+                text_style_id: None,
+            },
+            paragraph: TextProperties::default().paragraph,
         }
     }
 
@@ -12552,6 +12730,50 @@ mod tests {
         assert_eq!(
             document.seed_asset(unsorted_aliases),
             Err(CommandError::InvalidAsset)
+        );
+    }
+
+    #[test]
+    fn text_style_catalog_is_hashed_bounded_and_undoable() {
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash_hex();
+        let style = text_style_resource("S:body");
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterTextStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.text_style("S:body"), Some(&style));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert!(document.text_style("S:body").is_none());
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.text_style("S:body"), Some(&style));
+
+        assert!(matches!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::RegisterTextStyle {
+                        style: style.clone()
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::DuplicateTextStyle { .. })
+        ));
+        let mut invalid = text_style_resource("S:invalid");
+        invalid.style.text_style_id = Some("S:self".into());
+        assert_eq!(
+            document.seed_text_style(invalid),
+            Err(CommandError::InvalidTextStyle)
         );
     }
 

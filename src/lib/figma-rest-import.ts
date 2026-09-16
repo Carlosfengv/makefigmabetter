@@ -18,6 +18,7 @@ import {
   type DocumentPaint,
   type RelativeTransform,
   type DocumentTextProperties,
+  type DocumentTextStyleResource,
   type EditorCommand,
   type NodeKind,
   type StrokeAlign,
@@ -46,6 +47,7 @@ export type FigmaImportIssue = {
 export type FigmaRestImportPlan = {
   pages: CanvasPage[];
   nodes: CanvasNode[];
+  textStyles?: DocumentTextStyleResource[];
   /** Image references only. An authorized adapter must resolve/download bytes
    * and register an Asset before it binds any request to `nodeId`. */
   assetRequests: FigmaRestAssetRequest[];
@@ -133,6 +135,7 @@ export function resolveFigmaRestImportBatch(plan: FigmaRestImportPlan): Resolved
     ...nodes,
     batch: [
       ...plan.pages.map((page) => ({ type: "createPage" as const, page: structuredClone(page) })),
+      ...(plan.textStyles ?? []).map((style) => ({ type: "registerTextStyle" as const, style: structuredClone(style) })),
       ...nodes.batch,
     ],
   };
@@ -436,11 +439,13 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   const document = record(file?.document);
   const sourceComponents = record(file?.components);
   const sourceComponentSets = record(file?.componentSets);
+  const sourceStyles = record(file?.styles);
   const pageSources = array(document?.children);
   if (!file || !document || !pageSources) {
     return {
       pages,
       nodes,
+      textStyles: [],
       assetRequests,
       pageCommands: [],
       nodeCommands: [],
@@ -563,6 +568,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
     }
   }
   normalizeImportedAlphaMasks(nodes, issues);
+  const textStyles = importedTextStyleResources(sourceStyles, nodes, issues);
   const pageCommands = pages.map((page) => ({ type: "create-page" as const, id: page.id, name: page.name, positionId: page.positionId }));
   const nodeCommands = nodes.map((node) => ({ type: "create" as const, node }));
   // The import path contains only Page/Create/SetMask commands. Build its
@@ -570,6 +576,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   // the general interactive reducer here would duplicate all node cloning.
   const transactionBatch: CoreBatchCommand[] = [
     ...pages.map((page) => ({ type: "createPage" as const, page: structuredClone(page) })),
+    ...textStyles.map((style) => ({ type: "registerTextStyle" as const, style: structuredClone(style) })),
     ...nodes.map((node) => ({ type: "create" as const, node: coreProjectionNode(node) })),
     ...nodes.filter((node) => node.isMask).map((node) => ({ type: "setMask" as const, id: node.id, enabled: true })),
   ];
@@ -581,6 +588,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
   return {
     pages,
     nodes,
+    textStyles,
     assetRequests,
     pageCommands,
     nodeCommands,
@@ -1411,6 +1419,78 @@ function constraintState(value: unknown, sourceId: string, issues: FigmaImportIs
 
 type ImportedTextStyle = Pick<DocumentTextProperties["runs"][number], "fontSize" | "fontWeight" | "italic" | "letterSpacing" | "textCase" | "hyperlink" | "textDecoration" | "textDecorationStyle" | "textDecorationOffset" | "textDecorationThickness" | "textDecorationColor" | "textDecorationSkipInk" | "leadingTrim" | "openTypeFeatures" | "textStyleId">;
 
+function importedTextStyleResources(
+  sourceStyles: JsonRecord | undefined,
+  nodes: readonly CanvasNode[],
+  issues: FigmaImportIssue[],
+): DocumentTextStyleResource[] {
+  if (!sourceStyles) return [];
+  const consumers = new Map<string, Array<{ style: DocumentTextStyleResource["style"]; paragraph: DocumentTextStyleResource["paragraph"] }>>();
+  for (const node of nodes) {
+    const properties = node.textProperties;
+    if (!properties) continue;
+    const candidates = properties.baseStyle
+      ? [{ start: 0, end: 0, ...properties.baseStyle }]
+      : properties.runs;
+    for (const candidate of candidates) {
+      const id = candidate.textStyleId;
+      if (!id) continue;
+      const { start: _start, end: _end, textStyleId: _id, hyperlink: _hyperlink, ...style } = candidate;
+      void _start;
+      void _end;
+      void _id;
+      void _hyperlink;
+      const entries = consumers.get(id) ?? [];
+      entries.push({ style, paragraph: structuredClone(properties.paragraph) });
+      consumers.set(id, entries);
+    }
+  }
+
+  const textStyleEntries = Object.entries(sourceStyles).filter(([, source]) => {
+    const metadata = record(source);
+    const styleType = string(metadata?.styleType) ?? string(metadata?.style_type) ?? string(metadata?.type);
+    return styleType === "TEXT";
+  });
+  if (textStyleEntries.length > 4_096) {
+    issues.push({ capability: "text-style-resource", outcome: "rejected", reason: "Figma TextStyle metadata exceeds the 4,096-resource catalog limit." });
+  }
+  const resources: DocumentTextStyleResource[] = [];
+  for (const [id, source] of textStyleEntries.slice(0, 4_096)) {
+    const metadata = record(source);
+    const values = consumers.get(id) ?? [];
+    if (!values.length) {
+      issues.push({ sourceId: id, capability: "text-style-resource", outcome: "preserved-extension", reason: "Figma supplied TextStyle metadata without a consuming layer that could resolve its complete text values." });
+      continue;
+    }
+    const first = values[0]!;
+    if (values.some((value) => JSON.stringify(value) !== JSON.stringify(first))) {
+      issues.push({ sourceId: id, capability: "text-style-resource", outcome: "preserved-extension", reason: "Consumers of this Figma TextStyle disagree on its complete text values, so no ambiguous catalog entry was created." });
+      continue;
+    }
+    const name = string(metadata?.name);
+    const key = string(metadata?.key) ?? "";
+    const description = string(metadata?.description) ?? "";
+    const remote = metadata?.remote === true;
+    const valid = name !== undefined
+      && name.trim().length > 0
+      && !name.includes("\0")
+      && encoder.encode(name).byteLength <= 1_024
+      && !id.includes("\0")
+      && encoder.encode(id).byteLength <= 2_048
+      && !key.includes("\0")
+      && encoder.encode(key).byteLength <= 2_048
+      && (!remote || key.length > 0)
+      && !description.includes("\0")
+      && encoder.encode(description).byteLength <= 32 * 1_024;
+    if (!valid) {
+      issues.push({ sourceId: id, capability: "text-style-resource", outcome: "preserved-extension", reason: "Figma TextStyle identity metadata exceeds the Canonical catalog bounds." });
+      continue;
+    }
+    resources.push({ id, key, name, description, remote, style: first.style, paragraph: first.paragraph });
+  }
+  return resources.sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function textProperties(node: JsonRecord, text: string, sourceId: string, issues: FigmaImportIssue[]) {
   const extensions: Record<string, number[]> = {};
   const style = record(node.style);
@@ -1495,7 +1575,7 @@ function textProperties(node: JsonRecord, text: string, sourceId: string, issues
     extensions,
     properties: {
       runs,
-      ...(text.length === 0 ? { baseStyle: linkedBase } : {}),
+      ...(text.length === 0 || textStyleId ? { baseStyle: linkedBase } : {}),
       paragraph: {
         alignment: textAlignment(string(style.textAlignHorizontal)),
         ...lineHeight,
