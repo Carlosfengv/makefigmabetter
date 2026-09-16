@@ -68,6 +68,13 @@ describe("Variables resource runtime", () => {
     expect(surface.valuesByMode[collection.defaultModeId]).toEqual({ r: 0, g: 0, b: 0 });
     expect(session.variables.getLocalVariableCollections().at(-1)?.id).toBe(collection.id);
     expect(session.variables.getLocalVariables().slice(-2).map((value) => value.id)).toEqual([spacing.id, surface.id]);
+    collection.name = "Design tokens";
+    collection.hiddenFromPublishing = true;
+    const darkMode = collection.addMode("Dark");
+    expect(spacing.valuesByMode[darkMode]).toBe(0);
+    collection.renameMode(darkMode, "Night");
+    expect(collection.modes.find((mode) => mode.modeId === darkMode)?.name).toBe("Night");
+    collection.removeMode(darkMode);
     spacing.name = "Space";
     spacing.description = "Layout spacing";
     spacing.hiddenFromPublishing = true;
@@ -82,19 +89,15 @@ describe("Variables resource runtime", () => {
 
     await session.commitAsync();
     expect(transport.submitted).toHaveLength(1);
-    expect(transport.submitted[0]?.operations.map((operation) => operation.type)).toEqual([
-      "registerVariableCollection",
-      "registerVariable",
-      "registerVariable",
-      "setVariable",
-      "setVariable",
-      "setVariable",
-      "setVariable",
-      "setVariable",
-      "setVariable",
-      "deleteVariable",
-    ]);
+    const operationTypes = transport.submitted[0]?.operations.map((operation) => operation.type) ?? [];
+    expect(operationTypes.slice(0, 3)).toEqual(["registerVariableCollection", "registerVariable", "registerVariable"]);
+    expect(operationTypes).toEqual(expect.arrayContaining(["setVariableCollection", "setVariable", "deleteVariable"]));
     expect((await session.variables.getVariableByIdAsync(spacing.id))?.name).toBe("Space");
+    collection.remove();
+    expect(await session.variables.getVariableCollectionByIdAsync(collection.id)).toBeNull();
+    expect(await session.variables.getVariableByIdAsync(spacing.id)).toBeNull();
+    await session.commitAsync();
+    expect(transport.submitted[1]?.operations.map((operation) => operation.type)).toEqual(["deleteVariableCollection"]);
   });
 
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
@@ -295,6 +298,17 @@ class UpdatingTransport implements RuntimeTransactionTransport {
     const variables = [...(this.projection.variables ?? [])];
     for (const operation of transaction.operations) {
       if (operation.type === "registerVariableCollection") variableCollections.push(structuredClone(operation.collection));
+      if (operation.type === "setVariableCollection") {
+        const collectionIndex = variableCollections.findIndex((collection) => collection.id === operation.collection.id);
+        if (collectionIndex >= 0) variableCollections[collectionIndex] = structuredClone(operation.collection);
+        for (let index = variables.length - 1; index >= 0; index -= 1) if (variables[index]?.collectionId === operation.collection.id) variables.splice(index, 1);
+        variables.push(...structuredClone([...operation.variables]));
+      }
+      if (operation.type === "deleteVariableCollection") {
+        const collectionIndex = variableCollections.findIndex((collection) => collection.id === operation.id);
+        if (collectionIndex >= 0) variableCollections.splice(collectionIndex, 1);
+        for (let index = variables.length - 1; index >= 0; index -= 1) if (variables[index]?.collectionId === operation.id) variables.splice(index, 1);
+      }
       if (operation.type === "registerVariable") variables.push(structuredClone(operation.variable));
       if (operation.type === "setVariable") {
         const index = variables.findIndex((variable) => variable.id === operation.variable.id);

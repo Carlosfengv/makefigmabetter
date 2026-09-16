@@ -375,7 +375,7 @@ function transactionToEditorCommands(
   const remaining: PendingProjectionTransaction["operations"][number][] = [];
 
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable") {
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
       remaining.push(structuredClone(operation));
       continue;
     }
@@ -440,6 +440,12 @@ function toEditorCommands(
   }
   if (operation.type === "deleteVariable") {
     return [{ type: "delete-variable", id: operation.id }];
+  }
+  if (operation.type === "setVariableCollection") {
+    return [{ type: "set-variable-collection", collection: structuredClone(operation.collection), variables: structuredClone([...operation.variables]) }];
+  }
+  if (operation.type === "deleteVariableCollection") {
+    return [{ type: "delete-variable-collection", id: operation.id }];
   }
   if (operation.type === "boolean") {
     const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;

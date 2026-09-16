@@ -1069,6 +1069,15 @@ message DeleteVariable {
   string variable_id = 1;
 }
 
+message SetVariableCollection {
+  VariableCollectionResource collection = 1;
+  repeated VariableResource variables = 2;
+}
+
+message DeleteVariableCollection {
+  string collection_id = 1;
+}
+
 message SetPaintStyleLinks {
   bytes node_id = 1;
   optional string fill_style_id = 2;
@@ -1221,6 +1230,8 @@ message ResolvedOperation {
     RegisterVariable register_variable = 32;
     SetVariable set_variable = 33;
     DeleteVariable delete_variable = 34;
+    SetVariableCollection set_variable_collection = 35;
+    DeleteVariableCollection delete_variable_collection = 36;
   }
 }
 

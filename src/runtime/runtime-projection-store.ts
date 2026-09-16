@@ -25,6 +25,8 @@ export type PendingProjectionOperation =
   | Readonly<{ type: "registerVariable"; variable: DocumentVariableResource }>
   | Readonly<{ type: "setVariable"; variable: DocumentVariableResource }>
   | Readonly<{ type: "deleteVariable"; id: string }>
+  | Readonly<{ type: "setVariableCollection"; collection: DocumentVariableCollectionResource; variables: readonly DocumentVariableResource[] }>
+  | Readonly<{ type: "deleteVariableCollection"; id: string }>
   | Readonly<{ type: "create"; node: RuntimeProjectionNode }>
   | Readonly<{ type: "update"; nodeId: string; patch: Readonly<Record<string, unknown>>; ignoreConstraints?: true; convertToTextPath?: true }>
   | Readonly<{ type: "remove"; nodeId: string }>
@@ -183,6 +185,8 @@ export class RuntimeProjectionStore {
     for (const { transaction } of this.pending.values()) {
       for (const operation of transaction.operations) {
         if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
+        if (operation.type === "setVariableCollection") collections.set(operation.collection.id, operation.collection);
+        if (operation.type === "deleteVariableCollection") collections.delete(operation.id);
       }
     }
     return [...collections.values()];
@@ -195,6 +199,13 @@ export class RuntimeProjectionStore {
         if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
         if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
         if (operation.type === "deleteVariable") variables.delete(operation.id);
+        if (operation.type === "setVariableCollection") {
+          [...variables.values()].filter((value) => value.collectionId === operation.collection.id).forEach((value) => variables.delete(value.id));
+          operation.variables.forEach((value) => variables.set(value.id, value));
+        }
+        if (operation.type === "deleteVariableCollection") {
+          [...variables.values()].filter((value) => value.collectionId === operation.id).forEach((value) => variables.delete(value.id));
+        }
       }
     }
     return [...variables.values()];
@@ -266,6 +277,23 @@ function validateResourceOperations(
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       variables.delete(operation.id);
+    } else if (operation.type === "setVariableCollection") {
+      const before = collections.get(operation.collection.id);
+      const current = [...variables.values()].filter((value) => value.collectionId === operation.collection.id);
+      if (!before || before.remote || before.key !== operation.collection.key || operation.collection.remote || current.length !== operation.variables.length || new Set(operation.variables.map((value) => value.id)).size !== current.length || current.some((value) => !operation.variables.some((candidate) => candidate.id === value.id))) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      collections.set(operation.collection.id, operation.collection);
+      current.forEach((value) => variables.delete(value.id));
+      operation.variables.forEach((value) => variables.set(value.id, value));
+      validateVariableAliases(variables, transactionId);
+    } else if (operation.type === "deleteVariableCollection") {
+      const collection = collections.get(operation.id);
+      if (!collection || collection.remote) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      const removed = new Set([...variables.values()].filter((value) => value.collectionId === operation.id).map((value) => value.id));
+      if ([...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      removed.forEach((id) => variables.delete(id));
+      collections.delete(operation.id);
     }
   }
 }
@@ -301,6 +329,15 @@ function applyResourceOperations(
     if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
     if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
     if (operation.type === "deleteVariable") variables.delete(operation.id);
+    if (operation.type === "setVariableCollection") {
+      collections.set(operation.collection.id, operation.collection);
+      [...variables.values()].filter((value) => value.collectionId === operation.collection.id).forEach((value) => variables.delete(value.id));
+      operation.variables.forEach((value) => variables.set(value.id, value));
+    }
+    if (operation.type === "deleteVariableCollection") {
+      collections.delete(operation.id);
+      [...variables.values()].filter((value) => value.collectionId === operation.id).forEach((value) => variables.delete(value.id));
+    }
   }
 }
 
@@ -312,7 +349,7 @@ function validateOperations(
   const overlay = new Map<string, RuntimeProjectionNode>();
   const read = (nodeId: string) => overlay.get(nodeId) ?? base.get(nodeId);
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable") continue;
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -372,7 +409,7 @@ function applyOperations(
   transactionId: string,
 ): void {
   for (const operation of operations) {
-    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable") continue;
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });

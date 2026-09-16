@@ -372,6 +372,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       batch.push({ type: "deleteVariable", id: command.id });
       continue;
     }
+    if (command.type === "set-variable-collection") {
+      batch.push({ type: "setVariableCollection", collection: structuredClone(command.collection), variables: structuredClone(command.variables) });
+      continue;
+    }
+    if (command.type === "delete-variable-collection") {
+      batch.push({ type: "deleteVariableCollection", id: command.id });
+      continue;
+    }
     if (command.type === "convertToTextPath") {
       const index = nextNodes.findIndex((node) => node.id === command.id);
       const node = nextNodes[index];

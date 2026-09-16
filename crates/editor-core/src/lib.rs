@@ -1466,6 +1466,13 @@ pub enum Command {
     DeleteVariable {
         id: String,
     },
+    SetVariableCollection {
+        collection: VariableCollectionResource,
+        variables: Vec<VariableResource>,
+    },
+    DeleteVariableCollection {
+        id: String,
+    },
     Delete {
         id: NodeId,
     },
@@ -1626,6 +1633,16 @@ pub enum AppliedChange {
     },
     VariableDeleted {
         variable: VariableResource,
+    },
+    VariableCollectionChanged {
+        before: VariableCollectionResource,
+        after: VariableCollectionResource,
+        before_variables: Vec<VariableResource>,
+        after_variables: Vec<VariableResource>,
+    },
+    VariableCollectionDeleted {
+        collection: VariableCollectionResource,
+        variables: Vec<VariableResource>,
     },
     NodeDeleted {
         node: Node,
@@ -2627,6 +2644,151 @@ impl Document {
             .variable_catalog_bytes
             .saturating_sub(variable.estimated_bytes());
         Ok(variable)
+    }
+
+    fn replace_variable_collection(
+        &mut self,
+        collection: VariableCollectionResource,
+        variables: Vec<VariableResource>,
+    ) -> Result<(VariableCollectionResource, Vec<VariableResource>), CommandError> {
+        let Some(before) = self.variable_collections.get(&collection.id).cloned() else {
+            return Err(CommandError::InvalidVariableCollection);
+        };
+        if before.remote
+            || before.key != collection.key
+            || before.remote != collection.remote
+            || collection.remote
+        {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        let before_variables = self
+            .variables
+            .values()
+            .filter(|variable| variable.collection_id == collection.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected = before_variables
+            .iter()
+            .map(|variable| variable.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let supplied = variables
+            .iter()
+            .map(|variable| variable.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if expected != supplied
+            || variables.len() != expected.len()
+            || variables.iter().any(|variable| {
+                let Some(previous) = before_variables.iter().find(|item| item.id == variable.id)
+                else {
+                    return true;
+                };
+                variable.key != previous.key
+                    || variable.remote != previous.remote
+                    || variable.collection_id != collection.id
+                    || variable.resolved_type != previous.resolved_type
+            })
+        {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        self.variable_collections.remove(&before.id);
+        self.variable_catalog_bytes = self
+            .variable_catalog_bytes
+            .saturating_sub(before.estimated_bytes());
+        for variable in &before_variables {
+            self.variables.remove(&variable.id);
+            self.variable_catalog_bytes = self
+                .variable_catalog_bytes
+                .saturating_sub(variable.estimated_bytes());
+        }
+        self.insert_variable_collection(collection)?;
+        for variable in variables {
+            self.insert_variable(variable, false)?;
+        }
+        self.validate_variable_catalog()?;
+        Ok((before, before_variables))
+    }
+
+    fn remove_variable_collection(
+        &mut self,
+        id: &str,
+    ) -> Result<(VariableCollectionResource, Vec<VariableResource>), CommandError> {
+        let Some(collection) = self.variable_collections.get(id).cloned() else {
+            return Err(CommandError::InvalidVariableCollection);
+        };
+        if collection.remote {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        let variables = self
+            .variables
+            .values()
+            .filter(|variable| variable.collection_id == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed_ids = variables
+            .iter()
+            .map(|variable| variable.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if self.variables.values().any(|candidate| {
+            candidate.collection_id != id
+                && candidate.values_by_mode.values().any(
+                    |value| matches!(value, VariableValue::Alias(target_id) if removed_ids.contains(target_id.as_str())),
+                )
+        }) {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        for variable in &variables {
+            self.variables.remove(&variable.id);
+            self.variable_catalog_bytes = self
+                .variable_catalog_bytes
+                .saturating_sub(variable.estimated_bytes());
+        }
+        self.variable_collections.remove(id);
+        self.variable_catalog_bytes = self
+            .variable_catalog_bytes
+            .saturating_sub(collection.estimated_bytes());
+        Ok((collection, variables))
+    }
+
+    fn restore_variable_collection_state(
+        &mut self,
+        old_collection: &VariableCollectionResource,
+        old_variables: &[VariableResource],
+        collection: &VariableCollectionResource,
+        variables: &[VariableResource],
+    ) {
+        self.remove_variable_collection_state(old_collection, old_variables);
+        self.install_variable_collection_state(collection, variables);
+    }
+
+    fn install_variable_collection_state(
+        &mut self,
+        collection: &VariableCollectionResource,
+        variables: &[VariableResource],
+    ) {
+        self.variable_catalog_bytes += collection.estimated_bytes();
+        self.variable_collections
+            .insert(collection.id.clone(), collection.clone());
+        for variable in variables {
+            self.variable_catalog_bytes += variable.estimated_bytes();
+            self.variables.insert(variable.id.clone(), variable.clone());
+        }
+    }
+
+    fn remove_variable_collection_state(
+        &mut self,
+        collection: &VariableCollectionResource,
+        variables: &[VariableResource],
+    ) {
+        self.variable_collections.remove(&collection.id);
+        self.variable_catalog_bytes = self
+            .variable_catalog_bytes
+            .saturating_sub(collection.estimated_bytes());
+        for variable in variables {
+            self.variables.remove(&variable.id);
+            self.variable_catalog_bytes = self
+                .variable_catalog_bytes
+                .saturating_sub(variable.estimated_bytes());
+        }
     }
 
     pub fn validate_variable_catalog(&self) -> Result<(), CommandError> {
@@ -4635,6 +4797,26 @@ impl Document {
                 let variable = self.remove_variable(id)?;
                 Ok(AppliedChange::VariableDeleted { variable })
             }
+            Command::SetVariableCollection {
+                collection,
+                variables,
+            } => {
+                let (before, before_variables) =
+                    self.replace_variable_collection(collection.clone(), variables.clone())?;
+                Ok(AppliedChange::VariableCollectionChanged {
+                    before,
+                    after: collection.clone(),
+                    before_variables,
+                    after_variables: variables.clone(),
+                })
+            }
+            Command::DeleteVariableCollection { id } => {
+                let (collection, variables) = self.remove_variable_collection(id)?;
+                Ok(AppliedChange::VariableCollectionDeleted {
+                    collection,
+                    variables,
+                })
+            }
         }
     }
 
@@ -4754,6 +4936,21 @@ impl Document {
                     .variable_catalog_bytes
                     .saturating_add(variable.estimated_bytes());
             }
+            AppliedChange::VariableCollectionChanged {
+                before,
+                after,
+                before_variables,
+                after_variables,
+            } => self.restore_variable_collection_state(
+                after,
+                after_variables,
+                before,
+                before_variables,
+            ),
+            AppliedChange::VariableCollectionDeleted {
+                collection,
+                variables,
+            } => self.install_variable_collection_state(collection, variables),
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
             AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
@@ -4865,6 +5062,21 @@ impl Document {
                     .variable_catalog_bytes
                     .saturating_sub(variable.estimated_bytes());
             }
+            AppliedChange::VariableCollectionChanged {
+                before,
+                after,
+                before_variables,
+                after_variables,
+            } => self.restore_variable_collection_state(
+                before,
+                before_variables,
+                after,
+                after_variables,
+            ),
+            AppliedChange::VariableCollectionDeleted {
+                collection,
+                variables,
+            } => self.remove_variable_collection_state(collection, variables),
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
             AppliedChange::NodeRestored { node } => self.restore_node(node),
         }
@@ -5121,7 +5333,9 @@ impl Document {
                 | Command::RegisterVariableCollection { .. }
                 | Command::RegisterVariable { .. }
                 | Command::SetVariable { .. }
-                | Command::DeleteVariable { .. } => {}
+                | Command::DeleteVariable { .. }
+                | Command::SetVariableCollection { .. }
+                | Command::DeleteVariableCollection { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -7864,6 +8078,17 @@ impl Command {
             Command::RegisterVariable { variable } => variable.estimated_bytes(),
             Command::SetVariable { variable } => variable.estimated_bytes(),
             Command::DeleteVariable { id } => id.len(),
+            Command::SetVariableCollection {
+                collection,
+                variables,
+            } => {
+                collection.estimated_bytes()
+                    + variables
+                        .iter()
+                        .map(VariableResource::estimated_bytes)
+                        .sum::<usize>()
+            }
+            Command::DeleteVariableCollection { id } => id.len(),
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -8219,6 +8444,33 @@ impl AppliedChange {
                 before.estimated_bytes() + after.estimated_bytes()
             }
             AppliedChange::VariableDeleted { variable } => variable.estimated_bytes(),
+            AppliedChange::VariableCollectionChanged {
+                before,
+                after,
+                before_variables,
+                after_variables,
+            } => {
+                before.estimated_bytes()
+                    + after.estimated_bytes()
+                    + before_variables
+                        .iter()
+                        .map(VariableResource::estimated_bytes)
+                        .sum::<usize>()
+                    + after_variables
+                        .iter()
+                        .map(VariableResource::estimated_bytes)
+                        .sum::<usize>()
+            }
+            AppliedChange::VariableCollectionDeleted {
+                collection,
+                variables,
+            } => {
+                collection.estimated_bytes()
+                    + variables
+                        .iter()
+                        .map(VariableResource::estimated_bytes)
+                        .sum::<usize>()
+            }
         }
     }
 }
@@ -10017,6 +10269,23 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
         }
         Command::DeleteVariable { id } => {
             hasher.update([31]);
+            hash_text(hasher, id);
+        }
+        Command::SetVariableCollection {
+            collection,
+            variables,
+        } => {
+            hasher.update([32]);
+            hash_variable_collection(hasher, collection);
+            hash_len(hasher, variables.len());
+            let mut variables = variables.iter().collect::<Vec<_>>();
+            variables.sort_by(|left, right| left.id.cmp(&right.id));
+            for variable in variables {
+                hash_variable_resource(hasher, variable);
+            }
+        }
+        Command::DeleteVariableCollection { id } => {
+            hasher.update([33]);
             hash_text(hasher, id);
         }
         Command::SetDocumentColorProfile { profile } => {
@@ -22512,6 +22781,52 @@ mod tests {
         assert!(document.variable(&changed.id).is_none());
         document.undo().unwrap();
         assert_eq!(document.variable(&changed.id), Some(&changed));
+
+        let mut updated_collection = document.variable_collection("VC:tokens").unwrap().clone();
+        updated_collection.modes.push(VariableMode {
+            id: "dark".into(),
+            name: "Dark".into(),
+        });
+        let mut mode_variable = changed.clone();
+        mode_variable
+            .values_by_mode
+            .insert("dark".into(), VariableValue::Float(12.0));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetVariableCollection {
+                        collection: updated_collection.clone(),
+                        variables: vec![mode_variable.clone()],
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.variable(&mode_variable.id), Some(&mode_variable));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariableCollection {
+                        id: updated_collection.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(
+            document
+                .variable_collection(&updated_collection.id)
+                .is_none()
+        );
+        assert!(document.variable(&mode_variable.id).is_none());
+        document.undo().unwrap();
+        assert_eq!(
+            document.variable_collection(&updated_collection.id),
+            Some(&updated_collection)
+        );
+        assert_eq!(document.variable(&mode_variable.id), Some(&mode_variable));
     }
 
     #[test]

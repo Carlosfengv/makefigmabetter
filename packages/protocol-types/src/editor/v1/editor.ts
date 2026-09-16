@@ -1351,6 +1351,15 @@ export interface DeleteVariable {
   variableId: string;
 }
 
+export interface SetVariableCollection {
+  collection?: VariableCollectionResource | undefined;
+  variables: VariableResource[];
+}
+
+export interface DeleteVariableCollection {
+  collectionId: string;
+}
+
 export interface SetPaintStyleLinks {
   nodeId: Uint8Array;
   fillStyleId?: string | undefined;
@@ -1531,6 +1540,8 @@ export interface ResolvedOperation {
   registerVariable?: RegisterVariable | undefined;
   setVariable?: SetVariable | undefined;
   deleteVariable?: DeleteVariable | undefined;
+  setVariableCollection?: SetVariableCollection | undefined;
+  deleteVariableCollection?: DeleteVariableCollection | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -9860,6 +9871,112 @@ export const DeleteVariable: MessageFns<DeleteVariable> = {
   },
 };
 
+function createBaseSetVariableCollection(): SetVariableCollection {
+  return { collection: undefined, variables: [] };
+}
+
+export const SetVariableCollection: MessageFns<SetVariableCollection> = {
+  encode(message: SetVariableCollection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.collection !== undefined) {
+      VariableCollectionResource.encode(message.collection, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.variables) {
+      VariableResource.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVariableCollection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVariableCollection();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.collection = VariableCollectionResource.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.variables.push(VariableResource.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetVariableCollection>, I>>(base?: I): SetVariableCollection {
+    return SetVariableCollection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVariableCollection>, I>>(object: I): SetVariableCollection {
+    const message = createBaseSetVariableCollection();
+    message.collection = (object.collection !== undefined && object.collection !== null)
+      ? VariableCollectionResource.fromPartial(object.collection)
+      : undefined;
+    message.variables = object.variables?.map((e) => VariableResource.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseDeleteVariableCollection(): DeleteVariableCollection {
+  return { collectionId: "" };
+}
+
+export const DeleteVariableCollection: MessageFns<DeleteVariableCollection> = {
+  encode(message: DeleteVariableCollection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.collectionId !== "") {
+      writer.uint32(10).string(message.collectionId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteVariableCollection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteVariableCollection();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.collectionId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteVariableCollection>, I>>(base?: I): DeleteVariableCollection {
+    return DeleteVariableCollection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteVariableCollection>, I>>(object: I): DeleteVariableCollection {
+    const message = createBaseDeleteVariableCollection();
+    message.collectionId = object.collectionId ?? "";
+    return message;
+  },
+};
+
 function createBaseSetPaintStyleLinks(): SetPaintStyleLinks {
   return { nodeId: new Uint8Array(0), fillStyleId: undefined, strokeStyleId: undefined, backgroundStyleId: undefined };
 }
@@ -11023,6 +11140,8 @@ function createBaseResolvedOperation(): ResolvedOperation {
     registerVariable: undefined,
     setVariable: undefined,
     deleteVariable: undefined,
+    setVariableCollection: undefined,
+    deleteVariableCollection: undefined,
   };
 }
 
@@ -11129,6 +11248,12 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.deleteVariable !== undefined) {
       DeleteVariable.encode(message.deleteVariable, writer.uint32(274).fork()).join();
+    }
+    if (message.setVariableCollection !== undefined) {
+      SetVariableCollection.encode(message.setVariableCollection, writer.uint32(282).fork()).join();
+    }
+    if (message.deleteVariableCollection !== undefined) {
+      DeleteVariableCollection.encode(message.deleteVariableCollection, writer.uint32(290).fork()).join();
     }
     return writer;
   },
@@ -11412,6 +11537,22 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.deleteVariable = DeleteVariable.decode(reader, reader.uint32());
           continue;
         }
+        case 35: {
+          if (tag !== 282) {
+            break;
+          }
+
+          message.setVariableCollection = SetVariableCollection.decode(reader, reader.uint32());
+          continue;
+        }
+        case 36: {
+          if (tag !== 290) {
+            break;
+          }
+
+          message.deleteVariableCollection = DeleteVariableCollection.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11533,6 +11674,14 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     message.deleteVariable = (object.deleteVariable !== undefined && object.deleteVariable !== null)
       ? DeleteVariable.fromPartial(object.deleteVariable)
       : undefined;
+    message.setVariableCollection =
+      (object.setVariableCollection !== undefined && object.setVariableCollection !== null)
+        ? SetVariableCollection.fromPartial(object.setVariableCollection)
+        : undefined;
+    message.deleteVariableCollection =
+      (object.deleteVariableCollection !== undefined && object.deleteVariableCollection !== null)
+        ? DeleteVariableCollection.fromPartial(object.deleteVariableCollection)
+        : undefined;
     return message;
   },
 };

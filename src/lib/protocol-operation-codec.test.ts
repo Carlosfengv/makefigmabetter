@@ -82,6 +82,8 @@ describe("protocol operation codec", () => {
       { type: "registerVariable", variable: { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"] } },
       { type: "setVariable", variable: { id: "V:spacing", key: "", name: "Space", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 8 }, scopes: ["GAP"] } },
       { type: "deleteVariable", id: "V:spacing" },
+      { type: "setVariableCollection", collection: { ...collection, name: "Design tokens" }, variables: [] },
+      { type: "deleteVariableCollection", id: collection.id },
     ]));
 
     expect(batch.operations[0]?.registerVariableCollection?.collection).toMatchObject({ id: "VC:tokens", defaultModeId: "default" });
@@ -93,6 +95,8 @@ describe("protocol operation codec", () => {
     });
     expect(batch.operations[2]?.setVariable?.variable).toMatchObject({ name: "Space", valuesByMode: [{ modeId: "default", value: { floatValue: 8 } }] });
     expect(batch.operations[3]?.deleteVariable).toEqual({ variableId: "V:spacing" });
+    expect(batch.operations[4]?.setVariableCollection).toMatchObject({ collection: { name: "Design tokens" }, variables: [] });
+    expect(batch.operations[5]?.deleteVariableCollection).toEqual({ collectionId: "VC:tokens" });
   });
 
   it("serializes PaintStyle identities on create and clears them explicitly on update", () => {

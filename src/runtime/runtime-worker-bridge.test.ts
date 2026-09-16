@@ -60,6 +60,8 @@ describe("RuntimeWorkerBridge", () => {
         { type: "registerVariable", variable },
         { type: "setVariable", variable: { ...variable, name: "Space" } },
         { type: "deleteVariable", id: variable.id },
+        { type: "setVariableCollection", collection: { ...collection, name: "Design tokens" }, variables: [] },
+        { type: "deleteVariableCollection", id: collection.id },
       ],
     });
 
@@ -68,6 +70,8 @@ describe("RuntimeWorkerBridge", () => {
       { type: "register-variable", variable },
       { type: "set-variable", variable: { ...variable, name: "Space" } },
       { type: "delete-variable", id: variable.id },
+      { type: "set-variable-collection", collection: { ...collection, name: "Design tokens" }, variables: [] },
+      { type: "delete-variable-collection", id: collection.id },
     ]);
     bridge.close();
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));

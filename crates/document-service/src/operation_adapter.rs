@@ -81,6 +81,8 @@ pub fn commands_from_payload_with_semantics(
                     | Some(v1::resolved_operation::Kind::RegisterVariable(_))
                     | Some(v1::resolved_operation::Kind::SetVariable(_))
                     | Some(v1::resolved_operation::Kind::DeleteVariable(_))
+                    | Some(v1::resolved_operation::Kind::SetVariableCollection(_))
+                    | Some(v1::resolved_operation::Kind::DeleteVariableCollection(_))
             )
         })
     {
@@ -1702,6 +1704,19 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
         }),
         Kind::DeleteVariable(value) => Ok(Command::DeleteVariable {
             id: value.variable_id,
+        }),
+        Kind::SetVariableCollection(value) => Ok(Command::SetVariableCollection {
+            collection: variable_collection_from_proto(
+                value.collection.ok_or(ServiceError::InvalidEnvelope)?,
+            ),
+            variables: value
+                .variables
+                .into_iter()
+                .map(variable_resource_from_proto)
+                .collect::<Result<_, _>>()?,
+        }),
+        Kind::DeleteVariableCollection(value) => Ok(Command::DeleteVariableCollection {
+            id: value.collection_id,
         }),
         Kind::SetPaintStyleLinks(value) => Ok(Command::SetPaintStyleLinks {
             id: node_id(&value.node_id)?,

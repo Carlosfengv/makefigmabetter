@@ -156,6 +156,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "deleteVariable") {
     return [{ deleteVariable: { variableId: command.id } }];
   }
+  if (command.type === "setVariableCollection") {
+    return [{ setVariableCollection: { collection: variableCollectionResourceProto(command.collection), variables: command.variables.map(variableResourceProto) } }];
+  }
+  if (command.type === "deleteVariableCollection") {
+    return [{ deleteVariableCollection: { collectionId: command.id } }];
+  }
   if (command.type === "create") {
     const operations: ResolvedOperation[] = [{ createNode: { node: nodeProto(command.node) } }];
     const layout = autoLayoutOperation(command.node);

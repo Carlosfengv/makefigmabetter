@@ -321,6 +321,19 @@ impl DocumentEngine {
                 BatchCommand::DeleteVariable { id } => {
                     commands.push(Command::DeleteVariable { id });
                 }
+                BatchCommand::SetVariableCollection {
+                    collection,
+                    variables,
+                } => commands.push(Command::SetVariableCollection {
+                    collection: variable_collection_from_projection(&collection)?,
+                    variables: variables
+                        .iter()
+                        .map(variable_resource_from_projection)
+                        .collect::<Result<_, _>>()?,
+                }),
+                BatchCommand::DeleteVariableCollection { id } => {
+                    commands.push(Command::DeleteVariableCollection { id });
+                }
                 BatchCommand::Create { node } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
@@ -2030,6 +2043,13 @@ enum BatchCommand {
     DeleteVariable {
         id: String,
     },
+    SetVariableCollection {
+        collection: ProjectionVariableCollectionResource,
+        variables: Vec<ProjectionVariableResource>,
+    },
+    DeleteVariableCollection {
+        id: String,
+    },
     Create {
         node: ProjectionNode,
     },
@@ -3041,6 +3061,8 @@ impl DocumentEngine {
                 | BatchCommand::RegisterVariable { .. }
                 | BatchCommand::SetVariable { .. }
                 | BatchCommand::DeleteVariable { .. }
+                | BatchCommand::SetVariableCollection { .. }
+                | BatchCommand::DeleteVariableCollection { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }

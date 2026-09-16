@@ -355,6 +355,14 @@ export class RuntimeSession implements RuntimeContainerHost {
     ].some((bindings) => Object.values(bindings).includes(id)));
   }
 
+  setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
+    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }]);
+  }
+
+  deleteVariableCollection(id: string): void {
+    this.enqueueOperations([{ type: "deleteVariableCollection", id }]);
+  }
+
   assertSynchronousDocumentAccess(): void {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");

@@ -28,6 +28,8 @@ export type RuntimeVariableHost = Readonly<{
   setVariable(variable: DocumentVariableResource): void;
   deleteVariable(id: string): void;
   variableIsBound(id: string): boolean;
+  setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void;
+  deleteVariableCollection(id: string): void;
 }>;
 
 function runtimeColor(value: DocumentColor): RuntimeVariableColor {
@@ -154,32 +156,84 @@ function isRuntimeColor(value: RuntimeVariableValue): value is RuntimeVariableCo
 }
 
 export class RuntimeVariableCollection {
-  constructor(private readonly resource: DocumentVariableCollectionResource, private readonly host: RuntimeVariableHost) {}
+  private removed = false;
+  constructor(private resource: DocumentVariableCollectionResource, private readonly host: RuntimeVariableHost) {}
 
   get id(): string { return this.resource.id; }
-  get key(): string { return this.resource.key; }
-  get remote(): boolean { return this.resource.remote; }
+  get key(): string { return this.read().key; }
+  get remote(): boolean { return this.read().remote; }
   get isExtension(): false { return false; }
-  get name(): string { return this.resource.name; }
-  set name(_value: string) { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  get hiddenFromPublishing(): boolean { return this.resource.hiddenFromPublishing; }
-  set hiddenFromPublishing(_value: boolean) { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  get modes(): readonly Readonly<{ modeId: string; name: string }>[] { return Object.freeze(this.resource.modes.map((mode) => Object.freeze({ ...mode }))); }
-  get defaultModeId(): string { return this.resource.defaultModeId; }
+  get name(): string { return this.read().name; }
+  set name(value: string) { if (typeof value !== "string" || !value.trim()) throw runtimeError("INVALID_ARGUMENT"); this.update({ name: value }); }
+  get hiddenFromPublishing(): boolean { return this.read().hiddenFromPublishing; }
+  set hiddenFromPublishing(value: boolean) { if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT"); this.update({ hiddenFromPublishing: value }); }
+  get modes(): readonly Readonly<{ modeId: string; name: string }>[] { return Object.freeze(this.read().modes.map((mode) => Object.freeze({ ...mode }))); }
+  get defaultModeId(): string { return this.read().defaultModeId; }
   get variableIds(): readonly string[] {
     return Object.freeze(this.host.allVariableResources().filter((variable) => variable.collectionId === this.id).map((variable) => variable.id));
   }
-  async getPublishStatusAsync(): Promise<"UNPUBLISHED" | "CURRENT"> { return this.resource.key ? "CURRENT" : "UNPUBLISHED"; }
-  addMode(_name: string): never { void _name; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  renameMode(_modeId: string, _name: string): never { void _modeId; void _name; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  removeMode(_modeId: string): never { void _modeId; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  remove(): never { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  async getPublishStatusAsync(): Promise<"UNPUBLISHED" | "CURRENT"> { return this.read().key ? "CURRENT" : "UNPUBLISHED"; }
+  addMode(name: string): string {
+    if (typeof name !== "string" || !name.trim()) throw runtimeError("INVALID_ARGUMENT");
+    const current = this.assertMutable();
+    const modeId = this.host.allocateRuntimeId();
+    const variables = this.collectionVariables().map((variable) => ({ ...variable, valuesByMode: { ...variable.valuesByMode, [modeId]: structuredClone(variable.valuesByMode[current.defaultModeId]) } }));
+    this.commit({ ...current, modes: [...current.modes, { modeId, name }] }, variables);
+    return modeId;
+  }
+  renameMode(modeId: string, name: string): void {
+    if (typeof name !== "string" || !name.trim()) throw runtimeError("INVALID_ARGUMENT");
+    const current = this.assertMutable();
+    if (!current.modes.some((mode) => mode.modeId === modeId)) throw runtimeError("INVALID_ARGUMENT");
+    this.commit({ ...current, modes: current.modes.map((mode) => mode.modeId === modeId ? { ...mode, name } : mode) }, this.collectionVariables());
+  }
+  removeMode(modeId: string): void {
+    const current = this.assertMutable();
+    if (current.modes.length <= 1 || modeId === current.defaultModeId || !current.modes.some((mode) => mode.modeId === modeId)) throw runtimeError("INVALID_ARGUMENT");
+    const variables = this.collectionVariables().map((variable) => {
+      const valuesByMode = { ...variable.valuesByMode };
+      delete valuesByMode[modeId];
+      return { ...variable, valuesByMode };
+    });
+    this.commit({ ...current, modes: current.modes.filter((mode) => mode.modeId !== modeId) }, variables);
+  }
+  remove(): void {
+    this.assertMutable();
+    if (this.collectionVariables().some((variable) => this.host.variableIsBound(variable.id))) throw runtimeError("INVALID_ARGUMENT");
+    this.host.deleteVariableCollection(this.id);
+    this.removed = true;
+  }
   getPluginData(_key: string): string { void _key; return ""; }
   setPluginData(_key: string, _value: string): never { void _key; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
   getPluginDataKeys(): string[] { return []; }
   getSharedPluginData(_namespace: string, _key: string): string { void _namespace; void _key; return ""; }
   setSharedPluginData(_namespace: string, _key: string, _value: string): never { void _namespace; void _key; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
   getSharedPluginDataKeys(_namespace: string): string[] { void _namespace; return []; }
+
+  private read(): DocumentVariableCollectionResource {
+    const current = this.host.variableCollectionResource(this.resource.id);
+    if (current) this.resource = current;
+    return this.resource;
+  }
+  private assertMutable(): DocumentVariableCollectionResource {
+    this.host.assertOpen();
+    const current = this.host.variableCollectionResource(this.id);
+    if (this.removed || !current) throw runtimeError("RESOURCE_UNAVAILABLE");
+    if (current.remote) throw runtimeError("INVALID_ARGUMENT");
+    this.resource = current;
+    return current;
+  }
+  private collectionVariables(): DocumentVariableResource[] {
+    return this.host.allVariableResources().filter((variable) => variable.collectionId === this.id).map((variable) => structuredClone(variable));
+  }
+  private update(patch: Partial<DocumentVariableCollectionResource>): void {
+    const current = this.assertMutable();
+    this.commit({ ...current, ...patch }, this.collectionVariables());
+  }
+  private commit(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
+    this.host.setVariableCollection(collection, variables);
+    this.resource = collection;
+  }
 }
 
 export class RuntimeVariablesAPI {
