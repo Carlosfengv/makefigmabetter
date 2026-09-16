@@ -51,6 +51,7 @@ pub const MAX_VARIABLE_COLLECTIONS: usize = 1_024;
 pub const MAX_VARIABLES: usize = 8_192;
 pub const MAX_VARIABLE_MODES: usize = 40;
 pub const MAX_VARIABLE_SCOPES: usize = 32;
+pub const MAX_VARIABLE_CODE_SYNTAX_BYTES: usize = 32 * 1024;
 pub const MAX_VARIABLE_STRING_BYTES: usize = 32 * 1024;
 pub const MAX_VARIABLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 
@@ -974,6 +975,7 @@ pub struct VariableResource {
     pub resolved_type: VariableResolvedType,
     pub values_by_mode: BTreeMap<String, VariableValue>,
     pub scopes: Vec<String>,
+    pub code_syntax: BTreeMap<String, String>,
 }
 
 /// Stable node-level PaintStyle link identities. Background is retained as a
@@ -2558,12 +2560,25 @@ impl Document {
                 .scopes
                 .iter()
                 .all(|scope| !scope.is_empty() && scope.len() <= 128 && !scope.contains('\0'));
+        let code_syntax_valid = variable.code_syntax.len() <= 3
+            && variable.code_syntax.iter().all(|(platform, value)| {
+                matches!(platform.as_str(), "WEB" | "ANDROID" | "iOS")
+                    && !value.is_empty()
+                    && !value.contains('\0')
+            })
+            && variable
+                .code_syntax
+                .iter()
+                .map(|(platform, value)| platform.len() + value.len())
+                .sum::<usize>()
+                <= MAX_VARIABLE_CODE_SYNTAX_BYTES;
         let valid =
             valid_resource_identity(&variable.id, &variable.key, &variable.name, variable.remote)
                 && variable.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
                 && !variable.description.contains('\0')
                 && values_valid
                 && scopes_valid
+                && code_syntax_valid
                 && self.variables.len() < MAX_VARIABLES
                 && self.variable_catalog_bytes.saturating_add(bytes) <= MAX_VARIABLE_CATALOG_BYTES;
         if !valid {
@@ -8277,6 +8292,11 @@ impl VariableResource {
                 .map(|(mode, value)| mode.len() + value.estimated_bytes())
                 .sum::<usize>()
             + self.scopes.iter().map(String::len).sum::<usize>()
+            + self
+                .code_syntax
+                .iter()
+                .map(|(platform, value)| platform.len() + value.len())
+                .sum::<usize>()
     }
 }
 
@@ -9018,6 +9038,13 @@ fn hash_variable_resource(hasher: &mut Sha256, variable: &VariableResource) {
     hash_len(hasher, variable.scopes.len());
     for scope in &variable.scopes {
         hash_text(hasher, scope);
+    }
+    if !variable.code_syntax.is_empty() {
+        hash_len(hasher, variable.code_syntax.len());
+        for (platform, value) in &variable.code_syntax {
+            hash_text(hasher, platform);
+            hash_text(hasher, value);
+        }
     }
 }
 
@@ -22668,6 +22695,7 @@ mod tests {
             resolved_type: VariableResolvedType::Float,
             values_by_mode: [("default".into(), VariableValue::Float(0.0))].into(),
             scopes: vec!["ALL_SCOPES".into()],
+            code_syntax: BTreeMap::new(),
         };
         let before = document.canonical_hash();
         document
@@ -22730,6 +22758,7 @@ mod tests {
             resolved_type: VariableResolvedType::Float,
             values_by_mode: [("default".into(), VariableValue::Float(0.0))].into(),
             scopes: vec!["ALL_SCOPES".into()],
+            code_syntax: BTreeMap::new(),
         };
         document
             .submit(
@@ -22747,6 +22776,7 @@ mod tests {
             .unwrap();
         let mut changed = variable.clone();
         changed.name = "Space".into();
+        changed.code_syntax.insert("WEB".into(), "--space".into());
         changed
             .values_by_mode
             .insert("default".into(), VariableValue::Float(8.0));
@@ -22869,6 +22899,7 @@ mod tests {
             ]
             .into(),
             scopes: vec!["GAP".into()],
+            code_syntax: BTreeMap::new(),
         };
         document.seed_variable(spacing.clone()).unwrap();
         document
@@ -22887,11 +22918,21 @@ mod tests {
                 ]
                 .into(),
                 scopes: Vec::new(),
+                code_syntax: BTreeMap::new(),
             })
             .unwrap();
         document.validate_variable_catalog().unwrap();
         assert_ne!(document.canonical_hash(), before);
         assert_eq!(document.variable("V:spacing"), Some(&spacing));
+        let mut invalid_syntax = spacing.clone();
+        invalid_syntax.id = "V:invalid-syntax".into();
+        invalid_syntax
+            .code_syntax
+            .insert("DESKTOP".into(), "space".into());
+        assert!(matches!(
+            document.seed_variable(invalid_syntax),
+            Err(CommandError::InvalidVariable)
+        ));
         assert!(matches!(
             document.seed_variable(VariableResource {
                 id: "V:bad".into(),
@@ -22908,6 +22949,7 @@ mod tests {
                 ]
                 .into(),
                 scopes: Vec::new(),
+                code_syntax: BTreeMap::new(),
             }),
             Err(CommandError::InvalidVariable)
         ));

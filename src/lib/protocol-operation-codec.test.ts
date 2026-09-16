@@ -79,7 +79,7 @@ describe("protocol operation codec", () => {
     const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
       { type: "registerVariableCollection", collection },
-      { type: "registerVariable", variable: { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"] } },
+      { type: "registerVariable", variable: { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"], codeSyntax: { WEB: "--spacing" } } },
       { type: "setVariable", variable: { id: "V:spacing", key: "", name: "Space", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 8 }, scopes: ["GAP"] } },
       { type: "deleteVariable", id: "V:spacing" },
       { type: "setVariableCollection", collection: { ...collection, name: "Design tokens" }, variables: [] },
@@ -92,6 +92,7 @@ describe("protocol operation codec", () => {
       collectionId: "VC:tokens",
       resolvedType: VariableResolvedType.VARIABLE_RESOLVED_TYPE_FLOAT,
       valuesByMode: [{ modeId: "default", value: { floatValue: 0 } }],
+      codeSyntax: { WEB: "--spacing" },
     });
     expect(batch.operations[2]?.setVariable?.variable).toMatchObject({ name: "Space", valuesByMode: [{ modeId: "default", value: { floatValue: 8 } }] });
     expect(batch.operations[3]?.deleteVariable).toEqual({ variableId: "V:spacing" });

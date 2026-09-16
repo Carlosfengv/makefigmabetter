@@ -2462,6 +2462,7 @@ fn variable_resource_from_proto(
         resolved_type,
         values_by_mode,
         scopes: value.scopes,
+        code_syntax: value.code_syntax,
     })
 }
 
@@ -5195,6 +5196,7 @@ mod tests {
                 }),
             }],
             scopes: vec!["ALL_SCOPES".into()],
+            code_syntax: Default::default(),
         };
         let payload = v1::ResolvedOperationBatch {
             operations: vec![

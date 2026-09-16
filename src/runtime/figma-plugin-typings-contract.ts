@@ -28,6 +28,9 @@ export function assertFigmaPluginTypingsContract(
   rectangle.opacity = rectangle.opacity;
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) {
+    floatVariable.setVariableCodeSyntax("WEB", "--spacing");
+    floatVariable.removeVariableCodeSyntax("WEB");
+    void floatVariable.codeSyntax.WEB;
     rectangle.setBoundVariable("opacity", floatVariable);
     rectangle.setBoundVariable("width", floatVariable);
     rectangle.setBoundVariable("cornerRadius", floatVariable);

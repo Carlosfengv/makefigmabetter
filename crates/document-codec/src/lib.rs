@@ -73,8 +73,9 @@ pub const PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 45;
 pub const PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 46;
 pub const TEXT_PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 47;
 pub const VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 48;
+pub const VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION: u32 = 49;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -121,6 +122,13 @@ pub fn snapshot_from_document(
     if engine_semantics_version < VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && (document.variable_collections().next().is_some()
             || document.variables().next().is_some())
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
+    if engine_semantics_version < VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION
+        && document
+            .variables()
+            .any(|variable| !variable.code_syntax.is_empty())
     {
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
@@ -659,6 +667,11 @@ pub fn document_from_snapshot_with_engine_semantics(
             .map_err(|_| SnapshotError::Invalid)?;
     }
     for variable in snapshot.variables {
+        if declared_engine_semantics_version < VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION
+            && !variable.code_syntax.is_empty()
+        {
+            return Err(SnapshotError::Invalid);
+        }
         document
             .seed_variable(variable_resource_from_proto(variable)?)
             .map_err(|_| SnapshotError::Invalid)?;
@@ -2531,6 +2544,7 @@ fn variable_resource_to_proto(value: &VariableResource) -> v1::VariableResource 
             })
             .collect(),
         scopes: value.scopes.clone(),
+        code_syntax: value.code_syntax.clone(),
     }
 }
 
@@ -2569,6 +2583,7 @@ fn variable_resource_from_proto(
         resolved_type,
         values_by_mode,
         scopes: value.scopes,
+        code_syntax: value.code_syntax,
     })
 }
 
@@ -6880,6 +6895,7 @@ mod tests {
             )]
             .into(),
             scopes: vec!["ALL_FILLS".into()],
+            code_syntax: BTreeMap::new(),
         };
         document.seed_variable(variable.clone()).unwrap();
         document.validate_variable_catalog().unwrap();
@@ -6908,6 +6924,55 @@ mod tests {
                 920_u128.to_be_bytes(),
                 hash,
                 VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut syntax_document = Document::with_id(DocumentId(921));
+        syntax_document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        let mut syntax_variable = variable.clone();
+        syntax_variable
+            .code_syntax
+            .insert("WEB".into(), "--surface".into());
+        syntax_document
+            .seed_variable(syntax_variable.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &syntax_document,
+                VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION - 1
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let syntax_hash = syntax_document.canonical_hash();
+        let syntax_snapshot = snapshot_from_document(
+            &syntax_document,
+            VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let syntax_restored = document_from_snapshot_with_engine_semantics(
+            &syntax_snapshot,
+            921_u128.to_be_bytes(),
+            syntax_hash,
+            VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            syntax_restored.variable("V:surface"),
+            Some(&syntax_variable)
+        );
+        let mut mislabeled_syntax =
+            v1::DocumentSnapshot::decode(syntax_snapshot.as_slice()).unwrap();
+        mislabeled_syntax.engine_semantics_version =
+            VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled_syntax.encode_to_vec(),
+                921_u128.to_be_bytes(),
+                syntax_hash,
+                VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION
             ),
             Err(SnapshotError::Invalid)
         );

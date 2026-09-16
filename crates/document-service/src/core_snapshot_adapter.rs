@@ -2822,6 +2822,7 @@ fn variable_resource_to_proto(value: &VariableResource) -> v1::VariableResource 
             })
             .collect(),
         scopes: value.scopes.clone(),
+        code_syntax: value.code_syntax.clone(),
     }
 }
 
@@ -2860,6 +2861,7 @@ fn variable_resource_from_proto(
         resolved_type,
         values_by_mode,
         scopes: value.scopes,
+        code_syntax: value.code_syntax,
     })
 }
 

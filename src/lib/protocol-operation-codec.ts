@@ -317,6 +317,7 @@ function variableResourceProto(resource: DocumentVariableResource) {
       value: variableValueProto(value),
     })),
     scopes: [...resource.scopes],
+    codeSyntax: Object.fromEntries(Object.entries(resource.codeSyntax ?? {}).sort(([left], [right]) => left.localeCompare(right))),
   };
 }
 

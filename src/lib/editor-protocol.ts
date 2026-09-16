@@ -380,6 +380,7 @@ export interface DocumentVariableResource {
   resolvedType: DocumentVariableResolvedType;
   valuesByMode: Record<string, DocumentVariableValue>;
   scopes: string[];
+  codeSyntax?: Record<string, string>;
 }
 
 /** M3's durable prototype contract.  It intentionally lives beside the Canvas

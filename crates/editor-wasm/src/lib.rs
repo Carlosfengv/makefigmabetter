@@ -918,7 +918,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=63).contains(&snapshot.schema_version)
+    if !(1..=64).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 64
+            && snapshot.variables.as_ref().is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|variable| !variable.code_syntax.is_empty())
+            }))
         || (snapshot.schema_version < 63
             && (snapshot
                 .variable_collections
@@ -1786,6 +1792,8 @@ struct ProjectionVariableResource {
     values_by_mode: std::collections::BTreeMap<String, ProjectionVariableValue>,
     #[serde(default)]
     scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    code_syntax: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2214,7 +2222,13 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.variable_collections().next().is_some()
+        let schema_version = if self
+            .document
+            .variables()
+            .any(|variable| !variable.code_syntax.is_empty())
+        {
+            64
+        } else if self.document.variable_collections().next().is_some()
             || self.document.variables().next().is_some()
         {
             63
@@ -6181,6 +6195,7 @@ fn projection_variable_resource(value: &VariableResource) -> ProjectionVariableR
             .map(|(mode, value)| (mode.clone(), projection_variable_value(value)))
             .collect(),
         scopes: value.scopes.clone(),
+        code_syntax: value.code_syntax.clone(),
     }
 }
 
@@ -6209,6 +6224,7 @@ fn variable_resource_from_projection(
             .map(|(mode, value)| Ok((mode.clone(), variable_value_from_projection(value)?)))
             .collect::<Result<_, JsValue>>()?,
         scopes: value.scopes.clone(),
+        code_syntax: value.code_syntax.clone(),
     })
 }
 
@@ -13445,6 +13461,7 @@ mod tests {
                 resolved_type: VariableResolvedType::Float,
                 values_by_mode: [("light".into(), VariableValue::Float(8.0))].into(),
                 scopes: vec!["GAP".into()],
+                code_syntax: std::collections::BTreeMap::new(),
             })
             .unwrap();
         let snapshot = engine.snapshot_json();
@@ -13456,6 +13473,42 @@ mod tests {
         let mut restored = DocumentEngine::new();
         restored.load_snapshot_json(&snapshot).unwrap();
         assert_eq!(restored.canonical_hash(), hash);
+
+        let mut syntax_engine = DocumentEngine::new();
+        syntax_engine
+            .document
+            .seed_variable_collection(
+                engine
+                    .document
+                    .variable_collection("VC:theme")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let mut syntax_variable = engine.document.variable("V:gap").unwrap().clone();
+        syntax_variable
+            .code_syntax
+            .insert("ANDROID".into(), "gap".into());
+        syntax_engine
+            .document
+            .seed_variable(syntax_variable)
+            .unwrap();
+        let syntax_snapshot = syntax_engine.snapshot_json();
+        let projected: CoreSnapshot = serde_json::from_str(&syntax_snapshot).unwrap();
+        assert_eq!(projected.schema_version, 64);
+        assert_eq!(
+            projected.variables.unwrap()[0]
+                .code_syntax
+                .get("ANDROID")
+                .map(String::as_str),
+            Some("gap")
+        );
+        let mut rejected: CoreSnapshot = serde_json::from_str(&syntax_snapshot).unwrap();
+        rejected.schema_version = 63;
+        assert_eq!(
+            validate_core_snapshot_version(&rejected),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
     }
 
     #[test]

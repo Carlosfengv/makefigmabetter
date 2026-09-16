@@ -14,6 +14,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const rectangle = runtime.createRectangle();
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
   if (runtimeVariable) {
+    runtimeVariable.setVariableCodeSyntax("WEB", "--spacing");
+    runtimeVariable.removeVariableCodeSyntax("WEB");
+    void runtimeVariable.codeSyntax.WEB;
     rectangle.setBoundVariable("opacity", runtimeVariable);
     rectangle.setBoundVariable("width", runtimeVariable);
     rectangle.setBoundVariable("cornerRadius", runtimeVariable);

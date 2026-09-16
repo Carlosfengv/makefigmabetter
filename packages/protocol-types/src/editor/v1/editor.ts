@@ -1041,6 +1041,16 @@ export interface VariableResource {
   resolvedType: VariableResolvedType;
   valuesByMode: VariableModeValue[];
   scopes: string[];
+  /**
+   * Optional Figma code syntax names keyed by WEB, ANDROID, or iOS.
+   * Presence requires engine semantics 49.
+   */
+  codeSyntax: { [key: string]: string };
+}
+
+export interface VariableResource_CodeSyntaxEntry {
+  key: string;
+  value: string;
 }
 
 /**
@@ -6488,6 +6498,7 @@ function createBaseVariableResource(): VariableResource {
     resolvedType: 0,
     valuesByMode: [],
     scopes: [],
+    codeSyntax: {},
   };
 }
 
@@ -6523,6 +6534,9 @@ export const VariableResource: MessageFns<VariableResource> = {
     for (const v of message.scopes) {
       writer.uint32(82).string(v!);
     }
+    globalThis.Object.entries(message.codeSyntax).forEach(([key, value]: [string, string]) => {
+      VariableResource_CodeSyntaxEntry.encode({ key: key as any, value }, writer.uint32(90).fork()).join();
+    });
     return writer;
   },
 
@@ -6613,6 +6627,17 @@ export const VariableResource: MessageFns<VariableResource> = {
           message.scopes.push(reader.string());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          const entry11 = VariableResource_CodeSyntaxEntry.decode(reader, reader.uint32());
+          if (entry11.value !== undefined) {
+            message.codeSyntax[entry11.key] = entry11.value;
+          }
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6637,6 +6662,77 @@ export const VariableResource: MessageFns<VariableResource> = {
     message.resolvedType = object.resolvedType ?? 0;
     message.valuesByMode = object.valuesByMode?.map((e) => VariableModeValue.fromPartial(e)) || [];
     message.scopes = object.scopes?.map((e) => e) || [];
+    message.codeSyntax = (globalThis.Object.entries(object.codeSyntax ?? {}) as [string, string][]).reduce(
+      (acc: { [key: string]: string }, [key, value]: [string, string]) => {
+        if (value !== undefined) {
+          acc[key] = globalThis.String(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    return message;
+  },
+};
+
+function createBaseVariableResource_CodeSyntaxEntry(): VariableResource_CodeSyntaxEntry {
+  return { key: "", value: "" };
+}
+
+export const VariableResource_CodeSyntaxEntry: MessageFns<VariableResource_CodeSyntaxEntry> = {
+  encode(message: VariableResource_CodeSyntaxEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VariableResource_CodeSyntaxEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVariableResource_CodeSyntaxEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<VariableResource_CodeSyntaxEntry>, I>>(
+    base?: I,
+  ): VariableResource_CodeSyntaxEntry {
+    return VariableResource_CodeSyntaxEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VariableResource_CodeSyntaxEntry>, I>>(
+    object: I,
+  ): VariableResource_CodeSyntaxEntry {
+    const message = createBaseVariableResource_CodeSyntaxEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? "";
     return message;
   },
 };

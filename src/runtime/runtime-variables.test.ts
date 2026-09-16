@@ -79,9 +79,16 @@ describe("Variables resource runtime", () => {
     spacing.description = "Layout spacing";
     spacing.hiddenFromPublishing = true;
     spacing.scopes = ["GAP"];
+    spacing.setVariableCodeSyntax("WEB", "--space");
+    spacing.setVariableCodeSyntax("iOS", "space");
+    expect(spacing.codeSyntax).toEqual({ WEB: "--space", iOS: "space" });
+    expect(isRuntimeError(capture(() => spacing.setVariableCodeSyntax("DESKTOP", "space")), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => spacing.setVariableCodeSyntax("ANDROID", "")), "INVALID_ARGUMENT")).toBe(true);
+    spacing.removeVariableCodeSyntax("iOS");
+    expect(spacing.codeSyntax).toEqual({ WEB: "--space" });
     spacing.setValueForMode(collection.defaultModeId, 8);
     surface.setValueForMode(collection.defaultModeId, { r: 1, g: .5, b: 0, a: .75 });
-    expect(spacing).toMatchObject({ name: "Space", description: "Layout spacing", hiddenFromPublishing: true, scopes: ["GAP"] });
+    expect(spacing).toMatchObject({ name: "Space", description: "Layout spacing", hiddenFromPublishing: true, scopes: ["GAP"], codeSyntax: { WEB: "--space" } });
     expect(spacing.valuesByMode[collection.defaultModeId]).toBe(8);
     expect(surface.valuesByMode[collection.defaultModeId]).toEqual({ r: 1, g: .5, b: 0, a: .75 });
     surface.remove();
@@ -93,6 +100,7 @@ describe("Variables resource runtime", () => {
     expect(operationTypes.slice(0, 3)).toEqual(["registerVariableCollection", "registerVariable", "registerVariable"]);
     expect(operationTypes).toEqual(expect.arrayContaining(["setVariableCollection", "setVariable", "deleteVariable"]));
     expect((await session.variables.getVariableByIdAsync(spacing.id))?.name).toBe("Space");
+    expect((await session.variables.getVariableByIdAsync(spacing.id))?.codeSyntax).toEqual({ WEB: "--space" });
     collection.remove();
     expect(await session.variables.getVariableCollectionByIdAsync(collection.id)).toBeNull();
     expect(await session.variables.getVariableByIdAsync(spacing.id)).toBeNull();

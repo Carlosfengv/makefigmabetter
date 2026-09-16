@@ -813,6 +813,9 @@ message VariableResource {
   VariableResolvedType resolved_type = 8;
   repeated VariableModeValue values_by_mode = 9;
   repeated string scopes = 10;
+  // Optional Figma code syntax names keyed by WEB, ANDROID, or iOS.
+  // Presence requires engine semantics 49.
+  map<string, string> code_syntax = 11;
 }
 
 // M3 prototype vocabulary. These records are append-only and intentionally

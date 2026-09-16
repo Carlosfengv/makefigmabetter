@@ -79,7 +79,7 @@ export class RuntimeVariable {
   get valuesByMode(): Readonly<Record<string, RuntimeVariableValue>> {
     return Object.freeze(Object.fromEntries(Object.entries(this.read().valuesByMode).map(([mode, value]) => [mode, runtimeValue(value)])));
   }
-  get codeSyntax(): Readonly<Record<string, string>> { return Object.freeze({}); }
+  get codeSyntax(): Readonly<Record<string, string>> { return Object.freeze({ ...(this.read().codeSyntax ?? {}) }); }
 
   resolveForConsumer(_consumer: unknown): Readonly<{ value: RuntimeVariableValue; resolvedType: DocumentVariableResolvedType }> {
     this.host.assertOpen();
@@ -107,8 +107,19 @@ export class RuntimeVariable {
     } else throw runtimeError("INVALID_ARGUMENT");
     this.update({ valuesByMode: { ...current.valuesByMode, [modeId]: documentValue } });
   }
-  setVariableCodeSyntax(_platform: string, _value: string): never { void _platform; void _value; throw runtimeError("UNSUPPORTED_FEATURE"); }
-  removeVariableCodeSyntax(_platform: string): never { void _platform; throw runtimeError("UNSUPPORTED_FEATURE"); }
+  setVariableCodeSyntax(platform: string, value: string): void {
+    if (!isCodeSyntaxPlatform(platform) || typeof value !== "string" || !value || value.includes("\0")) throw runtimeError("INVALID_ARGUMENT");
+    const codeSyntax = { ...(this.read().codeSyntax ?? {}), [platform]: value };
+    const bytes = Object.entries(codeSyntax).reduce((total, [key, syntax]) => total + utf8ByteLength(key) + utf8ByteLength(syntax), 0);
+    if (bytes > 32 * 1024) throw runtimeError("INVALID_ARGUMENT");
+    this.update({ codeSyntax });
+  }
+  removeVariableCodeSyntax(platform: string): void {
+    if (!isCodeSyntaxPlatform(platform)) throw runtimeError("INVALID_ARGUMENT");
+    const codeSyntax = { ...(this.read().codeSyntax ?? {}) };
+    delete codeSyntax[platform];
+    this.update({ codeSyntax });
+  }
   remove(): void {
     this.assertMutable();
     if (this.host.variableIsBound(this.id)) throw runtimeError("INVALID_ARGUMENT");
@@ -148,6 +159,14 @@ export class RuntimeVariable {
 
 function isVariableAlias(value: RuntimeVariableValue): value is DocumentVariableAlias {
   return typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS" && typeof value.id === "string";
+}
+
+function isCodeSyntaxPlatform(value: string): value is "WEB" | "ANDROID" | "iOS" {
+  return value === "WEB" || value === "ANDROID" || value === "iOS";
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function isRuntimeColor(value: RuntimeVariableValue): value is RuntimeVariableColor {
