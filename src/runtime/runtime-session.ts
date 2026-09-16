@@ -1210,10 +1210,21 @@ export class RuntimeSession implements RuntimeContainerHost {
     const { metadata, linkedInstances } = context;
     const existing = metadata.componentPropertyDefinitions[propertyName];
     if (!existing) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
-    if (existing.type === "SLOT" || existing.type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    if (existing.type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     const definitions = structuredClone(metadata.componentPropertyDefinitions);
     delete definitions[propertyName];
     const operations = this.componentPropertyDefinitionOperations(context, definitions, propertyName, undefined, undefined);
+    if (existing.type === "SLOT") {
+      const componentIds = new Set(context.components.map((component) => component.id));
+      const sourceSlots = this.projectionStore.listLiveNodes().filter((node) =>
+        node.type === "SLOT" && runtimeSlotPropertyName(node) === propertyName && typeof node.parentId === "string" && componentIds.has(node.parentId));
+      sourceSlots.forEach((slot) => {
+        operations.push(...this.slotComponentPropertyReferenceOperations(slot, undefined, this.componentPropertyReferenceContext(slot), true));
+      });
+      if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+      this.enqueueOperations(operations);
+      return;
+    }
     linkedInstances.forEach((instance) => {
       const instanceMetadata = instance.instanceMetadata as Record<string, unknown>;
       const componentProperties = { ...structuredClone(instanceMetadata.componentProperties as Record<string, string | boolean>) };
@@ -1270,6 +1281,15 @@ export class RuntimeSession implements RuntimeContainerHost {
     references: DocumentComponentPropertyReferences | undefined,
     context: ReturnType<RuntimeSession["componentPropertyReferenceContext"]>,
   ): void {
+    this.enqueueOperations(this.slotComponentPropertyReferenceOperations(node, references, context));
+  }
+
+  private slotComponentPropertyReferenceOperations(
+    node: RuntimeProjectionNode,
+    references: DocumentComponentPropertyReferences | undefined,
+    context: ReturnType<RuntimeSession["componentPropertyReferenceContext"]>,
+    resetLinkedContents = false,
+  ): PendingProjectionOperation[] {
     if (context.owner.type !== "COMPONENT" || node.parentId !== context.owner.id || !["FRAME", "SLOT"].includes(node.type)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
     }
@@ -1284,7 +1304,13 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (linkedNodes.some((candidate) => !["FRAME", "SLOT"].includes(candidate.type))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
     }
-    const touched = 1 + linkedNodes.length + this.siblingsOf(node.id).length + linkedNodes.reduce((count, candidate) => count + this.siblingsOf(candidate.id).length, 0);
+    const sourceDescendantCount = resetLinkedContents
+      ? this.projectionStore.listLiveNodes().filter((candidate) => runtimeNodeHasAncestorIn(candidate, new Set([node.id]), (id) => this.projectionStore.getNode(id))).length
+      : this.siblingsOf(node.id).length;
+    const linkedDescendantCount = linkedNodes.reduce((count, candidate) => count + (resetLinkedContents
+      ? this.projectionStore.listLiveNodes().filter((descendant) => runtimeNodeHasAncestorIn(descendant, new Set([candidate.id]), (id) => this.projectionStore.getNode(id))).length
+      : this.siblingsOf(candidate.id).length), 0);
+    const touched = 1 + linkedNodes.length + sourceDescendantCount + linkedDescendantCount;
     if (touched > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: node.id });
 
     const operations: PendingProjectionOperation[] = [];
@@ -1317,16 +1343,26 @@ export class RuntimeSession implements RuntimeContainerHost {
         slotMetadata: propertyName ? { propertyName, sourceSlotId: sourceId } : undefined,
         extensions,
       };
-      if (candidate.type === targetType) operations.push({ type: "update", nodeId: candidate.id, patch });
-      else operations.push(this.replaceRuntimeContainerOperation(candidate, targetType, patch).operation);
+      if (candidate.type === targetType) {
+        operations.push({ type: "update", nodeId: candidate.id, patch });
+        return;
+      }
+      let childIds: readonly string[] | undefined;
+      if (resetLinkedContents && node.type === "SLOT" && candidate.type === "SLOT") {
+        const resetOperations = this.replaceRuntimeSubtreeOperations(node, candidate);
+        operations.push(...resetOperations);
+        childIds = resetOperations.flatMap((operation) => operation.type === "create" && operation.node.parentId === candidate.id ? [operation.node.id] : []);
+      }
+      operations.push(this.replaceRuntimeContainerOperation(candidate, targetType, patch, childIds).operation);
     });
-    this.enqueueOperations(operations);
+    return operations;
   }
 
   private replaceRuntimeContainerOperation(
     source: RuntimeProjectionNode,
     type: "FRAME" | "SLOT",
     patch: Readonly<Record<string, unknown>>,
+    childIds: readonly string[] = this.siblingsOf(source.id).map((child) => child.id),
   ): Readonly<{
     replacement: RuntimeProjectionNode;
     operation: Extract<PendingProjectionOperation, { type: "replaceContainer" }>;
@@ -1361,7 +1397,7 @@ export class RuntimeSession implements RuntimeContainerHost {
         type: "replaceContainer",
         sourceId: source.id,
         replacement,
-        childIds: this.siblingsOf(source.id).map((child) => child.id),
+        childIds,
         temporaryPositionId: runtimeTemporaryPositionId(id, finalPositionId),
         finalPositionId,
       },

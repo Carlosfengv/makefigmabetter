@@ -554,6 +554,65 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("deletes a Slot property and resets linked contents through Core", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000001b1";
+    const sourceSlotId = "00000000-0000-4000-8000-0000000001b2";
+    const sourceChildId = "00000000-0000-4000-8000-0000000001b3";
+    const instanceId = "00000000-0000-4000-8000-0000000001b4";
+    const instanceSlotId = "00000000-0000-4000-8000-0000000001b5";
+    const overrideId = "00000000-0000-4000-8000-0000000001b6";
+    const propertyName = "Content#1:1";
+    const references = { slotContentId: propertyName };
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } } },
+        { id: sourceSlotId, pageId: "page", parentId: componentId, kind: "slot", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, slotMetadata: { propertyName }, componentPropertyReferences: references },
+        { id: sourceChildId, pageId: "page", parentId: sourceSlotId, kind: "rectangle", name: "Default content", x: 4, y: 4, width: 92, height: 52, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 120, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+        { id: instanceSlotId, pageId: "page", parentId: instanceId, kind: "slot", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, slotMetadata: { propertyName, sourceSlotId }, componentPropertyReferences: references, extensions: { "figma.instance.source-node.v1": [...new TextEncoder().encode(sourceSlotId)] } },
+        { id: overrideId, pageId: "page", parentId: instanceSlotId, kind: "ellipse", name: "Override", x: 8, y: 8, width: 44, height: 44, rotation: 0, fill: "#f00", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x1b6;
+    const session = new RuntimeSession({ sessionId: "slot-delete-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`, scheduleMicrotask: () => {} });
+    const component = session.currentPage.children.find((node) => node.id === componentId)!;
+    component.deleteComponentProperty(propertyName);
+    const sourceFrame = component.children[0]!;
+    const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    const instanceFrame = instance.children[0]!;
+    const defaultClone = instanceFrame.children[0]!;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    const commands = posted[0]!.transaction.commands;
+    expect(commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", id: componentId, patch: { componentMetadata: expect.objectContaining({ componentPropertyDefinitions: {} }) } }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: sourceFrame.id, kind: "frame" }) }),
+      { type: "reparent", ids: [sourceChildId], parentId: sourceFrame.id },
+      { type: "delete", ids: [sourceSlotId] },
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: defaultClone.id, parentId: instanceSlotId, kind: "rectangle", name: "Default content" }) }),
+      { type: "delete", ids: [overrideId] },
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: instanceFrame.id, kind: "frame" }) }),
+      { type: "reparent", ids: [defaultClone.id], parentId: instanceFrame.id },
+      { type: "delete", ids: [instanceSlotId] },
+    ]));
+    const resolved = resolveCoreBatch(snapshot.nodes, commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: sourceFrame.id, kind: "frame" }),
+      expect.objectContaining({ id: sourceChildId, parentId: sourceFrame.id }),
+      expect.objectContaining({ id: instanceFrame.id, kind: "frame" }),
+      expect.objectContaining({ id: defaultClone.id, parentId: instanceFrame.id, kind: "rectangle", name: "Default content" }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => [sourceSlotId, instanceSlotId, overrideId].includes(node.id))).toBe(false);
+    bridge.close();
+    await commit;
+  });
+
   it("resets an Instance Slot through one Core delete-create batch", async () => {
     const componentId = "00000000-0000-4000-8000-0000000000d1";
     const sourceSlotId = "00000000-0000-4000-8000-0000000000d2";

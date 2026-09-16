@@ -552,6 +552,38 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => { nested.componentPropertyReferences = { slotContentId: propertyName }; }), "INVALID_ARGUMENT")).toBe(true);
   });
 
+  it("deletes a Slot property by restoring Frames and resetting linked contents", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const component = session.createComponent();
+    const sourceSlot = component.createSlot();
+    const propertyName = sourceSlot.componentPropertyReferences!.slotContentId!;
+    const sourceChild = session.createRectangle();
+    sourceChild.name = "Default content";
+    sourceSlot.appendChild(sourceChild);
+    const instance = component.createInstance();
+    const instanceSlot = instance.children[0] as RuntimeContainerNodeProxy;
+    instanceSlot.children[0]!.remove();
+    const override = session.createEllipse();
+    override.name = "Override";
+    instanceSlot.appendChild(override);
+
+    component.deleteComponentProperty(propertyName);
+
+    const sourceFrame = component.children[0] as RuntimeContainerNodeProxy;
+    const instanceFrame = instance.children[0] as RuntimeContainerNodeProxy;
+    expect(sourceSlot.removed).toBe(true);
+    expect(instanceSlot.removed).toBe(true);
+    expect(override.removed).toBe(true);
+    expect(component.componentPropertyDefinitions).not.toHaveProperty(propertyName);
+    expect(sourceFrame.type).toBe("FRAME");
+    expect(sourceFrame.componentPropertyReferences).toBeNull();
+    expect(sourceFrame.children[0]).toMatchObject({ id: sourceChild.id, name: "Default content" });
+    expect(instanceFrame.type).toBe("FRAME");
+    expect(instanceFrame.componentPropertyReferences).toBeNull();
+    expect(instanceFrame.children).toEqual([expect.objectContaining({ type: "RECTANGLE", name: "Default content" })]);
+    expect(instanceFrame.children[0]!.id).not.toBe(sourceChild.id);
+  });
+
   it("resets an Instance Slot from its source contents atomically", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
@@ -616,7 +648,6 @@ describe("M1 RuntimeSession", () => {
     const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
     expect(isRuntimeError(captureError(() => component.addComponentProperty("Bound", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "variable" })), "RESOURCE_UNAVAILABLE")).toBe(true);
     expect(isRuntimeError(captureError(() => component.addComponentProperty("Preferred", "TEXT", "value", { preferredValues: [] })), "INVALID_ARGUMENT")).toBe(true);
-    expect(isRuntimeError(captureError(() => component.deleteComponentProperty(renamedSlot)), "UNSUPPORTED_FEATURE")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
 
     component.deleteComponentProperty(renamed);
