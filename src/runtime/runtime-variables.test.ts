@@ -81,6 +81,10 @@ describe("Variables resource runtime", () => {
     frame.setBoundVariable("paddingBottom", spacing);
     frame.setBoundVariable("paddingLeft", spacing);
     frame.setBoundVariable("counterAxisSpacing", spacing);
+    frame.setBoundVariable("strokeTopWeight", spacing);
+    frame.setBoundVariable("strokeRightWeight", spacing);
+    frame.setBoundVariable("strokeBottomWeight", spacing);
+    frame.setBoundVariable("strokeLeftWeight", spacing);
     rectangle.setBoundVariable("minWidth", width);
     rectangle.setBoundVariable("maxWidth", width);
     rectangle.setBoundVariable("minHeight", spacing);
@@ -92,8 +96,13 @@ describe("Variables resource runtime", () => {
     expect(rectangle.height).toBe(60);
     expect(text.characters).toBe("Light");
     expect(frame).toMatchObject({ itemSpacing: 8, paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8, counterAxisSpacing: 8 });
+    expect(frame).toMatchObject({ strokeTopWeight: 8, strokeRightWeight: 8, strokeBottomWeight: 8, strokeLeftWeight: 8 });
     expect(rectangle).toMatchObject({ minWidth: 120, maxWidth: 120, minHeight: 8, maxHeight: 60 });
     expect(rectangle.boundVariables).toMatchObject({ height: { type: "VARIABLE_ALIAS", id: "V:height" }, minWidth: { type: "VARIABLE_ALIAS", id: "V:width" }, maxWidth: { type: "VARIABLE_ALIAS", id: "V:width" }, opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" }, width: { type: "VARIABLE_ALIAS", id: "V:width" } });
+    rectangle.setBoundVariable("strokeTopWeight", spacing);
+    expect(rectangle.boundVariables).not.toHaveProperty("strokeWeight");
+    rectangle.setBoundVariable("strokeWeight", spacing);
+    expect(rectangle.boundVariables).not.toHaveProperty("strokeTopWeight");
     expect(isRuntimeError(capture(() => rectangle.setBoundVariable("opacity", visible)), "INVALID_ARGUMENT")).toBe(true);
 
     frame.setExplicitVariableModeForCollection(collection, "dark");
@@ -106,6 +115,7 @@ describe("Variables resource runtime", () => {
     expect(rectangle.height).toBe(90);
     expect(text.characters).toBe("Dark");
     expect(frame).toMatchObject({ itemSpacing: 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12, paddingLeft: 12, counterAxisSpacing: 12 });
+    expect(frame).toMatchObject({ strokeTopWeight: 12, strokeRightWeight: 12, strokeBottomWeight: 12, strokeLeftWeight: 12 });
     expect(rectangle).toMatchObject({ minWidth: 180, maxWidth: 180, minHeight: 12, maxHeight: 90 });
     expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
 
@@ -128,6 +138,10 @@ describe("Variables resource runtime", () => {
     frame.paddingBottom = 3;
     frame.paddingLeft = 4;
     frame.counterAxisSpacing = 6;
+    frame.strokeTopWeight = 1;
+    frame.strokeRightWeight = 2;
+    frame.strokeBottomWeight = 3;
+    frame.strokeLeftWeight = 4;
     rectangle.minWidth = 50;
     rectangle.maxWidth = 200;
     rectangle.minHeight = 10;

@@ -166,10 +166,15 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   frame.counterAxisAlignItems = "BASELINE";
   frame.minWidth = 120;
   frame.maxWidth = 640;
+  frame.strokeTopWeight = 1;
+  frame.strokeRightWeight = 2;
+  frame.strokeBottomWeight = 3;
+  frame.strokeLeftWeight = 4;
   frame.appendChild(rectangle);
   if (runtimeVariable) {
     frame.setBoundVariable("itemSpacing", runtimeVariable);
     frame.setBoundVariable("paddingLeft", runtimeVariable);
+    frame.setBoundVariable("strokeTopWeight", runtimeVariable);
     rectangle.setBoundVariable("minWidth", runtimeVariable);
   }
   if (false) void runtime.flatten([boolean], frame, 0);

@@ -192,10 +192,15 @@ export function assertFigmaPluginTypingsContract(
   frame.counterAxisAlignItems = "BASELINE";
   frame.minWidth = 120;
   frame.maxWidth = 640;
+  frame.strokeTopWeight = 1;
+  frame.strokeRightWeight = 2;
+  frame.strokeBottomWeight = 3;
+  frame.strokeLeftWeight = 4;
   frame.appendChild(rectangle);
   if (floatVariable) {
     frame.setBoundVariable("itemSpacing", floatVariable);
     frame.setBoundVariable("paddingLeft", floatVariable);
+    frame.setBoundVariable("strokeTopWeight", floatVariable);
     rectangle.setBoundVariable("minWidth", floatVariable);
   }
   if (false) void figma.flatten([boolean], frame, 0);

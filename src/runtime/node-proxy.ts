@@ -201,12 +201,26 @@ const RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS = [
   "counterAxisSpacing",
   "visible",
   "strokeWeight",
+  "strokeTopWeight",
+  "strokeRightWeight",
+  "strokeBottomWeight",
+  "strokeLeftWeight",
   "opacity",
 ] as const;
 const RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET = new Set<string>(RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS);
 export type RuntimeVariableBindableNodeField = typeof RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS[number];
 function isRuntimeVariableBindableNodeField(value: string): value is RuntimeVariableBindableNodeField {
   return RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET.has(value);
+}
+type RuntimeVariableBindableStrokeSideField = "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight";
+const RUNTIME_STROKE_SIDE_INDEX: Readonly<Record<RuntimeVariableBindableStrokeSideField, number>> = {
+  strokeTopWeight: 0,
+  strokeRightWeight: 1,
+  strokeBottomWeight: 2,
+  strokeLeftWeight: 3,
+};
+function isRuntimeStrokeSideField(value: RuntimeVariableBindableNodeField): value is RuntimeVariableBindableStrokeSideField {
+  return Object.hasOwn(RUNTIME_STROKE_SIDE_INDEX, value);
 }
 function isRuntimeLineHeight(value: unknown): value is RuntimeLineHeight {
   if (!value || typeof value !== "object" || !("unit" in value)) return false;
@@ -1379,6 +1393,14 @@ export class RuntimeNodeProxy {
     if (!variableId || !this.host.variableResource(variableId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
     const resolved = this.host.resolveVariableValue(variableId, this.id);
     const patch = this.variableFieldPatch(field, resolved.value, resolved.resolvedType);
+    if (field === "strokeWeight") {
+      delete bindings.strokeTopWeight;
+      delete bindings.strokeRightWeight;
+      delete bindings.strokeBottomWeight;
+      delete bindings.strokeLeftWeight;
+    } else if (isRuntimeStrokeSideField(field)) {
+      delete bindings.strokeWeight;
+    }
     bindings[field] = variableId;
     this.write({ ...patch, extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) });
   }
@@ -1623,15 +1645,29 @@ export class RuntimeNodeProxy {
     this.write({ parametricShape: { kind: "star", pointCount: this.pointCount, innerRatio: value } });
   }
 
-  get strokeWeight(): number {
+  get strokeWeight(): number | typeof RUNTIME_MIXED {
     this.assertGeometry();
+    if ((this.type === "FRAME" || this.type === "RECTANGLE") && Array.isArray(this.read().strokeWeights)) {
+      const weights = this.individualStrokeWeights();
+      if (!weights.every((weight) => weight === weights[0])) return RUNTIME_MIXED;
+      return weights[0];
+    }
     return this.number("strokeWidth");
   }
   set strokeWeight(value: number) {
     this.assertGeometry();
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-    this.writeUnboundVariableField("strokeWeight", { strokeWidth: value });
+    this.writeUnboundVariableFields(["strokeWeight", "strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight"], { strokeWidth: value, strokeWeights: undefined });
   }
+
+  get strokeTopWeight(): number { return this.individualStrokeWeights()[0]; }
+  set strokeTopWeight(value: number) { this.writeIndividualStrokeWeight("strokeTopWeight", 0, value); }
+  get strokeRightWeight(): number { return this.individualStrokeWeights()[1]; }
+  set strokeRightWeight(value: number) { this.writeIndividualStrokeWeight("strokeRightWeight", 1, value); }
+  get strokeBottomWeight(): number { return this.individualStrokeWeights()[2]; }
+  set strokeBottomWeight(value: number) { this.writeIndividualStrokeWeight("strokeBottomWeight", 2, value); }
+  get strokeLeftWeight(): number { return this.individualStrokeWeights()[3]; }
+  set strokeLeftWeight(value: number) { this.writeIndividualStrokeWeight("strokeLeftWeight", 3, value); }
 
   get strokeCap(): RuntimeStrokeCapValue {
     this.assertGeometry();
@@ -3044,13 +3080,42 @@ export class RuntimeNodeProxy {
       }
       return { autoLayout: next };
     }
-    this.assertGeometry();
-    if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-    return { strokeWidth: value };
+    if (field === "strokeWeight") {
+      this.assertGeometry();
+      if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { strokeWidth: value, strokeWeights: undefined };
+    }
+    if (isRuntimeStrokeSideField(field)) {
+      if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const stagedWeights = Array.isArray(stagedPatch?.strokeWeights) && stagedPatch.strokeWeights.length === 4
+        ? stagedPatch.strokeWeights as readonly number[]
+        : this.individualStrokeWeights();
+      const weights = [...stagedWeights] as [number, number, number, number];
+      weights[RUNTIME_STROKE_SIDE_INDEX[field]] = value;
+      return { strokeWeights: weights };
+    }
+    throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
   }
 
   private assertGeometry(): void {
     if (!GEOMETRY_NODE_TYPES.has(this.type)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+  }
+
+  private individualStrokeWeights(): [number, number, number, number] {
+    if (this.type !== "FRAME" && this.type !== "RECTANGLE") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const value = this.read().strokeWeights;
+    if (Array.isArray(value) && value.length === 4 && value.every((weight) => typeof weight === "number" && Number.isFinite(weight) && weight >= 0)) {
+      return [...value] as [number, number, number, number];
+    }
+    const uniform = this.number("strokeWidth");
+    return [uniform, uniform, uniform, uniform];
+  }
+
+  private writeIndividualStrokeWeight(field: RuntimeVariableBindableStrokeSideField, index: number, value: number): void {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const weights = this.individualStrokeWeights();
+    weights[index] = value;
+    this.writeUnboundVariableFields([field, "strokeWeight"], { strokeWeights: weights });
   }
 
   private assertConstraintsSupported(): void {
