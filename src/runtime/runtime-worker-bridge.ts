@@ -388,7 +388,7 @@ function transactionToEditorCommands(
   };
 
   for (const operation of operations) {
-    if (operation.type === "componentFromNode" || operation.type === "detachInstance" || operation.type === "componentSet") {
+    if (operation.type === "componentFromNode" || operation.type === "replaceContainer" || operation.type === "detachInstance" || operation.type === "componentSet") {
       flush();
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
@@ -461,6 +461,15 @@ function toEditorCommands(
     return [{ type: "delete-variable-collection", id: operation.id }];
   }
   if (operation.type === "componentFromNode") {
+    const temporary = { ...structuredClone(operation.replacement), positionId: operation.temporaryPositionId };
+    return [
+      ...toEditorCommands({ type: "create", node: temporary }, pageIds),
+      ...(operation.childIds.length ? [{ type: "reparent" as const, ids: [...operation.childIds], parentId: operation.replacement.id }] : []),
+      { type: "delete", ids: [operation.sourceId] },
+      { type: "reposition", positionIds: [{ id: operation.replacement.id, positionId: operation.finalPositionId }] },
+    ];
+  }
+  if (operation.type === "replaceContainer") {
     const temporary = { ...structuredClone(operation.replacement), positionId: operation.temporaryPositionId };
     return [
       ...toEditorCommands({ type: "create", node: temporary }, pageIds),

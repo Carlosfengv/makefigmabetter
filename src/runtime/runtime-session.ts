@@ -830,7 +830,39 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
       return { type: "create", node: clone };
     });
+    const replacementSources: RuntimeProjectionNode[] = [];
+    const replacedSourceRoots = new Set<string>();
+    let plannedOperationCount = operations.length;
+    this.componentPropertyReferenceOrder(subtree.filter((source) => source.id !== componentId && runtimeComponentPropertyReferences(source)?.mainComponent)).forEach((source) => {
+      if (runtimeNodeHasAncestorIn(source, replacedSourceRoots, (id) => this.projectionStore.getNode(id))) return;
+      const references = runtimeComponentPropertyReferences(source)!;
+      if (!this.componentPropertyReferenceReplacesSubtree(source, references, componentProperties, metadata.componentPropertyDefinitions)) return;
+      const target = this.componentPropertyReferenceTarget(source, references, componentProperties, metadata.componentPropertyDefinitions)!;
+      const targetMetadata = target.componentMetadata as DocumentComponentMetadata | undefined;
+      if (!targetMetadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: source.id });
+      const currentDescendants = subtree.filter((candidate) => runtimeNodeHasAncestorIn(candidate, new Set([source.id]), (id) => this.projectionStore.getNode(id)));
+      const targetDescendants = this.projectionStore.listLiveNodes().filter((candidate) => runtimeNodeHasAncestorIn(candidate, new Set([target.id]), (id) => this.projectionStore.getNode(id)));
+      if (targetDescendants.some((candidate) => !INSTANCE_CLONE_TYPES.has(candidate.type as M1SceneNodeType))) {
+        throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: source.id });
+      }
+      const targetValues = Object.fromEntries(Object.entries(targetMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
+        definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+      targetDescendants.forEach((candidate) => {
+        const nestedReferences = runtimeComponentPropertyReferences(candidate);
+        if (nestedReferences) this.componentPropertyReferenceValuePatch(candidate, nestedReferences, targetValues, targetMetadata.componentPropertyDefinitions);
+      });
+      plannedOperationCount += 1 + currentDescendants.length + targetDescendants.length;
+      if (plannedOperationCount > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+      replacementSources.push(source);
+      replacedSourceRoots.add(source.id);
+    });
     this.enqueueOperations(operations);
+    replacementSources.forEach((source) => {
+      const clone = this.projectionStore.getNode(ids.get(source.id)!);
+      const references = runtimeComponentPropertyReferences(source)!;
+      if (!clone) throw runtimeError("NODE_NOT_FOUND", { nodeId: source.id });
+      this.enqueueOperations(this.componentPropertyReferenceOperations(clone, references, componentProperties, metadata.componentPropertyDefinitions, {}, true));
+    });
     return this.containerFor(instanceId);
   }
   swapInstanceComponent(instanceId: string, componentId: string): void {
@@ -984,6 +1016,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       removed: false,
       extensions: {},
       slotMetadata: { propertyName },
+      componentPropertyReferences: { slotContentId: propertyName },
     };
     const instanceSlotOperations = linkedInstances.map((instance): PendingProjectionOperation => {
       const instanceChildren = this.siblingsOf(instance.id);
@@ -1001,6 +1034,7 @@ export class RuntimeSession implements RuntimeContainerHost {
           positionId: instancePositionId,
           extensions: { [INSTANCE_SOURCE_NODE_EXTENSION]: [...new TextEncoder().encode(id)] },
           slotMetadata: { propertyName, sourceSlotId: id },
+          componentPropertyReferences: { slotContentId: propertyName },
         },
       };
     });
@@ -1142,9 +1176,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       candidate.defaultValue === undefined ? [] : [[name, candidate.defaultValue]]));
     const referenceRoots = [...context.components, ...linkedInstances];
     const referenceNodes = this.projectionStore.listLiveNodes().filter((node) =>
-      runtimeComponentPropertyReferences(node)?.["visible"] === propertyName ||
-      runtimeComponentPropertyReferences(node)?.["characters"] === propertyName ||
-      runtimeComponentPropertyReferences(node)?.["mainComponent"] === propertyName);
+      Object.values(runtimeComponentPropertyReferences(node) ?? {}).includes(propertyName));
     if (referenceNodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
     const replacedReferenceRoots = new Set<string>();
     this.componentPropertyReferenceOrder(referenceNodes).forEach((node) => {
@@ -1208,6 +1240,10 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!node || node.removed === true) throw runtimeError("NODE_NOT_FOUND", { nodeId });
     const context = this.componentPropertyReferenceContext(node);
     const references = validateRuntimeComponentPropertyReferences(value, node, context.definitions, nodeId);
+    if (node.type === "SLOT" || references?.slotContentId) {
+      this.setSlotComponentPropertyReferences(node, references, context);
+      return;
+    }
     const operations: PendingProjectionOperation[] = [];
     operations.push(...(references
       ? this.componentPropertyReferenceOperations(node, references, context.values, context.definitions, { componentPropertyReferences: references })
@@ -1227,6 +1263,109 @@ export class RuntimeSession implements RuntimeContainerHost {
     }
     if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId });
     this.enqueueOperations(operations);
+  }
+
+  private setSlotComponentPropertyReferences(
+    node: RuntimeProjectionNode,
+    references: DocumentComponentPropertyReferences | undefined,
+    context: ReturnType<RuntimeSession["componentPropertyReferenceContext"]>,
+  ): void {
+    if (context.owner.type !== "COMPONENT" || node.parentId !== context.owner.id || !["FRAME", "SLOT"].includes(node.type)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
+    }
+    const propertyName = references?.slotContentId;
+    const targetType = propertyName ? "SLOT" : "FRAME";
+    const linkedInstances = this.projectionStore.listLiveNodes().filter((candidate) =>
+      candidate.type === "INSTANCE" && instanceMainComponentId(candidate) === context.owner.id);
+    const linkedRoots = new Set(linkedInstances.map((instance) => instance.id));
+    const linkedNodes = this.projectionStore.listLiveNodes().filter((candidate) =>
+      runtimeInstanceSourceNodeId(candidate) === node.id &&
+      runtimeNodeHasAncestorIn(candidate, linkedRoots, (id) => this.projectionStore.getNode(id)));
+    if (linkedNodes.some((candidate) => !["FRAME", "SLOT"].includes(candidate.type))) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
+    }
+    const touched = 1 + linkedNodes.length + this.siblingsOf(node.id).length + linkedNodes.reduce((count, candidate) => count + this.siblingsOf(candidate.id).length, 0);
+    if (touched > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: node.id });
+
+    const operations: PendingProjectionOperation[] = [];
+    let sourceId = node.id;
+    if (node.type === targetType) {
+      operations.push({
+        type: "update",
+        nodeId: node.id,
+        patch: {
+          componentPropertyReferences: references,
+          slotMetadata: propertyName ? { propertyName } : undefined,
+        },
+      });
+    } else {
+      const conversion = this.replaceRuntimeContainerOperation(node, targetType, {
+        componentPropertyReferences: references,
+        slotMetadata: propertyName ? { propertyName } : undefined,
+      });
+      sourceId = conversion.replacement.id;
+      operations.push(conversion.operation);
+    }
+
+    linkedNodes.forEach((candidate) => {
+      const extensions = candidate.extensions && typeof candidate.extensions === "object" && !Array.isArray(candidate.extensions)
+        ? structuredClone(candidate.extensions as Record<string, number[]>)
+        : {};
+      extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(sourceId)];
+      const patch = {
+        componentPropertyReferences: references,
+        slotMetadata: propertyName ? { propertyName, sourceSlotId: sourceId } : undefined,
+        extensions,
+      };
+      if (candidate.type === targetType) operations.push({ type: "update", nodeId: candidate.id, patch });
+      else operations.push(this.replaceRuntimeContainerOperation(candidate, targetType, patch).operation);
+    });
+    this.enqueueOperations(operations);
+  }
+
+  private replaceRuntimeContainerOperation(
+    source: RuntimeProjectionNode,
+    type: "FRAME" | "SLOT",
+    patch: Readonly<Record<string, unknown>>,
+  ): Readonly<{
+    replacement: RuntimeProjectionNode;
+    operation: Extract<PendingProjectionOperation, { type: "replaceContainer" }>;
+  }> {
+    if (typeof source.parentId !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId: source.id });
+    const siblings = this.siblingsOf(source.parentId);
+    const sourceIndex = siblings.findIndex((candidate) => candidate.id === source.id);
+    const id = this.createId();
+    const finalPositionId = typeof source.positionId === "string" && source.positionId
+      ? source.positionId
+      : positionIdForLayerInsertion(siblings.filter((candidate) => candidate.id !== source.id), sourceIndex);
+    if (sourceIndex < 0 || !finalPositionId) throw runtimeError("INVALID_ARGUMENT", { nodeId: source.id });
+    const replacement: RuntimeProjectionNode = {
+      ...structuredClone(source),
+      ...structuredClone(patch),
+      id,
+      type,
+      removed: false,
+      positionId: finalPositionId,
+      siblingIndex: sourceIndex,
+    };
+    if (type === "FRAME") {
+      const extensions = replacement.extensions && typeof replacement.extensions === "object" && !Array.isArray(replacement.extensions)
+        ? structuredClone(replacement.extensions as Record<string, number[]>)
+        : {};
+      delete extensions["figma.slot.metadata.v1"];
+      (replacement as Record<string, unknown>).extensions = extensions;
+    }
+    return {
+      replacement,
+      operation: {
+        type: "replaceContainer",
+        sourceId: source.id,
+        replacement,
+        childIds: this.siblingsOf(source.id).map((child) => child.id),
+        temporaryPositionId: runtimeTemporaryPositionId(id, finalPositionId),
+        finalPositionId,
+      },
+    };
   }
 
   setInstanceProperties(instanceId: string, componentProperties: Readonly<Record<string, string | boolean>>): void {
@@ -1345,13 +1484,14 @@ export class RuntimeSession implements RuntimeContainerHost {
     values: Readonly<Record<string, string | boolean>>,
     definitions: DocumentComponentMetadata["componentPropertyDefinitions"],
     extraPatch: Readonly<Record<string, unknown>> = {},
+    forceSubtreeReplacement = false,
   ): PendingProjectionOperation[] {
     const patch = { ...extraPatch, ...this.componentPropertyReferenceValuePatch(node, references, values, definitions) };
     const operations: PendingProjectionOperation[] = Object.keys(patch).length
       ? [{ type: "update", nodeId: node.id, patch }]
       : [];
     const target = this.componentPropertyReferenceTarget(node, references, values, definitions);
-    if (!target || instanceMainComponentId(node) === target.id) return operations;
+    if (!target || (!forceSubtreeReplacement && instanceMainComponentId(node) === target.id)) return operations;
     const targetMetadata = target.componentMetadata as DocumentComponentMetadata | undefined;
     if (!targetMetadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: node.id });
     const targetValues = Object.fromEntries(Object.entries(targetMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
@@ -2831,7 +2971,7 @@ function runtimeComponentPropertyDefinition(
   const valid = type === "BOOLEAN"
     ? typeof defaultValue === "boolean"
     : typeof defaultValue === "string" && !defaultValue.includes("\0") && new TextEncoder().encode(defaultValue).byteLength <= 2_048;
-  if (!valid || ((type === "INSTANCE_SWAP" || type === "VARIANT" || type === "SLOT") && defaultValue === "")) {
+  if (!valid || ((type === "INSTANCE_SWAP" || type === "VARIANT") && defaultValue === "")) {
     throw runtimeError("INVALID_ARGUMENT", { nodeId });
   }
   return {
@@ -2859,19 +2999,21 @@ function validateRuntimeComponentPropertyReferences(
   if (value === null) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
   const entries = Object.entries(value);
-  if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent"].includes(field) || typeof propertyName !== "string" || !propertyName)) {
+  if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent", "slotContentId"].includes(field) || typeof propertyName !== "string" || !propertyName)) {
     throw runtimeError("INVALID_ARGUMENT", { nodeId });
   }
   if (value.characters !== undefined && !["TEXT", "TEXT_PATH"].includes(node.type)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
   if (value.mainComponent !== undefined && node.type !== "INSTANCE") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+  if (value.slotContentId !== undefined && !["FRAME", "SLOT"].includes(node.type)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
   const expectedTypes: Readonly<Record<keyof DocumentComponentPropertyReferences, DocumentComponentMetadata["componentPropertyDefinitions"][string]["type"]>> = {
     visible: "BOOLEAN",
     characters: "TEXT",
     mainComponent: "INSTANCE_SWAP",
+    slotContentId: "SLOT",
   };
   for (const [field, propertyName] of entries as Array<[keyof DocumentComponentPropertyReferences, string]>) {
     const definition = definitions[propertyName];
-    if (!definition || definition.type !== expectedTypes[field] || definition.defaultValue === undefined) {
+    if (!definition || definition.type !== expectedTypes[field] || (field !== "slotContentId" && definition.defaultValue === undefined)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId });
     }
   }
@@ -2880,9 +3022,12 @@ function validateRuntimeComponentPropertyReferences(
 
 function runtimeComponentPropertyReferences(node: RuntimeProjectionNode): DocumentComponentPropertyReferences | undefined {
   const value = node.componentPropertyReferences;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const propertyName = node.type === "SLOT" ? runtimeSlotPropertyName(node) : undefined;
+    return propertyName ? { slotContentId: propertyName } : undefined;
+  }
   const entries = Object.entries(value);
-  if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent"].includes(field) || typeof propertyName !== "string" || !propertyName)) return undefined;
+  if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent", "slotContentId"].includes(field) || typeof propertyName !== "string" || !propertyName)) return undefined;
   return value as DocumentComponentPropertyReferences;
 }
 

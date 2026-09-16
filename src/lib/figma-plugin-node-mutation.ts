@@ -155,11 +155,12 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
     else {
       if (!references || typeof references !== "object" || Array.isArray(references)) return rejected("componentPropertyReferences must be an object or null.");
       const entries = Object.entries(references);
-      if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent"].includes(field) || typeof propertyName !== "string" || !propertyName)) {
+      if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent", "slotContentId"].includes(field) || typeof propertyName !== "string" || !propertyName)) {
         return rejected("componentPropertyReferences contains an unsupported field or property name.");
       }
       if (references.characters !== undefined && !["text", "textPath"].includes(node.kind)) return rejected("characters references require a text-bearing node.");
       if (references.mainComponent !== undefined && node.kind !== "instance") return rejected("mainComponent references require an INSTANCE node.");
+      if (references.slotContentId !== undefined && !["frame", "slot"].includes(node.kind)) return rejected("slotContentId references require a FRAME or SLOT node.");
       patch.componentPropertyReferences = structuredClone(references);
     }
   }

@@ -491,6 +491,69 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("converts a referenced Frame and its linked clone to Slots through Core", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000001a1";
+    const sourceFrameId = "00000000-0000-4000-8000-0000000001a2";
+    const sourceChildId = "00000000-0000-4000-8000-0000000001a3";
+    const instanceId = "00000000-0000-4000-8000-0000000001a4";
+    const instanceFrameId = "00000000-0000-4000-8000-0000000001a5";
+    const instanceChildId = "00000000-0000-4000-8000-0000000001a6";
+    const propertyName = "Content#1:1";
+    const sourceExtension = (sourceId: string) => ({ "figma.instance.source-node.v1": [...new TextEncoder().encode(sourceId)] });
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } } },
+        { id: sourceFrameId, pageId: "page", parentId: componentId, kind: "frame", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: sourceChildId, pageId: "page", parentId: sourceFrameId, kind: "rectangle", name: "Default content", x: 4, y: 4, width: 92, height: 52, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 120, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+        { id: instanceFrameId, pageId: "page", parentId: instanceId, kind: "frame", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, extensions: sourceExtension(sourceFrameId) },
+        { id: instanceChildId, pageId: "page", parentId: instanceFrameId, kind: "rectangle", name: "Default content", x: 4, y: 4, width: 92, height: 52, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, extensions: sourceExtension(sourceChildId) },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x1a6;
+    const session = new RuntimeSession({
+      sessionId: "slot-reference-core",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const component = session.currentPage.children.find((node) => node.id === componentId)!;
+    const sourceFrame = component.children.find((node) => node.id === sourceFrameId)!;
+    sourceFrame.componentPropertyReferences = { slotContentId: propertyName };
+    const sourceSlot = component.children.find((node) => node.type === "SLOT")!;
+    const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    const instanceSlot = instance.children.find((node) => node.type === "SLOT")!;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: sourceSlot.id, kind: "slot", slotMetadata: { propertyName }, componentPropertyReferences: { slotContentId: propertyName } }) }),
+      { type: "reparent", ids: [sourceChildId], parentId: sourceSlot.id },
+      { type: "delete", ids: [sourceFrameId] },
+      expect.objectContaining({ type: "reposition", positionIds: [{ id: sourceSlot.id, positionId: expect.any(String) }] }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: instanceSlot.id, kind: "slot", slotMetadata: { propertyName, sourceSlotId: sourceSlot.id }, componentPropertyReferences: { slotContentId: propertyName } }) }),
+      { type: "reparent", ids: [instanceChildId], parentId: instanceSlot.id },
+      { type: "delete", ids: [instanceFrameId] },
+      expect.objectContaining({ type: "reposition", positionIds: [{ id: instanceSlot.id, positionId: expect.any(String) }] }),
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: sourceSlot.id, kind: "slot", slotMetadata: { propertyName } }),
+      expect.objectContaining({ id: sourceChildId, parentId: sourceSlot.id }),
+      expect.objectContaining({ id: instanceSlot.id, kind: "slot", slotMetadata: { propertyName, sourceSlotId: sourceSlot.id } }),
+      expect.objectContaining({ id: instanceChildId, parentId: instanceSlot.id }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => node.id === sourceFrameId || node.id === instanceFrameId)).toBe(false);
+    bridge.close();
+    await commit;
+  });
+
   it("resets an Instance Slot through one Core delete-create batch", async () => {
     const componentId = "00000000-0000-4000-8000-0000000000d1";
     const sourceSlotId = "00000000-0000-4000-8000-0000000000d2";
@@ -599,6 +662,59 @@ describe("RuntimeWorkerBridge", () => {
       expect.objectContaining({ id: "00000000-0000-4000-8000-000000000027", parentId: "00000000-0000-4000-8000-000000000026" }),
     ]));
     bridge.close();
+  });
+
+  it("materializes an exposed nested swap without emitting the discarded subtree", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000002a1";
+    const nestedSourceId = "00000000-0000-4000-8000-0000000002a2";
+    const oldChildId = "00000000-0000-4000-8000-0000000002a3";
+    const alternateId = "00000000-0000-4000-8000-0000000002a4";
+    const replacementId = "00000000-0000-4000-8000-0000000002a5";
+    const replacementChildId = "00000000-0000-4000-8000-0000000002a6";
+    const propertyName = "Swap#1:1";
+    const metadata = (key: string, definitions = {}) => ({ key, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: definitions });
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: metadata(componentId, { [propertyName]: { type: "INSTANCE_SWAP", defaultValue: replacementId } }) },
+        { id: nestedSourceId, pageId: "page", parentId: componentId, kind: "instance", name: "Icon", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentPropertyReferences: { mainComponent: propertyName }, instanceMetadata: { mainComponentId: alternateId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+        { id: oldChildId, pageId: "page", parentId: nestedSourceId, kind: "rectangle", name: "Old shape", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#000", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: alternateId, pageId: "page", kind: "component", name: "Old icon", x: 120, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: metadata(alternateId) },
+        { id: replacementId, pageId: "page", kind: "component", name: "New icon", x: 160, y: 0, width: 24, height: 24, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: metadata(replacementId) },
+        { id: replacementChildId, pageId: "page", parentId: replacementId, kind: "ellipse", name: "New shape", x: 0, y: 0, width: 24, height: 24, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x2a6;
+    const session = new RuntimeSession({
+      sessionId: "nested-swap-create-core",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const component = session.currentPage.children.find((node) => node.id === componentId)!;
+    const instance = component.createInstance();
+    const nested = instance.children[0]!;
+    const child = nested.children[0]!;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: instance.id, kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: componentId }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: nested.id, parentId: instance.id, kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: replacementId }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: child.id, parentId: nested.id, kind: "ellipse", name: "New shape" }) }),
+    ]);
+    expect(posted[0]!.transaction.commands.some((command) => command.type === "delete" || (command.type === "create" && command.node.name === "Old shape"))).toBe(false);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: nested.id, kind: "instance", instanceMetadata: expect.objectContaining({ mainComponentId: replacementId }) }),
+      expect.objectContaining({ id: child.id, parentId: nested.id, kind: "ellipse", name: "New shape" }),
+    ]));
+    bridge.close();
+    await commit;
   });
 
   it("lowers validated Instance property writes and component swaps through Core", async () => {

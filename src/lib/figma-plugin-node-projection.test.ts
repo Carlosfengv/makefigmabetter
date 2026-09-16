@@ -84,7 +84,7 @@ describe("Figma Plugin API node projection", () => {
 
   it("projects Slot's component-property identity", () => {
     const slot = { ...createNode("slot", 0, 0), id: "slot", slotMetadata: { propertyName: "Content" } };
-    expect(projectFigmaPluginNode([slot], slot)).toMatchObject({ type: "SLOT", slotPropertyName: "Content", clipsContent: true });
+    expect(projectFigmaPluginNode([slot], slot)).toMatchObject({ type: "SLOT", slotPropertyName: "Content", componentPropertyReferences: { slotContentId: "Content" }, clipsContent: true });
   });
 
   it("projects component property references as a nullable SceneNode property", () => {

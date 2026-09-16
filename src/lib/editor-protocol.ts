@@ -33,6 +33,7 @@ export type DocumentComponentPropertyReferences = {
   visible?: string;
   characters?: string;
   mainComponent?: string;
+  slotContentId?: string;
 };
 export const COMPONENT_PROPERTY_REFERENCES_EXTENSION = "figma.component-property-references.v1";
 export interface DocumentComponentMetadata {

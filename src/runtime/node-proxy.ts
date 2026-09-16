@@ -1707,9 +1707,11 @@ export class RuntimeNodeProxy {
 
   get componentPropertyReferences(): DocumentComponentPropertyReferences | null {
     const references = this.read().componentPropertyReferences;
-    return references && typeof references === "object"
-      ? structuredClone(references as DocumentComponentPropertyReferences)
-      : null;
+    if (references && typeof references === "object") return structuredClone(references as DocumentComponentPropertyReferences);
+    const propertyName = this.type === "SLOT"
+      ? (this.read().slotMetadata as { propertyName?: unknown } | undefined)?.propertyName
+      : undefined;
+    return typeof propertyName === "string" ? { slotContentId: propertyName } : null;
   }
   set componentPropertyReferences(value: DocumentComponentPropertyReferences | null) {
     this.assertMutable();

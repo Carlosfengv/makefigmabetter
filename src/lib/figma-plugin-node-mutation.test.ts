@@ -109,6 +109,12 @@ describe("Figma Plugin API node mutation adapter", () => {
       commands: [{ type: "update", id: text.id, patch: { componentPropertyReferences: undefined } }],
     });
     expect(writeFigmaPluginNode({ ...createNode("rectangle", 0, 0), id: "shape" }, { componentPropertyReferences: { characters: "Label" } })).toMatchObject({ ok: false });
+    const frame = { ...createNode("frame", 0, 0), id: "content" };
+    expect(writeFigmaPluginNode(frame, { componentPropertyReferences: { slotContentId: "Content" } })).toMatchObject({
+      ok: true,
+      commands: [{ type: "update", id: frame.id, patch: { componentPropertyReferences: { slotContentId: "Content" } } }],
+    });
+    expect(writeFigmaPluginNode({ ...createNode("rectangle", 0, 0), id: "shape" }, { componentPropertyReferences: { slotContentId: "Content" } })).toMatchObject({ ok: false });
   });
 
   it("writes Connector routing, endpoints, and caps through durable connector metadata", () => {

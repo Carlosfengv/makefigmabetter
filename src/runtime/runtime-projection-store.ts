@@ -77,6 +77,14 @@ export type PendingProjectionOperation =
       finalPositionId: string;
     }>
   | Readonly<{
+      type: "replaceContainer";
+      sourceId: string;
+      replacement: RuntimeProjectionNode;
+      childIds: readonly string[];
+      temporaryPositionId: string;
+      finalPositionId: string;
+    }>
+  | Readonly<{
       type: "detachInstance";
       sourceId: string;
       sourceIds: readonly string[];
@@ -450,6 +458,16 @@ function validateOperations(
       continue;
     }
 
+    if (operation.type === "replaceContainer") {
+      validateReplaceContainerOperation(read, operation, transactionId);
+      overlay.set(operation.replacement.id, cloneNode({ ...operation.replacement, positionId: operation.finalPositionId, removed: false }));
+      operation.childIds.forEach((nodeId, siblingIndex) => {
+        overlay.set(nodeId, cloneNode({ ...read(nodeId)!, parentId: operation.replacement.id, siblingIndex }));
+      });
+      overlay.set(operation.sourceId, cloneNode({ ...read(operation.sourceId)!, removed: true }));
+      continue;
+    }
+
     if (operation.type === "detachInstance") {
       validateDetachInstanceOperation(read, operation, transactionId);
       operation.replacements.forEach((replacement, index) => {
@@ -544,6 +562,16 @@ function applyOperations(
       continue;
     }
 
+    if (operation.type === "replaceContainer") {
+      validateReplaceContainerOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      nodes.set(operation.replacement.id, cloneNode({ ...operation.replacement, positionId: operation.finalPositionId, removed: false }));
+      operation.childIds.forEach((nodeId, siblingIndex) => {
+        nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, parentId: operation.replacement.id, siblingIndex }));
+      });
+      nodes.set(operation.sourceId, cloneNode({ ...nodes.get(operation.sourceId)!, removed: true }));
+      continue;
+    }
+
     if (operation.type === "detachInstance") {
       validateDetachInstanceOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
       operation.replacements.forEach((replacement, index) => {
@@ -584,6 +612,34 @@ function validateComponentFromNodeOperation(
     !operation.replacement.id ||
     read(operation.replacement.id) ||
     operation.replacement.type !== "COMPONENT" ||
+    operation.replacement.parentId !== source.parentId ||
+    operation.replacement.id === source.id ||
+    !operation.temporaryPositionId ||
+    !operation.finalPositionId ||
+    operation.temporaryPositionId === operation.finalPositionId ||
+    new Set(operation.childIds).size !== operation.childIds.length
+  ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceId });
+  operation.childIds.forEach((nodeId) => {
+    const child = read(nodeId);
+    if (!child || child.removed === true || child.parentId !== source.id) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
+    }
+  });
+}
+
+function validateReplaceContainerOperation(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  operation: Extract<PendingProjectionOperation, { type: "replaceContainer" }>,
+  transactionId: string,
+): void {
+  const source = read(operation.sourceId);
+  const pair = `${source?.type ?? ""}:${operation.replacement.type}`;
+  if (
+    !source ||
+    source.removed === true ||
+    !["FRAME:SLOT", "SLOT:FRAME"].includes(pair) ||
+    !operation.replacement.id ||
+    read(operation.replacement.id) ||
     operation.replacement.parentId !== source.parentId ||
     operation.replacement.id === source.id ||
     !operation.temporaryPositionId ||

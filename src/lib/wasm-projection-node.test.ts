@@ -108,5 +108,8 @@ describe("canvasNodeFromWasmProjection", () => {
     const cleared = coreProjectionNode({ ...source, componentPropertyReferences: undefined, extensions: core.extensions });
     expect(cleared.extensions?.["figma.component-property-references.v1"]).toBeUndefined();
     expect(canvasNodeFromWasmProjection(cleared).componentPropertyReferences).toBeUndefined();
+
+    const slot = { ...createNode("slot", 0, 0), componentPropertyReferences: { slotContentId: "Content" }, slotMetadata: { propertyName: "Content" } };
+    expect(canvasNodeFromWasmProjection(coreProjectionNode(slot)).componentPropertyReferences).toEqual({ slotContentId: "Content" });
   });
 });

@@ -503,6 +503,7 @@ describe("M1 RuntimeSession", () => {
     expect(slot).toBeInstanceOf(RuntimeContainerNodeProxy);
     expect(slot).toMatchObject({ type: "SLOT", name: "Slot", parent: component, width: 50, height: 50 });
     expect(definitions[propertyName]).toEqual({ type: "SLOT" });
+    expect(slot.componentPropertyReferences).toEqual({ slotContentId: propertyName });
     expect(session.projectionStore.getNode(slot.id)?.slotMetadata).toEqual({ propertyName });
     expect(component.children).toEqual([slot]);
     expect(instance.children).toHaveLength(1);
@@ -516,6 +517,39 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({ type: "create", node: expect.objectContaining({ id: slot.id, type: "SLOT", parentId: component.id, slotMetadata: { propertyName } }) }),
       expect.objectContaining({ type: "create", node: expect.objectContaining({ type: "SLOT", parentId: instance.id, slotMetadata: { propertyName, sourceSlotId: slot.id } }) }),
     ]);
+  });
+
+  it("binds an existing Frame to a Slot property across linked Instances", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const component = session.createComponent();
+    const frame = session.createFrame() as RuntimeContainerNodeProxy;
+    frame.name = "Content";
+    const sourceChild = session.createRectangle();
+    frame.appendChild(sourceChild);
+    component.appendChild(frame);
+    const instance = component.createInstance();
+    const instanceFrame = instance.children[0] as RuntimeContainerNodeProxy;
+    const instanceChild = instanceFrame.children[0]!;
+    const propertyName = component.addComponentProperty("Content", "SLOT", "");
+
+    frame.componentPropertyReferences = { slotContentId: propertyName };
+
+    const sourceSlot = component.children[0] as RuntimeContainerNodeProxy;
+    const instanceSlot = instance.children[0] as RuntimeContainerNodeProxy;
+    expect(frame.removed).toBe(true);
+    expect(instanceFrame.removed).toBe(true);
+    expect(sourceSlot).toMatchObject({ type: "SLOT", name: "Content" });
+    expect(instanceSlot).toMatchObject({ type: "SLOT", name: "Content" });
+    expect(sourceSlot.componentPropertyReferences).toEqual({ slotContentId: propertyName });
+    expect(instanceSlot.componentPropertyReferences).toEqual({ slotContentId: propertyName });
+    expect(session.projectionStore.getNode(sourceSlot.id)?.slotMetadata).toEqual({ propertyName });
+    expect(session.projectionStore.getNode(instanceSlot.id)?.slotMetadata).toEqual({ propertyName, sourceSlotId: sourceSlot.id });
+    expect(sourceSlot.children[0]).toMatchObject({ id: sourceChild.id, parent: sourceSlot });
+    expect(instanceSlot.children[0]).toMatchObject({ id: instanceChild.id, parent: instanceSlot });
+
+    const nested = session.createFrame();
+    sourceSlot.appendChild(nested);
+    expect(isRuntimeError(captureError(() => { nested.componentPropertyReferences = { slotContentId: propertyName }; }), "INVALID_ARGUMENT")).toBe(true);
   });
 
   it("resets an Instance Slot from its source contents atomically", async () => {
@@ -765,6 +799,33 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({ type: "update", nodeId: instanceNested.id, patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: replacement.id }) }) }),
       expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: instanceNested.id, type: "ELLIPSE", name: "New icon" }) }),
     ]));
+  });
+
+  it("materializes exposed nested Instance swaps while creating an Instance", async () => {
+    const propertyName = "Swap#1:1";
+    const componentMetadata = (key: string, definitions = {}) => ({ key, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: definitions });
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { id: "card", type: "COMPONENT", name: "Card", parentId: "page", siblingIndex: 1, componentMetadata: componentMetadata("card", { [propertyName]: { type: "INSTANCE_SWAP", defaultValue: "replacement" } }) },
+        { id: "nested", type: "INSTANCE", name: "Icon", parentId: "card", siblingIndex: 0, componentPropertyReferences: { mainComponent: propertyName }, instanceMetadata: { mainComponentId: "alternate", scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+        { id: "nested-old", type: "RECTANGLE", name: "Old shape", parentId: "nested", siblingIndex: 0 },
+        { id: "alternate", type: "COMPONENT", name: "Old icon", parentId: "page", siblingIndex: 2, componentMetadata: componentMetadata("alternate") },
+        { id: "alternate-child", type: "RECTANGLE", name: "Old shape", parentId: "alternate", siblingIndex: 0 },
+        { id: "replacement", type: "COMPONENT", name: "New icon", parentId: "page", siblingIndex: 3, componentMetadata: componentMetadata("replacement") },
+        { id: "replacement-child", type: "ELLIPSE", name: "New shape", parentId: "replacement", siblingIndex: 0 },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "nested-instance-materialization", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const component = session.currentPage.children.find((node) => node.id === "card")!;
+
+    const instance = component.createInstance();
+    const nested = instance.children[0]!;
+
+    expect((await nested.getMainComponentAsync())?.id).toBe("replacement");
+    expect(nested.children).toEqual([expect.objectContaining({ type: "ELLIPSE", name: "New shape" })]);
+    expect(nested.children.some((child) => child.name === "Old shape")).toBe(false);
   });
 
   it("validates and writes Instance component properties from the main Component definition", async () => {

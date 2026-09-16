@@ -1,4 +1,4 @@
-import type { CanvasNode, DocumentConstraints, EllipseArcData, NodeKind, RelativeTransform } from "./editor-protocol";
+import type { CanvasNode, DocumentComponentPropertyReferences, DocumentConstraints, EllipseArcData, NodeKind, RelativeTransform } from "./editor-protocol";
 import { colorToSrgbComponents } from "./color-rendering";
 import { runtimeTextCase } from "./text-case";
 import { IDENTITY_AFFINE, invertAffine, multiplyAffine, worldBoundsForNode, worldTransformForNode } from "./scene-transform";
@@ -109,7 +109,7 @@ export type FigmaPluginNodeProjection = Readonly<{
   key?: string;
   remote?: boolean;
   componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
-  componentPropertyReferences?: Readonly<{ visible?: string; characters?: string; mainComponent?: string }> | null;
+  componentPropertyReferences?: Readonly<DocumentComponentPropertyReferences> | null;
   mainComponentId?: string;
   scaleFactor?: number;
   componentProperties?: Readonly<Record<string, string | boolean>>;
@@ -322,7 +322,7 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     key?: string;
     remote?: boolean;
     componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
-    componentPropertyReferences?: Readonly<{ visible?: string; characters?: string; mainComponent?: string }> | null;
+    componentPropertyReferences?: Readonly<DocumentComponentPropertyReferences> | null;
     mainComponentId?: string;
     scaleFactor?: number;
     componentProperties?: Readonly<Record<string, string | boolean>>;
@@ -368,7 +368,9 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
 
   projection.componentPropertyReferences = node.componentPropertyReferences
     ? structuredClone(node.componentPropertyReferences)
-    : null;
+    : node.kind === "slot" && node.slotMetadata?.propertyName
+      ? { slotContentId: node.slotMetadata.propertyName }
+      : null;
 
   if (!CONSTRAINT_UNSUPPORTED_KINDS.has(node.kind)) {
     const constraints = effectiveConstraints(node);

@@ -63,7 +63,7 @@ function componentPropertyReferencesFromExtensions(extensions: CanvasNode["exten
     const value = bytes && JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes))) as Record<string, unknown>;
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const entries = Object.entries(value);
-    if (entries.some(([key, propertyName]) => !["visible", "characters", "mainComponent"].includes(key) || typeof propertyName !== "string" || !propertyName)) return undefined;
+    if (entries.some(([key, propertyName]) => !["visible", "characters", "mainComponent", "slotContentId"].includes(key) || typeof propertyName !== "string" || !propertyName)) return undefined;
     return Object.fromEntries(entries) as DocumentComponentPropertyReferences;
   } catch {
     return undefined;

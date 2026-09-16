@@ -167,7 +167,7 @@ export function resolveFlattenBooleanBatch(
   const targetParentId = target?.parentId !== undefined ? target.parentId : target?.pageId !== undefined ? undefined : boolean.parentId;
   const targetParent = targetParentId ? nodes.find((node) => node.id === targetParentId) : undefined;
   const targetPageId = target?.pageId ?? targetParent?.pageId ?? boolean.pageId;
-  if (targetPageId !== boolean.pageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(targetParent.kind)))) return undefined;
+  if (targetPageId !== boolean.pageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
   if (targetParentId && (targetParentId === boolean.id || hasAncestor(nodes, targetParentId, boolean.id))) return undefined;
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
     node.pageId === targetPageId && node.parentId === targetParentId && node.id !== boolean.id));
@@ -239,7 +239,7 @@ export function resolveFlattenNodeBatch(
   const targetParentId = target?.parentId !== undefined ? target.parentId : target?.pageId !== undefined ? undefined : source.parentId;
   const targetParent = targetParentId ? nodes.find((node) => node.id === targetParentId) : undefined;
   const targetPageId = target?.pageId ?? targetParent?.pageId ?? source.pageId;
-  if (targetPageId !== source.pageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(targetParent.kind)))) return undefined;
+  if (targetPageId !== source.pageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
   if (targetParentId && (targetParentId === source.id || hasAncestor(nodes, targetParentId, source.id))) return undefined;
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
     node.pageId === targetPageId && node.parentId === targetParentId && node.id !== source.id));
@@ -735,7 +735,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (selected.length !== command.ids.length) return undefined;
       const target = command.parentId ? nextNodes.find((node) => node.id === command.parentId) : undefined;
-      if (command.parentId && (!target || !["frame", "component", "group", "booleanOperation", "section"].includes(target.kind))) return undefined;
+      if (command.parentId && (!target || !["frame", "component", "group", "booleanOperation", "section", "slot"].includes(target.kind))) return undefined;
       const pageId = selected[0].pageId;
       if (selected.some((node) => node.pageId !== pageId || (target && node.pageId !== target.pageId))) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -836,7 +836,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         }
       }
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
-      if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(parent.kind))) return undefined;
+      if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(parent.kind))) return undefined;
       if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
       const id = (command.type === "transformGroup" || command.type === "boolean" || command.type === "componentSet") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
@@ -1446,7 +1446,7 @@ export function autoLayoutProjectionNormalizationPatches(nodes: readonly CanvasN
 function isValidPasteTarget(nodes: readonly CanvasNode[], target: { pageId?: string; parentId?: string }) {
   if (!target.parentId) return true;
   const parent = nodes.find((node) => node.id === target.parentId);
-  if (!parent || !["frame", "component", "group", "section"].includes(parent.kind)) return false;
+  if (!parent || !["frame", "component", "group", "section", "slot"].includes(parent.kind)) return false;
   return !target.pageId || (parent.pageId ?? undefined) === target.pageId;
 }
 
