@@ -68,6 +68,55 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", removed: false });
   });
 
+  it("projects ComponentSet creation and Component adoption atomically", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "default", type: "COMPONENT", parentId: "page", siblingIndex: 0, x: 10, y: 20 },
+        { id: "hover", type: "COMPONENT", parentId: "page", siblingIndex: 1, x: 80, y: 50 },
+        { id: "sibling", type: "RECTANGLE", parentId: "page", siblingIndex: 2 },
+      ],
+    });
+    store.stage({
+      transactionId: "tx-component-set",
+      baseRevision: 7,
+      operations: [{
+        type: "componentSet",
+        node: {
+          id: "button",
+          type: "COMPONENT_SET",
+          parentId: "page",
+          siblingIndex: 0,
+          componentSetMetadata: { key: "button", remote: false, variantGroupProperties: { State: { values: ["Default", "Hover"] } } },
+        },
+        childIds: ["default", "hover"],
+        childPatches: [
+          { parentId: "button", x: 0, y: 0 },
+          { parentId: "button", x: 70, y: 30 },
+        ],
+        siblingIndexes: [{ nodeId: "sibling", siblingIndex: 1 }],
+      }],
+    });
+
+    expect(store.getNode("button")).toMatchObject({ type: "COMPONENT_SET", parentId: "page", siblingIndex: 0, removed: false });
+    expect(store.getNode("default")).toMatchObject({ parentId: "button", siblingIndex: 0, x: 0, y: 0 });
+    expect(store.getNode("hover")).toMatchObject({ parentId: "button", siblingIndex: 1, x: 70, y: 30 });
+    expect(store.getNode("sibling")).toMatchObject({ parentId: "page", siblingIndex: 1 });
+
+    expect(() => store.stage({
+      transactionId: "tx-invalid-component-set",
+      baseRevision: 7,
+      operations: [{
+        type: "componentSet",
+        node: { id: "invalid", type: "COMPONENT_SET", parentId: "page", componentSetMetadata: { key: "invalid" } },
+        childIds: ["sibling"],
+        childPatches: [{ parentId: "invalid" }],
+        siblingIndexes: [],
+      }],
+    })).toThrow();
+  });
+
   it("projects one leaf flatten replacement synchronously", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

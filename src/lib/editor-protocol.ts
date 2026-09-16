@@ -878,6 +878,8 @@ export type EditorCommand =
   | { type: "transformGroup"; ids: string[]; id?: string; parentId?: string; pageId?: string; index?: number; modifiers: DocumentTransformModifier[]; patch?: Partial<CanvasNode> }
   /** Resolves selected roots into one live BooleanOperation container. */
   | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation; id?: string; parentId?: string; pageId?: string; index?: number; patch?: Partial<CanvasNode> }
+  /** Atomically creates a non-empty ComponentSet around local Components. */
+  | { type: "componentSet"; ids: string[]; id: string; parentId?: string; pageId?: string; index?: number; metadata: DocumentComponentSetMetadata; patch?: Partial<CanvasNode> }
   /** Replaces a live Boolean structure with its current Rust-derived VectorPath. */
   | { type: "flattenBoolean"; id: string; replacementId?: string; parentId?: string; pageId?: string; index?: number }
   /** Replaces one leaf vector-like node with an equivalent editable Vector. */

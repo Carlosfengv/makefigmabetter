@@ -1278,6 +1278,132 @@ export class RuntimeSession implements RuntimeContainerHost {
     throw runtimeError("RESOURCE_UNAVAILABLE");
   }
 
+  combineAsVariants(
+    nodes: readonly RuntimeNodeProxy[],
+    parent: RuntimeContainerNodeProxy,
+    index?: number,
+  ): RuntimeContainerNodeProxy {
+    this.assertOpen();
+    if (
+      parent.handle.sessionId !== this.sessionId ||
+      parent.removed ||
+      !["PAGE", "FRAME", "SECTION"].includes(parent.type) ||
+      !nodes.length ||
+      new Set(nodes.map((node) => node.id)).size !== nodes.length
+    ) throw runtimeError("INVALID_ARGUMENT", { nodeId: parent.handle.nodeId });
+    const parentNode = this.projectionStore.getNode(parent.id)!;
+    const pageId = this.pageIdFor(parentNode);
+    if (!pageId || runtimeOwnsAutoLayout(parentNode) || runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), parentNode)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    }
+    const selected = nodes.map((proxy) => {
+      if (proxy.handle.sessionId !== this.sessionId || proxy.removed || proxy.type !== "COMPONENT") {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: proxy.handle.nodeId });
+      }
+      const node = this.projectionStore.getNode(proxy.id);
+      const metadata = node?.componentMetadata as DocumentComponentMetadata | undefined;
+      const sourceParent = node?.parentId ? this.projectionStore.getNode(node.parentId) : undefined;
+      if (
+        !node ||
+        !metadata ||
+        metadata.remote ||
+        this.pageIdFor(node) !== pageId ||
+        !sourceParent ||
+        sourceParent.type === "GROUP" ||
+        sourceParent.type === "BOOLEAN_OPERATION" ||
+        sourceParent.type === "COMPONENT_SET" ||
+        runtimeOwnsAutoLayout(sourceParent) ||
+        runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), node)
+      ) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: proxy.id });
+      return node;
+    });
+    const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, pageId);
+    const selectedIds = new Set(orderedSelected.map((node) => node.id));
+    const remaining = this.siblingsOf(parent.id).filter((node) => !selectedIds.has(node.id));
+    const destination = index ?? remaining.length;
+    if (!Number.isSafeInteger(destination) || destination < 0 || destination > remaining.length) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: parent.id });
+    }
+    const childWorldTransforms = orderedSelected.map((node) => runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), node));
+    if (childWorldTransforms.some((transform) => !transform)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    const bounds = orderedSelected.map((node, selectedIndex) => runtimeBoundsForTransform(node, childWorldTransforms[selectedIndex]!));
+    const left = Math.min(...bounds.map((bound) => bound.left));
+    const top = Math.min(...bounds.map((bound) => bound.top));
+    const right = Math.max(...bounds.map((bound) => bound.right));
+    const bottom = Math.max(...bounds.map((bound) => bound.bottom));
+    const parentWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), parentNode);
+    const parentInverse = parentWorld && invertRuntimeTransform(parentWorld);
+    if (!parentInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    const wrapperWorld: RuntimeTransform = { a: 1, b: 0, c: 0, d: 1, e: left, f: top };
+    const wrapperLocal = multiplyRuntimeTransforms(parentInverse, wrapperWorld);
+    const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
+    const id = this.createId();
+    const positionId = positionIdForLayerInsertion(remaining, destination);
+    if (!positionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: parent.id });
+    const componentSet: RuntimeProjectionNode = {
+      id,
+      type: "COMPONENT_SET",
+      parentId: parent.id,
+      pageId,
+      name: "Component set",
+      x: wrapperLocal.e,
+      y: wrapperLocal.f,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top),
+      rotation: Math.atan2(wrapperLocal.b, wrapperLocal.a) * 180 / Math.PI,
+      relativeTransform: wrapperLocal,
+      fill: "transparent",
+      stroke: "transparent",
+      strokeWidth: 0,
+      opacity: 1,
+      visible: true,
+      siblingIndex: destination,
+      positionId,
+      componentSetMetadata: {
+        key: id,
+        remote: false,
+        description: "",
+        descriptionMarkdown: "",
+        documentationLinks: [],
+        variantGroupProperties: runtimeVariantGroupProperties(orderedSelected),
+      },
+    };
+    const childPositions: Readonly<Record<string, unknown>>[] = [];
+    const childPatches = orderedSelected.map((component, siblingIndex): Readonly<Record<string, unknown>> => {
+      const childPositionId = positionIdForLayerInsertion(childPositions, childPositions.length);
+      if (!childPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: component.id });
+      childPositions.push({ positionId: childPositionId });
+      return {
+        parentId: id,
+        siblingIndex,
+        positionId: childPositionId,
+        ...runtimeBooleanOperandPatch(multiplyRuntimeTransforms(wrapperInverse, childWorldTransforms[siblingIndex]!)),
+      };
+    });
+    const siblingIndexes: Array<Readonly<{ nodeId: string; siblingIndex: number }>> = [];
+    [...remaining.slice(0, destination), componentSet, ...remaining.slice(destination)].forEach((sibling, siblingIndex) => {
+      if (sibling.id !== id && sibling.siblingIndex !== siblingIndex) {
+        siblingIndexes.push({ nodeId: sibling.id, siblingIndex });
+      }
+    });
+    for (const sourceParentId of new Set(orderedSelected.map((component) => component.parentId))) {
+      if (sourceParentId === parent.id) continue;
+      this.siblingsOf(sourceParentId)
+        .filter((sibling) => !selectedIds.has(sibling.id))
+        .forEach((sibling, siblingIndex) => {
+          if (sibling.siblingIndex !== siblingIndex) siblingIndexes.push({ nodeId: sibling.id, siblingIndex });
+        });
+    }
+    this.enqueueOperations([{
+      type: "componentSet",
+      node: componentSet,
+      childIds: orderedSelected.map((component) => component.id),
+      childPatches,
+      siblingIndexes,
+    }]);
+    return this.containerFor(id);
+  }
+
   union(nodes: readonly RuntimeNodeProxy[], parent: RuntimeContainerNodeProxy, index?: number): RuntimeContainerNodeProxy {
     return this.createBoolean(nodes, parent, index, "union");
   }
@@ -2175,6 +2301,25 @@ function runtimeSlotPropertyName(node: RuntimeProjectionNode): string | undefine
   if (!metadata || typeof metadata !== "object") return undefined;
   const name = (metadata as { propertyName?: unknown }).propertyName;
   return typeof name === "string" ? name : undefined;
+}
+
+function runtimeVariantGroupProperties(
+  components: readonly RuntimeProjectionNode[],
+): DocumentComponentSetMetadata["variantGroupProperties"] {
+  const values = new Map<string, string[]>();
+  components.forEach((component) => {
+    const name = typeof component.name === "string" ? component.name : "";
+    name.split(",").forEach((part) => {
+      const separator = part.indexOf("=");
+      const property = separator < 0 ? "" : part.slice(0, separator).trim();
+      const value = separator < 0 ? "" : part.slice(separator + 1).trim();
+      if (!property || !value) return;
+      const variants = values.get(property) ?? [];
+      if (!variants.includes(value)) variants.push(value);
+      values.set(property, variants);
+    });
+  });
+  return Object.fromEntries([...values].map(([property, variants]) => [property, { values: variants }]));
 }
 
 function runtimeNodeHasAncestorIn(

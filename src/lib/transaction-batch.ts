@@ -785,7 +785,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       continue;
     }
-    if (command.type === "group" || command.type === "boolean" || command.type === "transformGroup") {
+    if (command.type === "group" || command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") {
       const selected = nextNodes.filter((node) => command.ids.includes(node.id));
       if (!selected.length || new Set(command.ids).size !== command.ids.length || selected.length !== command.ids.length) return undefined;
       const selectedIds = new Set(selected.map((node) => node.id));
@@ -794,15 +794,16 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // nested Group. Independent selected Groups remain normal roots and can
       // be wrapped together with sibling shapes or other Groups.
       const rootCandidates = selected.filter((node) => !hasSelectedAncestor(nextNodes, node, selectedIds));
-      const roots = command.type === "boolean"
+      const roots = command.type === "boolean" || command.type === "componentSet"
         ? sortNodesByDocumentOrder(nextNodes, rootCandidates)
         : sortNodesByLayerOrder(rootCandidates);
       if (!roots.length || (command.type === "boolean" && roots.length < 2)) return undefined;
+      if (command.type === "componentSet" && roots.some((node) => node.kind !== "component")) return undefined;
       const pageId = selected[0].pageId;
       if (roots.some((node) => node.pageId !== pageId)) return undefined;
       const commonParentId = nearestCommonParentId(nextNodes, roots);
       let parentId = commonParentId;
-      if (command.type === "boolean" || command.type === "transformGroup") {
+      if (command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") {
         if (command.parentId !== undefined && command.pageId !== undefined) return undefined;
         if (command.parentId !== undefined) {
           const requestedParent = nextNodes.find((node) => node.id === command.parentId);
@@ -830,8 +831,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
       if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section"].includes(parent.kind))) return undefined;
-      if ((command.type === "boolean" || command.type === "transformGroup") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
-      const id = (command.type === "transformGroup" || command.type === "boolean") && command.id ? command.id : createId();
+      if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
+      const id = (command.type === "transformGroup" || command.type === "boolean" || command.type === "componentSet") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
       if (bounds.some((bound) => !bound)) return undefined;
@@ -851,7 +852,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
       const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id));
-      const requestedIndex = command.type === "boolean" || command.type === "transformGroup" ? command.index : undefined;
+      const requestedIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet" ? command.index : undefined;
       if (requestedIndex !== undefined && requestedIndex > remainingSiblings.length) return undefined;
       const groupPositionId = requestedIndex === undefined
         ? `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`
@@ -869,11 +870,13 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         node.parentId === parentId && node.positionId === groupPositionId)
         ? `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`
         : groupPositionId;
-      const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.type === "transformGroup" ? "transformGroup" : command.autoLayout ? "frame" : "group";
+      const wrapperKind = command.type === "boolean" ? "booleanOperation" : command.type === "transformGroup" ? "transformGroup" : command.type === "componentSet" ? "componentSet" : command.autoLayout ? "frame" : "group";
       const booleanPatch = command.type === "boolean" ? command.patch ?? {} : {};
       if (command.type === "boolean" && Object.keys(booleanPatch).some((key) => !["name", "opacity", "visible", "booleanOperation", "blendMode", "locked", "contentsHidden"].includes(key))) return undefined;
       const transformGroupPatch = command.type === "transformGroup" ? command.patch ?? {} : {};
       if (command.type === "transformGroup" && Object.keys(transformGroupPatch).some((key) => !["name", "opacity", "visible", "blendMode", "locked", "contentsHidden"].includes(key))) return undefined;
+      const componentSetPatch = command.type === "componentSet" ? command.patch ?? {} : {};
+      if (command.type === "componentSet" && Object.keys(componentSetPatch).some((key) => !["name", "opacity", "visible", "blendMode", "locked", "contentsHidden"].includes(key))) return undefined;
       const group = {
         ...createNode(wrapperKind, left, top),
         ...groupTransform,
@@ -886,7 +889,9 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
         ...booleanPatch,
         ...transformGroupPatch,
+        ...componentSetPatch,
         ...(command.type === "transformGroup" ? { transformModifiers: structuredClone(command.modifiers) } : {}),
+        ...(command.type === "componentSet" ? { componentSetMetadata: structuredClone(command.metadata) } : {}),
         ...(command.type === "group" && command.autoLayout ? { autoLayout: structuredClone(command.autoLayout) } : {}),
         // Core deliberately keeps Auto Layout Frames on legacy local geometry:
         // Relative-v1 matrices are not a supported layout-container transform.

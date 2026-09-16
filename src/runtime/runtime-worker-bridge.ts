@@ -388,7 +388,7 @@ function transactionToEditorCommands(
   };
 
   for (const operation of operations) {
-    if (operation.type === "componentFromNode" || operation.type === "detachInstance") {
+    if (operation.type === "componentFromNode" || operation.type === "detachInstance" || operation.type === "componentSet") {
       flush();
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
@@ -479,6 +479,27 @@ function toEditorCommands(
       { type: "delete", ids: [operation.sourceId] },
       { type: "reposition", positionIds: [{ id: root.id, positionId: operation.finalPositionId }] },
     ];
+  }
+  if (operation.type === "componentSet") {
+    const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;
+    const index = typeof operation.node.siblingIndex === "number" && Number.isSafeInteger(operation.node.siblingIndex)
+      ? operation.node.siblingIndex
+      : undefined;
+    const metadata = operation.node.componentSetMetadata;
+    if (!metadata || typeof metadata !== "object") throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.node.id });
+    return [{
+      type: "componentSet",
+      ids: [...operation.childIds],
+      id: operation.node.id,
+      metadata: structuredClone(metadata) as Extract<EditorCommand, { type: "componentSet" }>["metadata"],
+      patch: {
+        ...(typeof operation.node.name === "string" ? { name: operation.node.name } : {}),
+        ...(typeof operation.node.opacity === "number" ? { opacity: operation.node.opacity } : {}),
+        ...(typeof operation.node.visible === "boolean" ? { visible: operation.node.visible } : {}),
+      },
+      ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
+      ...(index === undefined ? {} : { index }),
+    }];
   }
   if (operation.type === "boolean") {
     const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;

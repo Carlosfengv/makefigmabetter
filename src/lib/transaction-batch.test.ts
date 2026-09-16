@@ -403,6 +403,76 @@ describe("Core transaction batch resolution", () => {
     expect(transformPoint(worldTransformForNode(resolved!.nextNodes, second.id)!, { x: 0, y: 0 })).toEqual({ x: 80, y: 50 });
   });
 
+  it("creates a non-empty ComponentSet and reparents only Component roots", () => {
+    const first = {
+      ...createNode("component", 10, 20),
+      id: "00000000-0000-4000-8000-000000000201",
+      pageId: "page",
+      positionId: "20000000000000000000000000000000:00000000000040008000000000000201",
+      name: "State=Default",
+    };
+    const second = {
+      ...createNode("component", 80, 50),
+      id: "00000000-0000-4000-8000-000000000202",
+      pageId: "page",
+      positionId: "40000000000000000000000000000000:00000000000040008000000000000202",
+      name: "State=Hover",
+    };
+    const componentSetId = "00000000-0000-4000-8000-000000000203";
+    const metadata = {
+      key: componentSetId,
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      variantGroupProperties: { State: { values: ["Default", "Hover"] } },
+    };
+    const resolved = resolveCoreBatch([first, second], [{
+      type: "componentSet",
+      ids: [first.id, second.id],
+      id: componentSetId,
+      pageId: "page",
+      metadata,
+      patch: { name: "Button" },
+    }]);
+
+    expect(resolved?.createdIds).toEqual([componentSetId]);
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({
+        type: "create",
+        node: expect.objectContaining({
+          id: componentSetId,
+          kind: "componentSet",
+          name: "Button",
+          extensions: expect.objectContaining({ "figma.component-set.metadata.v1": expect.any(Array) }),
+        }),
+      }),
+      expect.objectContaining({
+        type: "reparent",
+        parentIds: expect.arrayContaining([
+          expect.objectContaining({ id: first.id, parentId: componentSetId }),
+          expect.objectContaining({ id: second.id, parentId: componentSetId }),
+        ]),
+      }),
+      expect.objectContaining({ type: "update", node: expect.objectContaining({ id: first.id, parentId: componentSetId, x: 0, y: 0 }) }),
+      expect.objectContaining({ type: "update", node: expect.objectContaining({ id: second.id, parentId: componentSetId, x: 70, y: 30 }) }),
+    ]);
+    expect(resolved?.nextNodes.find((node) => node.id === componentSetId)).toMatchObject({ kind: "componentSet", componentSetMetadata: metadata });
+
+    const rectangleNode = {
+      ...rectangle("00000000-0000-4000-8000-000000000204"),
+      pageId: "page",
+      positionId: "60000000000000000000000000000000:00000000000040008000000000000204",
+    };
+    expect(resolveCoreBatch([first, rectangleNode], [{
+      type: "componentSet",
+      ids: [first.id, rectangleNode.id],
+      id: componentSetId,
+      pageId: "page",
+      metadata,
+    }])).toBeUndefined();
+  });
+
   it("wraps a multi-selection in a hugging Auto Layout Frame with flow children", () => {
     const first = { ...rectangle("00000000-0000-4000-8000-000000000091"), x: 10, y: 20, width: 40, height: 30, positionId: "00000000000000000000000000000091:00000000000000000000000000000000" };
     const second = { ...rectangle("00000000-0000-4000-8000-000000000092"), x: 80, y: 50, width: 20, height: 20, positionId: "00000000000000000000000000000092:00000000000000000000000000000000" };

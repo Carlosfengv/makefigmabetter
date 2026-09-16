@@ -51,6 +51,13 @@ export class FigmaCompatibleRuntime {
   createTextPath(vector: RuntimeNodeProxy, startSegment: number, startPosition: number): RuntimeNodeProxy {
     return this.session.createTextPath(vector, startSegment, startPosition);
   }
+  combineAsVariants(
+    nodes: readonly RuntimeNodeProxy[],
+    parent: RuntimeContainerNodeProxy,
+    index?: number,
+  ): RuntimeContainerNodeProxy {
+    return this.session.combineAsVariants(nodes, parent, index);
+  }
   transformGroup(
     nodes: readonly RuntimeNodeProxy[],
     parent: RuntimeContainerNodeProxy,

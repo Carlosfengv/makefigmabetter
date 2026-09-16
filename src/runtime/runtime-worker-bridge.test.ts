@@ -646,6 +646,50 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("combines Components into a ComponentSet through one Core batch", async () => {
+    const baseId = "00000000-0000-4000-8000-000000000048";
+    const hoverId = "00000000-0000-4000-8000-000000000049";
+    const metadata = { key: baseId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} };
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes.map((node) => ({
+          ...node,
+          pageId: node.pageId ?? "page",
+          positionId: node.positionId ?? "20000000000000000000000000000000:00000000000040008000000000000001",
+        })),
+        { id: baseId, pageId: "page", positionId: "40000000000000000000000000000000:00000000000040008000000000000048", kind: "component", name: "State=Default", x: 120, y: 40, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: metadata },
+        { id: hoverId, pageId: "page", positionId: "80000000000000000000000000000000:00000000000040008000000000000049", kind: "component", name: "State=Hover", x: 260, y: 40, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { ...metadata, key: hoverId } },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "combine-variants-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const componentSet = session.combineAsVariants(
+      session.currentPage.children.filter((node) => node.id === baseId || node.id === hoverId),
+      session.currentPage,
+    );
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands.map((command) => command.type)).toEqual(["componentSet"]);
+    expect(posted[0]!.transaction.commands[0]).toEqual(expect.objectContaining({
+      type: "componentSet",
+      id: componentSet.id,
+      ids: [baseId, hoverId],
+      metadata: expect.objectContaining({ variantGroupProperties: { State: { values: ["Default", "Hover"] } } }),
+    }));
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: componentSet.id, kind: "componentSet" }),
+      expect.objectContaining({ id: baseId, parentId: componentSet.id, x: 0, y: 0 }),
+      expect.objectContaining({ id: hoverId, parentId: componentSet.id, x: 140, y: 0 }),
+    ]));
+    bridge.close();
+    await commit;
+  });
+
   it("keeps component conversion as an ordering barrier before same-turn instance creation", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

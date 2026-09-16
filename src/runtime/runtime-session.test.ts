@@ -756,6 +756,44 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(detached.id))?.type).toBe("FRAME");
   });
 
+  it("combines local Components as variants while preserving world geometry and order", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const base = session.createComponent();
+    base.name = "State=Default, Size=Medium";
+    base.x = 120;
+    base.y = 40;
+    base.resize(100, 60);
+    const hover = session.createComponent();
+    hover.name = "State=Hover, Size=Medium";
+    hover.x = 260;
+    hover.y = 40;
+    hover.resize(100, 60);
+
+    const set = session.combineAsVariants([hover, base], session.currentPage, 1);
+    expect(set).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(set).toMatchObject({ type: "COMPONENT_SET", name: "Component set", x: 120, y: 40, width: 240, height: 60, parent: session.currentPage });
+    expect(set.variantGroupProperties).toEqual({ State: { values: ["Default", "Hover"] }, Size: { values: ["Medium"] } });
+    expect(set.children).toEqual([base, hover]);
+    expect(base).toMatchObject({ parent: set, x: 0, y: 0 });
+    expect(hover).toMatchObject({ parent: set, x: 140, y: 0 });
+    expect(session.currentPage.children.map((node) => node.id)).toEqual(["frame", set.id]);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "componentSet",
+        node: expect.objectContaining({ id: set.id, type: "COMPONENT_SET" }),
+        childIds: [base.id, hover.id],
+        childPatches: [
+          expect.objectContaining({ parentId: set.id, siblingIndex: 0 }),
+          expect.objectContaining({ parentId: set.id, siblingIndex: 1 }),
+        ],
+      }),
+    ]));
+    expect((await session.getNodeByIdAsync(set.id))?.children).toEqual([base, hover]);
+  });
+
   it("atomically replaces a Frame with a local Component and preserves its subtree", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
@@ -3121,6 +3159,17 @@ class InMemoryTransport implements RuntimeTransactionTransport {
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
     for (const operation of transaction.operations) {
       if (operation.type === "create") nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
+      else if (operation.type === "componentSet") {
+        nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
+        operation.childIds.forEach((nodeId, index) => {
+          const node = nodes.get(nodeId);
+          if (node) nodes.set(nodeId, { ...node, ...structuredClone(operation.childPatches[index]), parentId: operation.node.id, siblingIndex: index });
+        });
+        operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
+          const node = nodes.get(nodeId);
+          if (node) nodes.set(nodeId, { ...node, siblingIndex });
+        });
+      }
       else if (operation.type === "boolean") {
         nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
         operation.operandIds.forEach((nodeId, index) => {

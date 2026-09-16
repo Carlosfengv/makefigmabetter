@@ -27,6 +27,8 @@ export function assertFigmaPluginTypingsContract(
   const createdSlice: SliceNode = figma.createSlice();
   createdComponent.appendChild(figma.createRectangle());
   const createdInstance: InstanceNode = createdComponent.createInstance();
+  const createdComponentSet: ComponentSetNode = figma.combineAsVariants([createdComponent, figma.createComponent()], figma.currentPage);
+  void createdComponentSet.variantGroupProperties;
   void createdInstance.mainComponent;
   void convertedComponent.children;
   createdSlice.resize(320, 180);

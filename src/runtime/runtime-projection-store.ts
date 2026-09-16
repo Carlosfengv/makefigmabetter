@@ -49,6 +49,13 @@ export type PendingProjectionOperation =
       wrapperPatch: Readonly<Record<string, unknown>>;
     }>
   | Readonly<{
+      type: "componentSet";
+      node: RuntimeProjectionNode;
+      childIds: readonly string[];
+      childPatches: readonly Readonly<Record<string, unknown>>[];
+      siblingIndexes: readonly Readonly<{ nodeId: string; siblingIndex: number }>[];
+    }>
+  | Readonly<{
       type: "flattenBoolean";
       booleanId: string;
       operandIds: readonly string[];
@@ -372,7 +379,7 @@ function validateOperations(
   const read = (nodeId: string) => overlay.get(nodeId) ?? base.get(nodeId);
   for (const operation of operations) {
     if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
-    if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
+    if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
       }
@@ -381,6 +388,9 @@ function validateOperations(
       }
       if (operation.type === "transformGroup") {
         validateTransformGroupOperation(read, operation, transactionId);
+      }
+      if (operation.type === "componentSet") {
+        validateComponentSetOperation(read, operation, transactionId);
       }
       overlay.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
@@ -393,6 +403,15 @@ function validateOperations(
         });
       }
       if (operation.type === "transformGroup") {
+        operation.childIds.forEach((nodeId, siblingIndex) => {
+          const node = read(nodeId)!;
+          overlay.set(nodeId, cloneNode({ ...node, ...operation.childPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
+        });
+        operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
+          overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex }));
+        });
+      }
+      if (operation.type === "componentSet") {
         operation.childIds.forEach((nodeId, siblingIndex) => {
           const node = read(nodeId)!;
           overlay.set(nodeId, cloneNode({ ...node, ...operation.childPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
@@ -463,12 +482,13 @@ function applyOperations(
 ): void {
   for (const operation of operations) {
     if (operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
-    if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
+    if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
       }
       if (operation.type === "boolean") validateBooleanOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
       if (operation.type === "transformGroup") validateTransformGroupOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      if (operation.type === "componentSet") validateComponentSetOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
       nodes.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
         operation.operandIds.forEach((nodeId, siblingIndex) => {
@@ -479,6 +499,14 @@ function applyOperations(
         });
       }
       if (operation.type === "transformGroup") {
+        operation.childIds.forEach((nodeId, siblingIndex) => {
+          nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, ...operation.childPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
+        });
+        operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
+          nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex }));
+        });
+      }
+      if (operation.type === "componentSet") {
         operation.childIds.forEach((nodeId, siblingIndex) => {
           nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, ...operation.childPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
         });
@@ -689,6 +717,55 @@ function projectionPageId(
     current = typeof current.parentId === "string" ? read(current.parentId) : undefined;
   }
   return undefined;
+}
+
+function validateComponentSetOperation(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  operation: Extract<PendingProjectionOperation, { type: "componentSet" }>,
+  transactionId: string,
+): void {
+  if (
+    operation.node.type !== "COMPONENT_SET" ||
+    !operation.childIds.length ||
+    new Set(operation.childIds).size !== operation.childIds.length ||
+    operation.childPatches.length !== operation.childIds.length ||
+    !operation.node.componentSetMetadata ||
+    typeof operation.node.componentSetMetadata !== "object"
+  ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
+  operation.childIds.forEach((nodeId, siblingIndex) => {
+    const node = read(nodeId);
+    const patch = operation.childPatches[siblingIndex];
+    if (
+      !node ||
+      node.removed === true ||
+      node.type !== "COMPONENT" ||
+      projectionPageId(read, node) !== projectionPageId(read, operation.node) ||
+      !patch ||
+      patch.parentId !== operation.node.id
+    ) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
+    }
+  });
+  if (new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length) {
+    throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
+  }
+  const occupiedSiblingSlots = new Set<string>();
+  for (const { nodeId, siblingIndex } of operation.siblingIndexes) {
+    const node = read(nodeId);
+    const slot = `${node?.parentId ?? "<root>"}:${siblingIndex}`;
+    if (
+      !node ||
+      node.removed === true ||
+      projectionPageId(read, node) !== projectionPageId(read, operation.node) ||
+      operation.childIds.includes(nodeId) ||
+      !Number.isSafeInteger(siblingIndex) ||
+      siblingIndex < 0 ||
+      occupiedSiblingSlots.has(slot)
+    ) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
+    }
+    occupiedSiblingSlots.add(slot);
+  }
 }
 
 function validateFlattenOperation(
