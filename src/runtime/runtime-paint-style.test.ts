@@ -4,6 +4,7 @@ import { RuntimeSession } from "./runtime-session";
 import type { PendingProjectionTransaction, RuntimeProjection } from "./runtime-projection-store";
 import type { RuntimeTransactionResult, RuntimeTransactionTransport } from "./runtime-transaction-client";
 import { isRuntimeError } from "./runtime-errors";
+import { RUNTIME_MIXED } from "./node-proxy";
 
 const projection: RuntimeProjection = {
   revision: 7,
@@ -98,6 +99,88 @@ describe("PaintStyle resource runtime", () => {
     expect(isRuntimeError(capture(() => { rectangle.fillStyleId = "S:brand-fill"; }), "PAGE_NOT_LOADED")).toBe(true);
     await rectangle.setFillStyleIdAsync("S:brand-fill");
     expect(rectangle.fillStyleId).toBe("S:brand-fill");
+  });
+
+  it("applies PaintStyle links to text ranges and clears only the changed range", async () => {
+    const textProjection: RuntimeProjection = {
+      ...projection,
+      nodes: [
+        ...projection.nodes,
+        {
+          id: "text",
+          type: "TEXT",
+          name: "Copy",
+          parentId: "page",
+          siblingIndex: 0,
+          characters: "ABCD",
+          textProperties: {
+            runs: [
+              { start: 0, end: 2, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+              { start: 2, end: 4, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+            ],
+            paragraph: { alignment: "left", paragraphSpacing: 0 },
+            autoSize: "fixed",
+          },
+        },
+      ],
+    };
+    const transport = new StyleTransport(textProjection);
+    const session = new RuntimeSession({ sessionId: "paint-style-text", projection: textProjection, transport, documentAccess: "dynamic-page", loadedPageIds: ["page"], scheduleMicrotask: () => {} });
+    const text = (await session.getNodeByIdAsync("text"))!;
+
+    expect(isRuntimeError(capture(() => text.setRangeFillStyleId(0, 2, "S:brand-fill")), "PAGE_NOT_LOADED")).toBe(true);
+    await text.setRangeFillStyleIdAsync(0, 2, "S:brand-fill");
+    expect(text.getRangeFillStyleId(0, 2)).toBe("S:brand-fill");
+    expect(text.getRangeFillStyleId(2, 4)).toBe("");
+    expect(text.fillStyleId).toBe(RUNTIME_MIXED);
+    expect(text.getRangeFills(0, 2)).toEqual([{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .75, visible: true, blendMode: "MULTIPLY", boundVariables: undefined }]);
+
+    const style = await session.getStyleByIdAsync("S:brand-fill");
+    expect((await style?.getStyleConsumersAsync())?.map((consumer) => ({ id: consumer.node.id, fields: consumer.fields }))).toEqual([
+      { id: "text", fields: ["fillStyleId"] },
+    ]);
+
+    text.setRangeFills(0, 2, []);
+    expect(text.getRangeFillStyleId(0, 2)).toBe("");
+    expect(text.getRangeFills(0, 2)).toEqual([]);
+    expect(isRuntimeError(capture(() => { text.fillStyleId = "S:missing"; }), "PAGE_NOT_LOADED")).toBe(true);
+    await expect(text.setRangeFillStyleIdAsync(0, 2, "S:missing")).rejects.toSatisfy(
+      (error: unknown) => isRuntimeError(error, "RESOURCE_UNAVAILABLE"),
+    );
+  });
+
+  it("applies PaintStyle links to an empty ShapeWithText insertion style", async () => {
+    const shapeProjection: RuntimeProjection = {
+      ...projection,
+      nodes: [
+        ...projection.nodes,
+        {
+          id: "shape",
+          type: "SHAPE_WITH_TEXT",
+          name: "Label",
+          parentId: "page",
+          siblingIndex: 0,
+          characters: "",
+          textProperties: {
+            runs: [],
+            baseStyle: { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 },
+            paragraph: { alignment: "center", paragraphSpacing: 0 },
+            autoSize: "fixed",
+          },
+        },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "paint-style-shape-text", projection: shapeProjection, transport: new StyleTransport(shapeProjection), scheduleMicrotask: () => {} });
+    const shape = (await session.getNodeByIdAsync("shape"))!;
+
+    await shape.text.setFillStyleIdAsync("S:brand-fill");
+    expect(shape.text.fillStyleId).toBe("S:brand-fill");
+    expect(shape.text.getRangeFillStyleId(0, 0)).toBe("S:brand-fill");
+    expect(shape.text.fills).toEqual([{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .75, visible: true, blendMode: "MULTIPLY", boundVariables: undefined }]);
+
+    shape.text.fills = [];
+    expect(shape.text.fillStyleId).toBe("");
+    expect(shape.text.fills).toEqual([]);
   });
 });
 

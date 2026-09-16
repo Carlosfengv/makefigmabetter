@@ -793,7 +793,14 @@ export interface TextStyleRun {
    * Figma TextStyle link identity. Presence requires engine semantics 43.
    * The referenced style resource may be resolved by a later capability.
    */
-  textStyleId?: string | undefined;
+  textStyleId?:
+    | string
+    | undefined;
+  /**
+   * Figma PaintStyle identity for this text range's fills. Presence requires
+   * engine semantics 47 and is independent of the owning node's fill link.
+   */
+  paintStyleId?: string | undefined;
 }
 
 export interface OpenTypeFeatureSetting {
@@ -4714,6 +4721,7 @@ function createBaseTextStyleRun(): TextStyleRun {
     leadingTrim: undefined,
     openTypeFeatures: [],
     textStyleId: undefined,
+    paintStyleId: undefined,
   };
 }
 
@@ -4778,6 +4786,9 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     if (message.textStyleId !== undefined) {
       writer.uint32(162).string(message.textStyleId);
+    }
+    if (message.paintStyleId !== undefined) {
+      writer.uint32(170).string(message.paintStyleId);
     }
     return writer;
   },
@@ -4949,6 +4960,14 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.textStyleId = reader.string();
           continue;
         }
+        case 21: {
+          if (tag !== 170) {
+            break;
+          }
+
+          message.paintStyleId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4996,6 +5015,7 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     message.leadingTrim = object.leadingTrim ?? undefined;
     message.openTypeFeatures = object.openTypeFeatures?.map((e) => OpenTypeFeatureSetting.fromPartial(e)) || [];
     message.textStyleId = object.textStyleId ?? undefined;
+    message.paintStyleId = object.paintStyleId ?? undefined;
     return message;
   },
 };

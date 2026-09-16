@@ -274,6 +274,8 @@ export interface DocumentTextStyle {
   openTypeFeatures?: Readonly<Record<string, boolean>>;
   /** Linked Figma TextStyle identity; omission means unlinked. */
   textStyleId?: string;
+  /** Linked Figma PaintStyle identity for this range's fills. */
+  paintStyleId?: string;
 }
 
 export interface DocumentTextProperties {

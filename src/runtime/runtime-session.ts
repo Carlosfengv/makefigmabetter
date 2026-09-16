@@ -322,6 +322,7 @@ export class RuntimeSession implements RuntimeContainerHost {
           if (node.fillStyleId === styleId) fields.push("fillStyleId");
           if (node.strokeStyleId === styleId) fields.push("strokeStyleId");
           if (node.backgroundStyleId === styleId) fields.push("backgroundStyleId");
+          if (runtimeNodeUsesPaintStyle(node, styleId) && !fields.includes("fillStyleId")) fields.push("fillStyleId");
           return fields.length ? { node: this.proxyFor(node.id), fields: Object.freeze(fields) } : undefined;
         })
         .filter((consumer): consumer is { node: RuntimeNodeProxy; fields: readonly string[] } => consumer !== undefined)),
@@ -1502,6 +1503,17 @@ function runtimeNodeUsesTextStyle(node: RuntimeProjectionNode, styleId: string):
   };
   return value.baseStyle?.textStyleId === styleId
     || value.runs?.some((run) => run.textStyleId === styleId) === true;
+}
+
+function runtimeNodeUsesPaintStyle(node: RuntimeProjectionNode, styleId: string): boolean {
+  const properties = node.textProperties;
+  if (!properties || typeof properties !== "object") return false;
+  const value = properties as {
+    baseStyle?: { paintStyleId?: unknown };
+    runs?: readonly { paintStyleId?: unknown }[];
+  };
+  return value.baseStyle?.paintStyleId === styleId
+    || value.runs?.some((run) => run.paintStyleId === styleId) === true;
 }
 
 function runtimeSubtreeBooleanIds(projection: RuntimeProjection, rootNodeId: string): string[] {

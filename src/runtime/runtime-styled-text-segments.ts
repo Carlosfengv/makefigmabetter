@@ -181,7 +181,7 @@ function segmentFieldValue(
       ? runtimePaintsFromDocumentStack(style.fillStack)
       : style.color ? runtimeFillsFromDocumentTextColor(style.color) : structuredClone(fallbackFills);
     case "textStyleId": return style.textStyleId ?? "";
-    case "fillStyleId": return "";
+    case "fillStyleId": return style.paintStyleId ?? "";
     case "listOptions": return { type: listType === "ordered" ? "ORDERED" : listType === "unordered" ? "UNORDERED" : "NONE" };
     case "listSpacing": return paragraphRun?.listSpacing ?? properties.paragraph.listSpacing ?? 0;
     case "indentation": return paragraphRun?.indentation ?? (listType ? 1 : 0);

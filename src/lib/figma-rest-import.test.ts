@@ -1132,6 +1132,34 @@ describe("Figma REST import planning", () => {
     ]);
   });
 
+  it("links REST text fills to PaintStyle identities on canonical text runs", () => {
+    const plan = planFigmaRestImport({
+      version: "text-paint-style-link",
+      styles: {
+        "S:text-fill": { key: "", name: "Text/Accent", styleType: "FILL", remote: false },
+      },
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1",
+        type: "TEXT",
+        characters: "Hi",
+        relativeTransform: [[1, 0, 0], [0, 1, 0]],
+        absoluteBoundingBox: { x: 0, y: 0, width: 40, height: 20 },
+        styles: { fill: "S:text-fill" },
+        fills: [{ type: "SOLID", color: { r: 0, g: .5, b: 1 } }],
+        style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.nodes[0]?.fillStyleId).toBeUndefined();
+    expect(plan.nodes[0]?.textProperties?.runs).toMatchObject([{
+      start: 0,
+      end: 2,
+      paintStyleId: "S:text-fill",
+      fillStack: plan.paintStyles[0]?.paints,
+    }]);
+  });
+
   it("preserves an empty Figma Text node style as its Canonical insertion style", () => {
     const plan = planFigmaRestImport({
       version: "empty-text-style",

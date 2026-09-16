@@ -573,6 +573,9 @@ message TextStyleRun {
   // Figma TextStyle link identity. Presence requires engine semantics 43.
   // The referenced style resource may be resolved by a later capability.
   optional string text_style_id = 20;
+  // Figma PaintStyle identity for this text range's fills. Presence requires
+  // engine semantics 47 and is independent of the owning node's fill link.
+  optional string paint_style_id = 21;
 }
 
 message OpenTypeFeatureSetting {

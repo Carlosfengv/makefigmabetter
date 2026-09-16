@@ -1509,16 +1509,37 @@ function applyImportedPaintStyleLinks(
   sourceNodeByCanonicalId: ReadonlyMap<string, JsonRecord>,
   issues: FigmaImportIssue[],
 ): void {
-  const available = new Set(resources.map((resource) => resource.id));
+  const available = new Map(resources.map((resource) => [resource.id, resource]));
   for (const node of nodes) {
     const source = sourceNodeByCanonicalId.get(node.id);
     const styles = record(source?.styles);
     const fill = string(styles?.fill);
     const stroke = string(styles?.stroke);
     if (fill && available.has(fill)) {
-      node.fillStyleId = fill;
-      if (["frame", "component", "instance", "slot", "componentSet"].includes(node.kind)) {
-        node.backgroundStyleId = fill;
+      const resource = available.get(fill)!;
+      if ((node.kind === "text" || node.kind === "textPath") && node.textProperties) {
+        node.textProperties = {
+          ...node.textProperties,
+          runs: node.textProperties.runs.map((run) => ({
+            ...run,
+            color: undefined,
+            fillStack: structuredClone(resource.paints),
+            paintStyleId: fill,
+          })),
+          ...(node.textProperties.baseStyle ? {
+            baseStyle: {
+              ...node.textProperties.baseStyle,
+              color: undefined,
+              fillStack: structuredClone(resource.paints),
+              paintStyleId: fill,
+            },
+          } : {}),
+        };
+      } else {
+        node.fillStyleId = fill;
+        if (["frame", "component", "instance", "slot", "componentSet"].includes(node.kind)) {
+          node.backgroundStyleId = fill;
+        }
       }
     } else if (fill) {
       node.extensions ??= {};

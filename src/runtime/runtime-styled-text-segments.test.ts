@@ -14,8 +14,8 @@ const fallbackFills = [{
 
 const properties: DocumentTextProperties = {
   runs: [
-    { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textStyleId: "S:body" },
-    { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, textCase: "upper", textStyleId: "S:caption" },
+    { start: 0, end: 6, fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0, textDecoration: "underline", textStyleId: "S:body", paintStyleId: "S:body-fill" },
+    { start: 6, end: 8, fontSize: 20, fontWeight: 700, italic: true, letterSpacing: 1, textCase: "upper", textStyleId: "S:caption", paintStyleId: "S:caption-fill" },
   ],
   paragraph: {
     alignment: "left",
@@ -108,7 +108,7 @@ describe("runtimeStyledTextSegments", () => {
       start: 0,
       end: 4,
       textStyleId: "S:body",
-      fillStyleId: "",
+      fillStyleId: "S:body-fill",
       openTypeFeatures: {},
       boundVariables: undefined,
       textStyleOverrides: [],
@@ -117,7 +117,7 @@ describe("runtimeStyledTextSegments", () => {
       start: 4,
       end: 6,
       textStyleId: "S:caption",
-      fillStyleId: "",
+      fillStyleId: "S:caption-fill",
       openTypeFeatures: {},
       boundVariables: undefined,
       textStyleOverrides: [],

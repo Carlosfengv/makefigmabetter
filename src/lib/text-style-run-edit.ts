@@ -360,5 +360,8 @@ function sameStyle(left: TextRun, right: TextRun) {
     && JSON.stringify(left.textDecorationThickness) === JSON.stringify(right.textDecorationThickness)
     && JSON.stringify(left.textDecorationColor) === JSON.stringify(right.textDecorationColor)
     && left.textDecorationSkipInk === right.textDecorationSkipInk
-    && left.leadingTrim === right.leadingTrim;
+    && left.leadingTrim === right.leadingTrim
+    && JSON.stringify(left.openTypeFeatures) === JSON.stringify(right.openTypeFeatures)
+    && left.textStyleId === right.textStyleId
+    && left.paintStyleId === right.paintStyleId;
 }

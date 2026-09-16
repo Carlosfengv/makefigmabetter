@@ -44,6 +44,12 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void text.getRangeTextStyleId(0, 1);
   text.textStyleId = "S:body";
   if (false) void text.setTextStyleIdAsync("S:body");
+  void text.fillStyleId;
+  void text.getRangeFillStyleId(0, 1);
+  text.fillStyleId = "S:brand-fill";
+  if (false) void text.setFillStyleIdAsync("S:brand-fill");
+  text.setRangeFillStyleId(0, 1, "S:brand-fill");
+  if (false) void text.setRangeFillStyleIdAsync(0, 1, "S:brand-fill");
   text.setRangeTextStyleId(0, 1, "S:body");
   if (false) void text.setRangeTextStyleIdAsync(0, 1, "S:body");
   void text.fontName;
@@ -238,6 +244,11 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void shapeWithText.text.getRangeTextWrapStyle(0, 7);
   shapeWithText.text.setRangeTextWrapStyle(0, 7, "PRETTY");
   shapeWithText.text.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 1 } }];
+  shapeWithText.text.fillStyleId = "S:brand-fill";
+  if (false) void shapeWithText.text.setFillStyleIdAsync("S:brand-fill");
+  void shapeWithText.text.getRangeFillStyleId(0, 7);
+  shapeWithText.text.setRangeFillStyleId(0, 7, "S:brand-fill");
+  if (false) void shapeWithText.text.setRangeFillStyleIdAsync(0, 7, "S:brand-fill");
   shapeWithText.text.setRangeFills(0, 7, [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5 }]);
   void shapeWithText.text.getRangeFills(0, 7);
   void shapeWithText.text.getStyledTextSegments(["fontSize", "fontStyle", "paragraphSpacing", "textWrapStyle"], 0, 7);

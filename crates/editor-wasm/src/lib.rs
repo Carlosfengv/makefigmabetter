@@ -882,7 +882,20 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=61).contains(&snapshot.schema_version)
+    if !(1..=62).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 62
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.paint_style_id.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.paint_style_id.is_some())
+                })
+            }))
         || (snapshot.schema_version < 61
             && snapshot.nodes.iter().any(|node| {
                 node.fill_style_id.is_some()
@@ -1592,6 +1605,8 @@ struct ProjectionTextStyleRun {
     open_type_features: std::collections::BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text_style_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paint_style_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1636,6 +1651,8 @@ struct ProjectionTextStyle {
     open_type_features: std::collections::BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text_style_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paint_style_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2074,7 +2091,22 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self
+        let schema_version = if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| run.paint_style_id.is_some())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| style.paint_style_id.is_some())
+                })
+        }) {
+            62
+        } else if self
             .document
             .nodes()
             .any(|node| self.document.paint_style_links_for_node(node.id).is_some())
@@ -5704,6 +5736,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .map(|feature| (feature.tag.clone(), feature.enabled))
                     .collect(),
                 text_style_id: run.text_style_id.clone(),
+                paint_style_id: run.paint_style_id.clone(),
             })
             .collect(),
         paragraph: ProjectionParagraphStyle {
@@ -5823,6 +5856,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .map(|feature| (feature.tag.clone(), feature.enabled))
                     .collect(),
                 text_style_id: style.text_style_id.clone(),
+                paint_style_id: style.paint_style_id.clone(),
             }),
     }
 }
@@ -5991,6 +6025,7 @@ fn text_properties_from_projection(
                                 })
                                 .collect(),
                             text_style_id: run.text_style_id.clone(),
+                            paint_style_id: run.paint_style_id.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, JsValue>>()?,
@@ -6158,6 +6193,7 @@ fn text_properties_from_projection(
                                 })
                                 .collect(),
                             text_style_id: style.text_style_id.clone(),
+                            paint_style_id: style.paint_style_id.clone(),
                         })
                     })
                     .transpose()?,
@@ -9987,6 +10023,7 @@ mod tests {
                     leading_trim: None,
                     open_type_features: Default::default(),
                     text_style_id: text_style_id.map(str::to_owned),
+                    paint_style_id: None,
                 }],
                 paragraph: ProjectionParagraphStyle {
                     alignment: "center".into(),
@@ -10161,6 +10198,31 @@ mod tests {
         mislabeled_link.schema_version = 57;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled_link),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+
+        let mut paint_node = text("After", None);
+        paint_node.text_properties.as_mut().unwrap().runs[0].paint_style_id =
+            Some("S:accent".into());
+        engine
+            .submit_batch(
+                NodeId(19),
+                engine.document.revision,
+                vec![BatchCommand::Update {
+                    node: paint_node,
+                    ignore_constraints: false,
+                    plain_text_only: false,
+                    rename_text_path: false,
+                }],
+            )
+            .unwrap();
+        let paint_snapshot = engine.snapshot_json();
+        assert!(paint_snapshot.contains("\"schemaVersion\":62"));
+        assert!(paint_snapshot.contains("\"paintStyleId\":\"S:accent\""));
+        let mut mislabeled_paint: CoreSnapshot = serde_json::from_str(&paint_snapshot).unwrap();
+        mislabeled_paint.schema_version = 61;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled_paint),
             Err("UNSUPPORTED_CORE_SNAPSHOT")
         );
     }

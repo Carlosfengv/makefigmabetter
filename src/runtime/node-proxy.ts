@@ -246,6 +246,18 @@ function runtimeTextStyleIdForRange(
   return values.some((value) => value !== values[0]) ? RUNTIME_MIXED : values[0]!;
 }
 
+function runtimePaintStyleIdForRange(
+  text: string,
+  properties: DocumentTextProperties | undefined,
+  start: number,
+  end: number,
+): string | typeof RUNTIME_MIXED {
+  const values = runtimeTextStylesForRange(text, properties, start, end)
+    .map((style) => style.paintStyleId ?? "");
+  if (!values.length) return properties?.baseStyle?.paintStyleId ?? "";
+  return values.some((value) => value !== values[0]) ? RUNTIME_MIXED : values[0]!;
+}
+
 function applyRuntimeTextStyleRange(
   text: string,
   properties: DocumentTextProperties | undefined,
@@ -277,6 +289,7 @@ function applyRuntimeTextStyleRange(
     leadingTrim: style.leadingTrim,
     openTypeFeatures: style.openTypeFeatures ? { ...style.openTypeFeatures } : undefined,
     textStyleId: styleId,
+    paintStyleId: undefined,
   };
   let next = patchRuntimeTextRange(text, properties, start, end, patch, defaults);
   if (start === 0 && end === text.length) {
@@ -571,6 +584,21 @@ export class RuntimeTextSublayerProxy {
 
   async setTextStyleIdAsync(styleId: string): Promise<void> {
     this.applyTextStyleRange(0, this.characters.length, styleId);
+    await this.host.commitAsync();
+  }
+
+  get fillStyleId(): string | typeof RUNTIME_MIXED {
+    return this.getRangeFillStyleId(0, this.characters.length);
+  }
+
+  set fillStyleId(value: string | typeof RUNTIME_MIXED) {
+    if (value === RUNTIME_MIXED) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.host.assertSynchronousDocumentAccess();
+    this.applyPaintStyleRange(0, this.characters.length, value);
+  }
+
+  async setFillStyleIdAsync(styleId: string): Promise<void> {
+    this.applyPaintStyleRange(0, this.characters.length, styleId);
     await this.host.commitAsync();
   }
 
@@ -946,6 +974,23 @@ export class RuntimeTextSublayerProxy {
     await this.host.commitAsync();
   }
 
+  getRangeFillStyleId(start: number, end: number): string | typeof RUNTIME_MIXED {
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    this.assertTextRange(start, end);
+    return runtimePaintStyleIdForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end);
+  }
+
+  setRangeFillStyleId(start: number, end: number, styleId: string): void {
+    this.host.assertSynchronousDocumentAccess();
+    this.applyPaintStyleRange(start, end, styleId);
+  }
+
+  async setRangeFillStyleIdAsync(start: number, end: number, styleId: string): Promise<void> {
+    this.applyPaintStyleRange(start, end, styleId);
+    await this.host.commitAsync();
+  }
+
   setRangeFontSize(start: number, end: number, value: number): void {
     if (!Number.isFinite(value) || value < 1) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.setTextRange(start, end, { fontSize: value });
@@ -1070,7 +1115,7 @@ export class RuntimeTextSublayerProxy {
 
   setRangeFills(start: number, end: number, value: readonly RuntimePaint[]): void {
     const fillStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.setTextRange(start, end, { color: undefined, fillStack });
+    this.setTextRange(start, end, { color: undefined, fillStack, paintStyleId: undefined });
   }
 
   private setTextRange(start: number, end: number, patch: RuntimeTextStylePatch): void {
@@ -1115,6 +1160,21 @@ export class RuntimeTextSublayerProxy {
         SHAPE_WITH_TEXT_DEFAULTS,
       ),
     });
+  }
+
+  private applyPaintStyleRange(start: number, end: number, styleId: string): void {
+    if (typeof styleId !== "string" || styleId.includes("\0") || new TextEncoder().encode(styleId).byteLength > 2_048) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    if (text.length > 0 && start === end) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    runtimeTextRange(text, start, end);
+    const resource = styleId ? this.host.paintStyleResource(styleId) : undefined;
+    if (styleId && (!resource || resource.id !== styleId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    this.setTextRange(start, end, styleId
+      ? { color: undefined, fillStack: structuredClone(resource!.paints), paintStyleId: styleId }
+      : { paintStyleId: undefined });
   }
 
   private replaceCharacters(start: number, end: number, replacement: string, insertionStyle: RuntimeTextInsertionStyle = "BEFORE"): void {
@@ -1301,25 +1361,44 @@ export class RuntimeNodeProxy {
       ...(extensions ? { extensions } : {}),
     });
   }
-  get fills(): readonly RuntimePaint[] {
+  get fills(): readonly RuntimePaint[] | typeof RUNTIME_MIXED {
     this.assertPaintsSupported("fill");
+    if (this.type === "TEXT" || this.type === "TEXT_PATH") {
+      return this.getRangeFills(0, this.characters.length);
+    }
     return structuredClone(runtimePaintsFromNode(this.read() as Readonly<Record<string, unknown>>, "fill"));
   }
   set fills(value: readonly RuntimePaint[]) {
     this.assertPaintsSupported("fill");
+    if (this.type === "TEXT" || this.type === "TEXT_PATH") {
+      this.setRangeFills(0, this.characters.length, value);
+      return;
+    }
     const fillStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
     this.write({ fillStack, fillStyleId: undefined, backgroundStyleId: undefined });
   }
-  get fillStyleId(): string {
+  get fillStyleId(): string | typeof RUNTIME_MIXED {
     this.assertPaintsSupported("fill");
+    if (this.type === "TEXT" || this.type === "TEXT_PATH") {
+      return this.getRangeFillStyleId(0, this.characters.length);
+    }
     return typeof this.read().fillStyleId === "string" ? this.read().fillStyleId as string : "";
   }
-  set fillStyleId(value: string) {
+  set fillStyleId(value: string | typeof RUNTIME_MIXED) {
+    if (value === RUNTIME_MIXED) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.host.assertSynchronousDocumentAccess();
-    this.applyPaintStyle("fill", value);
+    if (this.type === "TEXT" || this.type === "TEXT_PATH") {
+      this.applyTextPaintStyleRange(0, this.characters.length, value);
+    } else {
+      this.applyPaintStyle("fill", value);
+    }
   }
   async setFillStyleIdAsync(styleId: string): Promise<void> {
-    this.applyPaintStyle("fill", styleId);
+    if (this.type === "TEXT" || this.type === "TEXT_PATH") {
+      this.applyTextPaintStyleRange(0, this.characters.length, styleId);
+    } else {
+      this.applyPaintStyle("fill", styleId);
+    }
     await this.host.commitAsync();
   }
   get strokes(): readonly RuntimePaint[] {
@@ -1995,6 +2074,29 @@ export class RuntimeNodeProxy {
     await this.host.commitAsync();
   }
 
+  getRangeFillStyleId(start: number, end: number): string | typeof RUNTIME_MIXED {
+    this.assertText();
+    runtimeTextRange(this.characters, start, end);
+    return runtimePaintStyleIdForRange(
+      this.characters,
+      this.read().textProperties as DocumentTextProperties | undefined,
+      start,
+      end,
+    );
+  }
+
+  setRangeFillStyleId(start: number, end: number, styleId: string): void {
+    this.assertText();
+    this.host.assertSynchronousDocumentAccess();
+    this.applyTextPaintStyleRange(start, end, styleId);
+  }
+
+  async setRangeFillStyleIdAsync(start: number, end: number, styleId: string): Promise<void> {
+    this.assertText();
+    this.applyTextPaintStyleRange(start, end, styleId);
+    await this.host.commitAsync();
+  }
+
   getRangeLetterSpacing(start: number, end: number): RuntimeLetterSpacing | typeof RUNTIME_MIXED {
     this.assertText();
     const node = this.read();
@@ -2399,7 +2501,7 @@ export class RuntimeNodeProxy {
   setRangeFills(start: number, end: number, value: readonly RuntimePaint[]): void {
     this.assertText();
     const fillStack = documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash));
-    this.setTextRange(start, end, { color: undefined, fillStack });
+    this.setTextRange(start, end, { color: undefined, fillStack, paintStyleId: undefined });
   }
 
   getStyledTextSegments<Fields extends readonly RuntimeStyledTextSegmentField[]>(
@@ -2969,6 +3071,21 @@ export class RuntimeNodeProxy {
         DEFAULT_RUNTIME_TEXT_STYLE,
       ),
     });
+  }
+
+  private applyTextPaintStyleRange(start: number, end: number, styleId: string): void {
+    this.assertText();
+    if (typeof styleId !== "string" || styleId.includes("\0") || new TextEncoder().encode(styleId).byteLength > 2_048) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const text = this.characters;
+    if (text.length > 0 && start === end) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    runtimeTextRange(text, start, end);
+    const resource = styleId ? this.host.paintStyleResource(styleId) : undefined;
+    if (styleId && (!resource || resource.id !== styleId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    this.setTextRange(start, end, styleId
+      ? { color: undefined, fillStack: structuredClone(resource!.paints), paintStyleId: styleId }
+      : { paintStyleId: undefined });
   }
 
   private replaceCharacters(start: number, end: number, replacement: string, insertionStyle: RuntimeTextInsertionStyle = "BEFORE"): void {
