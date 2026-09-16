@@ -167,6 +167,11 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   frame.minWidth = 120;
   frame.maxWidth = 640;
   frame.appendChild(rectangle);
+  if (runtimeVariable) {
+    frame.setBoundVariable("itemSpacing", runtimeVariable);
+    frame.setBoundVariable("paddingLeft", runtimeVariable);
+    rectangle.setBoundVariable("minWidth", runtimeVariable);
+  }
   if (false) void runtime.flatten([boolean], frame, 0);
   rectangle.layoutSizingHorizontal = "FILL";
   rectangle.layoutSizingVertical = "FIXED";
@@ -177,6 +182,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   wrapFrame.layoutMode = "HORIZONTAL";
   wrapFrame.layoutWrap = "WRAP";
   wrapFrame.counterAxisSpacing = 12;
+  if (runtimeVariable) wrapFrame.setBoundVariable("counterAxisSpacing", runtimeVariable);
   wrapFrame.counterAxisAlignContent = "SPACE_BETWEEN";
   const connector = runtime.createConnector();
   connector.connectorLineType = "ELBOWED";

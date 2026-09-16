@@ -193,6 +193,11 @@ export function assertFigmaPluginTypingsContract(
   frame.minWidth = 120;
   frame.maxWidth = 640;
   frame.appendChild(rectangle);
+  if (floatVariable) {
+    frame.setBoundVariable("itemSpacing", floatVariable);
+    frame.setBoundVariable("paddingLeft", floatVariable);
+    rectangle.setBoundVariable("minWidth", floatVariable);
+  }
   if (false) void figma.flatten([boolean], frame, 0);
   rectangle.layoutSizingHorizontal = "FILL";
   rectangle.layoutSizingVertical = "FIXED";
@@ -203,6 +208,7 @@ export function assertFigmaPluginTypingsContract(
   wrapFrame.layoutMode = "HORIZONTAL";
   wrapFrame.layoutWrap = "WRAP";
   wrapFrame.counterAxisSpacing = 12;
+  if (floatVariable) wrapFrame.setBoundVariable("counterAxisSpacing", floatVariable);
   wrapFrame.counterAxisAlignContent = "SPACE_BETWEEN";
   const connector: ConnectorNode = figma.createConnector();
   connector.connectorLineType = "ELBOWED";

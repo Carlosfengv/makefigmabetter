@@ -55,7 +55,7 @@ describe("Variables resource runtime", () => {
   });
 
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
-    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0 }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, width: 100, height: 100, opacity: 1, visible: true, strokeWidth: 1 }, { id: "text", type: "TEXT", name: "Label", parentId: "frame", siblingIndex: 1, characters: "Initial", width: 100, height: 20 }] };
+    const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0, autoLayout: { mode: "horizontal", padding: [0, 0, 0, 0], itemSpacing: 0, wrap: true, primaryAlignment: "start", counterAlignment: "start", primarySizing: "fixed", counterSizing: "fixed", absolute: false } }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, width: 100, height: 100, opacity: 1, visible: true, strokeWidth: 1 }, { id: "text", type: "TEXT", name: "Label", parentId: "frame", siblingIndex: 1, characters: "Initial", width: 100, height: 20 }] };
     const transport = new UpdatingTransport(writable);
     const session = new RuntimeSession({ sessionId: "variable-bindings", projection: writable, transport, scheduleMicrotask: () => {} });
     const rectangle = (await session.getNodeByIdAsync("rect"))!;
@@ -75,13 +75,25 @@ describe("Variables resource runtime", () => {
     rectangle.setBoundVariable("width", width);
     rectangle.setBoundVariable("height", height);
     text.setBoundVariable("characters", label);
+    frame.setBoundVariable("itemSpacing", spacing);
+    frame.setBoundVariable("paddingTop", spacing);
+    frame.setBoundVariable("paddingRight", spacing);
+    frame.setBoundVariable("paddingBottom", spacing);
+    frame.setBoundVariable("paddingLeft", spacing);
+    frame.setBoundVariable("counterAxisSpacing", spacing);
+    rectangle.setBoundVariable("minWidth", width);
+    rectangle.setBoundVariable("maxWidth", width);
+    rectangle.setBoundVariable("minHeight", spacing);
+    rectangle.setBoundVariable("maxHeight", height);
     expect(rectangle.opacity).toBe(.5);
     expect(rectangle.visible).toBe(false);
     expect(rectangle.strokeWeight).toBe(8);
     expect(rectangle.width).toBe(120);
     expect(rectangle.height).toBe(60);
     expect(text.characters).toBe("Light");
-    expect(rectangle.boundVariables).toEqual({ height: { type: "VARIABLE_ALIAS", id: "V:height" }, opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" }, width: { type: "VARIABLE_ALIAS", id: "V:width" } });
+    expect(frame).toMatchObject({ itemSpacing: 8, paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8, counterAxisSpacing: 8 });
+    expect(rectangle).toMatchObject({ minWidth: 120, maxWidth: 120, minHeight: 8, maxHeight: 60 });
+    expect(rectangle.boundVariables).toMatchObject({ height: { type: "VARIABLE_ALIAS", id: "V:height" }, minWidth: { type: "VARIABLE_ALIAS", id: "V:width" }, maxWidth: { type: "VARIABLE_ALIAS", id: "V:width" }, opacity: { type: "VARIABLE_ALIAS", id: "V:opacity" }, strokeWeight: { type: "VARIABLE_ALIAS", id: "V:spacing" }, visible: { type: "VARIABLE_ALIAS", id: "V:visible" }, width: { type: "VARIABLE_ALIAS", id: "V:width" } });
     expect(isRuntimeError(capture(() => rectangle.setBoundVariable("opacity", visible)), "INVALID_ARGUMENT")).toBe(true);
 
     frame.setExplicitVariableModeForCollection(collection, "dark");
@@ -93,6 +105,8 @@ describe("Variables resource runtime", () => {
     expect(rectangle.width).toBe(180);
     expect(rectangle.height).toBe(90);
     expect(text.characters).toBe("Dark");
+    expect(frame).toMatchObject({ itemSpacing: 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12, paddingLeft: 12, counterAxisSpacing: 12 });
+    expect(rectangle).toMatchObject({ minWidth: 180, maxWidth: 180, minHeight: 12, maxHeight: 90 });
     expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
 
     rectangle.setExplicitVariableModeForCollection(collection, "light");
@@ -107,6 +121,22 @@ describe("Variables resource runtime", () => {
     expect(rectangle.boundVariables).not.toHaveProperty("width");
     expect(rectangle.boundVariables).not.toHaveProperty("height");
     expect(text.boundVariables).toBeUndefined();
+
+    frame.itemSpacing = 4;
+    frame.paddingTop = 1;
+    frame.paddingRight = 2;
+    frame.paddingBottom = 3;
+    frame.paddingLeft = 4;
+    frame.counterAxisSpacing = 6;
+    rectangle.minWidth = 50;
+    rectangle.maxWidth = 200;
+    rectangle.minHeight = 10;
+    rectangle.maxHeight = 100;
+    expect(frame.boundVariables).toBeUndefined();
+    expect(rectangle.boundVariables).not.toHaveProperty("minWidth");
+    expect(rectangle.boundVariables).not.toHaveProperty("maxWidth");
+    expect(rectangle.boundVariables).not.toHaveProperty("minHeight");
+    expect(rectangle.boundVariables).not.toHaveProperty("maxHeight");
 
     rectangle.opacity = .7;
     expect(rectangle.opacity).toBe(.7);

@@ -185,7 +185,29 @@ export interface RuntimeNodeHost {
 
 export type RuntimeLetterSpacing = Readonly<{ value: number; unit: "PIXELS" }>;
 export type RuntimeLineHeight = RuntimeParagraphLineHeight;
-export type RuntimeVariableBindableNodeField = "width" | "height" | "characters" | "visible" | "strokeWeight" | "opacity";
+const RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS = [
+  "width",
+  "height",
+  "characters",
+  "itemSpacing",
+  "paddingLeft",
+  "paddingRight",
+  "paddingTop",
+  "paddingBottom",
+  "minWidth",
+  "maxWidth",
+  "minHeight",
+  "maxHeight",
+  "counterAxisSpacing",
+  "visible",
+  "strokeWeight",
+  "opacity",
+] as const;
+const RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET = new Set<string>(RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS);
+export type RuntimeVariableBindableNodeField = typeof RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS[number];
+function isRuntimeVariableBindableNodeField(value: string): value is RuntimeVariableBindableNodeField {
+  return RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET.has(value);
+}
 function isRuntimeLineHeight(value: unknown): value is RuntimeLineHeight {
   if (!value || typeof value !== "object" || !("unit" in value)) return false;
   const candidate = value as { unit?: unknown; value?: unknown };
@@ -1344,7 +1366,7 @@ export class RuntimeNodeProxy {
     return Object.keys(aliases).length ? aliases : undefined;
   }
   setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
-    if (!["width", "height", "characters", "opacity", "visible", "strokeWeight"].includes(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (!isRuntimeVariableBindableNodeField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     if (typeof variable === "string") this.host.assertSynchronousDocumentAccess();
     const node = this.read();
     const bindings = { ...variableBindingsFromExtensions(node.extensions) };
@@ -2791,18 +2813,18 @@ export class RuntimeNodeProxy {
   }
 
   get paddingTop(): number { return this.autoLayout().padding[0]; }
-  set paddingTop(value: number) { this.writePadding(0, value); }
+  set paddingTop(value: number) { this.writePadding("paddingTop", 0, value); }
   get paddingRight(): number { return this.autoLayout().padding[1]; }
-  set paddingRight(value: number) { this.writePadding(1, value); }
+  set paddingRight(value: number) { this.writePadding("paddingRight", 1, value); }
   get paddingBottom(): number { return this.autoLayout().padding[2]; }
-  set paddingBottom(value: number) { this.writePadding(2, value); }
+  set paddingBottom(value: number) { this.writePadding("paddingBottom", 2, value); }
   get paddingLeft(): number { return this.autoLayout().padding[3]; }
-  set paddingLeft(value: number) { this.writePadding(3, value); }
+  set paddingLeft(value: number) { this.writePadding("paddingLeft", 3, value); }
   get itemSpacing(): number { return this.autoLayout().itemSpacing; }
   set itemSpacing(value: number) {
     if (!Number.isFinite(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.assertAutoLayoutFrame();
-    this.writeAutoLayout({ itemSpacing: value });
+    this.writeAutoLayoutUnboundVariableFields(["itemSpacing"], { itemSpacing: value });
   }
   get counterAxisSpacing(): number | null {
     this.assertActiveAutoLayoutFrame();
@@ -2813,7 +2835,7 @@ export class RuntimeNodeProxy {
     if (!this.autoLayout().wrap || (value !== null && (!Number.isFinite(value) || value < 0))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    this.writeAutoLayout({ trackSpacing: value ?? undefined });
+    this.writeAutoLayoutUnboundVariableFields(["counterAxisSpacing"], { trackSpacing: value ?? undefined });
   }
   get counterAxisAlignContent(): RuntimeCounterAxisAlignContent {
     this.assertActiveAutoLayoutFrame();
@@ -2954,14 +2976,18 @@ export class RuntimeNodeProxy {
     const bindings = variableBindingsFromExtensions(this.read().extensions);
     const patch: Record<string, unknown> = {};
     for (const [field, variableId] of Object.entries(bindings)) {
-      if (!["width", "height", "characters", "opacity", "visible", "strokeWeight"].includes(field)) continue;
+      if (!isRuntimeVariableBindableNodeField(field)) continue;
       const resolved = this.host.resolveVariableValue(variableId, this.id, override);
-      Object.assign(patch, this.variableFieldPatch(field as RuntimeVariableBindableNodeField, resolved.value, resolved.resolvedType));
+      Object.assign(patch, this.variableFieldPatch(field, resolved.value, resolved.resolvedType, patch));
+    }
+    const layout = patch.autoLayout as RuntimeAutoLayout | undefined;
+    if (layout && ((layout.minWidth ?? 0) > (layout.maxWidth ?? Number.POSITIVE_INFINITY) || (layout.minHeight ?? 0) > (layout.maxHeight ?? Number.POSITIVE_INFINITY))) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     return patch;
   }
 
-  private variableFieldPatch(field: RuntimeVariableBindableNodeField, value: DocumentVariableValue, type: DocumentVariableResolvedType): Readonly<Record<string, unknown>> {
+  private variableFieldPatch(field: RuntimeVariableBindableNodeField, value: DocumentVariableValue, type: DocumentVariableResolvedType, stagedPatch?: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     if (field === "characters") {
       this.assertTextCharacters();
       if (type !== "STRING" || typeof value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
@@ -2984,6 +3010,39 @@ export class RuntimeNodeProxy {
     if (field === "width" || field === "height") {
       if (value <= 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       return { [field]: value };
+    }
+    const layout = stagedPatch?.autoLayout && typeof stagedPatch.autoLayout === "object"
+      ? stagedPatch.autoLayout as RuntimeAutoLayout
+      : this.autoLayout();
+    if (field === "itemSpacing") {
+      this.assertAutoLayoutFrame();
+      return { autoLayout: { ...layout, itemSpacing: value } };
+    }
+    const paddingIndex = field === "paddingTop" ? 0
+      : field === "paddingRight" ? 1
+      : field === "paddingBottom" ? 2
+      : field === "paddingLeft" ? 3
+      : undefined;
+    if (paddingIndex !== undefined) {
+      this.assertAutoLayoutFrame();
+      if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const padding = [...layout.padding] as [number, number, number, number];
+      padding[paddingIndex] = value;
+      return { autoLayout: { ...layout, padding } };
+    }
+    if (field === "counterAxisSpacing") {
+      this.assertActiveAutoLayoutFrame();
+      if (!layout.wrap || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return { autoLayout: { ...layout, trackSpacing: value } };
+    }
+    if (field === "minWidth" || field === "maxWidth" || field === "minHeight" || field === "maxHeight") {
+      this.assertAutoLayoutParticipant();
+      if (value <= 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const next = { ...layout, [field]: value };
+      if (!stagedPatch && ((next.minWidth ?? 0) > (next.maxWidth ?? Number.POSITIVE_INFINITY) || (next.minHeight ?? 0) > (next.maxHeight ?? Number.POSITIVE_INFINITY))) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      }
+      return { autoLayout: next };
     }
     this.assertGeometry();
     if (value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
@@ -3102,7 +3161,7 @@ export class RuntimeNodeProxy {
     if ((next.minWidth ?? 0) > (next.maxWidth ?? Number.POSITIVE_INFINITY) || (next.minHeight ?? 0) > (next.maxHeight ?? Number.POSITIVE_INFINITY)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    this.writeAutoLayout({ [key]: value ?? undefined });
+    this.writeAutoLayoutUnboundVariableFields([key], { [key]: value ?? undefined });
   }
 
   private assertText(): void {
@@ -3280,13 +3339,24 @@ export class RuntimeNodeProxy {
     };
   }
 
-  private writePadding(index: number, value: number): void {
+  private writePadding(field: "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft", index: number, value: number): void {
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.assertAutoLayoutFrame();
     const layout = this.autoLayout();
     const padding = [...layout.padding] as [number, number, number, number];
     padding[index] = value;
-    this.writeAutoLayout({ padding });
+    this.writeAutoLayoutUnboundVariableFields([field], { padding });
+  }
+
+  private writeAutoLayoutUnboundVariableFields(fields: readonly RuntimeVariableBindableNodeField[], patch: Partial<RuntimeAutoLayout>): void {
+    const node = this.read();
+    const bindings = { ...variableBindingsFromExtensions(node.extensions) };
+    const linked = fields.some((field) => Object.hasOwn(bindings, field));
+    for (const field of fields) delete bindings[field];
+    this.write({
+      autoLayout: { ...this.autoLayout(), ...patch },
+      ...(linked ? { extensions: extensionsWithVariableMap(node.extensions, VARIABLE_BINDINGS_EXTENSION, bindings) } : {}),
+    });
   }
 
   private writeAutoLayout(patch: Partial<RuntimeAutoLayout>): void {
