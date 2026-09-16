@@ -24,6 +24,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void component.remote;
   const instance = component.createInstance();
   void instance.componentProperties;
+  void instance.exposedInstances;
+  instance.isExposedInstance = instance.isExposedInstance;
   instance.setProperties({});
   const slot = component.createSlot();
   void slot.limitViolations;

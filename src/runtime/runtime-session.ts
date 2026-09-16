@@ -641,6 +641,19 @@ export class RuntimeSession implements RuntimeContainerHost {
       .map((node) => this.proxyFor(node.id));
   }
 
+  getExposedInstances(instanceId: string): readonly RuntimeNodeProxy[] {
+    this.assertOpen();
+    const root = this.projectionStore.getNode(instanceId);
+    if (!root || root.removed === true || root.type !== "INSTANCE") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+    return [...this.runtimeSubtreePaths(instanceId).keys()].flatMap((id): RuntimeNodeProxy[] => {
+      if (id === instanceId) return [];
+      const node = this.projectionStore.getNode(id);
+      return node?.type === "INSTANCE" && (node.instanceMetadata as DocumentInstanceMetadata | undefined)?.isExposedInstance
+        ? [this.proxyFor(id)]
+        : [];
+    });
+  }
+
   createFrame(): RuntimeContainerNodeProxy { return this.createNode("FRAME") as RuntimeContainerNodeProxy; }
   createGroup(): RuntimeContainerNodeProxy { return this.createNode("GROUP") as RuntimeContainerNodeProxy; }
   createSection(): RuntimeContainerNodeProxy { return this.createNode("SECTION") as RuntimeContainerNodeProxy; }
@@ -1464,6 +1477,42 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
     this.enqueueOperations(operations);
     return true;
+  }
+
+  setInstanceExposed(instanceId: string, value: boolean): void {
+    this.assertOpen();
+    const source = this.projectionStore.getNode(instanceId);
+    const sourceMetadata = source?.instanceMetadata as DocumentInstanceMetadata | undefined;
+    if (!source || source.removed === true || source.type !== "INSTANCE" || !sourceMetadata) {
+      throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+    }
+    let current = typeof source.parentId === "string" ? this.projectionStore.getNode(source.parentId) : undefined;
+    const visited = new Set<string>();
+    let owner: RuntimeProjectionNode | undefined;
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (current.type === "INSTANCE") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+      if (current.type === "COMPONENT") { owner = current; break; }
+      current = typeof current.parentId === "string" ? this.projectionStore.getNode(current.parentId) : undefined;
+    }
+    const ownerMetadata = owner?.componentMetadata as DocumentComponentMetadata | undefined;
+    if (!owner || !ownerMetadata || ownerMetadata.remote) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+    const ownerId = owner.id;
+    const linkedRoots = new Set(this.projectionStore.listLiveNodes().filter((node) =>
+      node.type === "INSTANCE" && instanceMainComponentId(node) === ownerId).map((node) => node.id));
+    const inherited = this.projectionStore.listLiveNodes().filter((node) =>
+      node.type === "INSTANCE" &&
+      runtimeInstanceSourceNodeId(node) === source.id &&
+      runtimeNodeHasAncestorIn(node, linkedRoots, (id) => this.projectionStore.getNode(id)));
+    if (inherited.length + 1 > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+    this.enqueueOperations([source, ...inherited].map((node) => {
+      const metadata = node.instanceMetadata as DocumentInstanceMetadata;
+      return {
+        type: "update" as const,
+        nodeId: node.id,
+        patch: { instanceMetadata: { ...structuredClone(metadata), isExposedInstance: value } },
+      };
+    }));
   }
 
   setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void {

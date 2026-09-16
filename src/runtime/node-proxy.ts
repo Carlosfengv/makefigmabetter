@@ -175,6 +175,7 @@ export interface RuntimeNodeHost {
   hasLiveNode(nodeId: string): boolean;
   getNodeByIdAsync(nodeId: string): Promise<RuntimeNodeProxy | null>;
   getInstancesOfComponentAsync(componentId: string): Promise<readonly RuntimeNodeProxy[]>;
+  getExposedInstances(instanceId: string): readonly RuntimeNodeProxy[];
   createInstance(componentId: string): RuntimeContainerNodeProxy;
   createSlot(componentId: string): RuntimeContainerNodeProxy;
   resetSlot(slotId: string): void;
@@ -191,6 +192,7 @@ export interface RuntimeNodeHost {
   deleteComponentProperty(componentId: string, propertyName: string): void;
   setComponentPropertyReferences(nodeId: string, references: DocumentComponentPropertyReferences | null): void;
   setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void;
+  setInstanceExposed(instanceId: string, value: boolean): void;
   renameVariantComponent(componentId: string, name: string): boolean;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
@@ -1840,6 +1842,15 @@ export class RuntimeNodeProxy {
 
   get scaleFactor(): number { return this.instanceMetadata().scaleFactor; }
   get isExposedInstance(): boolean { return this.instanceMetadata().isExposedInstance; }
+  set isExposedInstance(value: boolean) {
+    if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    this.host.setInstanceExposed(this.handle.nodeId, value);
+  }
+  get exposedInstances(): readonly RuntimeNodeProxy[] {
+    this.instanceMetadata();
+    return this.host.getExposedInstances(this.handle.nodeId);
+  }
 
   get pointCount(): number {
     if (this.type !== "POLYGON" && this.type !== "STAR") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });

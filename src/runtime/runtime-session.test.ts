@@ -698,6 +698,38 @@ describe("M1 RuntimeSession", () => {
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
   });
 
+  it("inherits exposed nested Instance state into linked component Instances", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const icon = session.createComponent();
+    icon.name = "Icon";
+    icon.appendChild(session.createRectangle());
+    const card = session.createComponent();
+    card.name = "Card";
+    const nested = icon.createInstance();
+    card.appendChild(nested);
+    const cardInstance = card.createInstance();
+    const inherited = cardInstance.children.find((child) => child.type === "INSTANCE")!;
+
+    expect(nested.isExposedInstance).toBe(false);
+    expect(cardInstance.exposedInstances).toEqual([]);
+    nested.isExposedInstance = true;
+    expect(nested.isExposedInstance).toBe(true);
+    expect(inherited.isExposedInstance).toBe(true);
+    expect(cardInstance.exposedInstances).toEqual([inherited]);
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => { inherited.isExposedInstance = false; }), "UNSUPPORTED_PROPERTY")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: nested.id, patch: { instanceMetadata: expect.objectContaining({ isExposedInstance: true }) } }),
+      expect.objectContaining({ type: "update", nodeId: inherited.id, patch: { instanceMetadata: expect.objectContaining({ isExposedInstance: true }) } }),
+    ]));
+  });
+
   it("resolves and preserves VariableAlias component defaults", () => {
     const projection: RuntimeProjection = {
       ...initial,
