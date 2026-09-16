@@ -3273,6 +3273,58 @@ describe("M1 RuntimeSession", () => {
     ]));
   });
 
+  it("materializes manual Grid anchors, preserves them on reorder, and assigns new children", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    grid.gridRowCount = 3;
+    grid.gridColumnCount = 3;
+    const first = session.createRectangle();
+    const second = session.createRectangle();
+    const third = session.createRectangle();
+    grid.appendChild(first);
+    grid.appendChild(second);
+    grid.appendChild(third);
+    first.gridRowSpan = 2;
+    first.gridColumnSpan = 2;
+    third.gridColumnSpan = 2;
+
+    grid.gridItemsPositioning = "MANUAL";
+    expect(grid.gridItemsPositioning).toBe("MANUAL");
+    expect([first.gridRowAnchorIndex, first.gridColumnAnchorIndex]).toEqual([0, 0]);
+    expect([second.gridRowAnchorIndex, second.gridColumnAnchorIndex]).toEqual([0, 2]);
+    expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([2, 0]);
+
+    grid.insertChild(0, third);
+    expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([2, 0]);
+    second.setGridChildPosition(2, 2);
+    expect([second.gridRowAnchorIndex, second.gridColumnAnchorIndex]).toEqual([2, 2]);
+    expect(isRuntimeError(captureError(() => first.setGridChildPosition(1, 1)), "INVALID_ARGUMENT")).toBe(true);
+
+    const fourth = session.createRectangle();
+    grid.appendChild(fourth);
+    expect([fourth.gridRowAnchorIndex, fourth.gridColumnAnchorIndex]).toEqual([0, 2]);
+    fourth.layoutPositioning = "ABSOLUTE";
+    fourth.layoutPositioning = "AUTO";
+    expect([fourth.gridRowAnchorIndex, fourth.gridColumnAnchorIndex]).toEqual([0, 2]);
+
+    grid.gridItemsPositioning = "ROW_AUTO_FLOW";
+    expect(grid.gridItemsPositioning).toBe("ROW_AUTO_FLOW");
+    expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([0, 0]);
+    await expect(session.commitAsync()).resolves.toBe(1);
+    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: grid.id,
+        patch: { autoLayout: expect.objectContaining({ gridItemsPositioning: undefined }) },
+      }),
+      expect.objectContaining({
+        nodeId: fourth.id,
+        patch: { autoLayout: expect.objectContaining({ gridRowAnchor: undefined, gridColumnAnchor: undefined }) },
+      }),
+    ]));
+  });
+
   it("rejects a HUG track that contains a FILL child before staging", () => {
     const session = sessionFor(new InMemoryTransport(initial));
     const grid = session.createFrame();

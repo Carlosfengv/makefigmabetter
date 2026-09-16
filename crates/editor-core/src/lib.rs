@@ -380,6 +380,13 @@ pub enum GridTrack {
     Hug,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridItemsPositioning {
+    #[default]
+    RowAutoFlow,
+    Manual,
+}
+
 /// Container and child inputs live in a separate canonical table, which keeps
 /// legacy Node snapshots byte-compatible while still making layout semantic.
 #[derive(Debug, Clone, PartialEq)]
@@ -416,6 +423,12 @@ pub struct AutoLayout {
     /// one-track default; explicit one is rejected at the protocol boundary.
     pub grid_row_span: Option<u32>,
     pub grid_column_span: Option<u32>,
+    /// Grid container placement policy. Row auto-flow is the legacy default.
+    pub grid_items_positioning: GridItemsPositioning,
+    /// Direct-child manual Grid anchors. Both values are present together and
+    /// are interpreted only while the parent Grid uses manual positioning.
+    pub grid_row_anchor: Option<u32>,
+    pub grid_column_anchor: Option<u32>,
 }
 
 impl Default for AutoLayout {
@@ -443,6 +456,9 @@ impl Default for AutoLayout {
             grid_column_gap: None,
             grid_row_span: None,
             grid_column_span: None,
+            grid_items_positioning: GridItemsPositioning::RowAutoFlow,
+            grid_row_anchor: None,
+            grid_column_anchor: None,
         }
     }
 }
@@ -6103,33 +6119,56 @@ impl Document {
                         {
                             return Err(CommandError::AutoLayoutUnsupported);
                         }
-                        let mut placement = None;
-                        'cells: for index in 0..cell_count {
-                            let row = index / layout.grid_columns.len();
-                            let column = index % layout.grid_columns.len();
-                            if row + row_span > layout.grid_rows.len()
-                                || column + column_span > layout.grid_columns.len()
-                            {
-                                continue;
+                        let mut placement = match layout.grid_items_positioning {
+                            GridItemsPositioning::Manual => child_layout
+                                .grid_row_anchor
+                                .zip(child_layout.grid_column_anchor)
+                                .map(|(row, column)| (row as usize, column as usize)),
+                            GridItemsPositioning::RowAutoFlow => {
+                                if child_layout.grid_row_anchor.is_some()
+                                    || child_layout.grid_column_anchor.is_some()
+                                {
+                                    return Err(CommandError::InvalidAutoLayout);
+                                }
+                                None
                             }
-                            for occupied_row in row..row + row_span {
-                                for occupied_column in column..column + column_span {
-                                    if occupied
-                                        [occupied_row * layout.grid_columns.len() + occupied_column]
-                                    {
-                                        continue 'cells;
+                        };
+                        if layout.grid_items_positioning == GridItemsPositioning::RowAutoFlow {
+                            'cells: for index in 0..cell_count {
+                                let row = index / layout.grid_columns.len();
+                                let column = index % layout.grid_columns.len();
+                                if row + row_span > layout.grid_rows.len()
+                                    || column + column_span > layout.grid_columns.len()
+                                {
+                                    continue;
+                                }
+                                for occupied_row in row..row + row_span {
+                                    for occupied_column in column..column + column_span {
+                                        if occupied[occupied_row * layout.grid_columns.len()
+                                            + occupied_column]
+                                        {
+                                            continue 'cells;
+                                        }
                                     }
                                 }
+                                placement = Some((row, column));
+                                break;
                             }
-                            placement = Some((row, column));
-                            break;
                         }
                         let (row, column) = placement.ok_or(CommandError::AutoLayoutUnsupported)?;
+                        if row + row_span > layout.grid_rows.len()
+                            || column + column_span > layout.grid_columns.len()
+                        {
+                            return Err(CommandError::AutoLayoutUnsupported);
+                        }
                         for occupied_row in row..row + row_span {
                             for occupied_column in column..column + column_span {
-                                occupied
-                                    [occupied_row * layout.grid_columns.len() + occupied_column] =
-                                    true;
+                                let index =
+                                    occupied_row * layout.grid_columns.len() + occupied_column;
+                                if occupied[index] {
+                                    return Err(CommandError::AutoLayoutUnsupported);
+                                }
+                                occupied[index] = true;
                             }
                         }
 
@@ -9404,6 +9443,24 @@ fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
         hasher.update(layout.grid_row_span.unwrap_or(1).to_be_bytes());
         hasher.update(layout.grid_column_span.unwrap_or(1).to_be_bytes());
     }
+    if layout.grid_items_positioning == GridItemsPositioning::Manual
+        || layout.grid_row_anchor.is_some()
+        || layout.grid_column_anchor.is_some()
+    {
+        hasher.update(b"makefigma/editor-core/grid-manual-placement-v1");
+        hasher.update([u8::from(
+            layout.grid_items_positioning == GridItemsPositioning::Manual,
+        )]);
+        for anchor in [layout.grid_row_anchor, layout.grid_column_anchor] {
+            match anchor {
+                Some(value) => {
+                    hasher.update([1]);
+                    hasher.update(value.to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+    }
 }
 
 fn valid_auto_layout(layout: &AutoLayout) -> bool {
@@ -9483,6 +9540,11 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
         && layout
             .grid_column_span
             .is_none_or(|value| (2..=128).contains(&value))
+        && (layout.grid_row_anchor.is_some() == layout.grid_column_anchor.is_some())
+        && layout.grid_row_anchor.is_none_or(|value| value < 128)
+        && layout.grid_column_anchor.is_none_or(|value| value < 128)
+        && (layout.mode == LayoutMode::Grid
+            || layout.grid_items_positioning == GridItemsPositioning::RowAutoFlow)
         && grid_valid
 }
 
@@ -12855,6 +12917,120 @@ mod tests {
                     vec![Command::SetAutoLayout {
                         id: second.id,
                         layout: overspan,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::AutoLayoutUnsupported)
+        );
+        assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn grid_manual_placement_uses_persisted_anchors_and_rejects_collisions_atomically() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 260.0;
+        frame.height = 170.0;
+        let mut first = node(2);
+        first.parent_id = Some(frame.id);
+        let mut second = node(3);
+        second.parent_id = Some(frame.id);
+        let tracks = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Fixed(50.0); 3],
+            grid_columns: vec![GridTrack::Fixed(80.0); 3],
+            grid_row_gap: Some(10.0),
+            grid_column_gap: Some(10.0),
+            grid_items_positioning: GridItemsPositioning::Manual,
+            ..AutoLayout::default()
+        };
+        let first_layout = AutoLayout {
+            primary_sizing: LayoutSizing::Fill,
+            counter_sizing: LayoutSizing::Fill,
+            grid_row_span: Some(2),
+            grid_column_span: Some(2),
+            grid_row_anchor: Some(1),
+            grid_column_anchor: Some(1),
+            ..AutoLayout::default()
+        };
+        let second_layout = AutoLayout {
+            grid_row_anchor: Some(0),
+            grid_column_anchor: Some(0),
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: first.id,
+                            layout: first_layout,
+                        },
+                        Command::SetAutoLayout {
+                            id: second.id,
+                            layout: second_layout,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: tracks,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            document
+                .node(first.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((90.0, 60.0, 170.0, 110.0))
+        );
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetNodePosition {
+                        id: first.id,
+                        position: PositionId {
+                            key: 4,
+                            actor: ActorId(0),
+                        },
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            document.node(first.id).map(|node| (node.x, node.y)),
+            Some((90.0, 60.0))
+        );
+
+        let hash = document.canonical_hash();
+        let collision = AutoLayout {
+            grid_row_anchor: Some(1),
+            grid_column_anchor: Some(1),
+            ..document.auto_layout_for_node(second.id)
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAutoLayout {
+                        id: second.id,
+                        layout: collision
                     }],
                 ),
                 Origin::LocalUser,

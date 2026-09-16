@@ -204,6 +204,13 @@ export enum GridTrackType {
   UNRECOGNIZED = -1,
 }
 
+export enum GridItemsPositioning {
+  GRID_ITEMS_POSITIONING_UNSPECIFIED = 0,
+  GRID_ITEMS_POSITIONING_ROW_AUTO_FLOW = 1,
+  GRID_ITEMS_POSITIONING_MANUAL = 2,
+  UNRECOGNIZED = -1,
+}
+
 export enum ColorSpace {
   COLOR_SPACE_UNSPECIFIED = 0,
   COLOR_SPACE_SRGB = 1,
@@ -592,7 +599,16 @@ export interface AutoLayout {
    * track; canonical writers omit the explicit value one.
    */
   gridRowSpan?: number | undefined;
-  gridColumnSpan?: number | undefined;
+  gridColumnSpan?:
+    | number
+    | undefined;
+  /**
+   * Manual Grid placement requires semantics 59. Row auto-flow is omitted by
+   * canonical writers. Manual children persist both zero-based anchors.
+   */
+  gridItemsPositioning?: GridItemsPositioning | undefined;
+  gridRowAnchor?: number | undefined;
+  gridColumnAnchor?: number | undefined;
 }
 
 export interface Color {
@@ -2858,6 +2874,9 @@ function createBaseAutoLayout(): AutoLayout {
     gridColumnGap: undefined,
     gridRowSpan: undefined,
     gridColumnSpan: undefined,
+    gridItemsPositioning: undefined,
+    gridRowAnchor: undefined,
+    gridColumnAnchor: undefined,
   };
 }
 
@@ -2937,6 +2956,15 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.gridColumnSpan !== undefined) {
       writer.uint32(200).uint32(message.gridColumnSpan);
+    }
+    if (message.gridItemsPositioning !== undefined) {
+      writer.uint32(208).int32(message.gridItemsPositioning);
+    }
+    if (message.gridRowAnchor !== undefined) {
+      writer.uint32(216).uint32(message.gridRowAnchor);
+    }
+    if (message.gridColumnAnchor !== undefined) {
+      writer.uint32(224).uint32(message.gridColumnAnchor);
     }
     return writer;
   },
@@ -3148,6 +3176,30 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.gridColumnSpan = reader.uint32();
           continue;
         }
+        case 26: {
+          if (tag !== 208) {
+            break;
+          }
+
+          message.gridItemsPositioning = reader.int32() as any;
+          continue;
+        }
+        case 27: {
+          if (tag !== 216) {
+            break;
+          }
+
+          message.gridRowAnchor = reader.uint32();
+          continue;
+        }
+        case 28: {
+          if (tag !== 224) {
+            break;
+          }
+
+          message.gridColumnAnchor = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3187,6 +3239,9 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.gridColumnGap = object.gridColumnGap ?? undefined;
     message.gridRowSpan = object.gridRowSpan ?? undefined;
     message.gridColumnSpan = object.gridColumnSpan ?? undefined;
+    message.gridItemsPositioning = object.gridItemsPositioning ?? undefined;
+    message.gridRowAnchor = object.gridRowAnchor ?? undefined;
+    message.gridColumnAnchor = object.gridColumnAnchor ?? undefined;
     return message;
   },
 };

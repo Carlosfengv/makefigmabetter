@@ -256,6 +256,12 @@ enum GridTrackType {
   GRID_TRACK_TYPE_HUG = 3;
 }
 
+enum GridItemsPositioning {
+  GRID_ITEMS_POSITIONING_UNSPECIFIED = 0;
+  GRID_ITEMS_POSITIONING_ROW_AUTO_FLOW = 1;
+  GRID_ITEMS_POSITIONING_MANUAL = 2;
+}
+
 message GridTrack {
   GridTrackType type = 1;
   // FLEX uses fractional units; FIXED uses logical pixels; HUG ignores value.
@@ -300,6 +306,11 @@ message AutoLayout {
   // track; canonical writers omit the explicit value one.
   optional uint32 grid_row_span = 24;
   optional uint32 grid_column_span = 25;
+  // Manual Grid placement requires semantics 59. Row auto-flow is omitted by
+  // canonical writers. Manual children persist both zero-based anchors.
+  optional GridItemsPositioning grid_items_positioning = 26;
+  optional uint32 grid_row_anchor = 27;
+  optional uint32 grid_column_anchor = 28;
 }
 
 enum ColorSpace {

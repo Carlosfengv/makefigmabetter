@@ -146,6 +146,11 @@ export interface DocumentAutoLayout {
   /** Direct Grid-child spans. Omission is the canonical one-track default. */
   gridRowSpan?: number;
   gridColumnSpan?: number;
+  /** Grid container policy; omission is row auto-flow. Manual children persist
+   * both zero-based anchors so layer reordering does not move geometry. */
+  gridItemsPositioning?: "manual";
+  gridRowAnchor?: number;
+  gridColumnAnchor?: number;
 }
 export type AutoLayoutPaddingSide = "top" | "right" | "bottom" | "left";
 /** Stable line-height for text records that predate an explicit paragraph value. */

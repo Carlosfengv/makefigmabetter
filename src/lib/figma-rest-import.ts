@@ -722,10 +722,14 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
     const mask = maskState(node, sourceId, issues);
     Object.assign(extensions, mask.extensions);
     exportSettings(node.exportSettings, sourceId, issues, extensions);
-    const autoLayout = layout(node, kind, sourceId, issues, extensions);
+    let autoLayout = layout(node, kind, sourceId, issues, extensions);
     const constraints = constraintState(node.constraints, sourceId, issues, extensions);
     const appearance = strokeAppearance(node, kind, sourceId, issues, extensions);
     const parent = parentId ? nodeById.get(parentId) : undefined;
+    if (autoLayout && parent?.autoLayout?.gridItemsPositioning !== "manual"
+      && (autoLayout.gridRowAnchor !== undefined || autoLayout.gridColumnAnchor !== undefined)) {
+      autoLayout = { ...autoLayout, gridRowAnchor: undefined, gridColumnAnchor: undefined };
+    }
     // Core owns the position of an AUTO flow child. Figma still returns a
     // relativeTransform for that child, but preserving it would create two
     // incompatible geometry authorities. Absolute children remain affine.
@@ -1468,17 +1472,28 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const alignSelf = childAlignment(string(node.layoutAlign));
   const rawGridRowSpan = finite(node.gridRowSpan);
   const rawGridColumnSpan = finite(node.gridColumnSpan);
+  const rawGridRowAnchor = finite(node.gridRowAnchorIndex);
+  const rawGridColumnAnchor = finite(node.gridColumnAnchorIndex);
   const validGridSpan = (value: number | undefined) => value === undefined || (Number.isInteger(value) && value >= 1 && value <= 128);
   const hasGridSpan = node.gridRowSpan !== undefined || node.gridColumnSpan !== undefined;
   const validGridSpanField = (source: unknown, value: number | undefined) =>
     source === undefined || (value !== undefined && validGridSpan(value));
   const gridSpansValid = validGridSpanField(node.gridRowSpan, rawGridRowSpan)
     && validGridSpanField(node.gridColumnSpan, rawGridColumnSpan);
+  const hasGridAnchor = node.gridRowAnchorIndex !== undefined || node.gridColumnAnchorIndex !== undefined;
+  const gridAnchorsValid = node.gridRowAnchorIndex !== undefined
+    && node.gridColumnAnchorIndex !== undefined
+    && Number.isInteger(rawGridRowAnchor) && rawGridRowAnchor! >= 0 && rawGridRowAnchor! < 128
+    && Number.isInteger(rawGridColumnAnchor) && rawGridColumnAnchor! >= 0 && rawGridColumnAnchor! < 128;
   if (hasGridSpan && !gridSpansValid) {
     extensions["figma.rest.grid-child.v1"] = jsonBytes({ gridRowSpan: node.gridRowSpan, gridColumnSpan: node.gridColumnSpan });
     issues.push({ sourceId, capability: "grid-child-span", outcome: "preserved-extension", reason: "Grid child spans must be integers from 1 to 128." });
   }
-  if (!horizontal && !vertical && !grid && !absolute && !alignSelf && !hasGridSpan) {
+  if (hasGridAnchor && !gridAnchorsValid) {
+    extensions["figma.rest.grid-child.v1"] = jsonBytes({ gridRowAnchorIndex: node.gridRowAnchorIndex, gridColumnAnchorIndex: node.gridColumnAnchorIndex });
+    issues.push({ sourceId, capability: "grid-child-placement", outcome: "preserved-extension", reason: "Manual Grid anchors must be paired zero-based integers from 0 to 127." });
+  }
+  if (!horizontal && !vertical && !grid && !absolute && !alignSelf && !hasGridSpan && !hasGridAnchor) {
     return undefined;
   }
   const mappedMode = horizontal ? "horizontal" : vertical ? "vertical" : grid ? "grid" : "none";
@@ -1533,23 +1548,34 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
         || !validGridSpanField(source.gridColumnSpan, parsedColumnSpan)) return undefined;
       const rowSpan = parsedRowSpan ?? 1;
       const columnSpan = parsedColumnSpan ?? 1;
-      let placement: { row: number; column: number } | undefined;
-      for (let index = 0; index < occupied.length; index += 1) {
-        const row = Math.floor(index / gridColumns.length);
-        const column = index % gridColumns.length;
-        if (row + rowSpan > gridRows.length || column + columnSpan > gridColumns.length) continue;
-        let available = true;
-        for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
-          for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
-            if (occupied[occupiedRow * gridColumns.length + occupiedColumn]) { available = false; break; }
+      const parsedRowAnchor = finite(source.gridRowAnchorIndex);
+      const parsedColumnAnchor = finite(source.gridColumnAnchorIndex);
+      let placement: { row: number; column: number } | undefined = gridItemsPositioning === "MANUAL"
+        && Number.isInteger(parsedRowAnchor) && parsedRowAnchor! >= 0
+        && Number.isInteger(parsedColumnAnchor) && parsedColumnAnchor! >= 0
+        ? { row: parsedRowAnchor!, column: parsedColumnAnchor! }
+        : undefined;
+      if (gridItemsPositioning === "MANUAL" && !placement) return undefined;
+      if (!placement) {
+        for (let index = 0; index < occupied.length; index += 1) {
+          const row = Math.floor(index / gridColumns.length);
+          const column = index % gridColumns.length;
+          if (row + rowSpan > gridRows.length || column + columnSpan > gridColumns.length) continue;
+          let available = true;
+          for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+              if (occupied[occupiedRow * gridColumns.length + occupiedColumn]) { available = false; break; }
+            }
           }
+          if (available) { placement = { row, column }; break; }
         }
-        if (available) { placement = { row, column }; break; }
       }
-      if (!placement) return undefined;
+      if (!placement || placement.row + rowSpan > gridRows.length || placement.column + columnSpan > gridColumns.length) return undefined;
       for (let occupiedRow = placement.row; occupiedRow < placement.row + rowSpan; occupiedRow += 1) {
         for (let occupiedColumn = placement.column; occupiedColumn < placement.column + columnSpan; occupiedColumn += 1) {
-          occupied[occupiedRow * gridColumns.length + occupiedColumn] = true;
+          const index = occupiedRow * gridColumns.length + occupiedColumn;
+          if (occupied[index]) return undefined;
+          occupied[index] = true;
         }
       }
       placements.push({ source, ...placement, rowSpan, columnSpan });
@@ -1566,10 +1592,10 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     || !gridPlacements
     || gridHasFillHugCycle
     || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE")
-    || gridItemsPositioning !== "ROW_AUTO_FLOW"
+    || (gridItemsPositioning !== "ROW_AUTO_FLOW" && gridItemsPositioning !== "MANUAL")
   )) {
     extensions["figma.rest.grid-auto-layout.v1"] = jsonBytes({ gridRowCount: node.gridRowCount, gridColumnCount: node.gridColumnCount, gridRowSizes: node.gridRowSizes, gridColumnSizes: node.gridColumnSizes, gridRowGap: node.gridRowGap, gridColumnGap: node.gridColumnGap, gridAutoTracks: node.gridAutoTracks, gridItemsPositioning: node.gridItemsPositioning });
-    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, unplaceable spans, HUG/FILL cycles, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, unplaceable spans or anchors, HUG/FILL cycles, automatic rows or an oversized track matrix is outside the bounded Grid subset." });
     return undefined;
   }
   return {
@@ -1595,6 +1621,9 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     gridColumnGap,
     gridRowSpan: gridSpansValid && rawGridRowSpan !== undefined && rawGridRowSpan !== 1 ? rawGridRowSpan : undefined,
     gridColumnSpan: gridSpansValid && rawGridColumnSpan !== undefined && rawGridColumnSpan !== 1 ? rawGridColumnSpan : undefined,
+    gridItemsPositioning: grid && gridItemsPositioning === "MANUAL" ? "manual" : undefined,
+    gridRowAnchor: gridAnchorsValid ? rawGridRowAnchor : undefined,
+    gridColumnAnchor: gridAnchorsValid ? rawGridColumnAnchor : undefined,
   };
 }
 

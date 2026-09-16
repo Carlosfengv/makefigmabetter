@@ -49,6 +49,12 @@ export function normalizeAutoLayout(
       || (counter && candidate === "baseline") ? candidate : "start";
   const sizing = (candidate: unknown): DocumentAutoLayout["primarySizing"] =>
     candidate === "hug" || candidate === "fill" ? candidate : "fixed";
+  const gridAnchor = (candidate: unknown): number | undefined =>
+    typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 && candidate < 128
+      ? candidate
+      : undefined;
+  const rowAnchor = gridAnchor(source.gridRowAnchor);
+  const columnAnchor = gridAnchor(source.gridColumnAnchor);
   return {
     mode,
     padding,
@@ -72,6 +78,9 @@ export function normalizeAutoLayout(
     gridColumnGap: mode === "grid" ? optionalFiniteNonNegative(source.gridColumnGap) ?? 0 : undefined,
     gridRowSpan: optionalGridSpan(source.gridRowSpan),
     gridColumnSpan: optionalGridSpan(source.gridColumnSpan),
+    gridItemsPositioning: mode === "grid" && source.gridItemsPositioning === "manual" ? "manual" : undefined,
+    gridRowAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? rowAnchor : undefined,
+    gridColumnAnchor: rowAnchor !== undefined && columnAnchor !== undefined ? columnAnchor : undefined,
   };
 }
 

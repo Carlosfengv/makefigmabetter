@@ -6,17 +6,17 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridTrack, HyperlinkTarget,
-    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
-    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
-    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
-    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
-    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    can_parent_contain_child,
+    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridItemsPositioning, GridTrack,
+    HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
+    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page,
+    PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
+    TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment, can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -84,8 +84,9 @@ pub const TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 55;
 pub const GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION: u32 = 56;
 pub const GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION: u32 = 57;
 pub const GRID_SPAN_ENGINE_SEMANTICS_VERSION: u32 = 58;
+pub const GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION: u32 = 59;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_SPAN_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -119,6 +120,16 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.grid_items_positioning == GridItemsPositioning::Manual
+                || layout.grid_row_anchor.is_some()
+                || layout.grid_column_anchor.is_some()
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < GRID_SPAN_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             let layout = document.auto_layout_for_node(node.id);
@@ -694,6 +705,24 @@ pub fn document_from_snapshot_with_engine_semantics(
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version < GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.grid_items_positioning.is_some()
+                            || layout.grid_row_anchor.is_some()
+                            || layout.grid_column_anchor.is_some()
+                    })
+            })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < GRID_SPAN_ENGINE_SEMANTICS_VERSION
         && snapshot
             .page_chunks
@@ -1891,6 +1920,10 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         grid_column_gap: value.grid_column_gap,
         grid_row_span: value.grid_row_span,
         grid_column_span: value.grid_column_span,
+        grid_items_positioning: (value.grid_items_positioning == GridItemsPositioning::Manual)
+            .then_some(v1::GridItemsPositioning::Manual as i32),
+        grid_row_anchor: value.grid_row_anchor,
+        grid_column_anchor: value.grid_column_anchor,
     }
 }
 fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
@@ -1969,6 +2002,16 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
         Some(v1::WrapTrackAlignment::SpaceBetween) => WrapTrackAlignment::SpaceBetween,
         Some(v1::WrapTrackAlignment::Unspecified) => return Err(SnapshotError::Invalid),
     };
+    let grid_items_positioning = match value.grid_items_positioning {
+        None => GridItemsPositioning::RowAutoFlow,
+        Some(raw) => {
+            match v1::GridItemsPositioning::try_from(raw).map_err(|_| SnapshotError::Invalid)? {
+                v1::GridItemsPositioning::RowAutoFlow => GridItemsPositioning::RowAutoFlow,
+                v1::GridItemsPositioning::Manual => GridItemsPositioning::Manual,
+                v1::GridItemsPositioning::Unspecified => return Err(SnapshotError::Invalid),
+            }
+        }
+    };
     let layout = AutoLayout {
         mode,
         padding: [
@@ -2005,6 +2048,9 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
         grid_column_gap: value.grid_column_gap,
         grid_row_span: value.grid_row_span,
         grid_column_span: value.grid_column_span,
+        grid_items_positioning,
+        grid_row_anchor: value.grid_row_anchor,
+        grid_column_anchor: value.grid_column_anchor,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -4272,6 +4318,37 @@ mod tests {
         .unwrap();
         assert_eq!(restored.auto_layout_for_node(child.id), layout);
         assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn grid_manual_placement_requires_semantics_fifty_nine() {
+        let mut document = Document::with_id(DocumentId(80));
+        let mut frame = node(10, NodeKind::Frame, None);
+        frame.width = 100.0;
+        frame.height = 100.0;
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Fixed(100.0)],
+            grid_columns: vec![GridTrack::Fixed(100.0)],
+            grid_items_positioning: GridItemsPositioning::Manual,
+            ..AutoLayout::default()
+        };
+        document.seed_auto_layout(frame.id, layout.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_SPAN_ENGINE_SEMANTICS_VERSION),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bytes = snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot(
+            &bytes,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.auto_layout_for_node(frame.id), layout);
     }
 
     #[test]

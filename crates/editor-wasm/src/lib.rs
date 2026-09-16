@@ -7,17 +7,17 @@ use editor_core::{
     ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
-    FontReference, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
-    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
-    OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks,
-    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
-    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
-    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
-    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    FontReference, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow,
+    LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node,
+    NodeId, NodeKind, OpenTypeFeature, OperationEnvelope, OperationId, Origin, Page, PageId,
+    PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
+    TextWrapStyle, Transaction, TransactionId, VariableCollectionResource, VariableMode,
+    VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
+    VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -936,7 +936,15 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=72).contains(&snapshot.schema_version)
+    if !(1..=73).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 73
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout.grid_items_positioning.is_some()
+                        || layout.grid_row_anchor.is_some()
+                        || layout.grid_column_anchor.is_some()
+                })
+            }))
         || (snapshot.schema_version < 72
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -1644,6 +1652,12 @@ struct ProjectionAutoLayout {
     grid_row_span: Option<u32>,
     #[serde(default)]
     grid_column_span: Option<u32>,
+    #[serde(default)]
+    grid_items_positioning: Option<String>,
+    #[serde(default)]
+    grid_row_anchor: Option<u32>,
+    #[serde(default)]
+    grid_column_anchor: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2381,6 +2395,13 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            let layout = self.document.auto_layout_for_node(node.id);
+            layout.grid_items_positioning == GridItemsPositioning::Manual
+                || layout.grid_row_anchor.is_some()
+                || layout.grid_column_anchor.is_some()
+        }) {
+            73
+        } else if self.document.nodes().any(|node| {
             let layout = self.document.auto_layout_for_node(node.id);
             layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
         }) {
@@ -7155,6 +7176,10 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
         grid_column_gap: layout.grid_column_gap,
         grid_row_span: layout.grid_row_span,
         grid_column_span: layout.grid_column_span,
+        grid_items_positioning: (layout.grid_items_positioning == GridItemsPositioning::Manual)
+            .then(|| "manual".into()),
+        grid_row_anchor: layout.grid_row_anchor,
+        grid_column_anchor: layout.grid_column_anchor,
     })
 }
 
@@ -7222,6 +7247,11 @@ fn auto_layout_from_projection(
         .map(parse_wrap_track_alignment)
         .transpose()?
         .unwrap_or(WrapTrackAlignment::Auto);
+    let grid_items_positioning = match value.grid_items_positioning.as_deref() {
+        None | Some("rowAutoFlow") => GridItemsPositioning::RowAutoFlow,
+        Some("manual") => GridItemsPositioning::Manual,
+        Some(_) => return Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
+    };
     let layout = AutoLayout {
         mode,
         padding: value.padding,
@@ -7253,6 +7283,9 @@ fn auto_layout_from_projection(
         grid_column_gap: value.grid_column_gap,
         grid_row_span: value.grid_row_span,
         grid_column_span: value.grid_column_span,
+        grid_items_positioning,
+        grid_row_anchor: value.grid_row_anchor,
+        grid_column_anchor: value.grid_column_anchor,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -11649,6 +11682,41 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(child.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 71;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v73_round_trips_grid_manual_placement_and_v72_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let mut frame = existing_rect(NodeId(0x73));
+        frame.kind = NodeKind::Frame;
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Fixed(64.0)],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            grid_items_positioning: GridItemsPositioning::Manual,
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(frame.id, layout.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":73"));
+        assert!(snapshot.contains("\"gridItemsPositioning\":\"manual\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 72;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

@@ -28,6 +28,7 @@ import {
   type DocumentComponentPropertyReferences,
   type DocumentAsset,
   type DocumentBooleanOperation,
+  type DocumentAutoLayout,
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
   type DocumentEmbedMetadata,
@@ -45,6 +46,7 @@ import {
   type DocumentVariableValue,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
+import { normalizeAutoLayout } from "../lib/auto-layout-normalization";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
@@ -3131,6 +3133,60 @@ export class RuntimeSession implements RuntimeContainerHost {
       : candidate);
     if (!isBoundedTransformGroupRepeatForest(repeatCandidateNodes)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
     const siblings = this.siblingsOf(parentId).filter((sibling) => sibling.id !== nodeId);
+    const parentLayout = normalizeAutoLayout(parent.autoLayout as DocumentAutoLayout | undefined);
+    const nodeLayout = normalizeAutoLayout(node.autoLayout as DocumentAutoLayout | undefined) ?? {
+      mode: "none", padding: [0, 0, 0, 0], itemSpacing: 0, wrap: false,
+      primaryAlignment: "start", counterAlignment: "start",
+      primarySizing: "fixed", counterSizing: "fixed", absolute: false,
+    } satisfies DocumentAutoLayout;
+    let placementLayout: DocumentAutoLayout | undefined;
+    if (parentLayout?.mode === "grid" && parentLayout.gridItemsPositioning === "manual" && !nodeLayout.absolute) {
+      if (node.parentId === parentId && nodeLayout.gridRowAnchor !== undefined && nodeLayout.gridColumnAnchor !== undefined) {
+        placementLayout = nodeLayout;
+      } else {
+        const rows = parentLayout.gridRows?.length ?? 0;
+        const columns = parentLayout.gridColumns?.length ?? 0;
+        const occupied = Array.from({ length: rows * columns }, () => false);
+        for (const sibling of siblings) {
+          const layout = normalizeAutoLayout(sibling.autoLayout as DocumentAutoLayout | undefined);
+          if (!layout) throw runtimeError("INVALID_ARGUMENT", { nodeId: sibling.id });
+          if (layout.absolute) continue;
+          const row = layout.gridRowAnchor;
+          const column = layout.gridColumnAnchor;
+          const rowSpan = layout.gridRowSpan ?? 1;
+          const columnSpan = layout.gridColumnSpan ?? 1;
+          if (row === undefined || column === undefined || row + rowSpan > rows || column + columnSpan > columns) {
+            throw runtimeError("INVALID_ARGUMENT", { nodeId: sibling.id });
+          }
+          for (let occupiedRow = row; occupiedRow < row + rowSpan; occupiedRow += 1) {
+            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+              const slot = occupiedRow * columns + occupiedColumn;
+              if (occupied[slot]) throw runtimeError("INVALID_ARGUMENT", { nodeId: sibling.id });
+              occupied[slot] = true;
+            }
+          }
+        }
+        const rowSpan = nodeLayout.gridRowSpan ?? 1;
+        const columnSpan = nodeLayout.gridColumnSpan ?? 1;
+        let anchor: { row: number; column: number } | undefined;
+        for (let slot = 0; slot < occupied.length; slot += 1) {
+          const row = Math.floor(slot / columns);
+          const column = slot % columns;
+          if (row + rowSpan > rows || column + columnSpan > columns) continue;
+          let available = true;
+          for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+              if (occupied[occupiedRow * columns + occupiedColumn]) { available = false; break; }
+            }
+          }
+          if (available) { anchor = { row, column }; break; }
+        }
+        if (!anchor) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+        placementLayout = { ...nodeLayout, gridRowAnchor: anchor.row, gridColumnAnchor: anchor.column };
+      }
+    } else if (nodeLayout.gridRowAnchor !== undefined || nodeLayout.gridColumnAnchor !== undefined) {
+      placementLayout = { ...nodeLayout, gridRowAnchor: undefined, gridColumnAnchor: undefined };
+    }
     const destination = Math.min(index, siblings.length);
     const positionId = positionIdForLayerInsertion(siblings, destination);
     if (!positionId) throw runtimeError("INVALID_ARGUMENT", { nodeId });
@@ -3145,6 +3201,7 @@ export class RuntimeSession implements RuntimeContainerHost {
           parentId,
           siblingIndex,
           positionId,
+          ...(placementLayout ? { autoLayout: placementLayout } : {}),
           ...(runtimeOwnsAutoLayout(parent)
             ? { relativeTransform: undefined }
             : {

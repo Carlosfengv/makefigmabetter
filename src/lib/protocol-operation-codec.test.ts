@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, GridTrackType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, GridItemsPositioning, GridTrackType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -937,6 +937,7 @@ describe("protocol operation codec", () => {
       gridColumns: [{ type: "flex" as const, value: 2 }, { type: "fixed" as const, value: 80 }],
       gridRowGap: 12, gridColumnGap: 20,
       gridRowSpan: 2, gridColumnSpan: 2,
+      gridItemsPositioning: "manual" as const, gridRowAnchor: 0, gridColumnAnchor: 1,
     };
     const node = { ...createNode("frame", 10, 20), id, autoLayout };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
@@ -948,6 +949,9 @@ describe("protocol operation codec", () => {
       gridColumnGap: 20,
       gridRowSpan: 2,
       gridColumnSpan: 2,
+      gridItemsPositioning: GridItemsPositioning.GRID_ITEMS_POSITIONING_MANUAL,
+      gridRowAnchor: 0,
+      gridColumnAnchor: 1,
     });
   });
 

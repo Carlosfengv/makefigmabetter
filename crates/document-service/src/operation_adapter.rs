@@ -4,16 +4,17 @@
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontFaceMetadata, FontNameAlias, FontReference, GridTrack, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
-    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
-    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
-    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    FontFaceMetadata, FontNameAlias, FontReference, GridItemsPositioning, GridTrack,
+    HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
+    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page,
+    PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding, ParagraphListType,
+    ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign,
+    StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor,
+    TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
+    TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation,
+    TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -39,6 +40,24 @@ pub fn commands_from_payload_with_semantics(
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind.as_ref(),
+                Some(v1::resolved_operation::Kind::SetAutoLayout(update))
+                    if update.auto_layout.as_ref().is_some_and(|layout| {
+                        layout.grid_items_positioning.is_some()
+                            || layout.grid_row_anchor.is_some()
+                            || layout.grid_column_anchor.is_some()
+                    })
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION,
+        });
     }
     if engine_semantics_version < makefigma_document_codec::GRID_SPAN_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(|operation| {
@@ -2192,6 +2211,16 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         Some(v1::WrapTrackAlignment::SpaceBetween) => WrapTrackAlignment::SpaceBetween,
         Some(v1::WrapTrackAlignment::Unspecified) => return Err(ServiceError::InvalidEnvelope),
     };
+    let grid_items_positioning = match value.grid_items_positioning {
+        None => GridItemsPositioning::RowAutoFlow,
+        Some(raw) => match v1::GridItemsPositioning::try_from(raw)
+            .map_err(|_| ServiceError::InvalidEnvelope)?
+        {
+            v1::GridItemsPositioning::RowAutoFlow => GridItemsPositioning::RowAutoFlow,
+            v1::GridItemsPositioning::Manual => GridItemsPositioning::Manual,
+            v1::GridItemsPositioning::Unspecified => return Err(ServiceError::InvalidEnvelope),
+        },
+    };
     let layout = AutoLayout {
         mode,
         padding: [
@@ -2228,6 +2257,9 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
         grid_column_gap: value.grid_column_gap,
         grid_row_span: value.grid_row_span,
         grid_column_span: value.grid_column_span,
+        grid_items_positioning,
+        grid_row_anchor: value.grid_row_anchor,
+        grid_column_anchor: value.grid_column_anchor,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -3592,6 +3624,9 @@ mod tests {
             grid_column_gap: None,
             grid_row_span: None,
             grid_column_span: None,
+            grid_items_positioning: None,
+            grid_row_anchor: None,
+            grid_column_anchor: None,
         }
     }
 
@@ -3978,6 +4013,46 @@ mod tests {
             ).unwrap().as_slice(),
             [Command::SetAutoLayout { layout, .. }]
                 if layout.grid_row_span == Some(2) && layout.grid_column_span == Some(3)
+        ));
+    }
+
+    #[test]
+    fn grid_manual_placement_operation_requires_semantics_59() {
+        let mut layout = auto_layout(
+            v1::LayoutMode::None,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Start,
+            None,
+        );
+        layout.grid_row_anchor = Some(0);
+        layout.grid_column_anchor = Some(2);
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAutoLayout(
+                    v1::AutoLayoutUpdate {
+                        node_id: 7_u128.to_be_bytes().to_vec(),
+                        auto_layout: Some(layout),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_SPAN_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION,
+            ).unwrap().as_slice(),
+            [Command::SetAutoLayout { layout, .. }]
+                if layout.grid_row_anchor == Some(0) && layout.grid_column_anchor == Some(2)
         ));
     }
 

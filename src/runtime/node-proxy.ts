@@ -192,6 +192,9 @@ type RuntimeAutoLayout = Readonly<{
   gridColumnGap?: number;
   gridRowSpan?: number;
   gridColumnSpan?: number;
+  gridItemsPositioning?: "manual";
+  gridRowAnchor?: number;
+  gridColumnAnchor?: number;
 }>;
 
 export interface RuntimeNodeHost {
@@ -3416,6 +3419,11 @@ export class RuntimeNodeProxy {
     }
     const defaultGridColumnCount = Math.max(1, Math.min(128, Math.ceil(Math.sqrt(flowCount))));
     const defaultGridRowCount = Math.max(1, Math.ceil(flowCount / defaultGridColumnCount));
+    if (value !== "GRID" && layout.mode === "grid" && layout.gridItemsPositioning === "manual") {
+      for (const child of this.host.childrenOf(this.id).filter((candidate) => !candidate.autoLayout().absolute)) {
+        child.writeAutoLayout({ gridRowAnchor: undefined, gridColumnAnchor: undefined });
+      }
+    }
     this.writeAutoLayout(value === "GRID"
       ? {
           mode: "grid", wrap: false, trackSpacing: undefined, trackAlignment: undefined,
@@ -3427,6 +3435,7 @@ export class RuntimeNodeProxy {
       : {
           mode: value.toLowerCase() as RuntimeAutoLayout["mode"],
           gridRows: undefined, gridColumns: undefined, gridRowGap: undefined, gridColumnGap: undefined,
+          gridItemsPositioning: undefined,
         });
   }
 
@@ -3442,26 +3451,55 @@ export class RuntimeNodeProxy {
   get gridColumnSizes(): RuntimeGridTrackSize[] { return this.gridTrackProxies("column"); }
   get gridAutoTracks(): "NONE" { this.assertGridFrame(); return "NONE"; }
   set gridAutoTracks(value: "NONE") { this.assertGridFrame(); if (value !== "NONE") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
-  get gridItemsPositioning(): "ROW_AUTO_FLOW" { this.assertGridFrame(); return "ROW_AUTO_FLOW"; }
-  set gridItemsPositioning(value: "ROW_AUTO_FLOW") { this.assertGridFrame(); if (value !== "ROW_AUTO_FLOW") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
+  get gridItemsPositioning(): "ROW_AUTO_FLOW" | "MANUAL" {
+    this.assertGridFrame();
+    return this.autoLayout().gridItemsPositioning === "manual" ? "MANUAL" : "ROW_AUTO_FLOW";
+  }
+  set gridItemsPositioning(value: "ROW_AUTO_FLOW" | "MANUAL") {
+    this.assertGridFrame();
+    if (value !== "ROW_AUTO_FLOW" && value !== "MANUAL") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    if (value === this.gridItemsPositioning) return;
+    if (value === "MANUAL") {
+      const placements = this.gridPlacements();
+      for (const { child, row, column } of placements.values()) {
+        child.writeAutoLayout({ gridRowAnchor: row, gridColumnAnchor: column });
+      }
+      this.writeAutoLayout({ gridItemsPositioning: "manual" });
+      return;
+    }
+    for (const child of this.host.childrenOf(this.id).filter((candidate) => !candidate.autoLayout().absolute)) {
+      child.writeAutoLayout({ gridRowAnchor: undefined, gridColumnAnchor: undefined });
+    }
+    this.writeAutoLayout({ gridItemsPositioning: undefined });
+  }
 
   get gridRowAnchorIndex(): number {
     const parent = this.parentGridFrame();
-    return parent.gridAutoFlowPlacements().get(this.id)!.row;
+    return parent.gridPlacements().get(this.id)!.row;
   }
   get gridColumnAnchorIndex(): number {
     const parent = this.parentGridFrame();
-    return parent.gridAutoFlowPlacements().get(this.id)!.column;
+    return parent.gridPlacements().get(this.id)!.column;
   }
   get gridRowSpan(): number { this.parentGridFrame(); return this.autoLayout().gridRowSpan ?? 1; }
   set gridRowSpan(value: number) { this.writeGridSpan("row", value); }
   get gridColumnSpan(): number { this.parentGridFrame(); return this.autoLayout().gridColumnSpan ?? 1; }
   set gridColumnSpan(value: number) { this.writeGridSpan("column", value); }
   setGridChildPosition(rowIndex: number, columnIndex: number): void {
-    this.parentGridFrame();
-    void rowIndex;
-    void columnIndex;
-    throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    const parent = this.parentGridFrame();
+    if (parent.gridItemsPositioning !== "MANUAL" || !Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)
+      || rowIndex < 0 || columnIndex < 0) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    }
+    const layout = this.autoLayout();
+    parent.gridPlacements(undefined, undefined, {
+      nodeId: this.id,
+      rowSpan: layout.gridRowSpan ?? 1,
+      columnSpan: layout.gridColumnSpan ?? 1,
+      row: rowIndex,
+      column: columnIndex,
+    });
+    this.writeAutoLayout({ gridRowAnchor: rowIndex, gridColumnAnchor: columnIndex });
   }
 
   get layoutWrap(): "NO_WRAP" | "WRAP" {
@@ -3560,6 +3598,21 @@ export class RuntimeNodeProxy {
   set layoutPositioning(value: "AUTO" | "ABSOLUTE") {
     this.assertAutoLayoutChild();
     if (!["AUTO", "ABSOLUTE"].includes(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const parent = this.parentGridFrameIfAny();
+    if (parent?.gridItemsPositioning === "MANUAL") {
+      if (value === "AUTO" && this.autoLayout().absolute) {
+        const placement = parent.firstAvailableGridPlacement(
+          this.autoLayout().gridRowSpan ?? 1,
+          this.autoLayout().gridColumnSpan ?? 1,
+        );
+        this.writeAutoLayout({ absolute: false, gridRowAnchor: placement.row, gridColumnAnchor: placement.column });
+        return;
+      }
+      if (value === "ABSOLUTE") {
+        this.writeAutoLayout({ absolute: true, gridRowAnchor: undefined, gridColumnAnchor: undefined });
+        return;
+      }
+    }
     this.writeAutoLayout({ absolute: value === "ABSOLUTE" });
   }
 
@@ -4085,7 +4138,7 @@ export class RuntimeNodeProxy {
     if (value * other.length > 4096) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     target.length = Math.min(target.length, value);
     while (target.length < value) target.push({ type: "flex", value: 1 });
-    this.gridAutoFlowPlacements(rows, columns);
+    this.gridPlacements(rows, columns);
     this.writeAutoLayout(axis === "row" ? { gridRows: rows } : { gridColumns: columns });
   }
 
@@ -4102,7 +4155,7 @@ export class RuntimeNodeProxy {
     const type = patch.type ?? current.type;
     if (type === "hug") {
       if (patch.value !== undefined) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
-      const placements = this.gridAutoFlowPlacements();
+      const placements = this.gridPlacements();
       const hasFillCycle = [...placements.values()].some(({ child, row, column, rowSpan, columnSpan }) => {
         const occupiesTrack = axis === "row"
           ? row <= index && index < row + rowSpan
@@ -4164,10 +4217,43 @@ export class RuntimeNodeProxy {
     return parent;
   }
 
-  private gridAutoFlowPlacements(
+  private parentGridFrameIfAny(): RuntimeNodeProxy | undefined {
+    const parentId = this.read().parentId;
+    if (typeof parentId !== "string") return undefined;
+    const parent = this.host.proxyFor(parentId);
+    return parent.type === "FRAME" && parent.autoLayout().mode === "grid" ? parent : undefined;
+  }
+
+  private firstAvailableGridPlacement(rowSpan: number, columnSpan: number): { row: number; column: number } {
+    const rows = this.gridTracks("row");
+    const columns = this.gridTracks("column");
+    const occupied = Array.from({ length: rows.length * columns.length }, () => false);
+    for (const placement of this.gridPlacements().values()) {
+      for (let row = placement.row; row < placement.row + placement.rowSpan; row += 1) {
+        for (let column = placement.column; column < placement.column + placement.columnSpan; column += 1) {
+          occupied[row * columns.length + column] = true;
+        }
+      }
+    }
+    for (let index = 0; index < occupied.length; index += 1) {
+      const row = Math.floor(index / columns.length);
+      const column = index % columns.length;
+      if (row + rowSpan > rows.length || column + columnSpan > columns.length) continue;
+      let available = true;
+      for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+        for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+          if (occupied[occupiedRow * columns.length + occupiedColumn]) { available = false; break; }
+        }
+      }
+      if (available) return { row, column };
+    }
+    throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+  }
+
+  private gridPlacements(
     rows = this.gridTracks("row"),
     columns = this.gridTracks("column"),
-    override?: { nodeId: string; rowSpan: number; columnSpan: number },
+    override?: { nodeId: string; rowSpan: number; columnSpan: number; row?: number; column?: number },
   ): Map<string, { child: RuntimeNodeProxy; row: number; column: number; rowSpan: number; columnSpan: number }> {
     this.assertGridFrame();
     const occupied = Array.from({ length: rows.length * columns.length }, () => false);
@@ -4176,23 +4262,38 @@ export class RuntimeNodeProxy {
       const childLayout = child.autoLayout();
       const rowSpan = override?.nodeId === child.id ? override.rowSpan : childLayout.gridRowSpan ?? 1;
       const columnSpan = override?.nodeId === child.id ? override.columnSpan : childLayout.gridColumnSpan ?? 1;
-      let placement: { row: number; column: number } | undefined;
-      for (let index = 0; index < occupied.length; index += 1) {
-        const row = Math.floor(index / columns.length);
-        const column = index % columns.length;
-        if (row + rowSpan > rows.length || column + columnSpan > columns.length) continue;
-        let available = true;
-        for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
-          for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
-            if (occupied[occupiedRow * columns.length + occupiedColumn]) { available = false; break; }
+      let placement: { row: number; column: number } | undefined = this.gridItemsPositioning === "MANUAL"
+        ? {
+            row: override?.nodeId === child.id && override.row !== undefined ? override.row : childLayout.gridRowAnchor!,
+            column: override?.nodeId === child.id && override.column !== undefined ? override.column : childLayout.gridColumnAnchor!,
           }
-        }
-        if (available) { placement = { row, column }; break; }
+        : undefined;
+      if (this.gridItemsPositioning === "MANUAL" && (!Number.isInteger(placement?.row) || !Number.isInteger(placement?.column))) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
       }
-      if (!placement) throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
+      if (!placement) {
+        for (let index = 0; index < occupied.length; index += 1) {
+          const row = Math.floor(index / columns.length);
+          const column = index % columns.length;
+          if (row + rowSpan > rows.length || column + columnSpan > columns.length) continue;
+          let available = true;
+          for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+              if (occupied[occupiedRow * columns.length + occupiedColumn]) { available = false; break; }
+            }
+          }
+          if (available) { placement = { row, column }; break; }
+        }
+      }
+      if (!placement || placement.row < 0 || placement.column < 0
+        || placement.row + rowSpan > rows.length || placement.column + columnSpan > columns.length) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
+      }
       for (let occupiedRow = placement.row; occupiedRow < placement.row + rowSpan; occupiedRow += 1) {
         for (let occupiedColumn = placement.column; occupiedColumn < placement.column + columnSpan; occupiedColumn += 1) {
-          occupied[occupiedRow * columns.length + occupiedColumn] = true;
+          const index = occupiedRow * columns.length + occupiedColumn;
+          if (occupied[index]) throw runtimeError("INVALID_ARGUMENT", { nodeId: child.id });
+          occupied[index] = true;
         }
       }
       if ((child.readLayoutSizing(false) === "FILL" && rows.slice(placement.row, placement.row + rowSpan).some((track) => track.type === "hug"))
@@ -4213,7 +4314,7 @@ export class RuntimeNodeProxy {
     const layout = this.autoLayout();
     const rowSpan = axis === "row" ? value : layout.gridRowSpan ?? 1;
     const columnSpan = axis === "column" ? value : layout.gridColumnSpan ?? 1;
-    parent.gridAutoFlowPlacements(undefined, undefined, { nodeId: this.id, rowSpan, columnSpan });
+    parent.gridPlacements(undefined, undefined, { nodeId: this.id, rowSpan, columnSpan });
     this.writeAutoLayout(axis === "row"
       ? { gridRowSpan: value === 1 ? undefined : value }
       : { gridColumnSpan: value === 1 ? undefined : value });
@@ -4268,7 +4369,7 @@ export class RuntimeNodeProxy {
     }
     if (value === "FILL" && parentMode === "GRID") {
       const parent = this.parentGridFrame();
-      const placement = parent.gridAutoFlowPlacements().get(this.id)!;
+      const placement = parent.gridPlacements().get(this.id)!;
       const tracks = horizontal
         ? parent.gridTracks("column").slice(placement.column, placement.column + placement.columnSpan)
         : parent.gridTracks("row").slice(placement.row, placement.row + placement.rowSpan);

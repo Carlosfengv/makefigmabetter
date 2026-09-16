@@ -160,6 +160,36 @@ describe("Figma REST import planning", () => {
     expect(plan.nodes[3]?.autoLayout).toMatchObject({ gridColumnSpan: 2 });
   });
 
+  it("imports bounded manual Grid anchors and rejects overlapping cells", () => {
+    const source = (overlap = false) => ({
+      version: "grid-manual",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 260, height: 170 },
+        layoutMode: "GRID", gridRowCount: 3, gridColumnCount: 3, gridRowGap: 10, gridColumnGap: 10,
+        gridItemsPositioning: "MANUAL", gridAutoTracks: "NONE",
+        gridRowSizes: Array.from({ length: 3 }, () => ({ type: "FIXED", value: 50 })),
+        gridColumnSizes: Array.from({ length: 3 }, () => ({ type: "FIXED", value: 80 })),
+        children: [{
+          id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 90], [0, 1, 60]], absoluteBoundingBox: { x: 90, y: 60, width: 170, height: 110 },
+          gridRowAnchorIndex: 1, gridColumnAnchorIndex: 1, gridRowSpan: 2, gridColumnSpan: 2,
+        }, {
+          id: "1:3", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 20, height: 20 },
+          gridRowAnchorIndex: overlap ? 1 : 0, gridColumnAnchorIndex: overlap ? 1 : 2,
+        }],
+      }] }] },
+    });
+
+    const valid = planFigmaRestImport(source(), ids());
+    expect(valid.issues).toEqual([]);
+    expect(valid.nodes[0]?.autoLayout).toMatchObject({ mode: "grid", gridItemsPositioning: "manual" });
+    expect(valid.nodes[1]?.autoLayout).toMatchObject({ gridRowAnchor: 1, gridColumnAnchor: 1, gridRowSpan: 2, gridColumnSpan: 2 });
+    expect(valid.nodes[2]?.autoLayout).toMatchObject({ gridRowAnchor: 0, gridColumnAnchor: 2 });
+
+    const overlapping = planFigmaRestImport(source(true), ids());
+    expect(overlapping.nodes[0]?.autoLayout).toBeUndefined();
+    expect(overlapping.nodes[0]?.extensions?.["figma.rest.grid-auto-layout.v1"]).toBeDefined();
+  });
+
   it("preserves a Grid when child spans cannot fit its track matrix", () => {
     const plan = planFigmaRestImport({
       version: "grid-span-overflow",

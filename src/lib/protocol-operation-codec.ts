@@ -17,6 +17,7 @@ import {
   LayoutMode as ProtoLayoutMode,
   LayoutSizing as ProtoLayoutSizing,
   GridTrackType as ProtoGridTrackType,
+  GridItemsPositioning as ProtoGridItemsPositioning,
   LineHeightUnit as ProtoLineHeightUnit,
   LeadingTrim as ProtoLeadingTrim,
   TextListType as ProtoTextListType,
@@ -413,6 +414,16 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
     if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 2 && candidate <= 128) return candidate;
     throw new TypeError("Grid spans must be integers from 1 to 128.");
   };
+  const gridAnchor = (candidate: unknown) => {
+    if (candidate === undefined || candidate === null) return undefined;
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 && candidate < 128) return candidate;
+    throw new TypeError("Grid anchors must be integers from 0 to 127.");
+  };
+  const gridRowAnchor = gridAnchor(value.gridRowAnchor);
+  const gridColumnAnchor = gridAnchor(value.gridColumnAnchor);
+  if ((gridRowAnchor === undefined) !== (gridColumnAnchor === undefined)) {
+    throw new TypeError("Grid row and column anchors must be provided together.");
+  }
   return {
     mode: value.mode === "horizontal" ? ProtoLayoutMode.LAYOUT_MODE_HORIZONTAL : value.mode === "vertical" ? ProtoLayoutMode.LAYOUT_MODE_VERTICAL : value.mode === "grid" ? ProtoLayoutMode.LAYOUT_MODE_GRID : ProtoLayoutMode.LAYOUT_MODE_NONE,
     paddingTop: value.padding[0], paddingRight: value.padding[1], paddingBottom: value.padding[2], paddingLeft: value.padding[3], itemSpacing: value.itemSpacing, trackSpacing: bound(value.trackSpacing), wrapTrackAlignment: value.trackAlignment === "spaceBetween" ? ProtoWrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN : undefined, wrap: value.wrap,
@@ -430,6 +441,8 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
     })),
     gridRowGap: bound(value.gridRowGap), gridColumnGap: bound(value.gridColumnGap),
     gridRowSpan: gridSpan(value.gridRowSpan), gridColumnSpan: gridSpan(value.gridColumnSpan),
+    gridItemsPositioning: value.gridItemsPositioning === "manual" ? ProtoGridItemsPositioning.GRID_ITEMS_POSITIONING_MANUAL : undefined,
+    gridRowAnchor, gridColumnAnchor,
   };
 }
 
