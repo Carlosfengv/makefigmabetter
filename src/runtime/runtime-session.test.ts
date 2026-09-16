@@ -551,7 +551,7 @@ describe("M1 RuntimeSession", () => {
 
     const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
     const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
-    expect(isRuntimeError(captureError(() => component.addComponentProperty("Bound", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "variable" })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => component.addComponentProperty("Bound", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "variable" })), "RESOURCE_UNAVAILABLE")).toBe(true);
     expect(isRuntimeError(captureError(() => component.addComponentProperty("Preferred", "TEXT", "value", { preferredValues: [] })), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => component.deleteComponentProperty(renamedSlot)), "UNSUPPORTED_FEATURE")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
@@ -598,6 +598,30 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => component.editComponentProperty(slotName, { slotSettings: { minChildren: 2, maxChildren: 1 } })), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => component.editComponentProperty(swap, { slotSettings: { minChildren: 0 } })), "INVALID_ARGUMENT")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+  });
+
+  it("resolves and preserves VariableAlias component defaults", () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      variableCollections: [{ id: "collection", key: "", name: "Properties", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Default" }], defaultModeId: "default" }],
+      variables: [
+        { id: "enabled-variable", key: "", name: "Enabled", description: "", remote: false, hiddenFromPublishing: false, collectionId: "collection", resolvedType: "BOOLEAN", valuesByMode: { default: false }, scopes: ["ALL_SCOPES"] },
+        { id: "label-variable", key: "", name: "Label", description: "", remote: false, hiddenFromPublishing: false, collectionId: "collection", resolvedType: "STRING", valuesByMode: { default: "Continue" }, scopes: ["ALL_SCOPES"] },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "component-property-alias", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const component = session.createComponent();
+    const enabled = component.addComponentProperty("Enabled", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "enabled-variable" });
+    const label = component.addComponentProperty("Label", "TEXT", { type: "VARIABLE_ALIAS", id: "label-variable" });
+
+    expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false, boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "enabled-variable" } } });
+    expect(component.componentPropertyDefinitions[label]).toEqual({ type: "TEXT", defaultValue: "Continue", boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "label-variable" } } });
+    expect(component.createInstance().componentPropertyValues).toMatchObject({ [enabled]: false, [label]: "Continue" });
+    expect(session.variableIsBound("enabled-variable")).toBe(true);
+
+    expect(isRuntimeError(captureError(() => component.addComponentProperty("Wrong", "BOOLEAN", { type: "VARIABLE_ALIAS", id: "label-variable" })), "INVALID_ARGUMENT")).toBe(true);
+    component.editComponentProperty(enabled, { defaultValue: true });
+    expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: true });
   });
 
   it("authors component property references and applies Instance values to linked sublayers", async () => {

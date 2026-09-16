@@ -165,7 +165,7 @@ describe("Figma REST import planning", () => {
           id: "1:1", type: "COMPONENT", name: "Card", clipsContent: true,
           relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 60 },
           componentPropertyDefinitions: {
-            Enabled: { type: "BOOLEAN", defaultValue: true },
+            Enabled: { type: "BOOLEAN", defaultValue: true, boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "VariableID:1" } } },
             Content: { type: "SLOT", preferredValues: [{ type: "COMPONENT", key: "icon-key" }], slotSettings: { minChildren: 1, maxChildren: 2, allowPreferredValuesOnly: true } },
           },
           children: [{ id: "1:2", type: "RECTANGLE", componentPropertyReferences: { visible: "Enabled" }, relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 5, y: 5, width: 90, height: 50 } }],
@@ -206,7 +206,7 @@ describe("Figma REST import planning", () => {
       key: "card-key",
       description: "Reusable card",
       componentPropertyDefinitions: {
-        Enabled: { type: "BOOLEAN", defaultValue: true },
+        Enabled: { type: "BOOLEAN", defaultValue: true, boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "VariableID:1" } } },
         Content: { type: "SLOT", preferredValues: [{ type: "COMPONENT", key: "icon-key" }], slotSettings: { minChildren: 1, maxChildren: 2, allowPreferredValuesOnly: true } },
       },
     });

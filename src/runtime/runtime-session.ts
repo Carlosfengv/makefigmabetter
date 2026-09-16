@@ -379,11 +379,18 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   variableIsBound(id: string): boolean {
-    return this.projectionStore.listLiveNodes().some((node) => [
-      variableBindingsFromExtensions(node.extensions),
-      variablePaintBindingsFromExtensions(node.extensions),
-      variableEffectBindingsFromExtensions(node.extensions),
-    ].some((bindings) => Object.values(bindings).includes(id)));
+    return this.projectionStore.listLiveNodes().some((node) => {
+      const definitions = node.type === "COMPONENT"
+        ? (node.componentMetadata as DocumentComponentMetadata | undefined)?.componentPropertyDefinitions
+        : node.type === "COMPONENT_SET"
+          ? (node.componentSetMetadata as DocumentComponentSetMetadata | undefined)?.componentPropertyDefinitions
+          : undefined;
+      return Object.values(definitions ?? {}).some((definition) => definition.boundVariables?.defaultValue?.id === id) || [
+        variableBindingsFromExtensions(node.extensions),
+        variablePaintBindingsFromExtensions(node.extensions),
+        variableEffectBindingsFromExtensions(node.extensions),
+      ].some((bindings) => Object.values(bindings).includes(id));
+    });
   }
 
   setVariableCollection(collection: DocumentVariableCollectionResource, variables: readonly DocumentVariableResource[]): void {
@@ -977,7 +984,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     if (options?.description !== undefined && type !== "SLOT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     validateRuntimeComponentPropertyOptionCompatibility(type, options, componentId);
-    const definition = runtimeComponentPropertyDefinition(type, defaultValue, options, componentId);
+    const resolvedDefault = this.componentPropertyDefaultValue(type, defaultValue, componentId);
+    const definition = runtimeComponentPropertyDefinition(type, resolvedDefault.value, options, componentId);
+    if (resolvedDefault.alias) definition.boundVariables = { defaultValue: resolvedDefault.alias };
     if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
     }
@@ -1029,11 +1038,16 @@ export class RuntimeSession implements RuntimeContainerHost {
           ...(value.preferredValues === undefined ? {} : { preferredValues: value.preferredValues.map((preferred) => ({ ...preferred })) }),
           ...(value.slotSettings === undefined ? {} : { slotSettings: { ...value.slotSettings } }),
         }
-      : runtimeComponentPropertyDefinition(existing.type, value.defaultValue, {
-          description: value.description ?? existing.description,
-          preferredValues: value.preferredValues ?? existing.preferredValues,
-          slotSettings: value.slotSettings ?? existing.slotSettings,
-        }, componentId);
+      : (() => {
+          const resolvedDefault = this.componentPropertyDefaultValue(existing.type, value.defaultValue!, componentId);
+          const next = runtimeComponentPropertyDefinition(existing.type, resolvedDefault.value, {
+            description: value.description ?? existing.description,
+            preferredValues: value.preferredValues ?? existing.preferredValues,
+            slotSettings: value.slotSettings ?? existing.slotSettings,
+          }, componentId);
+          if (resolvedDefault.alias) next.boundVariables = { defaultValue: resolvedDefault.alias };
+          return next;
+        })();
     if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(definition.defaultValue)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
     }
@@ -2393,6 +2407,23 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (typeof value !== "string") return false;
     const target = this.projectionStore.getNode(value);
     return Boolean(target && target.removed !== true && target.type === "COMPONENT");
+  }
+
+  private componentPropertyDefaultValue(
+    type: RuntimeComponentPropertyType,
+    value: string | boolean | RuntimeVariableAlias,
+    nodeId: string,
+  ): Readonly<{ value: string | boolean; alias?: RuntimeVariableAlias }> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { value } as Readonly<{ value: string | boolean }>;
+    if (value.type !== "VARIABLE_ALIAS" || typeof value.id !== "string" || !value.id || type === "SLOT" || type === "VARIANT") {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    const resolved = this.resolveVariableValue(value.id, nodeId);
+    const expectedType = type === "BOOLEAN" ? "BOOLEAN" : "STRING";
+    if (resolved.resolvedType !== expectedType || (type === "BOOLEAN" ? typeof resolved.value !== "boolean" : typeof resolved.value !== "string")) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    return { value: resolved.value as string | boolean, alias: { type: "VARIABLE_ALIAS", id: value.id } };
   }
 
   private enqueueOperations(operations: readonly PendingProjectionOperation[]): void {

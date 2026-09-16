@@ -19,6 +19,7 @@ export type DocumentComponentPropertyDefinition = {
   variantOptions?: string[];
   preferredValues?: DocumentInstanceSwapPreferredValue[];
   slotSettings?: DocumentSlotSettings;
+  boundVariables?: { defaultValue?: DocumentVariableAlias };
 };
 export type DocumentInstanceSwapPreferredValue = { type: "COMPONENT" | "COMPONENT_SET"; key: string };
 export type DocumentSlotSettings = {

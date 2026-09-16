@@ -2623,9 +2623,15 @@ function componentPropertyDefinitions(value: unknown): Readonly<{
     });
     const preferredValues = type === "INSTANCE_SWAP" || type === "SLOT" ? parsedPreferredValues : undefined;
     const slotSettings = type === "SLOT" ? componentSlotSettings(definition.slotSettings) : undefined;
+    const rawBoundVariables = record(definition.boundVariables);
+    const defaultAlias = record(rawBoundVariables?.defaultValue);
+    const boundVariables = defaultAlias?.type === "VARIABLE_ALIAS" && typeof defaultAlias.id === "string" && defaultAlias.id
+      ? { defaultValue: { type: "VARIABLE_ALIAS" as const, id: defaultAlias.id } }
+      : undefined;
     if (
       (rawPreferredValues !== undefined && (preferredValues?.length !== rawPreferredValues.length)) ||
-      (definition.slotSettings !== undefined && !slotSettings)
+      (definition.slotSettings !== undefined && !slotSettings) ||
+      (definition.boundVariables !== undefined && !boundVariables)
     ) preserved = true;
     definitions[name] = {
       type: type as NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["type"],
@@ -2634,6 +2640,7 @@ function componentPropertyDefinitions(value: unknown): Readonly<{
       ...(variantOptions === undefined ? {} : { variantOptions: variantOptions as string[] }),
       ...(preferredValues === undefined ? {} : { preferredValues }),
       ...(slotSettings === undefined ? {} : { slotSettings }),
+      ...(boundVariables === undefined ? {} : { boundVariables }),
     };
   }
   return { definitions, preserved };

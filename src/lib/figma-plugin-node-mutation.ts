@@ -649,7 +649,8 @@ function validComponentProperty(name: string, definition: NonNullable<CanvasNode
     && (definition.defaultValue === undefined || typeof definition.defaultValue === "string" || typeof definition.defaultValue === "boolean")
     && (definition.description === undefined || typeof definition.description === "string")
     && (definition.preferredValues === undefined || ((definition.type === "INSTANCE_SWAP" || definition.type === "SLOT") && definition.preferredValues.length <= 256 && definition.preferredValues.every((value) => (value.type === "COMPONENT" || value.type === "COMPONENT_SET") && typeof value.key === "string" && value.key.length > 0 && value.key.length <= 256)))
-    && (definition.slotSettings === undefined || (definition.type === "SLOT" && validSlotSettings(definition.slotSettings)));
+    && (definition.slotSettings === undefined || (definition.type === "SLOT" && validSlotSettings(definition.slotSettings)))
+    && (definition.boundVariables === undefined || ((definition.type === "BOOLEAN" || definition.type === "TEXT" || definition.type === "INSTANCE_SWAP") && Object.keys(definition.boundVariables).every((field) => field === "defaultValue") && (definition.boundVariables.defaultValue === undefined || (definition.boundVariables.defaultValue.type === "VARIABLE_ALIAS" && typeof definition.boundVariables.defaultValue.id === "string" && definition.boundVariables.defaultValue.id.length > 0))));
 }
 
 function validSlotSettings(settings: NonNullable<NonNullable<CanvasNode["componentMetadata"]>["componentPropertyDefinitions"][string]["slotSettings"]>): boolean {
