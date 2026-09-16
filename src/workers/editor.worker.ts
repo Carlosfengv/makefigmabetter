@@ -28,7 +28,7 @@ import { basicTextDecorationPattern, basicTextDecorationRect, textDecorationPain
 import { usesSmallCaps } from "@/lib/text-case";
 import { admitWebGpuSceneResources, classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
-import { autoLayoutProjectionNormalizationPatches, captureClipboard, coalesceAdjacentNodeUpdates, coreProjectionNode, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, coalesceAdjacentNodeUpdates, coreProjectionNode, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveFlattenNodeBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
 import { validateClipboardCapture } from "@/lib/editor-clipboard";
 import { cancelFigmaRestAssetBindings, resolveFigmaRestAssetBindings, resolveFigmaRestImportBatch } from "@/lib/figma-rest-import";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeOperationPayloadEnvelope, encodeRegisterResourcePayload } from "@/lib/protocol-operation-codec";
@@ -8932,6 +8932,27 @@ function dispatch(command: EditorCommand) {
     } catch (error) { emitError(error); }
     return;
   }
+  if (command.type === "flattenNode") {
+    if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
+    const flattened = resolveFlattenNodeBatch(nodes, command.id, command.vectorPath, createId, command.replacementId, {
+      parentId: command.parentId,
+      pageId: command.pageId,
+      index: command.index,
+    });
+    if (!flattened) { emitError(undefined, "INVALID_COMMAND"); return; }
+    const baseRevision = Number(wasmDocument.revision);
+    const transactionId = createId();
+    try {
+      wasmDocument.apply_transaction_json(transactionId, wasmDocument.revision, JSON.stringify(flattened.batch));
+      recordHistory("core");
+      syncProjectionFromWasm(false);
+      selectedIds = [flattened.replacement.id];
+      rebuildNodeIndex(); render();
+      emitSnapshot(journalEntry({ type: "restore-core", coreSnapshot: wasmDocument.snapshot_json() }, baseRevision, transactionId));
+      queueRemoteOperation(transactionId, baseRevision, flattened.batch, wasmDocument.canonical_hash());
+    } catch (error) { emitError(error); }
+    return;
+  }
   if (command.type === "outlineStroke") {
     if (!wasmDocument) { emitError(undefined, "TRANSIENT"); return; }
     const subject = nodes.find((node) => node.id === command.id);
@@ -9259,6 +9280,21 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
     const boolean = nodes.find((node) => node.id === command.id);
     const path = boolean && canonicalBooleanPath(boolean);
     const flattened = path && resolveFlattenBooleanBatch(nodes, command.id, path, createId, command.replacementId, {
+      parentId: command.parentId,
+      pageId: command.pageId,
+      index: command.index,
+    });
+    if (!flattened) {
+      emitError(undefined, "INVALID_COMMAND", transaction.id);
+      emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });
+      return;
+    }
+    commitStructuralReplacement(flattened.batch, [flattened.replacement.id]);
+    return;
+  }
+  if (transaction.commands.length === 1 && transaction.commands[0].type === "flattenNode") {
+    const command = transaction.commands[0];
+    const flattened = resolveFlattenNodeBatch(nodes, command.id, command.vectorPath, createId, command.replacementId, {
       parentId: command.parentId,
       pageId: command.pageId,
       index: command.index,

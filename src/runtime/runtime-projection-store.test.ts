@@ -68,6 +68,31 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", removed: false });
   });
 
+  it("projects one leaf flatten replacement synchronously", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "rect", type: "RECTANGLE", parentId: "page", siblingIndex: 0, width: 40, height: 30 },
+        { id: "sibling", type: "VECTOR", parentId: "page", siblingIndex: 1 },
+      ],
+    });
+    store.stage({
+      transactionId: "tx-flatten-node",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNode",
+        sourceId: "rect",
+        replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 1, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [{ nodeId: "sibling", siblingIndex: 0 }],
+      }],
+    });
+
+    expect(store.getNode("rect")).toMatchObject({ removed: true });
+    expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", siblingIndex: 1, removed: false });
+    expect(store.getNode("sibling")).toMatchObject({ siblingIndex: 0 });
+  });
+
   it("projects same-page cross-parent Boolean moves and reindexes each source parent", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

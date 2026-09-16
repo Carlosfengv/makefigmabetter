@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode, type CanvasNode } from "./editor-protocol";
 import { transformPoint, translateNodeWorldPatch, worldTransformForNode } from "./scene-transform";
-import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveFlattenNodeBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
 import { createPhase2ProfessionalCompositeFixture } from "./phase2-professional-composite-fixture";
 import fixture from "../../fixtures/documents/phase2-common-nodes.fixture.json";
 
@@ -568,6 +568,44 @@ describe("Core transaction batch resolution", () => {
 
     expect(resolved?.replacement).toMatchObject({ id: forcedId, vectorPath: { subpaths: [] } });
     expect(resolved?.batch[0]).toEqual(expect.objectContaining({ type: "create", node: expect.objectContaining({ id: forcedId }) }));
+  });
+
+  it("flattens one parametric leaf into an atomic Vector replacement", () => {
+    const rectangle = {
+      ...createNode("rectangle", 10, 20),
+      id: "00000000-0000-4000-8000-000000000131",
+      name: "Card",
+      width: 90,
+      height: 50,
+      radius: 8,
+      isMask: false,
+      positionId: "00000000000000000000000000000131:00000000000000000000000000000000",
+    };
+    const replacementId = "00000000-0000-4000-8000-000000000132";
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [
+      { id: "p1", x: 0, y: 0, pointType: "corner" as const },
+      { id: "p2", x: 90, y: 0, pointType: "corner" as const },
+      { id: "p3", x: 90, y: 50, pointType: "corner" as const },
+      { id: "p4", x: 0, y: 50, pointType: "corner" as const },
+    ] }] };
+    const resolved = resolveFlattenNodeBatch([rectangle], rectangle.id, vectorPath, () => replacementId, replacementId);
+
+    expect(resolved?.replacement).toMatchObject({
+      id: replacementId,
+      kind: "vector",
+      name: "Card flattened",
+      x: 10,
+      y: 20,
+      width: 90,
+      height: 50,
+      radius: 0,
+      vectorPath,
+    });
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, kind: "vector", vectorPath }) }),
+      { type: "delete", ids: [rectangle.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: rectangle.positionId }] },
+    ]);
   });
 
   it("outlines a Vector Stroke as one same-ID Vector update", () => {

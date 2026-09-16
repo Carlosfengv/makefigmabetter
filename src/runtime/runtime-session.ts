@@ -806,10 +806,15 @@ export class RuntimeSession implements RuntimeContainerHost {
   flatten(nodes: readonly RuntimeNodeProxy[], parent?: RuntimeContainerNodeProxy, index?: number): RuntimeNodeProxy {
     this.assertOpen();
     if (nodes.length !== 1) throw runtimeError("UNSUPPORTED_FEATURE");
-    const booleanProxy = nodes[0]!;
-    if (booleanProxy.handle.sessionId !== this.sessionId || booleanProxy.removed || booleanProxy.type !== "BOOLEAN_OPERATION") {
-      throw runtimeError("INVALID_ARGUMENT", { nodeId: booleanProxy.handle.nodeId });
+    const sourceProxy = nodes[0]!;
+    if (sourceProxy.handle.sessionId !== this.sessionId || sourceProxy.removed) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: sourceProxy.handle.nodeId });
     }
+    if (["VECTOR", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "LINE"].includes(sourceProxy.type)) {
+      return this.flattenVectorLikeNode(sourceProxy, parent, index);
+    }
+    const booleanProxy = sourceProxy;
+    if (booleanProxy.type !== "BOOLEAN_OPERATION") throw runtimeError("INVALID_ARGUMENT", { nodeId: booleanProxy.handle.nodeId });
     const boolean = this.projectionStore.getNode(booleanProxy.id)!;
     if (!this.projectionStore.confirmedProjection.nodes.some((node) => node.id === boolean.id && node.removed !== true) || this.queuedTransactionId) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: boolean.id });
@@ -881,6 +886,95 @@ export class RuntimeSession implements RuntimeContainerHost {
       replacement,
       siblingIndexes,
     }]);
+    return this.proxyFor(replacementId);
+  }
+
+  private flattenVectorLikeNode(sourceProxy: RuntimeNodeProxy, parent?: RuntimeContainerNodeProxy, index?: number): RuntimeNodeProxy {
+    const source = this.projectionStore.getNode(sourceProxy.id)!;
+    if (!this.projectionStore.confirmedProjection.nodes.some((node) => node.id === source.id && node.removed !== true) || this.queuedTransactionId) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    }
+    const targetParent = parent ?? this.currentPage;
+    if (targetParent.handle.sessionId !== this.sessionId || targetParent.removed || !["PAGE", "FRAME", "GROUP", "SECTION", "COMPONENT", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(targetParent.type)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: targetParent.handle.nodeId });
+    }
+    const targetParentNode = this.projectionStore.getNode(targetParent.id)!;
+    if (this.pageIdFor(targetParentNode) !== this.pageIdFor(source) || runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), source) || runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), targetParentNode)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    }
+    const movesAcrossParents = targetParent.id !== source.parentId;
+    const sourceParent = typeof source.parentId === "string" ? this.projectionStore.getNode(source.parentId) : undefined;
+    if (movesAcrossParents && (
+      runtimeOwnsAutoLayout(targetParentNode)
+      || runtimeOwnsAutoLayout(sourceParent ?? { id: "", type: "" })
+      || sourceParent?.type === "GROUP"
+      || sourceParent?.type === "BOOLEAN_OPERATION"
+    )) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    const targetSiblings = this.siblingsOf(targetParent.id).filter((node) => node.id !== source.id);
+    const destination = index ?? targetSiblings.length;
+    if (!Number.isSafeInteger(destination) || destination < 0 || destination > targetSiblings.length) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: targetParent.id });
+    }
+    const sourceWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), source);
+    const targetParentWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), targetParentNode);
+    const targetParentInverse = targetParentWorld && invertRuntimeTransform(targetParentWorld);
+    if (!sourceWorld || !targetParentInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    const replacementLocal = multiplyRuntimeTransforms(targetParentInverse, sourceWorld);
+    const kind = sourceProxy.type === "VECTOR" ? "vector" : sourceProxy.type === "RECTANGLE" ? "rectangle" : sourceProxy.type === "ELLIPSE" ? "ellipse" : sourceProxy.type === "POLYGON" ? "polygon" : sourceProxy.type === "STAR" ? "star" : "line";
+    const resolvedPath = resolveTextPathVectorPath({
+      kind,
+      width: typeof source.width === "number" ? source.width : 0,
+      height: typeof source.height === "number" ? source.height : 0,
+      radius: typeof source.radius === "number" ? source.radius : 0,
+      cornerRadii: source.cornerRadii as [number, number, number, number] | undefined,
+      arcData: source.arcData as NonNullable<Parameters<typeof resolveTextPathVectorPath>[0]["arcData"]> | undefined,
+      parametricShape: source.parametricShape as NonNullable<Parameters<typeof resolveTextPathVectorPath>[0]["parametricShape"]> | undefined,
+      vectorPath: source.vectorPath as DocumentVectorPath | undefined,
+    }, this.createId);
+    if (!resolvedPath) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    const vectorPath: DocumentVectorPath = kind === "vector"
+      ? {
+          fillRule: resolvedPath.fillRule,
+          subpaths: resolvedPath.subpaths.map((subpath) => ({
+            closed: subpath.closed,
+            points: subpath.points.map((point) => ({ ...structuredClone(point), id: this.createId() })),
+          })),
+        }
+      : resolvedPath;
+    const replacementId = this.createId();
+    const replacementPositionId = positionIdForLayerInsertion(targetSiblings, destination);
+    if (!replacementPositionId) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+    const replacement: RuntimeProjectionNode = {
+      ...structuredClone(source),
+      id: replacementId,
+      type: "VECTOR",
+      name: `${typeof source.name === "string" ? source.name : source.type} flattened`,
+      parentId: targetParent.id,
+      x: replacementLocal.e,
+      y: replacementLocal.f,
+      rotation: Math.atan2(replacementLocal.b, replacementLocal.a) * 180 / Math.PI,
+      relativeTransform: replacementLocal,
+      siblingIndex: destination,
+      positionId: replacementPositionId,
+      vectorPath,
+      arcData: undefined,
+      parametricShape: undefined,
+      booleanOperation: undefined,
+      radius: 0,
+      cornerRadii: undefined,
+      cornerSmoothing: 0,
+      removed: false,
+    };
+    const siblingIndexes = [...targetSiblings.slice(0, destination), replacement, ...targetSiblings.slice(destination)].flatMap((sibling, siblingIndex) =>
+      sibling.id === replacementId || sibling.siblingIndex === siblingIndex ? [] : [{ nodeId: sibling.id, siblingIndex }]);
+    if (movesAcrossParents) {
+      this.siblingsOf(source.parentId)
+        .filter((sibling) => sibling.id !== source.id)
+        .forEach((sibling, siblingIndex) => {
+          if (sibling.siblingIndex !== siblingIndex) siblingIndexes.push({ nodeId: sibling.id, siblingIndex });
+        });
+    }
+    this.enqueueOperations([{ type: "flattenNode", sourceId: source.id, replacement, siblingIndexes }]);
     return this.proxyFor(replacementId);
   }
 

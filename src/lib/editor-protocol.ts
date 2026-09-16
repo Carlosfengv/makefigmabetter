@@ -880,6 +880,8 @@ export type EditorCommand =
   | { type: "boolean"; ids: string[]; operation: DocumentBooleanOperation; id?: string; parentId?: string; pageId?: string; index?: number; patch?: Partial<CanvasNode> }
   /** Replaces a live Boolean structure with its current Rust-derived VectorPath. */
   | { type: "flattenBoolean"; id: string; replacementId?: string; parentId?: string; pageId?: string; index?: number }
+  /** Replaces one leaf vector-like node with an equivalent editable Vector. */
+  | { type: "flattenNode"; id: string; replacementId?: string; vectorPath: DocumentVectorPath; parentId?: string; pageId?: string; index?: number }
   /** Replaces a Vector's paint stroke with the Rust-derived editable fill path. */
   | { type: "outlineStroke"; id: string }
   /** Replaces a Polygon or Star with its current closed editable VectorPath. */

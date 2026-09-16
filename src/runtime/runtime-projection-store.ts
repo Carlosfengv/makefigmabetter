@@ -54,6 +54,12 @@ export type PendingProjectionOperation =
       operandIds: readonly string[];
       replacement: RuntimeProjectionNode;
       siblingIndexes: readonly Readonly<{ nodeId: string; siblingIndex: number }>[];
+    }>
+  | Readonly<{
+      type: "flattenNode";
+      sourceId: string;
+      replacement: RuntimeProjectionNode;
+      siblingIndexes: readonly Readonly<{ nodeId: string; siblingIndex: number }>[];
     }>;
 
 export type PendingProjectionTransaction = Readonly<{
@@ -391,6 +397,14 @@ function validateOperations(
       continue;
     }
 
+    if (operation.type === "flattenNode") {
+      validateFlattenNodeOperation(read, operation, transactionId);
+      overlay.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
+      overlay.set(operation.sourceId, cloneNode({ ...read(operation.sourceId)!, removed: true }));
+      operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex })));
+      continue;
+    }
+
     const node = read(operation.nodeId);
     if (!node) throw runtimeError("NODE_NOT_FOUND", { transactionId, nodeId: operation.nodeId });
     if (node.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId: operation.nodeId });
@@ -441,6 +455,14 @@ function applyOperations(
       nodes.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
       operation.operandIds.forEach((nodeId) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, removed: true })));
       nodes.set(operation.booleanId, cloneNode({ ...nodes.get(operation.booleanId)!, removed: true }));
+      operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex })));
+      continue;
+    }
+
+    if (operation.type === "flattenNode") {
+      validateFlattenNodeOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      nodes.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
+      nodes.set(operation.sourceId, cloneNode({ ...nodes.get(operation.sourceId)!, removed: true }));
       operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex })));
       continue;
     }
@@ -551,6 +573,8 @@ function validateFlattenOperation(
     boolean.type !== "BOOLEAN_OPERATION" ||
     !operation.replacement.id ||
     operation.replacement.type !== "VECTOR" ||
+    !operation.replacement.vectorPath ||
+    typeof operation.replacement.vectorPath !== "object" ||
     read(operation.replacement.id) ||
     operation.operandIds.length < 2 ||
     new Set(operation.operandIds).size !== operation.operandIds.length ||
@@ -568,6 +592,35 @@ function validateFlattenOperation(
     const node = read(nodeId);
     const slot = `${node?.parentId ?? "<root>"}:${siblingIndex}`;
     if (!node || node.removed === true || nodeId === operation.booleanId || operation.operandIds.includes(nodeId) || !Number.isSafeInteger(siblingIndex) || siblingIndex < 0 || occupiedSiblingSlots.has(slot)) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
+    }
+    occupiedSiblingSlots.add(slot);
+  }
+}
+
+function validateFlattenNodeOperation(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  operation: Extract<PendingProjectionOperation, { type: "flattenNode" }>,
+  transactionId: string,
+): void {
+  const source = read(operation.sourceId);
+  if (!source) throw runtimeError("NODE_NOT_FOUND", { transactionId, nodeId: operation.sourceId });
+  if (source.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId: operation.sourceId });
+  if (
+    !["VECTOR", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "LINE"].includes(source.type) ||
+    !operation.replacement.id ||
+    operation.replacement.type !== "VECTOR" ||
+    !operation.replacement.vectorPath ||
+    typeof operation.replacement.vectorPath !== "object" ||
+    read(operation.replacement.id) ||
+    projectionPageId(read, source) !== projectionPageId(read, operation.replacement) ||
+    new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length
+  ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceId });
+  const occupiedSiblingSlots = new Set<string>();
+  for (const { nodeId, siblingIndex } of operation.siblingIndexes) {
+    const node = read(nodeId);
+    const slot = `${node?.parentId ?? "<root>"}:${siblingIndex}`;
+    if (!node || node.removed === true || nodeId === operation.sourceId || !Number.isSafeInteger(siblingIndex) || siblingIndex < 0 || occupiedSiblingSlots.has(slot)) {
       throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
     }
     occupiedSiblingSlots.add(slot);

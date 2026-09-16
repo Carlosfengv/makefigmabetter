@@ -1225,6 +1225,50 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
+  it("flattens one confirmed parametric leaf into a Vector without world drift", async () => {
+    const projection: RuntimeProjection = {
+      revision: 3,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "source-frame", type: "FRAME", name: "Source", parentId: "page", siblingIndex: 0, x: 100, y: 60, width: 200, height: 160, rotation: 0 },
+        { id: "rect", type: "RECTANGLE", name: "Card", parentId: "source-frame", siblingIndex: 0, x: 20, y: 30, width: 80, height: 50, rotation: 0, radius: 8, fill: "#3366cc", isMask: false },
+        { id: "source-sibling", type: "ELLIPSE", name: "Sibling", parentId: "source-frame", siblingIndex: 1, x: 120, y: 30, width: 40, height: 40 },
+        { id: "target", type: "FRAME", name: "Target", parentId: "page", siblingIndex: 1, x: 300, y: 200, width: 240, height: 180, rotation: 0 },
+        { id: "target-child", type: "VECTOR", name: "Target child", parentId: "target", siblingIndex: 0, x: 20, y: 20, width: 40, height: 40, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+      ],
+    };
+    let sequence = 0;
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-parametric", projection, transport, createId: () => `flatten-${++sequence}`, scheduleMicrotask: () => {} });
+    const rectangle = (await session.getNodeByIdAsync("rect"))!;
+    const target = (await session.getNodeByIdAsync("target")) as RuntimeContainerNodeProxy;
+
+    const flattened = session.flatten([rectangle], target, 0);
+    expect(flattened).toMatchObject({ type: "VECTOR", name: "Card flattened", x: -180, y: -110, width: 80, height: 50, fills: [expect.objectContaining({ type: "SOLID" })] });
+    expect(flattened.parent).toBe(target);
+    expect(flattened.vectorPaths[0]?.data).toContain("C");
+    expect(rectangle.removed).toBe(true);
+    expect(target.children.map((node) => node.id)).toEqual([flattened.id, "target-child"]);
+    const sourceFrame = (await session.getNodeByIdAsync("source-frame")) as RuntimeContainerNodeProxy;
+    expect(sourceFrame.children.map((node) => node.id)).toEqual(["source-sibling"]);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([
+      expect.objectContaining({
+        type: "flattenNode",
+        sourceId: "rect",
+        replacement: expect.objectContaining({ id: flattened.id, type: "VECTOR", parentId: "target", siblingIndex: 0, vectorPath: expect.objectContaining({ subpaths: [expect.objectContaining({ closed: true })] }) }),
+        siblingIndexes: expect.arrayContaining([
+          { nodeId: "target-child", siblingIndex: 1 },
+          { nodeId: "source-sibling", siblingIndex: 0 },
+        ]),
+      }),
+    ]);
+    expect(await session.getNodeByIdAsync("rect")).toBeNull();
+    expect(await session.getNodeByIdAsync(flattened.id)).toBe(flattened);
+  });
+
   it("creates a same-page Boolean from Vector children of different Frames", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,
@@ -2455,6 +2499,14 @@ class InMemoryTransport implements RuntimeTransactionTransport {
         nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
         nodes.delete(operation.booleanId);
         operation.operandIds.forEach((nodeId) => nodes.delete(nodeId));
+        operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
+          const node = nodes.get(nodeId);
+          if (node) nodes.set(nodeId, { ...node, siblingIndex });
+        });
+      }
+      else if (operation.type === "flattenNode") {
+        nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
+        nodes.delete(operation.sourceId);
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });

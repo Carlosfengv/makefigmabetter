@@ -328,9 +328,21 @@ describe("RuntimeWorkerBridge", () => {
         siblingIndexes: [],
       }],
     }).catch(() => undefined);
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "p1", x: 0, y: 0, pointType: "corner" as const }] }] };
+    void bridge.submit({
+      transactionId: "tx-flatten-node",
+      baseRevision: 4,
+      operations: [{
+        type: "flattenNode",
+        sourceId: "rect",
+        replacement: { id: "flat-rect-id", type: "VECTOR", parentId: "page", siblingIndex: 1, vectorPath },
+        siblingIndexes: [],
+      }],
+    }).catch(() => undefined);
 
     expect(posted[0]?.transaction.commands).toEqual([{ type: "boolean", ids: ["vector-a", "vector-b"], operation: "exclude", id: "boolean-id", pageId: "page", index: 0 }]);
     expect(posted[1]?.transaction.commands).toEqual([{ type: "flattenBoolean", id: "boolean-id", replacementId: "flat-id", pageId: "page" }]);
+    expect(posted[2]?.transaction.commands).toEqual([{ type: "flattenNode", id: "rect", replacementId: "flat-rect-id", vectorPath, pageId: "page", index: 1 }]);
     bridge.close();
   });
 
