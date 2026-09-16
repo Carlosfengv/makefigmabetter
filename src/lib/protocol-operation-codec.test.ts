@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -72,6 +72,22 @@ describe("protocol operation codec", () => {
       description: "Primary surface",
       remote: true,
       paints: { layers: [{ visible: true, opacity: .75, blendMode: BlendMode.BLEND_MODE_MULTIPLY, solid: { space: ColorSpace.COLOR_SPACE_SRGB, red: 1, green: 0, blue: 0, alpha: 1 } }] },
+    });
+  });
+
+  it("serializes variable collection and variable registrations", () => {
+    const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
+      { type: "registerVariableCollection", collection },
+      { type: "registerVariable", variable: { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT", valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"] } },
+    ]));
+
+    expect(batch.operations[0]?.registerVariableCollection?.collection).toMatchObject({ id: "VC:tokens", defaultModeId: "default" });
+    expect(batch.operations[1]?.registerVariable?.variable).toMatchObject({
+      id: "V:spacing",
+      collectionId: "VC:tokens",
+      resolvedType: VariableResolvedType.VARIABLE_RESOLVED_TYPE_FLOAT,
+      valuesByMode: [{ modeId: "default", value: { floatValue: 0 } }],
     });
   });
 

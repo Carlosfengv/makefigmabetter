@@ -47,6 +47,28 @@ describe("RuntimeWorkerBridge", () => {
     expect(bridge.hasPendingTransactions).toBe(false);
   });
 
+  it("maps variable resource writes to worker commands", async () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
+    const variable = { id: "V:spacing", key: "", name: "Spacing", description: "", remote: false, hiddenFromPublishing: false, collectionId: collection.id, resolvedType: "FLOAT" as const, valuesByMode: { default: 0 }, scopes: ["ALL_SCOPES"] };
+    const pending = bridge.submit({
+      transactionId: "tx-variable",
+      baseRevision: 4,
+      operations: [
+        { type: "registerVariableCollection", collection },
+        { type: "registerVariable", variable },
+      ],
+    });
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      { type: "register-variable-collection", collection },
+      { type: "register-variable", variable },
+    ]);
+    bridge.close();
+    await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));
+  });
+
   it("accepts a transaction when the matching projection arrives before its Worker Ack", async () => {
     const bridge = new RuntimeWorkerBridge(() => undefined);
     const pending = bridge.submit({

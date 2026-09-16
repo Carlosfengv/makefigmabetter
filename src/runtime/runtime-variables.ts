@@ -22,6 +22,9 @@ export type RuntimeVariableHost = Readonly<{
   allVariableResources(): readonly DocumentVariableResource[];
   resolveVariableValue(variableId: string, nodeId?: string, override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>;
   localVariableCollections(): readonly DocumentVariableCollectionResource[];
+  allocateRuntimeId(): string;
+  registerVariableCollection(collection: DocumentVariableCollectionResource): void;
+  registerVariable(variable: DocumentVariableResource): void;
 }>;
 
 function runtimeColor(value: DocumentColor): RuntimeVariableColor {
@@ -182,8 +185,52 @@ export class RuntimeVariablesAPI {
     if (!variable) throw runtimeError("RESOURCE_UNAVAILABLE");
     return Object.freeze({ type: "VARIABLE_ALIAS", id: variable.id });
   }
-  createVariable(): never { throw runtimeError("UNSUPPORTED_FEATURE"); }
-  createVariableCollection(): never { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  createVariable(name: string, collection: RuntimeVariableCollection | string, resolvedType: DocumentVariableResolvedType): RuntimeVariable {
+    this.host.assertOpen();
+    if (typeof name !== "string" || !name.trim() || !["BOOLEAN", "COLOR", "FLOAT", "STRING"].includes(resolvedType)) {
+      throw runtimeError("INVALID_ARGUMENT");
+    }
+    const collectionId = typeof collection === "string" ? collection : collection instanceof RuntimeVariableCollection ? collection.id : "";
+    const collectionResource = this.host.variableCollectionResource(collectionId);
+    if (!collectionResource || collectionResource.remote) throw runtimeError("INVALID_ARGUMENT");
+    const initialValue: DocumentVariableValue = resolvedType === "BOOLEAN"
+      ? false
+      : resolvedType === "COLOR"
+        ? { space: "srgb", components: [0, 0, 0], alpha: 1 }
+        : resolvedType === "FLOAT"
+          ? 0
+          : "";
+    const resource: DocumentVariableResource = {
+      id: this.host.allocateRuntimeId(),
+      key: "",
+      name,
+      description: "",
+      remote: false,
+      hiddenFromPublishing: false,
+      collectionId,
+      resolvedType,
+      valuesByMode: Object.fromEntries(collectionResource.modes.map((mode) => [mode.modeId, structuredClone(initialValue)])),
+      scopes: ["ALL_SCOPES"],
+    };
+    this.host.registerVariable(resource);
+    return new RuntimeVariable(resource, this.host);
+  }
+  createVariableCollection(name: string): RuntimeVariableCollection {
+    this.host.assertOpen();
+    if (typeof name !== "string" || !name.trim()) throw runtimeError("INVALID_ARGUMENT");
+    const modeId = this.host.allocateRuntimeId();
+    const resource: DocumentVariableCollectionResource = {
+      id: this.host.allocateRuntimeId(),
+      key: "",
+      name,
+      remote: false,
+      hiddenFromPublishing: false,
+      modes: [{ modeId, name: "Mode 1" }],
+      defaultModeId: modeId,
+    };
+    this.host.registerVariableCollection(resource);
+    return new RuntimeVariableCollection(resource, this.host);
+  }
   importVariableByKeyAsync(): Promise<never> { return Promise.reject(runtimeError("UNSUPPORTED_FEATURE")); }
 
   private variable(id: string): RuntimeVariable | null {

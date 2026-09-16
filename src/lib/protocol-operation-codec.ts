@@ -30,12 +30,13 @@ import {
   TextDecorationThicknessUnit as ProtoTextDecorationThicknessUnit,
   TextTruncation,
   TextWrapStyle as ProtoTextWrapStyle,
+  VariableResolvedType as ProtoVariableResolvedType,
   VectorPointType,
   type Paint,
   type PaintStack as ProtoPaintStack,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVectorPath } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVariableCollectionResource, type DocumentVariableResource, type DocumentVariableValue, type DocumentVectorPath } from "./editor-protocol";
 import { sha256Bytes } from "./sha256";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
 import { clipsChildren } from "./node-capabilities";
@@ -142,6 +143,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   }
   if (command.type === "registerPaintStyle") {
     return [{ registerPaintStyle: { style: paintStyleResourceProto(command.style) } }];
+  }
+  if (command.type === "registerVariableCollection") {
+    return [{ registerVariableCollection: { collection: variableCollectionResourceProto(command.collection) } }];
+  }
+  if (command.type === "registerVariable") {
+    return [{ registerVariable: { variable: variableResourceProto(command.variable) } }];
   }
   if (command.type === "create") {
     const operations: ResolvedOperation[] = [{ createNode: { node: nodeProto(command.node) } }];
@@ -254,6 +261,50 @@ function paintStyleResourceProto(resource: DocumentPaintStyleResource) {
     description: resource.description,
     remote: resource.remote,
     paints: versionedPaintStack(resource.paints),
+  };
+}
+
+function variableCollectionResourceProto(resource: DocumentVariableCollectionResource) {
+  return {
+    id: resource.id,
+    key: resource.key,
+    name: resource.name,
+    remote: resource.remote,
+    hiddenFromPublishing: resource.hiddenFromPublishing,
+    modes: resource.modes.map((mode) => ({ modeId: mode.modeId, name: mode.name })),
+    defaultModeId: resource.defaultModeId,
+  };
+}
+
+function variableValueProto(value: DocumentVariableValue) {
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number") return { floatValue: value };
+  if (typeof value === "string") return { stringValue: value };
+  if ("type" in value) return { aliasVariableId: value.id };
+  return { colorValue: colorProto(value) };
+}
+
+function variableResourceProto(resource: DocumentVariableResource) {
+  const resolvedType = {
+    BOOLEAN: ProtoVariableResolvedType.VARIABLE_RESOLVED_TYPE_BOOLEAN,
+    COLOR: ProtoVariableResolvedType.VARIABLE_RESOLVED_TYPE_COLOR,
+    FLOAT: ProtoVariableResolvedType.VARIABLE_RESOLVED_TYPE_FLOAT,
+    STRING: ProtoVariableResolvedType.VARIABLE_RESOLVED_TYPE_STRING,
+  }[resource.resolvedType];
+  return {
+    id: resource.id,
+    key: resource.key,
+    name: resource.name,
+    description: resource.description,
+    remote: resource.remote,
+    hiddenFromPublishing: resource.hiddenFromPublishing,
+    collectionId: resource.collectionId,
+    resolvedType,
+    valuesByMode: Object.entries(resource.valuesByMode).map(([modeId, value]) => ({
+      modeId,
+      value: variableValueProto(value),
+    })),
+    scopes: [...resource.scopes],
   };
 }
 

@@ -11,7 +11,8 @@ use editor_core::{
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
     TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -69,6 +70,20 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::RegisterVariableCollection(_))
+                    | Some(v1::resolved_operation::Kind::RegisterVariable(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version < makefigma_document_codec::PAINT_STACK_ENGINE_SEMANTICS_VERSION
@@ -1668,6 +1683,16 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
                 value.style.ok_or(ServiceError::InvalidEnvelope)?,
             )?,
         }),
+        Kind::RegisterVariableCollection(value) => Ok(Command::RegisterVariableCollection {
+            collection: variable_collection_from_proto(
+                value.collection.ok_or(ServiceError::InvalidEnvelope)?,
+            ),
+        }),
+        Kind::RegisterVariable(value) => Ok(Command::RegisterVariable {
+            variable: variable_resource_from_proto(
+                value.variable.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
         Kind::SetPaintStyleLinks(value) => Ok(Command::SetPaintStyleLinks {
             id: node_id(&value.node_id)?,
             links: PaintStyleLinks {
@@ -2342,6 +2367,76 @@ fn paint_style_resource_from_proto(
         description: resource.description,
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::InvalidEnvelope)?)?,
+    })
+}
+
+fn variable_collection_from_proto(
+    value: v1::VariableCollectionResource,
+) -> VariableCollectionResource {
+    VariableCollectionResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        modes: value
+            .modes
+            .into_iter()
+            .map(|mode| VariableMode {
+                id: mode.mode_id,
+                name: mode.name,
+            })
+            .collect(),
+        default_mode_id: value.default_mode_id,
+    }
+}
+
+fn variable_value_from_proto(value: v1::VariableValue) -> Result<VariableValue, ServiceError> {
+    use v1::variable_value::Value;
+    match value.value.ok_or(ServiceError::InvalidEnvelope)? {
+        Value::BooleanValue(value) => Ok(VariableValue::Boolean(value)),
+        Value::ColorValue(value) => Ok(VariableValue::Color(color_from_proto(value)?)),
+        Value::FloatValue(value) => Ok(VariableValue::Float(value)),
+        Value::StringValue(value) => Ok(VariableValue::String(value)),
+        Value::AliasVariableId(value) => Ok(VariableValue::Alias(value)),
+    }
+}
+
+fn variable_resource_from_proto(
+    value: v1::VariableResource,
+) -> Result<VariableResource, ServiceError> {
+    let resolved_type = match v1::VariableResolvedType::try_from(value.resolved_type)
+        .map_err(|_| ServiceError::InvalidEnvelope)?
+    {
+        v1::VariableResolvedType::Boolean => VariableResolvedType::Boolean,
+        v1::VariableResolvedType::Color => VariableResolvedType::Color,
+        v1::VariableResolvedType::Float => VariableResolvedType::Float,
+        v1::VariableResolvedType::String => VariableResolvedType::String,
+        v1::VariableResolvedType::Unspecified => return Err(ServiceError::InvalidEnvelope),
+    };
+    let mut values_by_mode = std::collections::BTreeMap::new();
+    for entry in value.values_by_mode {
+        if values_by_mode
+            .insert(
+                entry.mode_id,
+                variable_value_from_proto(entry.value.ok_or(ServiceError::InvalidEnvelope)?)?,
+            )
+            .is_some()
+        {
+            return Err(ServiceError::InvalidEnvelope);
+        }
+    }
+    Ok(VariableResource {
+        id: value.id,
+        key: value.key,
+        name: value.name,
+        description: value.description,
+        remote: value.remote,
+        hidden_from_publishing: value.hidden_from_publishing,
+        collection_id: value.collection_id,
+        resolved_type,
+        values_by_mode,
+        scopes: value.scopes,
     })
 }
 
@@ -5042,6 +5137,73 @@ mod tests {
                 if style.id == "S:brand-fill"
                     && style.key == "library-paint-key"
                     && style.paints.layers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn variable_catalog_operations_require_semantics_forty_eight() {
+        let collection = v1::VariableCollectionResource {
+            id: "VC:tokens".into(),
+            key: String::new(),
+            name: "Tokens".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![v1::VariableMode {
+                mode_id: "default".into(),
+                name: "Mode 1".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = v1::VariableResource {
+            id: "V:spacing".into(),
+            key: String::new(),
+            name: "Spacing".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: v1::VariableResolvedType::Float as i32,
+            values_by_mode: vec![v1::VariableModeValue {
+                mode_id: "default".into(),
+                value: Some(v1::VariableValue {
+                    value: Some(v1::variable_value::Value::FloatValue(0.0)),
+                }),
+            }],
+            scopes: vec!["ALL_SCOPES".into()],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::RegisterVariableCollection(
+                        v1::RegisterVariableCollection {
+                            collection: Some(collection),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::RegisterVariable(
+                        v1::RegisterVariable {
+                            variable: Some(variable),
+                        },
+                    )),
+                },
+            ],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::RegisterVariableCollection { collection }, Command::RegisterVariable { variable }]
+                if collection.id == "VC:tokens"
+                    && variable.collection_id == "VC:tokens"
+                    && variable.values_by_mode.get("default") == Some(&editor_core::VariableValue::Float(0.0))
         ));
     }
 

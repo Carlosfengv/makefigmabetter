@@ -375,6 +375,10 @@ function transactionToEditorCommands(
   const remaining: PendingProjectionTransaction["operations"][number][] = [];
 
   for (const operation of operations) {
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable") {
+      remaining.push(structuredClone(operation));
+      continue;
+    }
     if (operation.type === "boolean") {
       if (created.has(operation.node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.node.id });
       const cloned = structuredClone(operation);
@@ -425,6 +429,12 @@ function toEditorCommands(
   operation: PendingProjectionTransaction["operations"][number],
   pageIds: ReadonlySet<string>,
 ): EditorTransaction["commands"] {
+  if (operation.type === "registerVariableCollection") {
+    return [{ type: "register-variable-collection", collection: structuredClone(operation.collection) }];
+  }
+  if (operation.type === "registerVariable") {
+    return [{ type: "register-variable", variable: structuredClone(operation.variable) }];
+  }
   if (operation.type === "boolean") {
     const runtimeParentId = typeof operation.node.parentId === "string" ? operation.node.parentId : undefined;
     const index = typeof operation.node.siblingIndex === "number" && Number.isSafeInteger(operation.node.siblingIndex)

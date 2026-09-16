@@ -356,6 +356,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
   let selectionIds: string[] = [];
   const affectedGroupIds = new Set<string>();
   for (const command of commands) {
+    if (command.type === "register-variable-collection") {
+      batch.push({ type: "registerVariableCollection", collection: structuredClone(command.collection) });
+      continue;
+    }
+    if (command.type === "register-variable") {
+      batch.push({ type: "registerVariable", variable: structuredClone(command.variable) });
+      continue;
+    }
     if (command.type === "convertToTextPath") {
       const index = nextNodes.findIndex((node) => node.id === command.id);
       const node = nextNodes[index];

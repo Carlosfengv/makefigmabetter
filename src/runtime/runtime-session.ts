@@ -259,22 +259,22 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   variableResource(id: string): DocumentVariableResource | undefined {
     this.assertOpen();
-    return this.projectionStore.confirmedProjection.variables?.find((variable) => variable.id === id);
+    return this.projectionStore.listVariables().find((variable) => variable.id === id);
   }
 
   variableCollectionResource(id: string): DocumentVariableCollectionResource | undefined {
     this.assertOpen();
-    return this.projectionStore.confirmedProjection.variableCollections?.find((collection) => collection.id === id);
+    return this.projectionStore.listVariableCollections().find((collection) => collection.id === id);
   }
 
   localVariables(type?: DocumentVariableResolvedType): readonly DocumentVariableResource[] {
     this.assertOpen();
-    return (this.projectionStore.confirmedProjection.variables ?? []).filter((variable) => !variable.remote && (type === undefined || variable.resolvedType === type));
+    return this.projectionStore.listVariables().filter((variable) => !variable.remote && (type === undefined || variable.resolvedType === type));
   }
 
   allVariableResources(): readonly DocumentVariableResource[] {
     this.assertOpen();
-    return this.projectionStore.confirmedProjection.variables ?? [];
+    return this.projectionStore.listVariables();
   }
 
   explicitVariableModesForNode(nodeId: string): Readonly<Record<string, string>> {
@@ -328,7 +328,15 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   localVariableCollections(): readonly DocumentVariableCollectionResource[] {
     this.assertOpen();
-    return (this.projectionStore.confirmedProjection.variableCollections ?? []).filter((collection) => !collection.remote);
+    return this.projectionStore.listVariableCollections().filter((collection) => !collection.remote);
+  }
+
+  registerVariableCollection(collection: DocumentVariableCollectionResource): void {
+    this.enqueueOperations([{ type: "registerVariableCollection", collection }]);
+  }
+
+  registerVariable(variable: DocumentVariableResource): void {
+    this.enqueueOperations([{ type: "registerVariable", variable }]);
   }
 
   assertSynchronousDocumentAccess(): void {

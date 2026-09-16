@@ -1053,6 +1053,14 @@ message RegisterPaintStyle {
   PaintStyleResource style = 1;
 }
 
+message RegisterVariableCollection {
+  VariableCollectionResource collection = 1;
+}
+
+message RegisterVariable {
+  VariableResource variable = 1;
+}
+
 message SetPaintStyleLinks {
   bytes node_id = 1;
   optional string fill_style_id = 2;
@@ -1201,6 +1209,8 @@ message ResolvedOperation {
     RegisterTextStyle register_text_style = 28;
     RegisterPaintStyle register_paint_style = 29;
     SetPaintStyleLinks set_paint_style_links = 30;
+    RegisterVariableCollection register_variable_collection = 31;
+    RegisterVariable register_variable = 32;
   }
 }
 

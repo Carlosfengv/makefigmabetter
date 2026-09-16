@@ -55,6 +55,30 @@ describe("Variables resource runtime", () => {
     expect((await session.variables.getLocalVariablesAsync()).map((value) => value.id)).toEqual(["V:spacing", "V:spacing-alias", "V:surface", "V:opacity", "V:visible", "V:width", "V:height", "V:label"]);
   });
 
+  it("creates local collections and typed variables through one canonical transaction", async () => {
+    const transport = new UpdatingTransport(projection);
+    const session = new RuntimeSession({ sessionId: "variable-create", projection, transport, scheduleMicrotask: () => {} });
+    const collection = session.variables.createVariableCollection("Tokens");
+    const spacing = session.variables.createVariable("Spacing", collection, "FLOAT");
+    const surface = session.variables.createVariable("Surface", collection.id, "COLOR");
+
+    expect(collection).toMatchObject({ name: "Tokens", remote: false, modes: [{ name: "Mode 1" }] });
+    expect(spacing).toMatchObject({ name: "Spacing", resolvedType: "FLOAT", variableCollectionId: collection.id });
+    expect(spacing.valuesByMode[collection.defaultModeId]).toBe(0);
+    expect(surface.valuesByMode[collection.defaultModeId]).toEqual({ r: 0, g: 0, b: 0 });
+    expect(session.variables.getLocalVariableCollections().at(-1)?.id).toBe(collection.id);
+    expect(session.variables.getLocalVariables().slice(-2).map((value) => value.id)).toEqual([spacing.id, surface.id]);
+
+    await session.commitAsync();
+    expect(transport.submitted).toHaveLength(1);
+    expect(transport.submitted[0]?.operations.map((operation) => operation.type)).toEqual([
+      "registerVariableCollection",
+      "registerVariable",
+      "registerVariable",
+    ]);
+    expect((await session.variables.getVariableByIdAsync(spacing.id))?.name).toBe("Spacing");
+  });
+
   it("binds scalar variables to node values and unlinks on direct writes", async () => {
     const writable: RuntimeProjection = { ...projection, nodes: [...projection.nodes, { id: "frame", type: "FRAME", name: "Container", parentId: "page", siblingIndex: 0, autoLayout: { mode: "horizontal", padding: [0, 0, 0, 0], itemSpacing: 0, wrap: true, primaryAlignment: "start", counterAlignment: "start", primarySizing: "fixed", counterSizing: "fixed", absolute: false } }, { id: "rect", type: "RECTANGLE", name: "Card", parentId: "frame", siblingIndex: 0, width: 100, height: 100, opacity: 1, visible: true, strokeWidth: 1 }, { id: "text", type: "TEXT", name: "Label", parentId: "frame", siblingIndex: 1, characters: "Initial", width: 100, height: 20 }] };
     const transport = new UpdatingTransport(writable);
@@ -244,11 +268,18 @@ class UpdatingTransport implements RuntimeTransactionTransport {
     this.submitted.push(transaction);
     const nodes = new Map(this.projection.nodes.map((node) => [node.id, structuredClone(node)]));
     for (const operation of transaction.operations) {
-      if (operation.type !== "update") continue;
-      const node = nodes.get(operation.nodeId);
-      if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
+      if (operation.type === "update") {
+        const node = nodes.get(operation.nodeId);
+        if (node) nodes.set(operation.nodeId, { ...node, ...structuredClone(operation.patch) });
+      }
     }
-    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()] };
+    const variableCollections = [...(this.projection.variableCollections ?? [])];
+    const variables = [...(this.projection.variables ?? [])];
+    for (const operation of transaction.operations) {
+      if (operation.type === "registerVariableCollection") variableCollections.push(structuredClone(operation.collection));
+      if (operation.type === "registerVariable") variables.push(structuredClone(operation.variable));
+    }
+    this.projection = { ...this.projection, revision: this.projection.revision + 1, nodes: [...nodes.values()], variableCollections, variables };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
 }

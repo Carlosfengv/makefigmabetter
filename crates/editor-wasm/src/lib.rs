@@ -303,6 +303,16 @@ impl DocumentEngine {
                         style: paint_style_resource_from_projection(&style)?,
                     });
                 }
+                BatchCommand::RegisterVariableCollection { collection } => {
+                    commands.push(Command::RegisterVariableCollection {
+                        collection: variable_collection_from_projection(&collection)?,
+                    });
+                }
+                BatchCommand::RegisterVariable { variable } => {
+                    commands.push(Command::RegisterVariable {
+                        variable: variable_resource_from_projection(&variable)?,
+                    });
+                }
                 BatchCommand::Create { node } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
@@ -2000,6 +2010,12 @@ enum BatchCommand {
     RegisterPaintStyle {
         style: ProjectionPaintStyleResource,
     },
+    RegisterVariableCollection {
+        collection: ProjectionVariableCollectionResource,
+    },
+    RegisterVariable {
+        variable: ProjectionVariableResource,
+    },
     Create {
         node: ProjectionNode,
     },
@@ -3007,6 +3023,8 @@ impl DocumentEngine {
                 | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::RegisterTextStyle { .. }
                 | BatchCommand::RegisterPaintStyle { .. }
+                | BatchCommand::RegisterVariableCollection { .. }
+                | BatchCommand::RegisterVariable { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }
@@ -13400,5 +13418,55 @@ mod tests {
         let mut restored = DocumentEngine::new();
         restored.load_snapshot_json(&snapshot).unwrap();
         assert_eq!(restored.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn variable_catalog_commands_cross_the_wasm_transaction_boundary() {
+        let mut engine = DocumentEngine::new();
+        let before = engine.canonical_hash();
+        let commands = serde_json::json!([
+            {
+                "type": "registerVariableCollection",
+                "collection": {
+                    "id": "VC:tokens",
+                    "key": "",
+                    "name": "Tokens",
+                    "remote": false,
+                    "hiddenFromPublishing": false,
+                    "modes": [{ "modeId": "default", "name": "Mode 1" }],
+                    "defaultModeId": "default"
+                }
+            },
+            {
+                "type": "registerVariable",
+                "variable": {
+                    "id": "V:spacing",
+                    "key": "",
+                    "name": "Spacing",
+                    "description": "",
+                    "remote": false,
+                    "hiddenFromPublishing": false,
+                    "collectionId": "VC:tokens",
+                    "resolvedType": "FLOAT",
+                    "valuesByMode": { "default": 0.0 },
+                    "scopes": ["ALL_SCOPES"]
+                }
+            }
+        ])
+        .to_string();
+
+        engine
+            .apply_transaction_json("00000000-0000-4000-8000-000000001116", 0, &commands)
+            .unwrap();
+        let snapshot: CoreSnapshot = serde_json::from_str(&engine.snapshot_json()).unwrap();
+        assert_eq!(snapshot.variable_collections.unwrap()[0].id, "VC:tokens");
+        assert_eq!(snapshot.variables.unwrap()[0].id, "V:spacing");
+        let after = engine.canonical_hash();
+        assert_ne!(before, after);
+
+        engine.undo().unwrap();
+        assert_eq!(engine.canonical_hash(), before);
+        engine.redo().unwrap();
+        assert_eq!(engine.canonical_hash(), after);
     }
 }

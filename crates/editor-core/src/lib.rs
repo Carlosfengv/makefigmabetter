@@ -1454,6 +1454,12 @@ pub enum Command {
     RegisterPaintStyle {
         style: PaintStyleResource,
     },
+    RegisterVariableCollection {
+        collection: VariableCollectionResource,
+    },
+    RegisterVariable {
+        variable: VariableResource,
+    },
     Delete {
         id: NodeId,
     },
@@ -1601,6 +1607,12 @@ pub enum AppliedChange {
     },
     PaintStyleRegistered {
         style: PaintStyleResource,
+    },
+    VariableCollectionRegistered {
+        collection: VariableCollectionResource,
+    },
+    VariableRegistered {
+        variable: VariableResource,
     },
     NodeDeleted {
         node: Node,
@@ -2445,6 +2457,13 @@ impl Document {
         &mut self,
         collection: VariableCollectionResource,
     ) -> Result<(), CommandError> {
+        self.insert_variable_collection(collection)
+    }
+
+    fn insert_variable_collection(
+        &mut self,
+        collection: VariableCollectionResource,
+    ) -> Result<(), CommandError> {
         if self.variable_collections.contains_key(&collection.id) {
             return Err(CommandError::DuplicateVariableCollection { id: collection.id });
         }
@@ -2479,6 +2498,14 @@ impl Document {
     }
 
     pub fn seed_variable(&mut self, variable: VariableResource) -> Result<(), CommandError> {
+        self.insert_variable(variable, false)
+    }
+
+    fn insert_variable(
+        &mut self,
+        variable: VariableResource,
+        require_resolved_aliases: bool,
+    ) -> Result<(), CommandError> {
         if self.variables.contains_key(&variable.id) {
             return Err(CommandError::DuplicateVariable { id: variable.id });
         }
@@ -2510,6 +2537,17 @@ impl Document {
                 && self.variables.len() < MAX_VARIABLES
                 && self.variable_catalog_bytes.saturating_add(bytes) <= MAX_VARIABLE_CATALOG_BYTES;
         if !valid {
+            return Err(CommandError::InvalidVariable);
+        }
+        if require_resolved_aliases
+            && variable.values_by_mode.values().any(|value| match value {
+                VariableValue::Alias(target_id) => self
+                    .variables
+                    .get(target_id)
+                    .is_none_or(|target| target.resolved_type != variable.resolved_type),
+                _ => false,
+            })
+        {
             return Err(CommandError::InvalidVariable);
         }
         self.variable_catalog_bytes += bytes;
@@ -4500,6 +4538,18 @@ impl Document {
                     style: style.clone(),
                 })
             }
+            Command::RegisterVariableCollection { collection } => {
+                self.insert_variable_collection(collection.clone())?;
+                Ok(AppliedChange::VariableCollectionRegistered {
+                    collection: collection.clone(),
+                })
+            }
+            Command::RegisterVariable { variable } => {
+                self.insert_variable(variable.clone(), true)?;
+                Ok(AppliedChange::VariableRegistered {
+                    variable: variable.clone(),
+                })
+            }
         }
     }
 
@@ -4594,6 +4644,18 @@ impl Document {
                     .paint_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
+            AppliedChange::VariableCollectionRegistered { collection } => {
+                self.variable_collections.remove(&collection.id);
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_sub(collection.estimated_bytes());
+            }
+            AppliedChange::VariableRegistered { variable } => {
+                self.variables.remove(&variable.id);
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_sub(variable.estimated_bytes());
+            }
             AppliedChange::NodeDeleted { node } => self.restore_node(node),
             AppliedChange::NodeRestored { node } => self.retire_node(node.id),
         }
@@ -4678,6 +4740,19 @@ impl Document {
                     .paint_style_bytes
                     .saturating_add(style.estimated_bytes());
                 self.paint_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::VariableCollectionRegistered { collection } => {
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_add(collection.estimated_bytes());
+                self.variable_collections
+                    .insert(collection.id.clone(), collection.clone());
+            }
+            AppliedChange::VariableRegistered { variable } => {
+                self.variable_catalog_bytes = self
+                    .variable_catalog_bytes
+                    .saturating_add(variable.estimated_bytes());
+                self.variables.insert(variable.id.clone(), variable.clone());
             }
             AppliedChange::NodeDeleted { node } => self.retire_node(node.id),
             AppliedChange::NodeRestored { node } => self.restore_node(node),
@@ -4931,7 +5006,9 @@ impl Document {
                 | Command::SetDocumentColorProfile { .. }
                 | Command::RegisterAsset { .. }
                 | Command::RegisterTextStyle { .. }
-                | Command::RegisterPaintStyle { .. } => {}
+                | Command::RegisterPaintStyle { .. }
+                | Command::RegisterVariableCollection { .. }
+                | Command::RegisterVariable { .. } => {}
             }
         }
         let mut frames = BTreeSet::new();
@@ -7670,6 +7747,8 @@ impl Command {
             }
             Command::RegisterTextStyle { style } => style.estimated_bytes(),
             Command::RegisterPaintStyle { style } => style.estimated_bytes(),
+            Command::RegisterVariableCollection { collection } => collection.estimated_bytes(),
+            Command::RegisterVariable { variable } => variable.estimated_bytes(),
             Command::Delete { .. } => std::mem::size_of::<NodeId>(),
         }
     }
@@ -8017,6 +8096,10 @@ impl AppliedChange {
             }
             AppliedChange::TextStyleRegistered { style } => style.estimated_bytes(),
             AppliedChange::PaintStyleRegistered { style } => style.estimated_bytes(),
+            AppliedChange::VariableCollectionRegistered { collection } => {
+                collection.estimated_bytes()
+            }
+            AppliedChange::VariableRegistered { variable } => variable.estimated_bytes(),
         }
     }
 }
@@ -9800,6 +9883,14 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
         Command::RegisterPaintStyle { style } => {
             hasher.update([27]);
             hash_paint_style_resource(hasher, style);
+        }
+        Command::RegisterVariableCollection { collection } => {
+            hasher.update([28]);
+            hash_variable_collection(hasher, collection);
+        }
+        Command::RegisterVariable { variable } => {
+            hasher.update([29]);
+            hash_variable_resource(hasher, variable);
         }
         Command::SetDocumentColorProfile { profile } => {
             hasher.update([6]);
@@ -22153,6 +22244,68 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash_hex(), converted_hash);
         assert_eq!(document.node(NodeId(91)).unwrap().kind, NodeKind::TextPath);
+    }
+
+    #[test]
+    fn variable_registration_is_atomic_undoable_and_replayable() {
+        let mut document = Document::with_id(DocumentId(919));
+        let collection = VariableCollectionResource {
+            id: "VC:tokens".into(),
+            key: String::new(),
+            name: "Tokens".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Mode 1".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:spacing".into(),
+            key: String::new(),
+            name: "Spacing".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(0.0))].into(),
+            scopes: vec!["ALL_SCOPES".into()],
+        };
+        let before = document.canonical_hash();
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::RegisterVariableCollection {
+                            collection: collection.clone(),
+                        },
+                        Command::RegisterVariable {
+                            variable: variable.clone(),
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        let after = document.canonical_hash();
+        assert_ne!(before, after);
+        assert_eq!(
+            document.variable_collection(&collection.id),
+            Some(&collection)
+        );
+        assert_eq!(document.variable(&variable.id), Some(&variable));
+
+        document.undo().unwrap();
+        assert_eq!(document.canonical_hash(), before);
+        assert!(document.variable_collection(&collection.id).is_none());
+        assert!(document.variable(&variable.id).is_none());
+
+        document.redo().unwrap();
+        assert_eq!(document.canonical_hash(), after);
+        assert_eq!(document.variable(&variable.id), Some(&variable));
     }
 
     #[test]

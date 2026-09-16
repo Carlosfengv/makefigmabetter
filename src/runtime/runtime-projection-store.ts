@@ -21,6 +21,8 @@ export type RuntimeProjection = Readonly<{
 }>;
 
 export type PendingProjectionOperation =
+  | Readonly<{ type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }>
+  | Readonly<{ type: "registerVariable"; variable: DocumentVariableResource }>
   | Readonly<{ type: "create"; node: RuntimeProjectionNode }>
   | Readonly<{ type: "update"; nodeId: string; patch: Readonly<Record<string, unknown>>; ignoreConstraints?: true; convertToTextPath?: true }>
   | Readonly<{ type: "remove"; nodeId: string }>
@@ -104,6 +106,7 @@ export class RuntimeProjectionStore {
     }
     if (!transaction.operations.length) throw runtimeError("INVALID_ARGUMENT", { transactionId: transaction.transactionId });
 
+    validateResourceOperations(this.listVariableCollections(), this.listVariables(), transaction.operations, transaction.transactionId);
     validateOperations(this.composedNodeMap(), transaction.operations, transaction.transactionId);
     this.pending.set(transaction.transactionId, { transaction: freezeTransaction(transaction) });
     this.invalidateComposedCache();
@@ -173,6 +176,26 @@ export class RuntimeProjectionStore {
     return [...this.composedNodeMap().values()].filter((node) => node.removed !== true);
   }
 
+  listVariableCollections(): readonly DocumentVariableCollectionResource[] {
+    const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
+    for (const { transaction } of this.pending.values()) {
+      for (const operation of transaction.operations) {
+        if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
+      }
+    }
+    return [...collections.values()];
+  }
+
+  listVariables(): readonly DocumentVariableResource[] {
+    const variables = new Map((this.confirmed.variables ?? []).map((value) => [value.id, value]));
+    for (const { transaction } of this.pending.values()) {
+      for (const operation of transaction.operations) {
+        if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
+      }
+    }
+    return [...variables.values()];
+  }
+
   pendingTransactionIds(): readonly string[] {
     return [...this.pending.keys()];
   }
@@ -191,10 +214,51 @@ export class RuntimeProjectionStore {
 
   private validatePendingReplacement(transactionId: string, replacement: PendingProjectionTransaction): void {
     const nodes = new Map(this.confirmedNodeMap);
+    const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
+    const variables = new Map((this.confirmed.variables ?? []).map((value) => [value.id, value]));
     for (const [candidateId, entry] of this.pending) {
       const transaction = candidateId === transactionId ? replacement : entry.transaction;
+      validateResourceOperations([...collections.values()], [...variables.values()], transaction.operations, transaction.transactionId);
+      applyResourceOperations(collections, variables, transaction.operations);
       applyOperations(nodes, transaction.operations, transaction.transactionId);
     }
+  }
+}
+
+function validateResourceOperations(
+  baseCollections: readonly DocumentVariableCollectionResource[],
+  baseVariables: readonly DocumentVariableResource[],
+  operations: readonly PendingProjectionOperation[],
+  transactionId: string,
+): void {
+  const collections = new Map(baseCollections.map((value) => [value.id, value]));
+  const variables = new Map(baseVariables.map((value) => [value.id, value]));
+  for (const operation of operations) {
+    if (operation.type === "registerVariableCollection") {
+      const value = operation.collection;
+      if (!value.id || !value.name.trim() || collections.has(value.id) || !value.modes.length || !value.modes.some((mode) => mode.modeId === value.defaultModeId)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      collections.set(value.id, value);
+    } else if (operation.type === "registerVariable") {
+      const value = operation.variable;
+      const collection = collections.get(value.collectionId);
+      if (!value.id || !value.name.trim() || variables.has(value.id) || !collection || collection.modes.some((mode) => value.valuesByMode[mode.modeId] === undefined)) {
+        throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      }
+      variables.set(value.id, value);
+    }
+  }
+}
+
+function applyResourceOperations(
+  collections: Map<string, DocumentVariableCollectionResource>,
+  variables: Map<string, DocumentVariableResource>,
+  operations: readonly PendingProjectionOperation[],
+): void {
+  for (const operation of operations) {
+    if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
+    if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
   }
 }
 
@@ -206,6 +270,7 @@ function validateOperations(
   const overlay = new Map<string, RuntimeProjectionNode>();
   const read = (nodeId: string) => overlay.get(nodeId) ?? base.get(nodeId);
   for (const operation of operations) {
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -265,6 +330,7 @@ function applyOperations(
   transactionId: string,
 ): void {
   for (const operation of operations) {
+    if (operation.type === "registerVariableCollection" || operation.type === "registerVariable") continue;
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });

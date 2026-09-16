@@ -1335,6 +1335,14 @@ export interface RegisterPaintStyle {
   style?: PaintStyleResource | undefined;
 }
 
+export interface RegisterVariableCollection {
+  collection?: VariableCollectionResource | undefined;
+}
+
+export interface RegisterVariable {
+  variable?: VariableResource | undefined;
+}
+
 export interface SetPaintStyleLinks {
   nodeId: Uint8Array;
   fillStyleId?: string | undefined;
@@ -1511,6 +1519,8 @@ export interface ResolvedOperation {
   registerTextStyle?: RegisterTextStyle | undefined;
   registerPaintStyle?: RegisterPaintStyle | undefined;
   setPaintStyleLinks?: SetPaintStyleLinks | undefined;
+  registerVariableCollection?: RegisterVariableCollection | undefined;
+  registerVariable?: RegisterVariable | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -9650,6 +9660,102 @@ export const RegisterPaintStyle: MessageFns<RegisterPaintStyle> = {
   },
 };
 
+function createBaseRegisterVariableCollection(): RegisterVariableCollection {
+  return { collection: undefined };
+}
+
+export const RegisterVariableCollection: MessageFns<RegisterVariableCollection> = {
+  encode(message: RegisterVariableCollection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.collection !== undefined) {
+      VariableCollectionResource.encode(message.collection, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterVariableCollection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterVariableCollection();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.collection = VariableCollectionResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterVariableCollection>, I>>(base?: I): RegisterVariableCollection {
+    return RegisterVariableCollection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterVariableCollection>, I>>(object: I): RegisterVariableCollection {
+    const message = createBaseRegisterVariableCollection();
+    message.collection = (object.collection !== undefined && object.collection !== null)
+      ? VariableCollectionResource.fromPartial(object.collection)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRegisterVariable(): RegisterVariable {
+  return { variable: undefined };
+}
+
+export const RegisterVariable: MessageFns<RegisterVariable> = {
+  encode(message: RegisterVariable, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.variable !== undefined) {
+      VariableResource.encode(message.variable, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterVariable {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterVariable();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.variable = VariableResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterVariable>, I>>(base?: I): RegisterVariable {
+    return RegisterVariable.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterVariable>, I>>(object: I): RegisterVariable {
+    const message = createBaseRegisterVariable();
+    message.variable = (object.variable !== undefined && object.variable !== null)
+      ? VariableResource.fromPartial(object.variable)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseSetPaintStyleLinks(): SetPaintStyleLinks {
   return { nodeId: new Uint8Array(0), fillStyleId: undefined, strokeStyleId: undefined, backgroundStyleId: undefined };
 }
@@ -10809,6 +10915,8 @@ function createBaseResolvedOperation(): ResolvedOperation {
     registerTextStyle: undefined,
     registerPaintStyle: undefined,
     setPaintStyleLinks: undefined,
+    registerVariableCollection: undefined,
+    registerVariable: undefined,
   };
 }
 
@@ -10903,6 +11011,12 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.setPaintStyleLinks !== undefined) {
       SetPaintStyleLinks.encode(message.setPaintStyleLinks, writer.uint32(242).fork()).join();
+    }
+    if (message.registerVariableCollection !== undefined) {
+      RegisterVariableCollection.encode(message.registerVariableCollection, writer.uint32(250).fork()).join();
+    }
+    if (message.registerVariable !== undefined) {
+      RegisterVariable.encode(message.registerVariable, writer.uint32(258).fork()).join();
     }
     return writer;
   },
@@ -11154,6 +11268,22 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.setPaintStyleLinks = SetPaintStyleLinks.decode(reader, reader.uint32());
           continue;
         }
+        case 31: {
+          if (tag !== 250) {
+            break;
+          }
+
+          message.registerVariableCollection = RegisterVariableCollection.decode(reader, reader.uint32());
+          continue;
+        }
+        case 32: {
+          if (tag !== 258) {
+            break;
+          }
+
+          message.registerVariable = RegisterVariable.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11261,6 +11391,13 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.setPaintStyleLinks = (object.setPaintStyleLinks !== undefined && object.setPaintStyleLinks !== null)
       ? SetPaintStyleLinks.fromPartial(object.setPaintStyleLinks)
+      : undefined;
+    message.registerVariableCollection =
+      (object.registerVariableCollection !== undefined && object.registerVariableCollection !== null)
+        ? RegisterVariableCollection.fromPartial(object.registerVariableCollection)
+        : undefined;
+    message.registerVariable = (object.registerVariable !== undefined && object.registerVariable !== null)
+      ? RegisterVariable.fromPartial(object.registerVariable)
       : undefined;
     return message;
   },
