@@ -74,6 +74,13 @@ describe("Variables resource runtime", () => {
     expect(boundPaint.boundVariables).toEqual({ color: { type: "VARIABLE_ALIAS", id: "V:surface" } });
     expect(session.variables.setBoundVariableForPaint(boundPaint, "color", null).boundVariables).toBeUndefined();
     expect(isRuntimeError(capture(() => session.variables.setBoundVariableForPaint(boundPaint, "color", spacing)), "INVALID_ARGUMENT")).toBe(true);
+    let boundShadow = session.variables.setBoundVariableForEffect({ type: "DROP_SHADOW", color: { r: 1, g: 1, b: 1, a: 1 }, offset: { x: 0, y: 0 }, radius: 1, spread: 0, visible: true, blendMode: "NORMAL" }, "color", surface);
+    boundShadow = session.variables.setBoundVariableForEffect(boundShadow, "radius", spacing);
+    boundShadow = session.variables.setBoundVariableForEffect(boundShadow, "spread", spacing);
+    boundShadow = session.variables.setBoundVariableForEffect(boundShadow, "offsetX", spacing);
+    boundShadow = session.variables.setBoundVariableForEffect(boundShadow, "offsetY", spacing);
+    const boundBlur = session.variables.setBoundVariableForEffect({ type: "LAYER_BLUR", radius: 1, visible: true, blurType: "NORMAL" }, "radius", spacing);
+    expect(isRuntimeError(capture(() => session.variables.setBoundVariableForEffect(boundBlur, "color", surface)), "INVALID_ARGUMENT")).toBe(true);
 
     rectangle.setBoundVariable("opacity", opacity);
     rectangle.setBoundVariable("visible", visible);
@@ -83,6 +90,7 @@ describe("Variables resource runtime", () => {
     rectangle.setBoundVariable("cornerRadius", spacing);
     rectangle.fills = [boundPaint];
     rectangle.strokes = [boundPaint];
+    rectangle.effects = [boundShadow, boundBlur];
     text.setBoundVariable("characters", label);
     frame.setBoundVariable("itemSpacing", spacing);
     frame.setBoundVariable("paddingTop", spacing);
@@ -108,6 +116,11 @@ describe("Variables resource runtime", () => {
     expect(rectangle.boundVariables).toMatchObject({ fills: [{ type: "VARIABLE_ALIAS", id: "V:surface" }], strokes: [{ type: "VARIABLE_ALIAS", id: "V:surface" }] });
     expect(rectangle.fills).toMatchObject([{ type: "SOLID", opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
     expect(rectangle.strokes).toMatchObject([{ type: "SOLID", opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
+    expect(rectangle.effects).toMatchObject([
+      { type: "DROP_SHADOW", radius: 8, spread: 8, offset: { x: 8, y: 8 }, boundVariables: { color: { id: "V:surface" }, radius: { id: "V:spacing" }, spread: { id: "V:spacing" }, offsetX: { id: "V:spacing" }, offsetY: { id: "V:spacing" } } },
+      { type: "LAYER_BLUR", radius: 8, boundVariables: { radius: { id: "V:spacing" } } },
+    ]);
+    expect(rectangle.boundVariables).toMatchObject({ effects: expect.arrayContaining([{ type: "VARIABLE_ALIAS", id: "V:surface" }, { type: "VARIABLE_ALIAS", id: "V:spacing" }]) });
     expect(rectangle.boundVariables).toMatchObject({ topLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, topRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomRightRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" }, bottomLeftRadius: { type: "VARIABLE_ALIAS", id: "V:spacing" } });
     expect(text.characters).toBe("Light");
     expect(frame).toMatchObject({ itemSpacing: 8, paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8, counterAxisSpacing: 8 });
@@ -131,6 +144,10 @@ describe("Variables resource runtime", () => {
     expect(rectangle.cornerRadius).toBe(12);
     expect(rectangle.fills).toMatchObject([{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
     expect(rectangle.strokes).toMatchObject([{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: .5, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "V:surface" } } }]);
+    expect(rectangle.effects).toMatchObject([
+      { type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 1 }, radius: 12, spread: 12, offset: { x: 12, y: 12 } },
+      { type: "LAYER_BLUR", radius: 12 },
+    ]);
     expect(text.characters).toBe("Dark");
     expect(frame).toMatchObject({ itemSpacing: 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12, paddingLeft: 12, counterAxisSpacing: 12 });
     expect(frame).toMatchObject({ strokeTopWeight: 12, strokeRightWeight: 12, strokeBottomWeight: 12, strokeLeftWeight: 12 });
@@ -138,6 +155,7 @@ describe("Variables resource runtime", () => {
     expect(opacity.resolveForConsumer(rectangle)).toEqual({ value: .8, resolvedType: "FLOAT" });
     await session.commitAsync();
     expect(rectangle.boundVariables).toMatchObject({ fills: [{ type: "VARIABLE_ALIAS", id: "V:surface" }], strokes: [{ type: "VARIABLE_ALIAS", id: "V:surface" }] });
+    expect(rectangle.effects[0]).toMatchObject({ boundVariables: { color: { id: "V:surface" }, radius: { id: "V:spacing" } } });
 
     rectangle.setExplicitVariableModeForCollection(collection, "light");
     expect(rectangle.opacity).toBe(.5);
@@ -166,6 +184,8 @@ describe("Variables resource runtime", () => {
     rectangle.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 1 } }];
     expect(rectangle.boundVariables).not.toHaveProperty("fills");
     expect(rectangle.boundVariables).not.toHaveProperty("strokes");
+    rectangle.effects = [{ type: "LAYER_BLUR", radius: 4, visible: true, blurType: "NORMAL" }];
+    expect(rectangle.boundVariables).not.toHaveProperty("effects");
 
     frame.itemSpacing = 4;
     frame.paddingTop = 1;

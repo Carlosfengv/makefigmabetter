@@ -10,6 +10,7 @@ import type {
   DocumentConnectorMetadata,
   DocumentColor,
   DocumentConstraints,
+  DocumentEffect,
   DocumentFontReference,
   DocumentInstanceMetadata,
   DocumentPaintStyleResource,
@@ -47,7 +48,7 @@ import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextC
 import { colorToSrgbCss } from "../lib/color-rendering";
 import type { RuntimeImage } from "./runtime-session";
 import type { RuntimeVariable, RuntimeVariableCollection } from "./runtime-variables";
-import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, VARIABLE_PAINT_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
+import { extensionsWithVariableMap, VARIABLE_BINDINGS_EXTENSION, VARIABLE_EFFECT_BINDINGS_EXTENSION, VARIABLE_MODES_EXTENSION, VARIABLE_PAINT_BINDINGS_EXTENSION, variableAliases, variableBindingsFromExtensions, variableEffectBindingsFromExtensions, variablePaintBindingsFromExtensions } from "./runtime-variable-bindings";
 import {
   documentPaintStackFromRuntime,
   documentTextDecorationColorFromRuntime,
@@ -60,6 +61,7 @@ import {
   type RuntimeSolidPaint,
   type RuntimeTextDecorationColor,
 } from "./runtime-paint";
+import { documentEffectsFromRuntime, runtimeEffectsFromDocument, type RuntimeEffect } from "./runtime-effect";
 import { type PrototypeMetadata, type PrototypeReaction, validatePrototypeMetadata, validatePrototypeReactions } from "./prototype-contract";
 import type { RuntimeExportSettings, RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
 import {
@@ -74,6 +76,7 @@ import {
 } from "./runtime-styled-text-segments";
 export type { RuntimeVectorNetwork } from "./runtime-vector-network";
 export type { RuntimePaint } from "./runtime-paint";
+export type { RuntimeEffect } from "./runtime-effect";
 export type { RuntimeTextDecorationColor } from "./runtime-paint";
 export type { RuntimeFontName } from "./runtime-font-name";
 export type { RuntimeTextCase } from "../lib/text-case";
@@ -218,6 +221,11 @@ const RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS = [
 ] as const;
 const RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET = new Set<string>(RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS);
 export type RuntimeVariableBindableNodeField = typeof RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS[number];
+type RuntimeEffectVariableField = "color" | "radius" | "spread" | "offsetX" | "offsetY";
+const RUNTIME_EFFECT_VARIABLE_FIELDS: readonly RuntimeEffectVariableField[] = ["color", "radius", "spread", "offsetX", "offsetY"];
+function isRuntimeEffectVariableField(value: string): value is RuntimeEffectVariableField {
+  return RUNTIME_EFFECT_VARIABLE_FIELDS.includes(value as RuntimeEffectVariableField);
+}
 function isRuntimeVariableBindableNodeField(value: string): value is RuntimeVariableBindableNodeField {
   return RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET.has(value);
 }
@@ -1405,6 +1413,14 @@ export class RuntimeNodeProxy {
         .map(({ id }) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id }));
       if (values.length) aliases[`${usage}s`] = Object.freeze(values);
     }
+    const effectValues = Object.entries(variableEffectBindingsFromExtensions(node.extensions))
+      .flatMap(([key, id]) => {
+        const match = /^effect:(\d+):(color|radius|spread|offsetX|offsetY)$/.exec(key);
+        return match ? [{ index: Number(match[1]), field: match[2]!, id }] : [];
+      })
+      .sort((a, b) => a.index - b.index || a.field.localeCompare(b.field))
+      .map(({ id }) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id }));
+    if (effectValues.length) aliases.effects = Object.freeze(effectValues);
     return Object.keys(aliases).length ? Object.freeze(aliases) : undefined;
   }
   setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
@@ -1524,6 +1540,14 @@ export class RuntimeNodeProxy {
       blendMode,
       ...(extensions ? { extensions } : {}),
     });
+  }
+  get effects(): readonly RuntimeEffect[] {
+    this.assertEffectsSupported();
+    return this.runtimeEffectsWithVariableBindings();
+  }
+  set effects(value: readonly RuntimeEffect[]) {
+    this.assertEffectsSupported();
+    this.writeNodeEffects(value);
   }
   get fills(): readonly RuntimePaint[] | typeof RUNTIME_MIXED {
     this.assertPaintsSupported("fill");
@@ -3087,6 +3111,7 @@ export class RuntimeNodeProxy {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     Object.assign(patch, this.paintVariableValuePatch(override));
+    Object.assign(patch, this.effectVariableValuePatch(override));
     return patch;
   }
 
@@ -3110,6 +3135,23 @@ export class RuntimeNodeProxy {
       stacks.set(usage, stack);
     }
     return Object.fromEntries([...stacks].map(([usage, stack]) => [`${usage}Stack`, stack]));
+  }
+
+  private effectVariableValuePatch(override?: Readonly<{ nodeId: string; modes: Readonly<Record<string, string>> }>): Readonly<Record<string, unknown>> {
+    const node = this.read();
+    const bindings = variableEffectBindingsFromExtensions(node.extensions);
+    if (!Object.keys(bindings).length) return {};
+    const effects = structuredClone((node.effectStack as DocumentEffect[] | undefined) ?? []);
+    for (const [key, variableId] of Object.entries(bindings)) {
+      const match = /^effect:(\d+):(color|radius|spread|offsetX|offsetY)$/.exec(key);
+      if (!match) continue;
+      const index = Number(match[1]);
+      const effect = effects[index];
+      if (!effect) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      const resolved = this.host.resolveVariableValue(variableId, this.id, override);
+      this.applyVariableToDocumentEffect(effect, match[2] as RuntimeEffectVariableField, resolved.value, resolved.resolvedType);
+    }
+    return { effectStack: effects };
   }
 
   private variableFieldPatch(field: RuntimeVariableBindableNodeField, value: DocumentVariableValue, type: DocumentVariableResolvedType, stagedPatch?: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
@@ -3392,6 +3434,87 @@ export class RuntimeNodeProxy {
     if (!["FRAME", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET"].includes(this.type)) {
       throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     }
+  }
+
+  private assertEffectsSupported(): void {
+    if (["DOCUMENT", "PAGE", "BOOLEAN_OPERATION", "SLICE"].includes(this.type)) {
+      throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    }
+  }
+
+  private runtimeEffectsWithVariableBindings(): readonly RuntimeEffect[] {
+    const node = this.read();
+    const bindings = variableEffectBindingsFromExtensions(node.extensions);
+    return runtimeEffectsFromDocument(node.effectStack as DocumentEffect[] | undefined).map((effect, index) => {
+      const boundVariables = Object.fromEntries(([
+        "color",
+        "radius",
+        "spread",
+        "offsetX",
+        "offsetY",
+      ] as const).flatMap((field) => {
+        const variableId = bindings[`effect:${index}:${field}`];
+        return variableId ? [[field, Object.freeze({ type: "VARIABLE_ALIAS" as const, id: variableId })] as const] : [];
+      }));
+      return Object.keys(boundVariables).length
+        ? Object.freeze({ ...effect, boundVariables: Object.freeze(boundVariables) })
+        : Object.freeze(effect);
+    });
+  }
+
+  private writeNodeEffects(value: readonly RuntimeEffect[]): void {
+    const node = this.read();
+    const bindings = { ...variableEffectBindingsFromExtensions(node.extensions) };
+    const oldKeys = Object.keys(bindings).filter((key) => key.startsWith("effect:"));
+    for (const key of oldKeys) delete bindings[key];
+    const sourceBindings = value.map((effect) => ({ ...effect.boundVariables }));
+    const effects = documentEffectsFromRuntime(value.map((effect): RuntimeEffect => {
+      const { boundVariables: _boundVariables, ...base } = effect;
+      void _boundVariables;
+      return base as RuntimeEffect;
+    }));
+    sourceBindings.forEach((effectBindings, index) => {
+      for (const [field, alias] of Object.entries(effectBindings)) {
+        if (!isRuntimeEffectVariableField(field)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        if (!alias || alias.type !== "VARIABLE_ALIAS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        const resource = this.host.variableResource(alias.id);
+        const expected = field === "color" ? "COLOR" : "FLOAT";
+        if (!resource || resource.resolvedType !== expected) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+        const resolved = this.host.resolveVariableValue(resource.id, this.id);
+        this.applyVariableToDocumentEffect(effects[index]!, field, resolved.value, resolved.resolvedType);
+        bindings[`effect:${index}:${field}`] = resource.id;
+      }
+    });
+    const hasKeys = Object.keys(bindings).some((key) => key.startsWith("effect:"));
+    this.write({
+      effectStack: effects,
+      ...((oldKeys.length || hasKeys) ? { extensions: extensionsWithVariableMap(node.extensions, VARIABLE_EFFECT_BINDINGS_EXTENSION, bindings) } : {}),
+    });
+  }
+
+  private applyVariableToDocumentEffect(effect: DocumentEffect, field: RuntimeEffectVariableField, value: DocumentVariableValue, type: DocumentVariableResolvedType): void {
+    const shadow = effect.dropShadow ?? effect.innerShadow;
+    if (field === "color") {
+      if (!shadow || type !== "COLOR" || !isDocumentVariableColor(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      shadow.color = structuredClone(value);
+      return;
+    }
+    if (type !== "FLOAT" || typeof value !== "number" || !Number.isFinite(value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (field === "radius") {
+      const blur = effect.layerBlur ?? effect.backgroundBlur;
+      if (shadow) {
+        if (value < 0 || value > 1_024) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        shadow.blurRadius = value;
+      } else if (blur) {
+        if (value < 0 || value > 256) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        blur.radius = value;
+      } else throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      return;
+    }
+    if (!shadow || value < -10_000 || value > 10_000) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (field === "spread") shadow.spread = value;
+    else if (field === "offsetX") shadow.offsetX = value;
+    else shadow.offsetY = value;
   }
 
   private runtimePaintsWithVariableBindings(usage: "fill" | "stroke"): readonly RuntimePaint[] {

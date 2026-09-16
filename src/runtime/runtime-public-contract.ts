@@ -42,6 +42,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   if (runtimeStringVariable) text.setBoundVariable("characters", runtimeStringVariable);
   const runtimeColorVariable = runtime.variables.getLocalVariables("COLOR")[0];
   if (runtimeColorVariable) rectangle.fills = [runtime.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 0, b: 0 } }, "color", runtimeColorVariable)];
+  if (runtimeVariable) rectangle.effects = [runtime.variables.setBoundVariableForEffect({ type: "LAYER_BLUR", radius: 4, visible: true, blurType: "NORMAL" }, "radius", runtimeVariable)];
   text.textAutoResize = "HEIGHT";
   text.textTruncation = "ENDING";
   text.maxLines = 2;

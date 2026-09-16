@@ -8,6 +8,7 @@ import type {
 } from "../lib/editor-protocol";
 import { runtimeError } from "./runtime-errors";
 import type { RuntimeSolidPaint } from "./runtime-paint";
+import type { RuntimeEffect } from "./runtime-effect";
 
 export type RuntimeVariableColor = Readonly<{ r: number; g: number; b: number; a?: number }>;
 export type RuntimeVariableValue = boolean | number | string | RuntimeVariableColor | DocumentVariableAlias;
@@ -153,6 +154,28 @@ export class RuntimeVariablesAPI {
       color: Object.freeze({ ...paint.color }),
       ...(bindings.color ? { boundVariables: Object.freeze(bindings) } : {}),
     });
+  }
+  setBoundVariableForEffect(effect: RuntimeEffect, field: "color" | "radius" | "spread" | "offsetX" | "offsetY", variable: RuntimeVariable | null): RuntimeEffect {
+    this.host.assertOpen();
+    const shadow = effect?.type === "DROP_SHADOW" || effect?.type === "INNER_SHADOW";
+    if (!effect || !["color", "radius", "spread", "offsetX", "offsetY"].includes(field) || (!shadow && effect.type !== "LAYER_BLUR" && effect.type !== "BACKGROUND_BLUR") || (!shadow && field !== "radius")) {
+      throw runtimeError("INVALID_ARGUMENT");
+    }
+    const bindings = { ...effect.boundVariables };
+    if (variable === null) delete bindings[field];
+    else {
+      const resource = this.host.variableResource(variable.id);
+      const expected = field === "color" ? "COLOR" : "FLOAT";
+      if (!resource || resource.resolvedType !== expected) throw runtimeError("INVALID_ARGUMENT");
+      bindings[field] = { type: "VARIABLE_ALIAS", id: resource.id };
+    }
+    const { boundVariables: _boundVariables, ...base } = effect;
+    void _boundVariables;
+    return Object.freeze({
+      ...base,
+      ...(shadow ? { color: Object.freeze({ ...effect.color }), offset: Object.freeze({ ...effect.offset }) } : {}),
+      ...(Object.keys(bindings).length ? { boundVariables: Object.freeze(bindings) } : {}),
+    }) as RuntimeEffect;
   }
   async createVariableAliasByIdAsync(id: string): Promise<DocumentVariableAlias> {
     const variable = this.host.variableResource(id);
