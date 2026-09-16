@@ -2,6 +2,7 @@ import type { DocumentPaintStyleResource } from "../lib/editor-protocol";
 import { documentPaintStackFromRuntime, runtimePaintsFromDocumentStack, type RuntimePaint } from "./runtime-paint";
 import type { RuntimeNodeProxy } from "./node-proxy";
 import { runtimeError } from "./runtime-errors";
+import { runtimeStyleDocumentationLinks } from "./runtime-style-metadata";
 
 export type RuntimePaintStyleHost = Readonly<{
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined;
@@ -41,10 +42,17 @@ export class RuntimePaintStyle {
     if (typeof value !== "string" || value.includes("\0")) throw runtimeError("INVALID_ARGUMENT");
     this.write({ description: value });
   }
-  get descriptionMarkdown(): string { return this.current().description; }
-  set descriptionMarkdown(value: string) { this.description = value; }
-  get documentationLinks(): readonly { readonly uri: string }[] { return Object.freeze([]); }
-  set documentationLinks(_value: readonly { readonly uri: string }[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  get descriptionMarkdown(): string { return this.current().descriptionMarkdown; }
+  set descriptionMarkdown(value: string) {
+    if (typeof value !== "string" || value.includes("\0")) throw runtimeError("INVALID_ARGUMENT");
+    this.write({ descriptionMarkdown: value });
+  }
+  get documentationLinks(): readonly { readonly uri: string }[] {
+    return Object.freeze(this.current().documentationLinks.map((link) => Object.freeze({ ...link })));
+  }
+  set documentationLinks(value: readonly { readonly uri: string }[]) {
+    this.write({ documentationLinks: runtimeStyleDocumentationLinks(value) });
+  }
   get paints(): readonly RuntimePaint[] { return Object.freeze([...runtimePaintsFromDocumentStack(this.current().paints)]); }
   set paints(value: readonly RuntimePaint[]) {
     this.write({ paints: documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash)) });

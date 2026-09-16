@@ -745,6 +745,10 @@ message TextProperties {
   repeated ParagraphStyleRun paragraph_style_runs = 8;
 }
 
+message DocumentationLink {
+  string uri = 1;
+}
+
 message TextStyleResource {
   string id = 1;
   string key = 2;
@@ -753,6 +757,8 @@ message TextStyleResource {
   bool remote = 5;
   TextStyleRun style = 6;
   ParagraphStyle paragraph = 7;
+  string description_markdown = 8;
+  repeated DocumentationLink documentation_links = 9;
 }
 
 message PaintStyleResource {
@@ -762,6 +768,8 @@ message PaintStyleResource {
   string description = 4;
   bool remote = 5;
   PaintStack paints = 6;
+  string description_markdown = 7;
+  repeated DocumentationLink documentation_links = 8;
 }
 
 enum VariableResolvedType {

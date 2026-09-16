@@ -1555,6 +1555,8 @@ function importedPaintStyleResources(
     const name = string(metadata?.name);
     const key = string(metadata?.key) ?? "";
     const description = string(metadata?.description) ?? "";
+    const descriptionMarkdown = "";
+    const documentationLinks: Array<{ uri: string }> = [];
     const remote = metadata?.remote === true;
     const valid = name !== undefined
       && name.trim().length > 0
@@ -1571,7 +1573,7 @@ function importedPaintStyleResources(
       issues.push({ sourceId: id, capability: "paint-style-resource", outcome: "preserved-extension", reason: "Figma PaintStyle identity metadata exceeds the Canonical catalog bounds." });
       continue;
     }
-    resources.push({ id, key, name, description, remote, paints: first });
+    resources.push({ id, key, name, description, descriptionMarkdown, documentationLinks, remote, paints: first });
   }
   return resources.sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -1680,6 +1682,8 @@ function importedTextStyleResources(
     const name = string(metadata?.name);
     const key = string(metadata?.key) ?? "";
     const description = string(metadata?.description) ?? "";
+    const descriptionMarkdown = "";
+    const documentationLinks: Array<{ uri: string }> = [];
     const remote = metadata?.remote === true;
     const valid = name !== undefined
       && name.trim().length > 0
@@ -1696,7 +1700,7 @@ function importedTextStyleResources(
       issues.push({ sourceId: id, capability: "text-style-resource", outcome: "preserved-extension", reason: "Figma TextStyle identity metadata exceeds the Canonical catalog bounds." });
       continue;
     }
-    resources.push({ id, key, name, description, remote, style: first.style, paragraph: first.paragraph });
+    resources.push({ id, key, name, description, descriptionMarkdown, documentationLinks, remote, style: first.style, paragraph: first.paragraph });
   }
   return resources.sort((left, right) => left.id.localeCompare(right.id));
 }

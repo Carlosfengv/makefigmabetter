@@ -75,8 +75,10 @@ pub const TEXT_PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION: u32 = 47;
 pub const VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 48;
 pub const VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION: u32 = 49;
 pub const STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION: u32 = 50;
+pub const STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 51;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
+    STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -110,6 +112,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
+        && (document.text_styles().any(style_has_publishable_metadata)
+            || document
+                .paint_styles()
+                .any(paint_style_has_publishable_metadata))
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.text_styles().next().is_some()
     {
@@ -639,6 +649,18 @@ pub fn document_from_snapshot_with_engine_semantics(
     }
     if declared_engine_semantics_version < TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.text_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    if declared_engine_semantics_version < STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
+        && (snapshot
+            .text_styles
+            .iter()
+            .any(text_style_proto_has_publishable_metadata)
+            || snapshot
+                .paint_styles
+                .iter()
+                .any(paint_style_proto_has_publishable_metadata))
     {
         return Err(SnapshotError::Invalid);
     }
@@ -2403,7 +2425,29 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
         remote: resource.remote,
         style: encoded.base_style,
         paragraph: encoded.paragraph,
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
     }
+}
+
+fn style_has_publishable_metadata(resource: &TextStyleResource) -> bool {
+    !resource.description_markdown.is_empty() || !resource.documentation_links.is_empty()
+}
+
+fn paint_style_has_publishable_metadata(resource: &PaintStyleResource) -> bool {
+    !resource.description_markdown.is_empty() || !resource.documentation_links.is_empty()
+}
+
+fn text_style_proto_has_publishable_metadata(resource: &v1::TextStyleResource) -> bool {
+    !resource.description_markdown.is_empty() || !resource.documentation_links.is_empty()
+}
+
+fn paint_style_proto_has_publishable_metadata(resource: &v1::PaintStyleResource) -> bool {
+    !resource.description_markdown.is_empty() || !resource.documentation_links.is_empty()
 }
 
 fn text_style_resource_from_proto(
@@ -2424,6 +2468,12 @@ fn text_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         style: properties.base_style.ok_or(SnapshotError::Invalid)?,
         paragraph: properties.paragraph,
@@ -2438,6 +2488,12 @@ fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyl
         description: resource.description.clone(),
         remote: resource.remote,
         paints: Some(paint_stack_to_proto(&resource.paints)),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
     }
 }
 
@@ -2449,6 +2505,12 @@ fn paint_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(SnapshotError::Invalid)?)?,
     })
@@ -6039,6 +6101,8 @@ mod tests {
             key: "library-key".into(),
             name: "Body".into(),
             description: "Body text".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: true,
             style: TextStyleRun {
                 start: 0,
@@ -6102,6 +6166,8 @@ mod tests {
             key: "library-paint-key".into(),
             name: "Brand fill".into(),
             description: "Primary surface".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: true,
             paints: PaintStack::default(),
         };
@@ -6130,6 +6196,92 @@ mod tests {
                 173_u128.to_be_bytes(),
                 hash,
                 PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn style_publishable_metadata_round_trips_and_requires_semantics_fifty_one() {
+        let mut document = Document::with_id(DocumentId(176));
+        let text_style = TextStyleResource {
+            id: "S:body".into(),
+            key: String::new(),
+            name: "Body".into(),
+            description: "Body copy".into(),
+            description_markdown: "**Body** copy".into(),
+            documentation_links: vec!["https://example.com/styles/body".into()],
+            remote: false,
+            style: TextStyleRun {
+                start: 0,
+                end: 0,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                open_type_features: Vec::new(),
+                text_style_id: None,
+                paint_style_id: None,
+            },
+            paragraph: TextProperties::default().paragraph,
+        };
+        let paint_style = PaintStyleResource {
+            id: "S:brand".into(),
+            key: String::new(),
+            name: "Brand".into(),
+            description: "Brand color".into(),
+            description_markdown: "**Brand** color".into(),
+            documentation_links: vec!["https://example.com/styles/brand".into()],
+            remote: false,
+            paints: PaintStack::default(),
+        };
+        document.seed_text_style(text_style.clone()).unwrap();
+        document.seed_paint_style(paint_style.clone()).unwrap();
+
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot = snapshot_from_document(
+            &document,
+            STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            176_u128.to_be_bytes(),
+            hash,
+            STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.text_style("S:body"), Some(&text_style));
+        assert_eq!(restored.paint_style("S:brand"), Some(&paint_style));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version =
+            STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                176_u128.to_be_bytes(),
+                hash,
+                STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

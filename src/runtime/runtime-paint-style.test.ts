@@ -14,6 +14,8 @@ const projection: RuntimeProjection = {
       key: "",
       name: "Brand fill",
       description: "Primary surface",
+      descriptionMarkdown: "**Primary surface**",
+      documentationLinks: [],
       remote: false,
       paints: { layers: [{ visible: true, opacity: .75, blendMode: "multiply", paint: { css: "#ff0000ff", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
     },
@@ -22,6 +24,8 @@ const projection: RuntimeProjection = {
       key: "library-key",
       name: "Library fill",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: true,
       paints: { layers: [] },
     },
@@ -98,9 +102,12 @@ describe("PaintStyle resource runtime", () => {
 
     style.name = "Color/Brand";
     style.description = "Primary brand surface";
+    style.descriptionMarkdown = "**Primary brand surface**";
+    style.documentationLinks = [{ uri: "https://design.example/color/brand" }];
     style.paints = [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 }, opacity: 0.8 }];
     expect(style.name).toBe("Color/Brand");
-    expect(style.descriptionMarkdown).toBe("Primary brand surface");
+    expect(style.descriptionMarkdown).toBe("**Primary brand surface**");
+    expect(style.documentationLinks).toEqual([{ uri: "https://design.example/color/brand" }]);
     expect(style.paints).toEqual([{
       type: "SOLID",
       color: { r: 0.1, g: 0.2, b: 0.3 },
@@ -114,6 +121,9 @@ describe("PaintStyle resource runtime", () => {
     await session.commitAsync();
     expect(transport.currentProjection().paintStyles?.find((candidate) => candidate.id === style.id)).toMatchObject({
       name: "Color/Brand",
+      description: "Primary brand surface",
+      descriptionMarkdown: "**Primary brand surface**",
+      documentationLinks: [{ uri: "https://design.example/color/brand" }],
       paints: { layers: [{ opacity: 0.8, blendMode: "normal", paint: { color: { space: "srgb", components: [0.1, 0.2, 0.3], alpha: 1 } } }] },
     });
 

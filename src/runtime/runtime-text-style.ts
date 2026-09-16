@@ -2,6 +2,7 @@ import type { DocumentTextStyleResource } from "../lib/editor-protocol";
 import type { RuntimeFontName } from "./runtime-font-name";
 import type { RuntimeNodeProxy } from "./node-proxy";
 import { runtimeError } from "./runtime-errors";
+import { runtimeStyleDocumentationLinks } from "./runtime-style-metadata";
 
 export type RuntimeTextStyleHost = Readonly<{
   textStyleResource(styleId: string): DocumentTextStyleResource | undefined;
@@ -42,10 +43,17 @@ export class RuntimeTextStyle {
     if (typeof value !== "string" || value.includes("\0")) throw runtimeError("INVALID_ARGUMENT");
     this.write({ description: value });
   }
-  get descriptionMarkdown(): string { return this.current().description; }
-  set descriptionMarkdown(value: string) { this.description = value; }
-  get documentationLinks(): readonly { readonly uri: string }[] { return Object.freeze([]); }
-  set documentationLinks(_value: readonly { readonly uri: string }[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  get descriptionMarkdown(): string { return this.current().descriptionMarkdown; }
+  set descriptionMarkdown(value: string) {
+    if (typeof value !== "string" || value.includes("\0")) throw runtimeError("INVALID_ARGUMENT");
+    this.write({ descriptionMarkdown: value });
+  }
+  get documentationLinks(): readonly { readonly uri: string }[] {
+    return Object.freeze(this.current().documentationLinks.map((link) => Object.freeze({ ...link })));
+  }
+  set documentationLinks(value: readonly { readonly uri: string }[]) {
+    this.write({ documentationLinks: runtimeStyleDocumentationLinks(value) });
+  }
 
   get fontSize(): number { return this.current().style.fontSize; }
   set fontSize(value: number) {

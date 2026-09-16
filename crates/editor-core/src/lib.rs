@@ -47,6 +47,8 @@ pub const MAX_PAINT_STYLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
 pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
 pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
+pub const MAX_STYLE_DOCUMENTATION_LINKS: usize = 1;
+pub const MAX_STYLE_DOCUMENTATION_URI_BYTES: usize = 2_048;
 pub const MAX_VARIABLE_COLLECTIONS: usize = 1_024;
 pub const MAX_VARIABLES: usize = 8_192;
 pub const MAX_VARIABLE_MODES: usize = 40;
@@ -912,6 +914,8 @@ pub struct TextStyleResource {
     pub key: String,
     pub name: String,
     pub description: String,
+    pub description_markdown: String,
+    pub documentation_links: Vec<String>,
     pub remote: bool,
     pub style: TextStyleRun,
     pub paragraph: ParagraphStyle,
@@ -925,6 +929,8 @@ pub struct PaintStyleResource {
     pub key: String,
     pub name: String,
     pub description: String,
+    pub description_markdown: String,
+    pub documentation_links: Vec<String>,
     pub remote: bool,
     pub paints: PaintStack,
 }
@@ -2893,7 +2899,10 @@ impl Document {
             && style.name.len() <= MAX_STYLE_NAME_BYTES
             && !style.name.contains('\0')
             && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
-            && !style.description.contains('\0');
+            && !style.description.contains('\0')
+            && style.description_markdown.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description_markdown.contains('\0')
+            && valid_style_documentation_links(&style.documentation_links);
         let valid_assets = style.paints.layers.iter().all(|layer| match layer.paint {
             PaintLayerKind::Image(image) => self
                 .assets
@@ -2936,7 +2945,10 @@ impl Document {
             && style.name.len() <= MAX_STYLE_NAME_BYTES
             && !style.name.contains('\0')
             && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
-            && !style.description.contains('\0');
+            && !style.description.contains('\0')
+            && style.description_markdown.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description_markdown.contains('\0')
+            && valid_style_documentation_links(&style.documentation_links);
         if !valid_identity
             || bytes > MAX_TEXT_STYLE_RESOURCE_BYTES
             || self.text_styles.len() >= MAX_TEXT_STYLE_RESOURCES
@@ -8455,6 +8467,12 @@ impl TextStyleResource {
             + self.key.len()
             + self.name.len()
             + self.description.len()
+            + self.description_markdown.len()
+            + self
+                .documentation_links
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
             + properties.estimated_bytes()
     }
 }
@@ -8466,8 +8484,25 @@ impl PaintStyleResource {
             + self.key.len()
             + self.name.len()
             + self.description.len()
+            + self.description_markdown.len()
+            + self
+                .documentation_links
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
             + self.paints.estimated_bytes()
     }
+}
+
+fn valid_style_documentation_links(links: &[String]) -> bool {
+    links.len() <= MAX_STYLE_DOCUMENTATION_LINKS
+        && links.iter().all(|uri| {
+            !uri.is_empty()
+                && uri.len() <= MAX_STYLE_DOCUMENTATION_URI_BYTES
+                && !uri.contains('\0')
+                && !uri.bytes().any(|byte| byte.is_ascii_whitespace())
+                && (uri.starts_with("https://") || uri.starts_with("http://"))
+        })
 }
 
 impl VariableCollectionResource {
@@ -9194,6 +9229,11 @@ fn hash_text_style_resource(hasher: &mut Sha256, resource: &TextStyleResource) {
     properties.paragraph = resource.paragraph.clone();
     properties.base_style = Some(resource.style.clone());
     hash_text_properties(hasher, &properties);
+    hash_style_publishable_metadata(
+        hasher,
+        &resource.description_markdown,
+        &resource.documentation_links,
+    );
 }
 
 fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource) {
@@ -9203,6 +9243,27 @@ fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource)
     hash_text(hasher, &resource.description);
     hasher.update([u8::from(resource.remote)]);
     hash_versioned_paint_stack(hasher, &resource.paints);
+    hash_style_publishable_metadata(
+        hasher,
+        &resource.description_markdown,
+        &resource.documentation_links,
+    );
+}
+
+fn hash_style_publishable_metadata(
+    hasher: &mut Sha256,
+    description_markdown: &str,
+    documentation_links: &[String],
+) {
+    if description_markdown.is_empty() && documentation_links.is_empty() {
+        return;
+    }
+    hasher.update(b"makefigma/editor-core/style-publishable-metadata-v1");
+    hash_text(hasher, description_markdown);
+    hash_len(hasher, documentation_links.len());
+    for uri in documentation_links {
+        hash_text(hasher, uri);
+    }
 }
 
 fn hash_variable_collection(hasher: &mut Sha256, collection: &VariableCollectionResource) {
@@ -11587,6 +11648,8 @@ mod tests {
             key: String::new(),
             name: "Body".into(),
             description: "Body text".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: false,
             style: TextStyleRun {
                 start: 0,
@@ -11621,6 +11684,8 @@ mod tests {
             key: String::new(),
             name: "Brand fill".into(),
             description: "Primary surface".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: false,
             paints: PaintStack::default(),
         }
@@ -14399,6 +14464,9 @@ mod tests {
             .unwrap();
         let mut changed_text = text.clone();
         changed_text.name = "Typography/Body".into();
+        changed_text.description_markdown = "**Body** copy".into();
+        changed_text.documentation_links = vec!["https://example.com/styles/body".into()];
+        let text_hash_before_update = text_document.canonical_hash();
         text_document
             .submit(
                 transaction(
@@ -14411,6 +14479,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text_document.text_style(&text.id), Some(&changed_text));
+        assert_ne!(text_document.canonical_hash(), text_hash_before_update);
         text_document.undo().unwrap();
         assert_eq!(text_document.text_style(&text.id), Some(&text));
         text_document.redo().unwrap();
@@ -14447,6 +14516,9 @@ mod tests {
             .unwrap();
         let mut changed_paint = paint.clone();
         changed_paint.name = "Color/Brand".into();
+        changed_paint.description_markdown = "**Brand** color".into();
+        changed_paint.documentation_links = vec!["https://example.com/styles/brand".into()];
+        let paint_hash_before_update = paint_document.canonical_hash();
         paint_document
             .submit(
                 transaction(
@@ -14459,6 +14531,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(paint_document.paint_style(&paint.id), Some(&changed_paint));
+        assert_ne!(paint_document.canonical_hash(), paint_hash_before_update);
         paint_document.undo().unwrap();
         assert_eq!(paint_document.paint_style(&paint.id), Some(&paint));
         paint_document.redo().unwrap();
@@ -14479,6 +14552,22 @@ mod tests {
         assert_eq!(paint_document.paint_style(&paint.id), Some(&changed_paint));
         paint_document.redo().unwrap();
         assert!(paint_document.paint_style(&paint.id).is_none());
+
+        let mut invalid_scheme = text_style_resource("S:invalid-scheme");
+        invalid_scheme.documentation_links = vec!["javascript:alert(1)".into()];
+        assert_eq!(
+            Document::empty().seed_text_style(invalid_scheme),
+            Err(CommandError::InvalidTextStyle)
+        );
+        let mut too_many_links = paint_style_resource("S:too-many-links");
+        too_many_links.documentation_links = vec![
+            "https://example.com/one".into(),
+            "https://example.com/two".into(),
+        ];
+        assert_eq!(
+            Document::empty().seed_paint_style(too_many_links),
+            Err(CommandError::InvalidPaintStyle)
+        );
     }
 
     #[test]

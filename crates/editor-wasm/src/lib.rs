@@ -934,7 +934,17 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=64).contains(&snapshot.schema_version)
+    if !(1..=65).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 65
+            && (snapshot.text_styles.as_ref().is_some_and(|styles| {
+                styles.iter().any(|style| {
+                    !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+                })
+            }) || snapshot.paint_styles.as_ref().is_some_and(|styles| {
+                styles.iter().any(|style| {
+                    !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+                })
+            })))
         || (snapshot.schema_version < 64
             && snapshot.variables.as_ref().is_some_and(|values| {
                 values
@@ -1732,6 +1742,10 @@ struct ProjectionTextStyleResource {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    description_markdown: String,
+    #[serde(default)]
+    documentation_links: Vec<ProjectionDocumentationLink>,
+    #[serde(default)]
     remote: bool,
     style: ProjectionTextStyle,
     paragraph: ProjectionParagraphStyle,
@@ -1747,8 +1761,18 @@ struct ProjectionPaintStyleResource {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    description_markdown: String,
+    #[serde(default)]
+    documentation_links: Vec<ProjectionDocumentationLink>,
+    #[serde(default)]
     remote: bool,
     paints: ProjectionPaintStack,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionDocumentationLink {
+    uri: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2250,7 +2274,13 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self
+        let schema_version = if self.document.text_styles().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }) || self.document.paint_styles().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }) {
+            65
+        } else if self
             .document
             .variables()
             .any(|variable| !variable.code_syntax.is_empty())
@@ -6073,6 +6103,12 @@ fn projection_text_style_resource(resource: &TextStyleResource) -> ProjectionTex
         key: resource.key.clone(),
         name: resource.name.clone(),
         description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| ProjectionDocumentationLink { uri: uri.clone() })
+            .collect(),
         remote: resource.remote,
         style: projected
             .base_style
@@ -6101,6 +6137,12 @@ fn text_style_resource_from_projection(
         key: resource.key.clone(),
         name: resource.name.clone(),
         description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|link| link.uri.clone())
+            .collect(),
         remote: resource.remote,
         style: properties
             .base_style
@@ -6115,6 +6157,12 @@ fn projection_paint_style_resource(resource: &PaintStyleResource) -> ProjectionP
         key: resource.key.clone(),
         name: resource.name.clone(),
         description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| ProjectionDocumentationLink { uri: uri.clone() })
+            .collect(),
         remote: resource.remote,
         paints: projection_paint_stack(&resource.paints),
     }
@@ -6128,6 +6176,12 @@ fn paint_style_resource_from_projection(
         key: resource.key.clone(),
         name: resource.name.clone(),
         description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|link| link.uri.clone())
+            .collect(),
         remote: resource.remote,
         paints: paint_stack_from_projection(&resource.paints)?,
     })
@@ -10842,6 +10896,83 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 59;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v65_round_trips_style_publishable_metadata_and_v64_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([
+            {
+                "type": "registerTextStyle",
+                "style": {
+                    "id": "S:body",
+                    "key": "",
+                    "name": "Body",
+                    "description": "Body copy",
+                    "descriptionMarkdown": "**Body** copy",
+                    "documentationLinks": [{ "uri": "https://example.com/styles/body" }],
+                    "remote": false,
+                    "style": {
+                        "fontSize": 16.0,
+                        "fontWeight": 400,
+                        "italic": false,
+                        "letterSpacing": 0.0
+                    },
+                    "paragraph": {
+                        "alignment": "left",
+                        "lineHeight": 24.0,
+                        "paragraphSpacing": 6.0
+                    }
+                }
+            },
+            {
+                "type": "registerPaintStyle",
+                "style": {
+                    "id": "S:brand",
+                    "key": "",
+                    "name": "Brand",
+                    "description": "Brand color",
+                    "descriptionMarkdown": "**Brand** color",
+                    "documentationLinks": [{ "uri": "https://example.com/styles/brand" }],
+                    "remote": false,
+                    "paints": { "layers": [] }
+                }
+            }
+        ]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000065",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":65"));
+        assert!(snapshot.contains("\"descriptionMarkdown\":\"**Body** copy\""));
+        assert!(
+            snapshot.contains(
+                "\"documentationLinks\":[{\"uri\":\"https://example.com/styles/brand\"}]"
+            )
+        );
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored
+                .document
+                .text_style("S:body")
+                .unwrap()
+                .description_markdown,
+            "**Body** copy"
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 64;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

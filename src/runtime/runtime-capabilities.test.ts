@@ -50,6 +50,7 @@ describe("M0 runtime capability matrix", () => {
     });
     expect(runtimeCapability("style.catalog-runtime")?.property).toContain("createPaintStyle");
     expect(runtimeCapability("style.catalog-runtime")?.property).toContain("BaseStyle.remove");
+    expect(runtimeCapability("style.catalog-runtime")?.property).toContain("BaseStyle.documentationLinks");
     expect(runtimeCapability("component.instance-properties-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("setProperties"),

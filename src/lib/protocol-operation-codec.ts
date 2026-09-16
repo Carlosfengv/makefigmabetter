@@ -271,6 +271,8 @@ function textStyleResourceProto(resource: DocumentTextStyleResource) {
     key: resource.key,
     name: resource.name,
     description: resource.description,
+    descriptionMarkdown: resource.descriptionMarkdown,
+    documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
     remote: resource.remote,
     style: properties.baseStyle,
     paragraph: properties.paragraph,
@@ -283,6 +285,8 @@ function paintStyleResourceProto(resource: DocumentPaintStyleResource) {
     key: resource.key,
     name: resource.name,
     description: resource.description,
+    descriptionMarkdown: resource.descriptionMarkdown,
+    documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
     remote: resource.remote,
     paints: versionedPaintStack(resource.paints),
   };

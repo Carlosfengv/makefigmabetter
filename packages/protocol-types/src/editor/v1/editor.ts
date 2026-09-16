@@ -983,6 +983,10 @@ export interface TextProperties {
   paragraphStyleRuns: ParagraphStyleRun[];
 }
 
+export interface DocumentationLink {
+  uri: string;
+}
+
 export interface TextStyleResource {
   id: string;
   key: string;
@@ -991,6 +995,8 @@ export interface TextStyleResource {
   remote: boolean;
   style?: TextStyleRun | undefined;
   paragraph?: ParagraphStyle | undefined;
+  descriptionMarkdown: string;
+  documentationLinks: DocumentationLink[];
 }
 
 export interface PaintStyleResource {
@@ -1000,6 +1006,8 @@ export interface PaintStyleResource {
   description: string;
   remote: boolean;
   paints?: PaintStack | undefined;
+  descriptionMarkdown: string;
+  documentationLinks: DocumentationLink[];
 }
 
 export interface VariableMode {
@@ -5938,8 +5946,64 @@ export const TextProperties: MessageFns<TextProperties> = {
   },
 };
 
+function createBaseDocumentationLink(): DocumentationLink {
+  return { uri: "" };
+}
+
+export const DocumentationLink: MessageFns<DocumentationLink> = {
+  encode(message: DocumentationLink, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.uri !== "") {
+      writer.uint32(10).string(message.uri);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DocumentationLink {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDocumentationLink();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.uri = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DocumentationLink>, I>>(base?: I): DocumentationLink {
+    return DocumentationLink.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DocumentationLink>, I>>(object: I): DocumentationLink {
+    const message = createBaseDocumentationLink();
+    message.uri = object.uri ?? "";
+    return message;
+  },
+};
+
 function createBaseTextStyleResource(): TextStyleResource {
-  return { id: "", key: "", name: "", description: "", remote: false, style: undefined, paragraph: undefined };
+  return {
+    id: "",
+    key: "",
+    name: "",
+    description: "",
+    remote: false,
+    style: undefined,
+    paragraph: undefined,
+    descriptionMarkdown: "",
+    documentationLinks: [],
+  };
 }
 
 export const TextStyleResource: MessageFns<TextStyleResource> = {
@@ -5964,6 +6028,12 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
     }
     if (message.paragraph !== undefined) {
       ParagraphStyle.encode(message.paragraph, writer.uint32(58).fork()).join();
+    }
+    if (message.descriptionMarkdown !== "") {
+      writer.uint32(66).string(message.descriptionMarkdown);
+    }
+    for (const v of message.documentationLinks) {
+      DocumentationLink.encode(v!, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -6031,6 +6101,22 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
           message.paragraph = ParagraphStyle.decode(reader, reader.uint32());
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.descriptionMarkdown = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6056,12 +6142,23 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
     message.paragraph = (object.paragraph !== undefined && object.paragraph !== null)
       ? ParagraphStyle.fromPartial(object.paragraph)
       : undefined;
+    message.descriptionMarkdown = object.descriptionMarkdown ?? "";
+    message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBasePaintStyleResource(): PaintStyleResource {
-  return { id: "", key: "", name: "", description: "", remote: false, paints: undefined };
+  return {
+    id: "",
+    key: "",
+    name: "",
+    description: "",
+    remote: false,
+    paints: undefined,
+    descriptionMarkdown: "",
+    documentationLinks: [],
+  };
 }
 
 export const PaintStyleResource: MessageFns<PaintStyleResource> = {
@@ -6083,6 +6180,12 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
     }
     if (message.paints !== undefined) {
       PaintStack.encode(message.paints, writer.uint32(50).fork()).join();
+    }
+    if (message.descriptionMarkdown !== "") {
+      writer.uint32(58).string(message.descriptionMarkdown);
+    }
+    for (const v of message.documentationLinks) {
+      DocumentationLink.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -6142,6 +6245,22 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
           message.paints = PaintStack.decode(reader, reader.uint32());
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.descriptionMarkdown = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6164,6 +6283,8 @@ export const PaintStyleResource: MessageFns<PaintStyleResource> = {
     message.paints = (object.paints !== undefined && object.paints !== null)
       ? PaintStack.fromPartial(object.paints)
       : undefined;
+    message.descriptionMarkdown = object.descriptionMarkdown ?? "";
+    message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
     return message;
   },
 };

@@ -80,6 +80,17 @@ pub fn commands_from_payload_with_semantics(
         });
     }
     if engine_semantics_version
+        < makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_style_publishable_metadata)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(operation_has_paint_style_links)
     {
@@ -493,6 +504,25 @@ fn operation_has_paint_style_links(operation: &v1::ResolvedOperation) -> bool {
             .node
             .as_ref()
             .is_some_and(scene_node_has_paint_style_links),
+        _ => false,
+    }
+}
+
+fn operation_has_style_publishable_metadata(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref() {
+        Some(Kind::RegisterTextStyle(value)) => value.style.as_ref().is_some_and(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }),
+        Some(Kind::SetTextStyle(value)) => value.style.as_ref().is_some_and(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }),
+        Some(Kind::RegisterPaintStyle(value)) => value.style.as_ref().is_some_and(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }),
+        Some(Kind::SetPaintStyle(value)) => value.style.as_ref().is_some_and(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }),
         _ => false,
     }
 }
@@ -2403,6 +2433,12 @@ fn text_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
         paragraph: properties.paragraph,
@@ -2417,6 +2453,12 @@ fn paint_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::InvalidEnvelope)?)?,
     })
@@ -5119,6 +5161,8 @@ mod tests {
             key: "library-key".into(),
             name: "Body".into(),
             description: "Body copy".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: true,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5165,6 +5209,8 @@ mod tests {
             key: "library-paint-key".into(),
             name: "Brand fill".into(),
             description: "Primary surface".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: true,
             paints: Some(v1::PaintStack { layers: Vec::new() }),
         };
@@ -5194,12 +5240,62 @@ mod tests {
     }
 
     #[test]
+    fn style_publishable_metadata_operations_require_semantics_fifty_one() {
+        let style = v1::TextStyleResource {
+            id: "S:body".into(),
+            key: String::new(),
+            name: "Body".into(),
+            description: "Body copy".into(),
+            description_markdown: "**Body** copy".into(),
+            documentation_links: vec![v1::DocumentationLink {
+                uri: "https://example.com/styles/body".into(),
+            }],
+            remote: false,
+            style: Some(v1::TextStyleRun {
+                font_size: 16.0,
+                font_weight: 400,
+                ..Default::default()
+            }),
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextStyle(
+                    v1::SetTextStyle { style: Some(style) },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextStyle { style }]
+                if style.description == "Body copy"
+                    && style.description_markdown == "**Body** copy"
+                    && style.documentation_links == ["https://example.com/styles/body"]
+        ));
+    }
+
+    #[test]
     fn style_lifecycle_operations_map_to_distinct_core_commands() {
         let text_style = v1::TextStyleResource {
             id: "S:body".into(),
             key: String::new(),
             name: "Body".into(),
             description: String::new(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: false,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5217,6 +5313,8 @@ mod tests {
             key: String::new(),
             name: "Brand".into(),
             description: String::new(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
             remote: false,
             paints: Some(v1::PaintStack { layers: Vec::new() }),
         };

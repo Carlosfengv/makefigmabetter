@@ -13,6 +13,8 @@ const projection: RuntimeProjection = {
       key: "",
       name: "Body",
       description: "Default body copy",
+      descriptionMarkdown: "**Default body copy**",
+      documentationLinks: [{ uri: "https://design.example/text/body" }],
       remote: false,
       style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: .25, textCase: "smallCaps" },
       paragraph: { alignment: "left", lineHeight: 150, lineHeightUnit: "percent", paragraphSpacing: 8, paragraphIndent: 4, textWrapStyle: "pretty", listSpacing: 6, hangingList: true, hangingPunctuation: true },
@@ -22,6 +24,8 @@ const projection: RuntimeProjection = {
       key: "library-key",
       name: "Library",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: true,
       style: { fontSize: 12, fontWeight: 500, italic: false, letterSpacing: 0 },
       paragraph: { alignment: "left", lineHeight: 20, paragraphSpacing: 0 },
@@ -73,7 +77,7 @@ describe("TextStyle resource runtime", () => {
     const figma = new FigmaCompatibleRuntime(session);
     const style = await figma.getStyleByIdAsync("S:body");
 
-    expect(style).toMatchObject({ id: "S:body", type: "TEXT", name: "Body", remote: false, fontSize: 16, paragraphIndent: 4, paragraphSpacing: 8, listSpacing: 6, hangingList: true, hangingPunctuation: true, textCase: "SMALL_CAPS", textWrapStyle: "PRETTY" });
+    expect(style).toMatchObject({ id: "S:body", type: "TEXT", name: "Body", remote: false, descriptionMarkdown: "**Default body copy**", documentationLinks: [{ uri: "https://design.example/text/body" }], fontSize: 16, paragraphIndent: 4, paragraphSpacing: 8, listSpacing: 6, hangingList: true, hangingPunctuation: true, textCase: "SMALL_CAPS", textWrapStyle: "PRETTY" });
     expect(style?.letterSpacing).toEqual({ value: .25, unit: "PIXELS" });
     expect(style?.lineHeight).toEqual({ value: 150, unit: "PERCENT" });
     expect(style?.getPluginData("missing")).toBe("");
@@ -93,6 +97,7 @@ describe("TextStyle resource runtime", () => {
 
     style.name = "Typography/Body";
     style.descriptionMarkdown = "Default body copy **updated**";
+    style.documentationLinks = [{ uri: "https://design.example/text/body-v2" }];
     style.fontSize = 18;
     style.textDecoration = "UNDERLINE";
     style.letterSpacing = { value: 1.5, unit: "PIXELS" };
@@ -106,7 +111,9 @@ describe("TextStyle resource runtime", () => {
     style.hangingList = true;
     style.textCase = "UPPER";
     expect(style.name).toBe("Typography/Body");
-    expect(style.description).toBe("Default body copy **updated**");
+    expect(style.description).toBe("Default body copy");
+    expect(style.descriptionMarkdown).toBe("Default body copy **updated**");
+    expect(style.documentationLinks).toEqual([{ uri: "https://design.example/text/body-v2" }]);
     expect(style.fontSize).toBe(18);
     expect(style.textDecoration).toBe("UNDERLINE");
     expect(style.letterSpacing).toEqual({ value: 1.5, unit: "PIXELS" });
@@ -123,10 +130,15 @@ describe("TextStyle resource runtime", () => {
     expect(isRuntimeError(capture(() => { style.name = " "; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.name = "界".repeat(400); }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.letterSpacing = { value: 10, unit: "PERCENT" }; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.documentationLinks = [{ uri: "javascript:alert(1)" }]; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.documentationLinks = [{ uri: "https://design.example/one" }, { uri: "https://design.example/two" }]; }), "INVALID_ARGUMENT")).toBe(true);
 
     await session.commitAsync();
     expect(transport.currentProjection().textStyles?.find((candidate) => candidate.id === style.id)).toMatchObject({
       name: "Typography/Body",
+      description: "Default body copy",
+      descriptionMarkdown: "Default body copy **updated**",
+      documentationLinks: [{ uri: "https://design.example/text/body-v2" }],
       style: { fontSize: 18, letterSpacing: 1.5, textDecoration: "underline", leadingTrim: "capHeight", textCase: "upper" },
       paragraph: { lineHeight: 125, lineHeightUnit: "percent", paragraphIndent: 4, paragraphSpacing: 8, textWrapStyle: "balance", listSpacing: 6, hangingPunctuation: true, hangingList: true },
     });
@@ -238,6 +250,8 @@ describe("TextStyle resource runtime", () => {
       key: "",
       name: "Range",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: false,
       style: { fontSize: 20, fontWeight: 600, italic: true, letterSpacing: 1 },
       paragraph: { alignment: "left" as const, lineHeight: 28, paragraphSpacing: 4, paragraphIndent: 2, textWrapStyle: "balance" as const },

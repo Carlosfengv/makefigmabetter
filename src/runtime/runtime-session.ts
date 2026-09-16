@@ -459,6 +459,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       key: "",
       name: "Text Style",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: false,
       style: { fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 },
       paragraph: { alignment: "left", lineHeight: 20, paragraphSpacing: 0 },
@@ -474,6 +476,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       key: "",
       name: "Paint Style",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: false,
       paints: { layers: [] },
     };

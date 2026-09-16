@@ -365,6 +365,8 @@ export interface DocumentTextStyleResource {
   key: string;
   name: string;
   description: string;
+  descriptionMarkdown: string;
+  documentationLinks: Array<{ uri: string }>;
   remote: boolean;
   style: DocumentTextStyle;
   paragraph: DocumentTextProperties["paragraph"];
@@ -376,6 +378,8 @@ export interface DocumentPaintStyleResource {
   key: string;
   name: string;
   description: string;
+  descriptionMarkdown: string;
+  documentationLinks: Array<{ uri: string }>;
   remote: boolean;
   paints: DocumentPaintStack;
 }

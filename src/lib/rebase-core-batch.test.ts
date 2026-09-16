@@ -26,6 +26,8 @@ describe("core batch reconciliation", () => {
         key: "",
         name: "Body",
         description: "",
+        descriptionMarkdown: "",
+        documentationLinks: [],
         remote: false,
         style: { fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 },
         paragraph: { alignment: "left", lineHeight: 24, paragraphSpacing: 0 },

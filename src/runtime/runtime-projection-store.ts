@@ -1,4 +1,5 @@
 import { runtimeError } from "./runtime-errors";
+import { validRuntimeStyleDocumentationLinks } from "./runtime-style-metadata";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
 import type { DocumentPaintStyleResource, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
@@ -428,6 +429,8 @@ function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPa
   return Boolean(value.id && !value.id.includes("\0") && encoder.encode(value.id).byteLength <= 2_048
     && value.name.trim() && !value.name.includes("\0") && encoder.encode(value.name).byteLength <= 1_024
     && !value.description.includes("\0") && encoder.encode(value.description).byteLength <= 32 * 1_024
+    && !value.descriptionMarkdown.includes("\0") && encoder.encode(value.descriptionMarkdown).byteLength <= 32 * 1_024
+    && validRuntimeStyleDocumentationLinks(value.documentationLinks)
     && value.key === "");
 }
 

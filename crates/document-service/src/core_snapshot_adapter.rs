@@ -478,6 +478,16 @@ pub fn snapshot_from_document(
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
     if engine_semantics_version
+        < makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
+        && (document.text_styles().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }) || document.paint_styles().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }))
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.text_styles().next().is_some()
     {
@@ -1015,6 +1025,16 @@ pub fn document_from_snapshot(
     if declared_engine_semantics_version
         < makefigma_document_codec::TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.text_styles.is_empty()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
+        && (snapshot.text_styles.iter().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }) || snapshot.paint_styles.iter().any(|style| {
+            !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
+        }))
     {
         return Err(ServiceError::ReducerRejected);
     }
@@ -2680,6 +2700,12 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
         remote: resource.remote,
         style: encoded.base_style,
         paragraph: encoded.paragraph,
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
     }
 }
 
@@ -2701,6 +2727,12 @@ fn text_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::ReducerRejected)?,
         paragraph: properties.paragraph,
@@ -2715,6 +2747,12 @@ fn paint_style_resource_to_proto(resource: &PaintStyleResource) -> v1::PaintStyl
         description: resource.description.clone(),
         remote: resource.remote,
         paints: Some(paint_stack_to_proto(&resource.paints)),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
     }
 }
 
@@ -2726,6 +2764,12 @@ fn paint_style_resource_from_proto(
         key: resource.key,
         name: resource.name,
         description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::ReducerRejected)?)?,
     })

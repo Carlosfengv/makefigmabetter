@@ -1115,6 +1115,8 @@ describe("Figma REST import planning", () => {
       key: "published-body-key",
       name: "Typography/Body",
       description: "Primary body copy",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: true,
       style: { fontSize: 16, fontWeight: 450, italic: false, letterSpacing: .2 },
       paragraph: { alignment: "left", lineHeight: 24, paragraphSpacing: 6 },
@@ -1155,6 +1157,8 @@ describe("Figma REST import planning", () => {
       key: "published-paint-key",
       name: "Brand/Primary",
       description: "Primary surface",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: true,
       paints: { layers: [{ visible: true, opacity: .75, blendMode: "normal", paint: { css: "#ff0000", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } } }] },
     }]);

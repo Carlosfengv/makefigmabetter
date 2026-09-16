@@ -87,6 +87,8 @@ describe("RuntimeWorkerBridge", () => {
       key: "",
       name: "Text Style",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: false,
       style: { fontSize: 12, fontWeight: 400, italic: false, letterSpacing: 0 },
       paragraph: { alignment: "left" as const, lineHeight: 20, paragraphSpacing: 0 },
@@ -96,6 +98,8 @@ describe("RuntimeWorkerBridge", () => {
       key: "",
       name: "Paint Style",
       description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
       remote: false,
       paints: { layers: [] },
     };
