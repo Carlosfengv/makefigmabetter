@@ -38,6 +38,7 @@ export function assertFigmaPluginTypingsContract(
   if (stringVariable) text.setBoundVariable("characters", stringVariable);
   const colorVariable = figma.variables.getLocalVariables("COLOR")[0];
   if (colorVariable) rectangle.fills = [figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 1, g: 0, b: 0 } }, "color", colorVariable)];
+  if (colorVariable) rectangle.strokes = [{ type: "GRADIENT_LINEAR", gradientTransform: [[1, 0, 0], [0, 1, 0]], gradientStops: [{ position: 0, color: { r: 1, g: 0, b: 0, a: 1 }, boundVariables: { color: figma.variables.createVariableAlias(colorVariable) } }, { position: 1, color: { r: 0, g: 0, b: 1, a: 1 } }] }];
   if (floatVariable) rectangle.effects = [figma.variables.setBoundVariableForEffect({ type: "LAYER_BLUR", radius: 4, visible: true, blurType: "NORMAL" }, "radius", floatVariable)];
   void rectangle.boundVariables;
   const variableCollection = figma.variables.getLocalVariableCollections()[0];

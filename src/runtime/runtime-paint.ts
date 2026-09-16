@@ -32,10 +32,11 @@ export type RuntimeImageFilters = Readonly<{
 export type RuntimePaintBoundVariables = Readonly<{ color?: DocumentVariableAlias }>;
 type RuntimePaintBase = Readonly<{ visible?: boolean; opacity?: number; blendMode?: RuntimeBlendMode; boundVariables?: RuntimePaintBoundVariables }>;
 export type RuntimeSolidPaint = RuntimePaintBase & Readonly<{ type: "SOLID"; color: RuntimeRGB }>;
+export type RuntimeGradientStop = Readonly<{ position: number; color: RuntimeRGBA; boundVariables?: RuntimePaintBoundVariables }>;
 export type RuntimeGradientPaint = RuntimePaintBase & Readonly<{
   type: "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND";
   gradientTransform: RuntimeTransform;
-  gradientStops: readonly Readonly<{ position: number; color: RuntimeRGBA }>[];
+  gradientStops: readonly RuntimeGradientStop[];
 }>;
 export type RuntimeImagePaint = RuntimePaintBase & Readonly<{
   type: "IMAGE";
@@ -288,6 +289,7 @@ function documentGradient(paint: RuntimeGradientPaint): DocumentLinearGradient {
     throw runtimeError("INVALID_ARGUMENT");
   }
   const stops = paint.gradientStops.map((stop) => {
+    if (stop.boundVariables !== undefined) throw runtimeError("UNSUPPORTED_FEATURE");
     if (!finiteUnit(stop.position)) throw runtimeError("INVALID_ARGUMENT");
     return { position: stop.position, color: documentRgba(stop.color) };
   });
@@ -300,6 +302,7 @@ function documentNonLinearGradient(paint: RuntimeGradientPaint): DocumentGradien
   invert(transform);
   if (paint.gradientStops.length < 2 || paint.gradientStops.length > 16) throw runtimeError("INVALID_ARGUMENT");
   const stops = paint.gradientStops.map((stop) => {
+    if (stop.boundVariables !== undefined) throw runtimeError("UNSUPPORTED_FEATURE");
     if (!finiteUnit(stop.position)) throw runtimeError("INVALID_ARGUMENT");
     return { position: stop.position, color: documentRgba(stop.color) };
   });

@@ -1408,8 +1408,11 @@ export class RuntimeNodeProxy {
     const paintBindings = variablePaintBindingsFromExtensions(node.extensions);
     for (const usage of ["fill", "stroke"] as const) {
       const values = Object.entries(paintBindings)
-        .flatMap(([key, id]) => key.startsWith(`${usage}:`) && Number.isInteger(Number(key.slice(usage.length + 1))) ? [{ index: Number(key.slice(usage.length + 1)), id }] : [])
-        .sort((a, b) => a.index - b.index)
+        .flatMap(([key, id]) => {
+          const match = new RegExp(`^${usage}:(\\d+)(?::stop:(\\d+))?$`).exec(key);
+          return match ? [{ index: Number(match[1]), stopIndex: match[2] === undefined ? -1 : Number(match[2]), id }] : [];
+        })
+        .sort((a, b) => a.index - b.index || a.stopIndex - b.stopIndex)
         .map(({ id }) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id }));
       if (values.length) aliases[`${usage}s`] = Object.freeze(values);
     }
@@ -3120,18 +3123,27 @@ export class RuntimeNodeProxy {
     const bindings = variablePaintBindingsFromExtensions(node.extensions);
     const stacks = new Map<"fill" | "stroke", DocumentPaintStack>();
     for (const [key, variableId] of Object.entries(bindings)) {
-      const match = /^(fill|stroke):(\d+)$/.exec(key);
+      const match = /^(fill|stroke):(\d+)(?::stop:(\d+))?$/.exec(key);
       if (!match) continue;
       const usage = match[1] as "fill" | "stroke";
       const index = Number(match[2]);
+      const stopIndex = match[3] === undefined ? undefined : Number(match[3]);
       if (!Number.isInteger(index) || index < 0 || index >= 16) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       const source = node[`${usage}Stack`] as DocumentPaintStack | undefined;
       const stack = stacks.get(usage) ?? (source ? structuredClone(source) : undefined);
       const layer = stack?.layers[index];
-      if (!stack || !layer?.paint || layer.paint.gradient || layer.paint.gradientPaint || layer.image) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      if (!stack || !layer?.paint || layer.image) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       const resolved = this.host.resolveVariableValue(variableId, this.id, override);
       if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-      layer.paint = { css: colorToSrgbCss(resolved.value), color: structuredClone(resolved.value) };
+      if (stopIndex === undefined) {
+        if (layer.paint.gradient || layer.paint.gradientPaint) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        layer.paint = { css: colorToSrgbCss(resolved.value), color: structuredClone(resolved.value) };
+      } else {
+        const stops = layer.paint.gradient?.stops ?? layer.paint.gradientPaint?.stops;
+        const stop = stops?.[stopIndex];
+        if (!stop || !Number.isInteger(stopIndex) || stopIndex < 0 || stopIndex >= 16) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+        stop.color = structuredClone(resolved.value);
+      }
       stacks.set(usage, stack);
     }
     return Object.fromEntries([...stacks].map(([usage, stack]) => [`${usage}Stack`, stack]));
@@ -3523,12 +3535,26 @@ export class RuntimeNodeProxy {
     const stack = node[`${usage}Stack`] as DocumentPaintStack | undefined;
     return runtimePaintsFromNode(node as Readonly<Record<string, unknown>>, usage).map((paint, index) => {
       const variableId = bindings[`${usage}:${index}`];
-      if (!variableId || paint.type !== "SOLID") return structuredClone(paint);
-      return {
-        ...structuredClone(paint),
-        ...(stack?.layers[index] ? { opacity: stack.layers[index]!.opacity } : {}),
-        boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: variableId }) }),
-      } satisfies RuntimeSolidPaint;
+      if (paint.type === "SOLID") {
+        if (!variableId) return structuredClone(paint);
+        return {
+          ...structuredClone(paint),
+          ...(stack?.layers[index] ? { opacity: stack.layers[index]!.opacity } : {}),
+          boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: variableId }) }),
+        } satisfies RuntimeSolidPaint;
+      }
+      if ("gradientStops" in paint) {
+        return {
+          ...structuredClone(paint),
+          gradientStops: paint.gradientStops.map((stop, stopIndex) => {
+            const stopVariableId = bindings[`${usage}:${index}:stop:${stopIndex}`];
+            return stopVariableId
+              ? { ...structuredClone(stop), boundVariables: Object.freeze({ color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: stopVariableId }) }) }
+              : structuredClone(stop);
+          }),
+        } as RuntimePaint;
+      }
+      return structuredClone(paint);
     });
   }
 
@@ -3539,10 +3565,29 @@ export class RuntimeNodeProxy {
     const hadBindings = Object.keys(bindings).some((key) => key.startsWith(prefix));
     for (const key of Object.keys(bindings)) if (key.startsWith(prefix)) delete bindings[key];
     const colors = new Map<number, DocumentColor>();
+    const stopColors = new Map<string, DocumentColor>();
     const paints = value.map((paint, index): RuntimePaint => {
       const alias = paint.boundVariables?.color;
       const { boundVariables: _boundVariables, ...base } = paint;
       void _boundVariables;
+      if ("gradientStops" in paint) {
+        if (alias) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: this.handle.nodeId });
+        const gradientStops = paint.gradientStops.map((stop, stopIndex) => {
+          const stopAlias = stop.boundVariables?.color;
+          const { boundVariables: _stopBoundVariables, ...stopBase } = stop;
+          void _stopBoundVariables;
+          if (!stopAlias) return stopBase;
+          if (stopAlias.type !== "VARIABLE_ALIAS") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+          const resource = this.host.variableResource(stopAlias.id);
+          if (!resource || resource.resolvedType !== "COLOR") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+          const resolved = this.host.resolveVariableValue(resource.id, this.id);
+          if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+          bindings[`${usage}:${index}:stop:${stopIndex}`] = resource.id;
+          stopColors.set(`${index}:${stopIndex}`, structuredClone(resolved.value));
+          return stopBase;
+        });
+        return { ...base, gradientStops } as RuntimePaint;
+      }
       if (!alias) return base as RuntimePaint;
       if (paint.type !== "SOLID" || alias.type !== "VARIABLE_ALIAS") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: this.handle.nodeId });
       const resource = this.host.variableResource(alias.id);
@@ -3558,6 +3603,14 @@ export class RuntimeNodeProxy {
       const layer = stack.layers[index];
       if (!layer?.paint) throw runtimeError("INTERNAL_ERROR", { nodeId: this.handle.nodeId });
       layer.paint = { css: colorToSrgbCss(color), color };
+    }
+    for (const [key, color] of stopColors) {
+      const [paintIndex, stopIndex] = key.split(":").map(Number);
+      const layer = stack.layers[paintIndex!];
+      const stops = layer?.paint?.gradient?.stops ?? layer?.paint?.gradientPaint?.stops;
+      const stop = stops?.[stopIndex!];
+      if (!stop) throw runtimeError("INTERNAL_ERROR", { nodeId: this.handle.nodeId });
+      stop.color = color;
     }
     const hasBindings = Object.keys(bindings).some((key) => key.startsWith(prefix));
     this.write({
