@@ -270,6 +270,71 @@ describe("M1 RuntimeSession", () => {
     expect(instance.componentPropertyValues).toEqual({ Enabled: true });
   });
 
+  it("scales an Instance subtree atomically and preserves the factor across subtree rebuilds", async () => {
+    const sourceLink = (id: string) => ({ "figma.instance.source-node.v1": [...new TextEncoder().encode(id)] });
+    const sourceFrame: RuntimeProjection["nodes"][number] = {
+      id: "scale-source-frame", type: "FRAME", name: "Surface", parentId: "scale-component", siblingIndex: 0,
+      x: 10, y: 5, width: 40, height: 20, radius: 4, strokeWidth: 2,
+      cornerRadii: [1, 2, 3, 4], strokeDashPattern: [2, 3], strokeWeights: [1, 2, 3, 4],
+      relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 5 },
+      autoLayout: { mode: "horizontal", padding: [1, 2, 3, 4], itemSpacing: 5, trackSpacing: 6, wrap: true, primaryAlignment: "start", counterAlignment: "start", primarySizing: "fixed", counterSizing: "fixed", minWidth: 20, maxHeight: 60, absolute: false },
+      dropShadow: { offsetX: 1, offsetY: 2, blurRadius: 3, spread: 4, color: { space: "srgb", components: [0, 0, 0], alpha: .5 }, visible: true },
+      effectStack: [{ layerBlur: { radius: 2, visible: true } }],
+    };
+    const sourceText: RuntimeProjection["nodes"][number] = {
+      id: "scale-source-text", type: "TEXT", name: "Label", parentId: sourceFrame.id, siblingIndex: 0,
+      x: 2, y: 3, width: 20, height: 10, characters: "A",
+      textProperties: {
+        runs: [{ start: 0, end: 1, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 1, textDecorationOffset: { unit: "pixels", value: 2 } }],
+        paragraph: { alignment: "left", lineHeight: 12, paragraphSpacing: 3, paragraphIndent: 4, listSpacing: 5 },
+        paragraphStyleRuns: [{ start: 0, lineHeight: 14, paragraphSpacing: 2, paragraphIndent: 3, listSpacing: 4 }],
+        autoSize: "fixed", baseStyle: { fontSize: 8, fontWeight: 400, italic: false, letterSpacing: .5 },
+      },
+    };
+    const sourceVector: RuntimeProjection["nodes"][number] = {
+      id: "scale-source-vector", type: "VECTOR", name: "Icon", parentId: "scale-component", siblingIndex: 1,
+      x: 60, y: 10, width: 10, height: 10,
+      vectorPath: { fillRule: "nonZero", subpaths: [{ closed: false, points: [{ id: "p1", x: 1, y: 2, handleOut: { x: 3, y: 4 }, pointType: "corner" }, { id: "p2", x: 5, y: 6, pointType: "corner" }] }] },
+    };
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { id: "scale-component", type: "COMPONENT", name: "Card", parentId: "page", siblingIndex: 1, x: 0, y: 0, width: 100, height: 50, componentMetadata: { key: "card", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} } },
+        sourceFrame,
+        sourceText,
+        sourceVector,
+        { id: "scale-instance", type: "INSTANCE", name: "Card instance", parentId: "page", siblingIndex: 2, x: 200, y: 100, width: 100, height: 50, instanceMetadata: { mainComponentId: "scale-component", scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false }, extensions: sourceLink("scale-component") },
+        { ...structuredClone(sourceFrame), id: "scale-clone-frame", parentId: "scale-instance", extensions: sourceLink(sourceFrame.id) },
+        { ...structuredClone(sourceText), id: "scale-clone-text", parentId: "scale-clone-frame", extensions: sourceLink(sourceText.id) },
+        { ...structuredClone(sourceVector), id: "scale-clone-vector", parentId: "scale-instance", extensions: sourceLink(sourceVector.id) },
+      ],
+    };
+    let sequence = 0;
+    const session = new RuntimeSession({ sessionId: "instance-scale", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {}, createId: () => `rebuilt-${++sequence}` });
+    const instance = (await session.getNodeByIdAsync("scale-instance"))!;
+
+    instance.scaleFactor = 2;
+    expect(instance).toMatchObject({ x: 200, y: 100, width: 200, height: 100, scaleFactor: 2 });
+    expect(session.projectionStore.getNode("scale-clone-frame")).toMatchObject({ x: 20, y: 10, width: 80, height: 40, radius: 8, strokeWidth: 4, cornerRadii: [2, 4, 6, 8], strokeDashPattern: [4, 6], strokeWeights: [2, 4, 6, 8], relativeTransform: { e: 20, f: 10 }, autoLayout: { padding: [2, 4, 6, 8], itemSpacing: 10, trackSpacing: 12, minWidth: 40, maxHeight: 120 }, dropShadow: { offsetX: 2, offsetY: 4, blurRadius: 6, spread: 8 }, effectStack: [{ layerBlur: { radius: 4, visible: true } }] });
+    expect(session.projectionStore.getNode("scale-clone-text")?.textProperties).toMatchObject({ runs: [{ fontSize: 20, letterSpacing: 2, textDecorationOffset: { unit: "pixels", value: 4 } }], paragraph: { lineHeight: 24, paragraphSpacing: 6, paragraphIndent: 8, listSpacing: 10 }, paragraphStyleRuns: [{ lineHeight: 28, paragraphSpacing: 4, paragraphIndent: 6, listSpacing: 8 }], baseStyle: { fontSize: 16, letterSpacing: 1 } });
+    expect(session.projectionStore.getNode("scale-clone-vector")?.vectorPath).toMatchObject({ subpaths: [{ points: [{ x: 2, y: 4, handleOut: { x: 6, y: 8 } }, { x: 10, y: 12 }] }] });
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    expect(session.projectionStore.transaction(transactionId)?.operations).toSatisfy((operations: PendingProjectionTransaction["operations"]) => operations.length === 4 && operations.every((operation) => operation.type === "update" && operation.ignoreConstraints));
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => { instance.scaleFactor = 0; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    instance.removeOverrides();
+    expect(instance.scaleFactor).toBe(2);
+    const rebuiltFrame = session.projectionStore.listLiveNodes().find((node) => node.parentId === instance.id && node.name === "Surface")!;
+    const rebuiltVector = session.projectionStore.listLiveNodes().find((node) => node.parentId === instance.id && node.name === "Icon")!;
+    const rebuiltText = session.projectionStore.listLiveNodes().find((node) => node.parentId === rebuiltFrame.id && node.name === "Label")!;
+    expect(rebuiltFrame).toMatchObject({ x: 20, y: 10, width: 80, height: 40 });
+    expect(rebuiltText).toMatchObject({ x: 4, y: 6, width: 40, height: 20, textProperties: { runs: [{ fontSize: 20 }] } });
+    expect(rebuiltVector.vectorPath).toMatchObject({ subpaths: [{ points: [{ x: 2, y: 4 }, { x: 10, y: 12 }] }] });
+  });
+
   it("keeps one proxy identity and coalesces synchronous setters into one fenced transaction", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

@@ -35,6 +35,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void component.remote;
   const instance = component.createInstance();
   void instance.componentProperties;
+  instance.scaleFactor = instance.scaleFactor;
   void instance.exposedInstances;
   instance.isExposedInstance = instance.isExposedInstance;
   instance.setProperties({});

@@ -21,6 +21,7 @@ import {
 import { RuntimeTransactionClient, type RuntimeTransactionTransport } from "./runtime-transaction-client";
 import {
   createId,
+  type CanvasNode,
   type DocumentComponentMetadata,
   type DocumentComponentSetMetadata,
   type DocumentComponentPropertyReferences,
@@ -1642,6 +1643,35 @@ export class RuntimeSession implements RuntimeContainerHost {
         patch: { instanceMetadata: { ...structuredClone(metadata), isExposedInstance: value } },
       };
     }));
+  }
+
+  setInstanceScaleFactor(instanceId: string, value: number): void {
+    this.assertOpen();
+    const instance = this.projectionStore.getNode(instanceId);
+    const metadata = instance?.instanceMetadata as DocumentInstanceMetadata | undefined;
+    if (!instance || instance.removed === true || instance.type !== "INSTANCE" || !metadata) {
+      throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: instanceId });
+    }
+    if (!Number.isFinite(value) || value <= 0 || value > 100 || !Number.isFinite(metadata.scaleFactor) || metadata.scaleFactor <= 0) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+    }
+    if (value === metadata.scaleFactor) return;
+    const ratio = value / metadata.scaleFactor;
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 100) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+    const roots = new Set([instanceId]);
+    const descendants = this.projectionStore.listLiveNodes().filter((node) =>
+      node.id !== instanceId && runtimeNodeHasAncestorIn(node, roots, (id) => this.projectionStore.getNode(id)));
+    if (descendants.length + 1 > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+    const operations: PendingProjectionOperation[] = [instance, ...descendants].map((node) => ({
+      type: "update",
+      nodeId: node.id,
+      patch: {
+        ...runtimeScaledInstanceNodePatch(node, ratio, node.id === instanceId),
+        ...(node.id === instanceId ? { instanceMetadata: { ...structuredClone(metadata), scaleFactor: value } } : {}),
+      },
+      ignoreConstraints: true,
+    }));
+    this.enqueueOperations(operations);
   }
 
   setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean | RuntimeVariableAlias>>): void {
@@ -3295,6 +3325,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     targetRoot: RuntimeProjectionNode,
     decorate?: (source: RuntimeProjectionNode, clone: RuntimeProjectionNode) => RuntimeProjectionNode,
   ): PendingProjectionOperation[] {
+    const targetScaleFactor = this.runtimeInstanceScaleForNode(targetRoot);
     const collect = (rootId: string): RuntimeProjectionNode[] => {
       const result: RuntimeProjectionNode[] = [];
       const visit = (parentId: string): void => {
@@ -3331,6 +3362,9 @@ export class RuntimeSession implements RuntimeContainerHost {
       const mutableClone = clone as unknown as Record<string, unknown>;
       if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") mutableClone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
       if (Array.isArray(clone.reactions)) mutableClone.reactions = remapRuntimeReactions(clone.reactions, ids);
+      if (targetScaleFactor !== 1) {
+        clone = { ...clone, ...runtimeScaledInstanceNodePatch(clone, targetScaleFactor, false) };
+      }
       if (decorate) clone = decorate(sourceNode, clone);
       return clone;
     });
@@ -3338,6 +3372,25 @@ export class RuntimeSession implements RuntimeContainerHost {
       ...current.reverse().map((node) => ({ type: "remove" as const, nodeId: node.id })),
       ...replacements.map((node) => ({ type: "create" as const, node })),
     ];
+  }
+
+  private runtimeInstanceScaleForNode(node: RuntimeProjectionNode): number {
+    let factor = 1;
+    let current: RuntimeProjectionNode | undefined = node;
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (current.type === "INSTANCE") {
+        const scaleFactor = (current.instanceMetadata as DocumentInstanceMetadata | undefined)?.scaleFactor;
+        if (typeof scaleFactor !== "number" || !Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+          throw runtimeError("INVALID_ARGUMENT", { nodeId: current.id });
+        }
+        factor *= scaleFactor;
+        if (!Number.isFinite(factor) || factor > 100) throw runtimeError("RESOURCE_LIMIT", { nodeId: node.id });
+      }
+      current = typeof current.parentId === "string" ? this.projectionStore.getNode(current.parentId) : undefined;
+    }
+    return factor;
   }
 
   private addVariantComponentProperty(
@@ -3962,6 +4015,134 @@ function runtimeNodeHasAncestorIn(
     parentId = read(parentId)?.parentId;
   }
   return false;
+}
+
+function runtimeScaledInstanceNodePatch(node: RuntimeProjectionNode, ratio: number, root: boolean): Readonly<Record<string, unknown>> {
+  const source = node as unknown as Partial<CanvasNode>;
+  const patch: Record<string, unknown> = {};
+  const scaleField = (field: string): void => {
+    const value = (source as unknown as Record<string, unknown>)[field];
+    if (typeof value === "number" && Number.isFinite(value)) patch[field] = value * ratio;
+  };
+  if (!root) {
+    scaleField("x");
+    scaleField("y");
+  }
+  ["width", "height", "radius", "strokeWidth"].forEach(scaleField);
+  if (!root && source.relativeTransform) {
+    patch.relativeTransform = { ...source.relativeTransform, e: source.relativeTransform.e * ratio, f: source.relativeTransform.f * ratio };
+  }
+  if (source.cornerRadii) patch.cornerRadii = source.cornerRadii.map((value) => value * ratio);
+  if (source.strokeWeights) patch.strokeWeights = source.strokeWeights.map((value) => value * ratio);
+  if (source.strokeDashPattern) patch.strokeDashPattern = source.strokeDashPattern.map((value) => value * ratio);
+  if (source.autoLayout) {
+    const layout = structuredClone(source.autoLayout);
+    layout.padding = layout.padding.map((value) => value * ratio) as [number, number, number, number];
+    layout.itemSpacing *= ratio;
+    if (layout.trackSpacing !== undefined) layout.trackSpacing *= ratio;
+    for (const field of ["minWidth", "maxWidth", "minHeight", "maxHeight"] as const) {
+      if (layout[field] !== undefined) layout[field]! *= ratio;
+    }
+    patch.autoLayout = layout;
+  }
+  if (source.dropShadow) patch.dropShadow = runtimeScaledDropShadow(source.dropShadow, ratio);
+  if (source.effectStack) patch.effectStack = source.effectStack.map((effect) => {
+    if (effect.dropShadow) return { dropShadow: runtimeScaledDropShadow(effect.dropShadow, ratio) };
+    if (effect.innerShadow) return { innerShadow: runtimeScaledDropShadow(effect.innerShadow, ratio) };
+    if (effect.layerBlur) return { layerBlur: { ...effect.layerBlur, radius: effect.layerBlur.radius * ratio } };
+    return { backgroundBlur: { ...effect.backgroundBlur, radius: effect.backgroundBlur.radius * ratio } };
+  });
+  if (source.vectorPath) {
+    patch.vectorPath = {
+      ...structuredClone(source.vectorPath),
+      subpaths: source.vectorPath.subpaths.map((subpath) => ({
+        ...structuredClone(subpath),
+        points: subpath.points.map((point) => ({
+          ...structuredClone(point),
+          x: point.x * ratio,
+          y: point.y * ratio,
+          ...(point.handleIn ? { handleIn: { x: point.handleIn.x * ratio, y: point.handleIn.y * ratio } } : {}),
+          ...(point.handleOut ? { handleOut: { x: point.handleOut.x * ratio, y: point.handleOut.y * ratio } } : {}),
+        })),
+      })),
+    };
+  }
+  if (source.connectorMetadata) {
+    patch.connectorMetadata = {
+      ...structuredClone(source.connectorMetadata),
+      start: { ...source.connectorMetadata.start, x: source.connectorMetadata.start.x * ratio, y: source.connectorMetadata.start.y * ratio },
+      end: { ...source.connectorMetadata.end, x: source.connectorMetadata.end.x * ratio, y: source.connectorMetadata.end.y * ratio },
+      ...(source.connectorMetadata.cornerRadius === undefined ? {} : { cornerRadius: source.connectorMetadata.cornerRadius * ratio }),
+    };
+  }
+  if (source.tableMetadata) {
+    patch.tableMetadata = {
+      rowHeights: source.tableMetadata.rowHeights.map((value) => value * ratio),
+      columnWidths: source.tableMetadata.columnWidths.map((value) => value * ratio),
+    };
+  }
+  if (source.transformModifiers) {
+    patch.transformModifiers = source.transformModifiers.map((modifier) => modifier.unitType === "PIXELS"
+      ? { ...modifier, offset: modifier.offset * ratio }
+      : structuredClone(modifier));
+  }
+  if (source.textProperties) patch.textProperties = runtimeScaledTextProperties(source.textProperties, ratio);
+  if (!runtimeValueHasOnlyFiniteNumbers(patch)) throw runtimeError("RESOURCE_LIMIT", { nodeId: node.id });
+  return patch;
+}
+
+function runtimeValueHasOnlyFiniteNumbers(value: unknown, visited = new Set<object>()): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (!value || typeof value !== "object") return true;
+  if (visited.has(value)) return true;
+  visited.add(value);
+  return Object.values(value).every((entry) => runtimeValueHasOnlyFiniteNumbers(entry, visited));
+}
+
+function runtimeScaledDropShadow(shadow: NonNullable<CanvasNode["dropShadow"]>, ratio: number) {
+  return {
+    ...structuredClone(shadow),
+    offsetX: shadow.offsetX * ratio,
+    offsetY: shadow.offsetY * ratio,
+    blurRadius: shadow.blurRadius * ratio,
+    spread: shadow.spread * ratio,
+  };
+}
+
+function runtimeScaledTextProperties(properties: NonNullable<CanvasNode["textProperties"]>, ratio: number) {
+  const scaleStyle = <T extends object>(style: T): T => {
+    const scaled = structuredClone(style) as Record<string, unknown>;
+    for (const field of ["fontSize", "letterSpacing"] as const) {
+      if (typeof scaled[field] === "number") (scaled[field] as number) *= ratio;
+    }
+    for (const field of ["textDecorationOffset", "textDecorationThickness"] as const) {
+      const value = scaled[field];
+      if (value && typeof value === "object" && "unit" in value && value.unit === "pixels" && "value" in value && typeof value.value === "number") {
+        scaled[field] = { ...value, value: value.value * ratio };
+      }
+    }
+    return scaled as T;
+  };
+  const paragraph = structuredClone(properties.paragraph);
+  if (paragraph.lineHeight !== undefined && paragraph.lineHeightUnit !== "percent") paragraph.lineHeight *= ratio;
+  paragraph.paragraphSpacing *= ratio;
+  if (paragraph.paragraphIndent !== undefined) paragraph.paragraphIndent *= ratio;
+  if (paragraph.listSpacing !== undefined) paragraph.listSpacing *= ratio;
+  const paragraphStyleRuns = properties.paragraphStyleRuns?.map((run) => {
+    const scaled = structuredClone(run);
+    if (scaled.lineHeight !== undefined && scaled.lineHeightUnit !== "percent") scaled.lineHeight *= ratio;
+    if (scaled.paragraphSpacing !== undefined) scaled.paragraphSpacing *= ratio;
+    if (scaled.paragraphIndent !== undefined) scaled.paragraphIndent *= ratio;
+    if (scaled.listSpacing !== undefined) scaled.listSpacing *= ratio;
+    return scaled;
+  });
+  return {
+    ...structuredClone(properties),
+    runs: properties.runs.map((run) => scaleStyle(run)),
+    paragraph,
+    ...(paragraphStyleRuns ? { paragraphStyleRuns } : {}),
+    ...(properties.baseStyle ? { baseStyle: scaleStyle(properties.baseStyle) } : {}),
+  };
 }
 
 function validRuntimePluginId(value: unknown): value is string {

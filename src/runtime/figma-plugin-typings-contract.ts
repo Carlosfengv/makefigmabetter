@@ -217,7 +217,7 @@ export function assertFigmaPluginTypingsContract(
   void component.getInstancesAsync();
   void instance.componentProperties;
   void instance.overrides;
-  void instance.scaleFactor;
+  instance.scaleFactor = instance.scaleFactor;
   void instance.isExposedInstance;
   void instance.exposedInstances;
   instance.isExposedInstance = instance.isExposedInstance;

@@ -210,6 +210,7 @@ export interface RuntimeNodeHost {
   deleteComponentProperty(componentId: string, propertyName: string): void;
   setComponentPropertyReferences(nodeId: string, references: DocumentComponentPropertyReferences | null): void;
   setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean | RuntimeVariableAlias>>): void;
+  setInstanceScaleFactor(instanceId: string, value: number): void;
   setInstanceExposed(instanceId: string, value: boolean): void;
   renameVariantComponent(componentId: string, name: string): boolean;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
@@ -1888,6 +1889,12 @@ export class RuntimeNodeProxy {
   }
 
   get scaleFactor(): number { return this.instanceMetadata().scaleFactor; }
+  set scaleFactor(value: number) {
+    this.instanceMetadata();
+    if (!Number.isFinite(value) || value <= 0 || value > 100) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    this.host.setInstanceScaleFactor(this.handle.nodeId, value);
+  }
   get isExposedInstance(): boolean { return this.instanceMetadata().isExposedInstance; }
   set isExposedInstance(value: boolean) {
     if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
