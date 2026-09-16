@@ -3470,6 +3470,7 @@ export class RuntimeNodeProxy {
     if (value === this.gridAutoTracks) return;
     if (value === "ROWS") {
       if (this.gridItemsPositioning !== "ROW_AUTO_FLOW") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+      if (this.autoLayout().counterSizing === "hug") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
       const firstRow = this.gridTracks("row")[0];
       if (!firstRow) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
       this.gridPlacements([firstRow], this.gridTracks("column"), undefined, new Map(), true);
@@ -3578,6 +3579,7 @@ export class RuntimeNodeProxy {
     if (!["FIXED", "AUTO"].includes(value) || (value === "AUTO" && this.autoLayout().wrap)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
+    if (value === "AUTO" && this.autoLayout().mode === "grid") this.assertGridHugAxisCanResolve(true);
     this.writeAutoLayout({ primarySizing: value === "AUTO" ? "hug" : "fixed" });
   }
 
@@ -3592,6 +3594,7 @@ export class RuntimeNodeProxy {
     if (!["FIXED", "AUTO"].includes(value) || hasStretchFlowChild) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
+    if (value === "AUTO" && this.autoLayout().mode === "grid") this.assertGridHugAxisCanResolve(false);
     this.writeAutoLayout({ counterSizing: value === "AUTO" ? "hug" : "fixed" });
   }
 
@@ -4181,6 +4184,8 @@ export class RuntimeNodeProxy {
     const target = axis === "row" ? rows : columns;
     const other = axis === "row" ? columns : rows;
     if (value * other.length > 4096) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    const sizing = axis === "column" ? layout.primarySizing : layout.counterSizing;
+    if (value > target.length && sizing === "hug") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     target.length = Math.min(target.length, value);
     while (target.length < value) target.push({ type: "flex", value: 1 });
     this.gridPlacements(rows, columns);
@@ -4261,6 +4266,9 @@ export class RuntimeNodeProxy {
     const current = tracks[index];
     if (!current) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     const type = patch.type ?? current.type;
+    const layout = this.autoLayout();
+    const sizing = axis === "column" ? layout.primarySizing : layout.counterSizing;
+    if (type === "flex" && sizing === "hug") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     if (type === "hug") {
       if (patch.value !== undefined) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
       const placements = this.gridPlacements();
@@ -4519,7 +4527,18 @@ export class RuntimeNodeProxy {
     if (value === "HUG" && (this.type !== "FRAME" || this.layoutMode === "NONE" || (this.autoLayout().wrap && sizingKey === "primarySizing"))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
+    if (value === "HUG" && this.autoLayout().mode === "grid") this.assertGridHugAxisCanResolve(horizontal);
     this.writeAutoLayout({ [sizingKey]: value.toLowerCase() });
+  }
+
+  private assertGridHugAxisCanResolve(horizontal: boolean): void {
+    this.assertGridFrame();
+    const layout = this.autoLayout();
+    const tracks = horizontal ? layout.gridColumns : layout.gridRows;
+    if (!tracks?.length || tracks.some((track) => track.type === "flex")
+      || (!horizontal && layout.gridAutoTracks === "rows")) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    }
   }
 
   private readAutoLayoutLimit(key: "minWidth" | "maxWidth" | "minHeight" | "maxHeight"): number | null {

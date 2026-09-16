@@ -6103,11 +6103,6 @@ impl Document {
                 }
                 if layout.mode == LayoutMode::Grid {
                     let [top, right, bottom, left] = layout.padding;
-                    let content_width = frame.width - left - right;
-                    let content_height = frame.height - top - bottom;
-                    if content_width < 0.0 || content_height < 0.0 {
-                        return Err(CommandError::InvalidAutoLayout);
-                    }
                     let row_gap = layout.grid_row_gap.unwrap_or(0.0);
                     let column_gap = layout.grid_column_gap.unwrap_or(0.0);
                     let mut grid_rows = layout.grid_rows.clone();
@@ -6295,6 +6290,70 @@ impl Document {
                             width_sizing,
                             height_sizing,
                         ));
+                    }
+                    let intrinsic_tracks = |tracks: &[GridTrack], hug_sizes: &[f64], gap: f64| {
+                        tracks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, track)| match track {
+                                GridTrack::Fixed(value) => *value,
+                                GridTrack::Hug => hug_sizes[index],
+                                GridTrack::Flex(_) => 0.0,
+                            })
+                            .sum::<f64>()
+                            + gap * tracks.len().saturating_sub(1) as f64
+                    };
+                    let candidate_width = clamp_size(
+                        if layout.primary_sizing == LayoutSizing::Hug {
+                            left + intrinsic_tracks(&layout.grid_columns, &hug_columns, column_gap)
+                                + right
+                        } else {
+                            frame.width
+                        },
+                        layout.min_width,
+                        layout.max_width,
+                    );
+                    let candidate_height = clamp_size(
+                        if layout.counter_sizing == LayoutSizing::Hug {
+                            top + intrinsic_tracks(&grid_rows, &hug_rows, row_gap) + bottom
+                        } else {
+                            frame.height
+                        },
+                        layout.min_height,
+                        layout.max_height,
+                    );
+                    if frame.width != candidate_width || frame.height != candidate_height {
+                        let before = Geometry {
+                            x: frame.x,
+                            y: frame.y,
+                            width: frame.width,
+                            height: frame.height,
+                            rotation: frame.rotation,
+                        };
+                        let after = Geometry {
+                            x: frame.x,
+                            y: frame.y,
+                            width: normalize_layout_number(candidate_width),
+                            height: normalize_layout_number(candidate_height),
+                            rotation: frame.rotation,
+                        };
+                        let node = self.nodes.get_mut(&frame_id).expect("grid frame exists");
+                        (node.width, node.height) = (after.width, after.height);
+                        changes.push(AppliedChange::GeometryChanged {
+                            id: frame_id,
+                            before,
+                            after,
+                        });
+                    }
+                    let frame = self
+                        .nodes
+                        .get(&frame_id)
+                        .cloned()
+                        .expect("grid frame exists");
+                    let content_width = frame.width - left - right;
+                    let content_height = frame.height - top - bottom;
+                    if content_width < 0.0 || content_height < 0.0 {
+                        return Err(CommandError::InvalidAutoLayout);
                     }
                     let resolve_tracks =
                         |tracks: &[GridTrack], hug_sizes: &[f64], extent: f64, gap: f64| {
@@ -9553,8 +9612,25 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
                 .len()
                 .saturating_mul(layout.grid_columns.len())
                 <= 4096
-            && layout.primary_sizing == LayoutSizing::Fixed
-            && layout.counter_sizing == LayoutSizing::Fixed
+            && matches!(
+                layout.primary_sizing,
+                LayoutSizing::Fixed | LayoutSizing::Hug
+            )
+            && matches!(
+                layout.counter_sizing,
+                LayoutSizing::Fixed | LayoutSizing::Hug
+            )
+            && (layout.primary_sizing != LayoutSizing::Hug
+                || !layout
+                    .grid_columns
+                    .iter()
+                    .any(|track| matches!(track, GridTrack::Flex(_))))
+            && (layout.counter_sizing != LayoutSizing::Hug
+                || (layout.grid_auto_tracks == GridAutoTracks::None
+                    && !layout
+                        .grid_rows
+                        .iter()
+                        .any(|track| matches!(track, GridTrack::Flex(_)))))
             && !layout.wrap
             && layout.track_spacing.is_none()
             && layout.track_alignment == WrapTrackAlignment::Auto
@@ -12892,6 +12968,83 @@ mod tests {
                 Origin::LocalUser,
             ),
             Err(CommandError::AutoLayoutUnsupported)
+        );
+        assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn grid_container_hug_derives_physical_size_and_rejects_flex_cycles() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 500.0;
+        frame.height = 500.0;
+        let mut first = node(2);
+        first.parent_id = Some(frame.id);
+        first.width = 40.0;
+        first.height = 20.0;
+        let mut second = node(3);
+        second.parent_id = Some(frame.id);
+        second.width = 60.0;
+        second.height = 30.0;
+        let grid = AutoLayout {
+            mode: LayoutMode::Grid,
+            padding: [10.0, 20.0, 30.0, 40.0],
+            primary_sizing: LayoutSizing::Hug,
+            counter_sizing: LayoutSizing::Hug,
+            grid_rows: vec![GridTrack::Hug],
+            grid_columns: vec![GridTrack::Fixed(80.0), GridTrack::Hug],
+            grid_column_gap: Some(10.0),
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: grid,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            document
+                .node(frame.id)
+                .map(|node| (node.width, node.height)),
+            Some((210.0, 70.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((130.0, 10.0))
+        );
+
+        let hash = document.canonical_hash();
+        let flex_cycle = AutoLayout {
+            mode: LayoutMode::Grid,
+            primary_sizing: LayoutSizing::Hug,
+            grid_rows: vec![GridTrack::Fixed(40.0)],
+            grid_columns: vec![GridTrack::Flex(1.0)],
+            ..AutoLayout::default()
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAutoLayout {
+                        id: frame.id,
+                        layout: flex_cycle,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidAutoLayout)
         );
         assert_eq!(document.canonical_hash(), hash);
     }

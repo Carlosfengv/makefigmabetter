@@ -1542,6 +1542,8 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   };
   const gridRows = grid ? gridTracks(node.gridRowSizes, node.gridRowCount) : undefined;
   const gridColumns = grid ? gridTracks(node.gridColumnSizes, node.gridColumnCount) : undefined;
+  const gridHorizontalSizing = grid ? sizing(string(node.layoutSizingHorizontal)) : undefined;
+  const gridVerticalSizing = grid ? sizing(string(node.layoutSizingVertical)) : undefined;
   const gridAutoTracks = string(node.gridAutoTracks);
   const gridItemsPositioning = string(node.gridItemsPositioning);
   const automaticRows = gridAutoTracks === "ROWS";
@@ -1606,6 +1608,10 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     || gridRows.length * gridColumns.length > 4096
     || !gridPlacements
     || gridHasFillHugCycle
+    || gridHorizontalSizing === "fill"
+    || gridVerticalSizing === "fill"
+    || (gridHorizontalSizing === "hug" && gridColumns.some((track) => track.type === "flex"))
+    || (gridVerticalSizing === "hug" && (automaticRows || gridRows.some((track) => track.type === "flex")))
     || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE" && gridAutoTracks !== "ROWS")
     || !automaticRowTracksValid
     || (automaticRows && gridItemsPositioning !== "ROW_AUTO_FLOW")
@@ -1624,8 +1630,8 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     wrap: !grid && string(node.layoutWrap) === "WRAP",
     primaryAlignment: grid ? "start" : alignment(string(node.primaryAxisAlignItems), false),
     counterAlignment: grid ? "start" : alignment(string(node.counterAxisAlignItems), true),
-    primarySizing: grid ? "fixed" : sizing(horizontal ? string(node.layoutSizingHorizontal) : string(node.layoutSizingVertical)),
-    counterSizing: grid ? "fixed" : sizing(horizontal ? string(node.layoutSizingVertical) : string(node.layoutSizingHorizontal)),
+    primarySizing: grid ? gridHorizontalSizing! : sizing(horizontal ? string(node.layoutSizingHorizontal) : string(node.layoutSizingVertical)),
+    counterSizing: grid ? gridVerticalSizing! : sizing(horizontal ? string(node.layoutSizingVertical) : string(node.layoutSizingHorizontal)),
     alignSelf,
     minWidth: finite(node.minWidth) ?? undefined,
     maxWidth: finite(node.maxWidth) ?? undefined,

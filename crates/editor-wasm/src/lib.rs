@@ -937,7 +937,14 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=75).contains(&snapshot.schema_version)
+    if !(1..=76).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 76
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout.mode == "grid"
+                        && (layout.primary_sizing == "hug" || layout.counter_sizing == "hug")
+                })
+            }))
         || (snapshot.schema_version < 75
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -2415,6 +2422,13 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            let layout = self.document.auto_layout_for_node(node.id);
+            layout.mode == LayoutMode::Grid
+                && (layout.primary_sizing == LayoutSizing::Hug
+                    || layout.counter_sizing == LayoutSizing::Hug)
+        }) {
+            76
+        } else if self.document.nodes().any(|node| {
             let layout = self.document.auto_layout_for_node(node.id);
             layout.grid_child_horizontal_align != GridChildAlignment::Auto
                 || layout.grid_child_vertical_align != GridChildAlignment::Auto
@@ -11847,6 +11861,41 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(child.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 74;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v76_round_trips_grid_container_hug_and_v75_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let mut frame = existing_rect(NodeId(0x76));
+        frame.kind = NodeKind::Frame;
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            primary_sizing: LayoutSizing::Hug,
+            counter_sizing: LayoutSizing::Hug,
+            grid_rows: vec![GridTrack::Fixed(64.0)],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(frame.id, layout.clone())
+            .unwrap();
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":76"));
+        assert!(snapshot.contains("\"primarySizing\":\"hug\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 75;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

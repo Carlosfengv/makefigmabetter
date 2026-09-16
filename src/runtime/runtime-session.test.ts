@@ -3425,6 +3425,29 @@ describe("M1 RuntimeSession", () => {
     expect(fixed.layoutSizingHorizontal).toBe("FIXED");
   });
 
+  it("maps Grid container HUG to physical axes and rejects FLEX cycles before staging", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    grid.gridColumnSizes[0]!.type = "FIXED";
+    grid.gridColumnSizes[0]!.value = 80;
+    grid.gridRowSizes[0]!.type = "FIXED";
+    grid.gridRowSizes[0]!.value = 60;
+
+    grid.layoutSizingHorizontal = "HUG";
+    grid.counterAxisSizingMode = "AUTO";
+    expect(grid.layoutSizingHorizontal).toBe("HUG");
+    expect(grid.layoutSizingVertical).toBe("HUG");
+    expect(grid.primaryAxisSizingMode).toBe("AUTO");
+    expect(grid.counterAxisSizingMode).toBe("AUTO");
+
+    expect(isRuntimeError(captureError(() => { grid.gridColumnSizes[0]!.type = "FLEX"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { grid.gridColumnCount = 2; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { grid.gridAutoTracks = "ROWS"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(grid.gridColumnCount).toBe(1);
+    expect(grid.gridAutoTracks).toBe("NONE");
+  });
+
   it("admits FILL, STRETCH and nested HUG children in a wrapped Frame", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

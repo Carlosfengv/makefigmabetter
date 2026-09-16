@@ -479,6 +479,17 @@ pub fn snapshot_from_document(
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
     if engine_semantics_version
+        < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.mode == LayoutMode::Grid
+                && (layout.primary_sizing == LayoutSizing::Hug
+                    || layout.counter_sizing == LayoutSizing::Hug)
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             let layout = document.auto_layout_for_node(node.id);
@@ -1084,6 +1095,25 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.mode == v1::LayoutMode::Grid as i32
+                            && (layout.primary_sizing == v1::LayoutSizing::Hug as i32
+                                || layout.counter_sizing == v1::LayoutSizing::Hug as i32)
+                    })
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if declared_engine_semantics_version
         < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
         && snapshot
@@ -5890,6 +5920,41 @@ mod tests {
             document_from_snapshot(&snapshot, 74_u128.to_be_bytes(), document.canonical_hash())
                 .unwrap();
         assert_eq!(restored.auto_layout_for_node(NodeId(74)), layout);
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_sixty_two_for_grid_container_hug() {
+        let mut document = Document::with_id(DocumentId(76));
+        let mut frame = leaf(NodeId(76), None, NodeKind::Frame);
+        frame.name = "Hug grid".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            primary_sizing: LayoutSizing::Hug,
+            counter_sizing: LayoutSizing::Hug,
+            grid_rows: vec![GridTrack::Fixed(64.0)],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            ..AutoLayout::default()
+        };
+        document
+            .seed_auto_layout(NodeId(76), layout.clone())
+            .unwrap();
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 76_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(restored.auto_layout_for_node(NodeId(76)), layout);
     }
 
     #[test]

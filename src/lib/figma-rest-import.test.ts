@@ -111,6 +111,33 @@ describe("Figma REST import planning", () => {
     });
   });
 
+  it("imports Grid container HUG only when both physical axes are intrinsically resolvable", () => {
+    const source = (columnType: "FIXED" | "FLEX") => ({
+      version: "grid-container-hug",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 64 },
+        layoutMode: "GRID", layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG",
+        gridRowCount: 1, gridColumnCount: 1, gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "FIXED", value: 64 }],
+        gridColumnSizes: [{ type: columnType, value: columnType === "FIXED" ? 100 : 1 }],
+        children: [],
+      }] }] },
+    });
+    const accepted = planFigmaRestImport(source("FIXED"), ids());
+    expect(accepted.issues).toEqual([]);
+    expect(accepted.nodes[0]?.autoLayout).toMatchObject({
+      mode: "grid",
+      primarySizing: "hug",
+      counterSizing: "hug",
+    });
+
+    const rejected = planFigmaRestImport(source("FLEX"), ids());
+    expect(rejected.nodes[0]?.autoLayout).toBeUndefined();
+    expect(rejected.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ capability: "grid-auto-layout", outcome: "preserved-extension" }),
+    ]));
+  });
+
   it("imports HUG Grid tracks and defaults an omitted FLEX weight to one", () => {
     const plan = planFigmaRestImport({
       version: "grid-hug-track",

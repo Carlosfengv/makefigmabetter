@@ -41,6 +41,15 @@ pub fn commands_from_payload_with_semantics(
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
     }
+    if engine_semantics_version < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| matches!(operation.kind.as_ref(),
+            Some(v1::resolved_operation::Kind::SetAutoLayout(update)) if update.auto_layout.as_ref().is_some_and(|layout|
+                layout.mode == v1::LayoutMode::Grid as i32
+                    && (layout.primary_sizing == v1::LayoutSizing::Hug as i32
+                        || layout.counter_sizing == v1::LayoutSizing::Hug as i32))))
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported { minimum: makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION });
+    }
     if engine_semantics_version < makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(|operation| matches!(operation.kind.as_ref(),
             Some(v1::resolved_operation::Kind::SetAutoLayout(update)) if update.auto_layout.as_ref().is_some_and(|layout|
@@ -4140,6 +4149,55 @@ mod tests {
         assert!(matches!(
             commands_from_payload_with_semantics(&payload, makefigma_document_codec::GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(),
             [Command::SetAutoLayout { layout, .. }] if layout.grid_auto_tracks == GridAutoTracks::Rows
+        ));
+    }
+
+    #[test]
+    fn grid_container_hug_operation_requires_semantics_62() {
+        let mut layout = auto_layout(
+            v1::LayoutMode::Grid,
+            v1::LayoutAlignment::Start,
+            v1::LayoutAlignment::Start,
+            None,
+        );
+        layout.primary_sizing = v1::LayoutSizing::Hug as i32;
+        layout.grid_rows = vec![v1::GridTrack {
+            r#type: v1::GridTrackType::Fixed as i32,
+            value: 64.0,
+        }];
+        layout.grid_columns = vec![v1::GridTrack {
+            r#type: v1::GridTrackType::Fixed as i32,
+            value: 80.0,
+        }];
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetAutoLayout(
+                    v1::AutoLayoutUpdate {
+                        node_id: 9_u128.to_be_bytes().to_vec(),
+                        auto_layout: Some(layout),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetAutoLayout { layout, .. }]
+                if layout.mode == editor_core::LayoutMode::Grid
+                    && layout.primary_sizing == editor_core::LayoutSizing::Hug
         ));
     }
 
