@@ -87,6 +87,13 @@ describe("Figma Plugin API node projection", () => {
     expect(projectFigmaPluginNode([slot], slot)).toMatchObject({ type: "SLOT", slotPropertyName: "Content", clipsContent: true });
   });
 
+  it("projects component property references as a nullable SceneNode property", () => {
+    const referenced = { ...createNode("rectangle", 0, 0), id: "referenced", componentPropertyReferences: { visible: "Enabled#1:2" } };
+    const ordinary = { ...createNode("rectangle", 0, 0), id: "ordinary" };
+    expect(projectFigmaPluginNode([referenced], referenced)).toMatchObject({ componentPropertyReferences: { visible: "Enabled#1:2" } });
+    expect(projectFigmaPluginNode([ordinary], ordinary)).toMatchObject({ componentPropertyReferences: null });
+  });
+
   it("projects Connector endpoints, routing, caps, label, and corner radius", () => {
     const connector = { ...createNode("connector", 0, 0), id: "connector", connectorMetadata: { lineType: "ELBOWED" as const, start: { endpointNodeId: "a", magnet: "RIGHT" as const, x: 0, y: 0 }, end: { endpointNodeId: "b", x: 160, y: 20 }, startStrokeCap: "NONE", endStrokeCap: "ARROW_EQUILATERAL", text: "relates to", cornerRadius: 8 } };
     const projection = projectFigmaPluginNode([connector], connector);

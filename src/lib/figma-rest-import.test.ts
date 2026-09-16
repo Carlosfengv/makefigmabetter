@@ -165,7 +165,7 @@ describe("Figma REST import planning", () => {
           id: "1:1", type: "COMPONENT", name: "Card", clipsContent: true,
           relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 60 },
           componentPropertyDefinitions: { Enabled: { type: "BOOLEAN", defaultValue: true } },
-          children: [{ id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 5, y: 5, width: 90, height: 50 } }],
+          children: [{ id: "1:2", type: "RECTANGLE", componentPropertyReferences: { visible: "Enabled" }, relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 5, y: 5, width: 90, height: 50 } }],
         },
         {
           id: "1:3", type: "INSTANCE", name: "Card instance", componentId: "1:1",
@@ -174,7 +174,7 @@ describe("Figma REST import planning", () => {
           overrides: [{ id: "1:4", overriddenFields: ["fills", "characters"] }],
           relativeTransform: [[1, 0, 120], [0, 1, 0]], absoluteBoundingBox: { x: 120, y: 0, width: 100, height: 60 },
           children: [
-            { id: "1:4", type: "RECTANGLE", relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 125, y: 5, width: 90, height: 50 } },
+            { id: "1:4", type: "RECTANGLE", componentPropertyReferences: { visible: "Enabled" }, relativeTransform: [[1, 0, 5], [0, 1, 5]], absoluteBoundingBox: { x: 125, y: 5, width: 90, height: 50 } },
             { id: "1:8", type: "INSTANCE", componentId: "1:6", relativeTransform: [[1, 0, 10], [0, 1, 10]], absoluteBoundingBox: { x: 130, y: 10, width: 20, height: 20 }, children: [] },
           ],
         },
@@ -200,6 +200,8 @@ describe("Figma REST import planning", () => {
     expect(plan.nodes.filter((node) => node.parentId === instance.id)).toHaveLength(2);
     expect(plan.nodes.filter((node) => node.parentId === set.id)).toHaveLength(2);
     expect(component.componentMetadata).toMatchObject({ key: "card-key", description: "Reusable card", componentPropertyDefinitions: { Enabled: { type: "BOOLEAN", defaultValue: true } } });
+    expect(plan.nodes.find((node) => node.parentId === component.id)?.componentPropertyReferences).toEqual({ visible: "Enabled" });
+    expect(instanceChild.componentPropertyReferences).toEqual({ visible: "Enabled" });
     expect(instance.instanceMetadata).toEqual({
       mainComponentId: component.id,
       scaleFactor: 1.25,
@@ -215,6 +217,23 @@ describe("Figma REST import planning", () => {
     });
     expect(plan.issues).not.toEqual(expect.arrayContaining([expect.objectContaining({ capability: "component-set-properties" })]));
     expect(resolveFigmaRestImportBatch(plan)).toBeDefined();
+  });
+
+  it("preserves unresolved component property references without making them editable", () => {
+    const plan = planFigmaRestImport({
+      version: "invalid-property-reference",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1",
+        type: "RECTANGLE",
+        componentPropertyReferences: { visible: "Missing" },
+        relativeTransform: [[1, 0, 0], [0, 1, 0]],
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 60 },
+      }] }] },
+    }, ids());
+
+    expect(plan.nodes[0]?.componentPropertyReferences).toBeUndefined();
+    expect(decode(plan.nodes[0]?.extensions?.["figma.rest.component-property-references.v1"])).toContain("Missing");
+    expect(plan.issues).toContainEqual(expect.objectContaining({ capability: "component-property-references", outcome: "preserved-extension" }));
   });
 
   it("retains an Instance subtree and reports an unresolved external main Component", () => {

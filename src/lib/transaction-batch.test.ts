@@ -10,6 +10,17 @@ function rectangle(id: string): CanvasNode {
 }
 
 describe("Core transaction batch resolution", () => {
+  it("persists and clears component property references through extension-backed updates", () => {
+    const node = { ...rectangle("00000000-0000-4000-8000-000000000205"), componentPropertyReferences: { visible: "Enabled" } };
+    const stored = resolveCoreBatch([node], [{ type: "update", id: node.id, patch: { componentPropertyReferences: { visible: "Active" } } }]);
+    expect(stored?.batch.map((entry) => entry.type)).toEqual(["setExtensions", "update"]);
+    expect(new TextDecoder().decode(Uint8Array.from((stored?.batch[0] as Extract<NonNullable<typeof stored>["batch"][number], { type: "setExtensions" }>).extensions["figma.component-property-references.v1"]!))).toContain("Active");
+
+    const cleared = resolveCoreBatch(stored!.nextNodes, [{ type: "update", id: node.id, patch: { componentPropertyReferences: undefined } }]);
+    expect(cleared?.nextNodes[0].componentPropertyReferences).toBeUndefined();
+    expect((cleared?.batch[0] as Extract<NonNullable<typeof cleared>["batch"][number], { type: "setExtensions" }>).extensions["figma.component-property-references.v1"]).toBeUndefined();
+  });
+
   it("preserves resizeWithoutConstraints as a Core transport flag", () => {
     const frame = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000091" };
     const resolved = resolveCoreBatch([frame], [{ type: "resizeWithoutConstraints", id: frame.id, patch: { width: 320, height: 180 } }]);

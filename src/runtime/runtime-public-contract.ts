@@ -12,8 +12,12 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void runtime.variables.getLocalVariableCollectionsAsync();
   void runtime.variables.getVariableByIdAsync("V:spacing");
   const component = runtime.createComponent();
-  component.appendChild(runtime.createRectangle());
+  const propertyLayer = runtime.createRectangle();
+  component.appendChild(propertyLayer);
   const propertyName = component.addComponentProperty("Enabled", "BOOLEAN", true);
+  propertyLayer.componentPropertyReferences = { visible: propertyName };
+  void propertyLayer.componentPropertyReferences;
+  propertyLayer.componentPropertyReferences = null;
   const renamedProperty = component.editComponentProperty(propertyName, { name: "Active", defaultValue: false });
   component.deleteComponentProperty(renamedProperty);
   void component.key;

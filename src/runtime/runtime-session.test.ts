@@ -564,6 +564,63 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(instance.id))?.componentPropertyValues).not.toHaveProperty(renamed);
   });
 
+  it("authors component property references and applies Instance values to linked sublayers", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const alternate = session.createComponent();
+    const surface = session.createRectangle();
+    const label = session.createText();
+    const nested = alternate.createInstance();
+    component.appendChild(surface);
+    component.appendChild(label);
+    component.appendChild(nested);
+    const enabled = component.addComponentProperty("Enabled", "BOOLEAN", false);
+    const title = component.addComponentProperty("Title", "TEXT", "Continue");
+    const swap = component.addComponentProperty("Swap", "INSTANCE_SWAP", alternate.id);
+
+    surface.componentPropertyReferences = { visible: enabled };
+    label.componentPropertyReferences = { characters: title };
+    nested.componentPropertyReferences = { mainComponent: swap };
+    expect(surface.visible).toBe(false);
+    expect(label.characters).toBe("Continue");
+    expect(surface.componentPropertyReferences).toEqual({ visible: enabled });
+
+    const instance = component.createInstance();
+    const instanceSurface = instance.children.find((child) => child.type === "RECTANGLE")!;
+    const instanceLabel = instance.children.find((child) => child.type === "TEXT")!;
+    const instanceNested = instance.children.find((child) => child.type === "INSTANCE")!;
+    expect(instanceSurface).toMatchObject({ visible: false, componentPropertyReferences: { visible: enabled } });
+    expect(instanceLabel).toMatchObject({ characters: "Continue", componentPropertyReferences: { characters: title } });
+    expect((await instanceNested.getMainComponentAsync())?.id).toBe(alternate.id);
+
+    instance.setProperties({ [enabled]: true, [title]: "Save", [swap]: alternate.id });
+    expect(instanceSurface.visible).toBe(true);
+    expect(instanceLabel.characters).toBe("Save");
+    expect(instance.componentPropertyValues).toMatchObject({ [enabled]: true, [title]: "Save", [swap]: alternate.id });
+
+    const renamedEnabled = component.editComponentProperty(enabled, { name: "Shown" });
+    expect(surface.componentPropertyReferences).toEqual({ visible: renamedEnabled });
+    expect(instanceSurface.componentPropertyReferences).toEqual({ visible: renamedEnabled });
+    component.deleteComponentProperty(renamedEnabled);
+    expect(surface.componentPropertyReferences).toBeNull();
+    expect(instanceSurface.componentPropertyReferences).toBeNull();
+
+    const operationCount = session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)!.operations.length;
+    expect(isRuntimeError(captureError(() => { surface.componentPropertyReferences = { characters: title }; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { surface.componentPropertyReferences = { visible: title }; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)!.operations).toHaveLength(operationCount);
+
+    label.componentPropertyReferences = null;
+    expect(label.componentPropertyReferences).toBeNull();
+    expect(instanceLabel.componentPropertyReferences).toBeNull();
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: instance.id, patch: { instanceMetadata: expect.objectContaining({ componentProperties: expect.objectContaining({ [enabled]: true, [title]: "Save" }) }) } }),
+      expect.objectContaining({ type: "update", nodeId: instanceLabel.id, patch: expect.objectContaining({ characters: "Save" }) }),
+    ]));
+  });
+
   it("validates and writes Instance component properties from the main Component definition", async () => {
     const componentMetadata = {
       key: "card-key",

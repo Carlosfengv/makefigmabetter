@@ -98,6 +98,19 @@ describe("Figma Plugin API node mutation adapter", () => {
     expect(writeFigmaPluginNode(remote, { description: "Nope" })).toEqual({ ok: false, reason: "remote COMPONENT_SET nodes are read-only." });
   });
 
+  it("writes supported component property references and clears them through null", () => {
+    const text = { ...createNode("text", 0, 0), id: "label" };
+    expect(writeFigmaPluginNode(text, { componentPropertyReferences: { visible: "Enabled", characters: "Label" } })).toMatchObject({
+      ok: true,
+      commands: [{ type: "update", id: text.id, patch: { componentPropertyReferences: { visible: "Enabled", characters: "Label" } } }],
+    });
+    expect(writeFigmaPluginNode(text, { componentPropertyReferences: null })).toMatchObject({
+      ok: true,
+      commands: [{ type: "update", id: text.id, patch: { componentPropertyReferences: undefined } }],
+    });
+    expect(writeFigmaPluginNode({ ...createNode("rectangle", 0, 0), id: "shape" }, { componentPropertyReferences: { characters: "Label" } })).toMatchObject({ ok: false });
+  });
+
   it("writes Connector routing, endpoints, and caps through durable connector metadata", () => {
     const connector = { ...createNode("connector", 0, 0), id: "connector" };
     const result = writeFigmaPluginNode(connector, {

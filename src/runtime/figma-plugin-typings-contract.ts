@@ -25,7 +25,8 @@ export function assertFigmaPluginTypingsContract(
   const createdComponent: ComponentNode = figma.createComponent();
   const convertedComponent: ComponentNode = figma.createComponentFromNode(figma.createFrame());
   const createdSlice: SliceNode = figma.createSlice();
-  createdComponent.appendChild(figma.createRectangle());
+  const createdPropertyLayer = figma.createRectangle();
+  createdComponent.appendChild(createdPropertyLayer);
   const createdInstance: InstanceNode = createdComponent.createInstance();
   const createdComponentSet: ComponentSetNode = figma.combineAsVariants([createdComponent, figma.createComponent()], figma.currentPage);
   void createdComponentSet.variantGroupProperties;
@@ -172,6 +173,9 @@ export function assertFigmaPluginTypingsContract(
   void component.documentationLinks;
   void component.componentPropertyDefinitions;
   const propertyName: string = component.addComponentProperty("Enabled", "BOOLEAN", true);
+  rectangle.componentPropertyReferences = { visible: propertyName };
+  void rectangle.componentPropertyReferences;
+  rectangle.componentPropertyReferences = null;
   const renamedProperty: string = component.editComponentProperty(propertyName, { name: "Active", defaultValue: false });
   component.deleteComponentProperty(renamedProperty);
   void component.getInstancesAsync();

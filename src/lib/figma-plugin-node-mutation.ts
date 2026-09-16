@@ -1,4 +1,4 @@
-import { createNode, isShapeWithTextType, type CanvasNode, type DocumentBooleanOperation, type DocumentConnectorMetadata, type DocumentConstraints, type DocumentSlideMetadata, type DocumentStickyMetadata, type DocumentTableMetadata, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type ShapeWithTextType } from "./editor-protocol";
+import { createNode, isShapeWithTextType, type CanvasNode, type DocumentBooleanOperation, type DocumentComponentPropertyReferences, type DocumentConnectorMetadata, type DocumentConstraints, type DocumentSlideMetadata, type DocumentStickyMetadata, type DocumentTableMetadata, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type ShapeWithTextType } from "./editor-protocol";
 import { fromFigmaPluginArcData, type FigmaPluginArcData, type FigmaPluginBlendMode, type FigmaPluginConstraints } from "./figma-plugin-node-projection";
 import { canContainChildren, nodeCapabilities } from "./node-capabilities";
 import { nodeBlendExtensionPatch } from "./node-blend-semantics";
@@ -38,6 +38,7 @@ export type FigmaPluginNodeWrite = Readonly<{
   description?: string;
   descriptionMarkdown?: string;
   documentationLinks?: Array<{ uri: string; name?: string }>;
+  componentPropertyReferences?: DocumentComponentPropertyReferences | null;
   connectorLineType?: DocumentConnectorMetadata["lineType"];
   connectorStart?: FigmaConnectorEndpoint;
   connectorEnd?: FigmaConnectorEndpoint;
@@ -147,6 +148,20 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
   if (has("visible")) {
     if (typeof write.visible !== "boolean") return rejected("visible must be a boolean.");
     patch.visible = write.visible;
+  }
+  if (has("componentPropertyReferences")) {
+    const references = write.componentPropertyReferences;
+    if (references === null) patch.componentPropertyReferences = undefined;
+    else {
+      if (!references || typeof references !== "object" || Array.isArray(references)) return rejected("componentPropertyReferences must be an object or null.");
+      const entries = Object.entries(references);
+      if (entries.some(([field, propertyName]) => !["visible", "characters", "mainComponent"].includes(field) || typeof propertyName !== "string" || !propertyName)) {
+        return rejected("componentPropertyReferences contains an unsupported field or property name.");
+      }
+      if (references.characters !== undefined && !["text", "textPath"].includes(node.kind)) return rejected("characters references require a text-bearing node.");
+      if (references.mainComponent !== undefined && node.kind !== "instance") return rejected("mainComponent references require an INSTANCE node.");
+      patch.componentPropertyReferences = structuredClone(references);
+    }
   }
   if (has("locked")) {
     if (typeof write.locked !== "boolean") return rejected("locked must be a boolean.");

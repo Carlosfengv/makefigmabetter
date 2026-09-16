@@ -99,4 +99,14 @@ describe("canvasNodeFromWasmProjection", () => {
       variantGroupProperties: { State: { values: ["Default"] } },
     });
   });
+
+  it("round-trips component property references through the extension-backed Core projection", () => {
+    const source = { ...createNode("text", 0, 0), componentPropertyReferences: { visible: "Enabled", characters: "Label" } };
+    const core = coreProjectionNode(source);
+    expect(canvasNodeFromWasmProjection(core).componentPropertyReferences).toEqual({ visible: "Enabled", characters: "Label" });
+
+    const cleared = coreProjectionNode({ ...source, componentPropertyReferences: undefined, extensions: core.extensions });
+    expect(cleared.extensions?.["figma.component-property-references.v1"]).toBeUndefined();
+    expect(canvasNodeFromWasmProjection(cleared).componentPropertyReferences).toBeUndefined();
+  });
 });

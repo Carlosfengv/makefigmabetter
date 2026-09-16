@@ -109,6 +109,7 @@ export type FigmaPluginNodeProjection = Readonly<{
   key?: string;
   remote?: boolean;
   componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
+  componentPropertyReferences?: Readonly<{ visible?: string; characters?: string; mainComponent?: string }> | null;
   mainComponentId?: string;
   scaleFactor?: number;
   componentProperties?: Readonly<Record<string, string | boolean>>;
@@ -321,6 +322,7 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     key?: string;
     remote?: boolean;
     componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
+    componentPropertyReferences?: Readonly<{ visible?: string; characters?: string; mainComponent?: string }> | null;
     mainComponentId?: string;
     scaleFactor?: number;
     componentProperties?: Readonly<Record<string, string | boolean>>;
@@ -363,6 +365,10 @@ export function projectFigmaPluginNode(nodes: readonly CanvasNode[], node: Canva
     absoluteTransform: toFigmaPluginTransform(absolute),
     absoluteBoundingBox: { x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top },
   };
+
+  projection.componentPropertyReferences = node.componentPropertyReferences
+    ? structuredClone(node.componentPropertyReferences)
+    : null;
 
   if (!CONSTRAINT_UNSUPPORTED_KINDS.has(node.kind)) {
     const constraints = effectiveConstraints(node);

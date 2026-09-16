@@ -18,6 +18,12 @@ export type DocumentComponentPropertyDefinition = {
   description?: string;
   variantOptions?: string[];
 };
+export type DocumentComponentPropertyReferences = {
+  visible?: string;
+  characters?: string;
+  mainComponent?: string;
+};
+export const COMPONENT_PROPERTY_REFERENCES_EXTENSION = "figma.component-property-references.v1";
 export interface DocumentComponentMetadata {
   /** Local keys default to the Canonical NodeId. Imported remote keys stay
    * visible but mutating APIs reject the remote record. */
@@ -473,6 +479,9 @@ export interface CanvasNode {
   instanceMetadata?: DocumentInstanceMetadata;
   slotMetadata?: DocumentSlotMetadata;
   componentSetMetadata?: DocumentComponentSetMetadata;
+  /** Component/Instance sublayer bindings for BOOLEAN visibility, TEXT
+   * characters and INSTANCE_SWAP main-component properties. */
+  componentPropertyReferences?: DocumentComponentPropertyReferences;
   connectorMetadata?: DocumentConnectorMetadata;
   embedMetadata?: DocumentEmbedMetadata;
   highlightHandleMirroring?: "NONE" | "ANGLE" | "ANGLE_AND_LENGTH";

@@ -5,6 +5,7 @@ import type { RuntimeContainerNodeProxy } from "./container-node-proxy";
 import type {
   DocumentComponentMetadata,
   DocumentComponentSetMetadata,
+  DocumentComponentPropertyReferences,
   DocumentBooleanOperation,
   BlendMode,
   CanvasNode,
@@ -184,6 +185,8 @@ export interface RuntimeNodeHost {
   ): string;
   editComponentProperty(componentId: string, propertyName: string, value: RuntimeComponentPropertyEdit): string;
   deleteComponentProperty(componentId: string, propertyName: string): void;
+  setComponentPropertyReferences(nodeId: string, references: DocumentComponentPropertyReferences | null): void;
+  setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -1697,6 +1700,17 @@ export class RuntimeNodeProxy {
     throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
   }
 
+  get componentPropertyReferences(): DocumentComponentPropertyReferences | null {
+    const references = this.read().componentPropertyReferences;
+    return references && typeof references === "object"
+      ? structuredClone(references as DocumentComponentPropertyReferences)
+      : null;
+  }
+  set componentPropertyReferences(value: DocumentComponentPropertyReferences | null) {
+    this.assertMutable();
+    this.host.setComponentPropertyReferences(this.handle.nodeId, value);
+  }
+
   /** Canonical currently stores the exact values but not every Figma property
    * descriptor, so expose values explicitly instead of guessing API types. */
   get componentPropertyValues(): Readonly<Record<string, string | boolean>> {
@@ -1968,7 +1982,7 @@ export class RuntimeNodeProxy {
       }
       next[name] = value;
     }
-    if (Object.keys(properties).length) this.write({ instanceMetadata: { ...structuredClone(metadata), componentProperties: next } });
+    if (Object.keys(properties).length) this.host.setInstanceProperties(this.handle.nodeId, next);
   }
 
   swapComponent(component: RuntimeNodeProxy): void {

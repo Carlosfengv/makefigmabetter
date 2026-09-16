@@ -604,6 +604,62 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("applies Instance properties to referenced sublayers through the same Core transaction", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000000b1";
+    const sourceChildId = "00000000-0000-4000-8000-0000000000b2";
+    const instanceId = "00000000-0000-4000-8000-0000000000b3";
+    const instanceChildId = "00000000-0000-4000-8000-0000000000b4";
+    const propertyName = "Enabled";
+    const componentPropertyReferences = { visible: propertyName };
+    const referenceExtension = {
+      "figma.component-property-references.v1": [...new TextEncoder().encode(JSON.stringify(componentPropertyReferences))],
+    };
+    const sourceExtension = {
+      "figma.instance.source-node.v1": [...new TextEncoder().encode(sourceChildId)],
+    };
+    const base = snapshotAt(4);
+    const componentMetadata = {
+      key: componentId,
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN" as const, defaultValue: true } },
+    };
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata },
+        { id: sourceChildId, pageId: "page", parentId: componentId, kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, visible: true, componentPropertyReferences, extensions: referenceExtension },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 120, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: { [propertyName]: true }, overrides: [], isExposedInstance: false } },
+        { id: instanceChildId, pageId: "page", parentId: instanceId, kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, visible: true, componentPropertyReferences, extensions: { ...referenceExtension, ...sourceExtension } },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "component-property-reference-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    session.currentPage.children.find((node) => node.id === instanceId)!.setProperties({ [propertyName]: false });
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({
+        type: "update",
+        id: instanceId,
+        patch: { instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: false } }) },
+      }),
+      { type: "update", id: instanceChildId, patch: { visible: false } },
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: false } }) }),
+      expect.objectContaining({ id: instanceChildId, visible: false, extensions: expect.objectContaining(referenceExtension) }),
+    ]));
+    bridge.close();
+    await commit;
+  });
+
   it("writes Component property definitions and linked Instance defaults through Core", async () => {
     const componentId = "00000000-0000-4000-8000-000000000046";
     const instanceId = "00000000-0000-4000-8000-000000000047";

@@ -571,6 +571,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
       }
     }
   }
+  validateImportedComponentPropertyReferences(nodes, nodeById, sourceNodeByCanonicalId, sourceIdByCanonicalId, issues);
   normalizeImportedAlphaMasks(nodes, issues);
   const textStyles = importedTextStyleResources(sourceStyles, nodes, issues);
   const paintStyles = importedPaintStyleResources(sourceStyles, nodes, sourceNodeByCanonicalId, issues);
@@ -768,6 +769,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
     );
     if (deferredAssetLock) extensions["figma.rest.deferred-lock.v1"] = bytes("true");
     const blendMode = blend(node.blendMode, sourceId, issues, extensions);
+    const propertyReferences = componentPropertyReferences(node.componentPropertyReferences, extensions, sourceId, issues);
     const blendExtensions = extensionsForNodeBlendMode(
       extensions,
       blendMode,
@@ -829,6 +831,7 @@ export function planFigmaRestImport(input: unknown, options: FigmaRestImportOpti
       componentMetadata: kind === "component" ? componentMetadata(node, record(sourceComponents?.[sourceId]), id, extensions, sourceId, issues) : undefined,
       slotMetadata: kind === "slot" ? slotMetadata(node, extensions, sourceId, issues) : undefined,
       componentSetMetadata: kind === "componentSet" ? componentSetMetadata(node, record(sourceComponentSets?.[sourceId]), id, extensions, sourceId, issues) : undefined,
+      componentPropertyReferences: propertyReferences,
       extensions: blendExtensions,
     };
     for (const usage of ["fill", "stroke"] as const) {
@@ -1130,6 +1133,76 @@ function slotMetadata(
     return undefined;
   }
   return { propertyName };
+}
+
+function componentPropertyReferences(
+  value: unknown,
+  extensions: Record<string, number[]>,
+  sourceId: string,
+  issues: FigmaImportIssue[],
+): CanvasNode["componentPropertyReferences"] {
+  if (value === undefined || value === null) return undefined;
+  const raw = record(value);
+  if (!raw) {
+    extensions["figma.rest.component-property-references.v1"] = jsonBytes(value);
+    issues.push({ sourceId, capability: "component-property-references", outcome: "preserved-extension", reason: "Component property references must be an object; the source value remains preserved metadata." });
+    return undefined;
+  }
+  const supported: NonNullable<CanvasNode["componentPropertyReferences"]> = {};
+  let preserved = false;
+  for (const [field, propertyName] of Object.entries(raw)) {
+    if (!["visible", "characters", "mainComponent"].includes(field) || typeof propertyName !== "string" || !propertyName) {
+      preserved = true;
+      continue;
+    }
+    supported[field as keyof typeof supported] = propertyName;
+  }
+  if (preserved) {
+    extensions["figma.rest.component-property-references.v1"] = jsonBytes(value);
+    issues.push({ sourceId, capability: "component-property-references", outcome: "preserved-extension", reason: "Supported component property references were mapped; unknown or invalid entries remain preserved metadata." });
+  }
+  return Object.keys(supported).length ? supported : undefined;
+}
+
+function validateImportedComponentPropertyReferences(
+  nodes: readonly CanvasNode[],
+  nodeById: ReadonlyMap<string, CanvasNode>,
+  sourceNodeByCanonicalId: ReadonlyMap<string, JsonRecord>,
+  sourceIdByCanonicalId: ReadonlyMap<string, string>,
+  issues: FigmaImportIssue[],
+): void {
+  for (const node of nodes) {
+    const references = node.componentPropertyReferences;
+    if (!references) continue;
+    let ancestor = node.parentId ? nodeById.get(node.parentId) : undefined;
+    const visited = new Set<string>();
+    while (ancestor && !visited.has(ancestor.id) && ancestor.kind !== "component" && ancestor.kind !== "instance") {
+      visited.add(ancestor.id);
+      ancestor = ancestor.parentId ? nodeById.get(ancestor.parentId) : undefined;
+    }
+    const definitions = ancestor?.kind === "component"
+      ? ancestor.componentMetadata?.componentPropertyDefinitions
+      : ancestor?.kind === "instance"
+        ? nodeById.get(ancestor.instanceMetadata?.mainComponentId ?? "")?.componentMetadata?.componentPropertyDefinitions
+        : undefined;
+    const invalid = !definitions || Object.entries(references).some(([field, propertyName]) => {
+      const definition = definitions[propertyName];
+      if (!definition) return true;
+      if (field === "visible") return definition.type !== "BOOLEAN";
+      if (field === "characters") return definition.type !== "TEXT" || !["text", "textPath"].includes(node.kind);
+      return field !== "mainComponent" || definition.type !== "INSTANCE_SWAP" || node.kind !== "instance";
+    });
+    if (!invalid) continue;
+    node.componentPropertyReferences = undefined;
+    node.extensions ??= {};
+    node.extensions["figma.rest.component-property-references.v1"] = jsonBytes(sourceNodeByCanonicalId.get(node.id)?.componentPropertyReferences);
+    issues.push({
+      sourceId: sourceIdByCanonicalId.get(node.id),
+      capability: "component-property-references",
+      outcome: "preserved-extension",
+      reason: "Component property references did not resolve to compatible definitions on the containing Component or Instance; the source value remains preserved metadata.",
+    });
+  }
 }
 
 /** A Figma mask source is valid only when a later imported sibling remains in

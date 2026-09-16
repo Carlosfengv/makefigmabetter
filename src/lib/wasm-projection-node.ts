@@ -1,4 +1,4 @@
-import { isShapeWithTextType, type CanvasNode, type CoreProjectionNode } from "./editor-protocol";
+import { COMPONENT_PROPERTY_REFERENCES_EXTENSION, isShapeWithTextType, type CanvasNode, type CoreProjectionNode, type DocumentComponentPropertyReferences } from "./editor-protocol";
 import { normalizeAutoLayout } from "./auto-layout-normalization";
 import { decodePrototypeMetadata, decodePrototypeReactions, PROTOTYPE_METADATA_EXTENSION, PROTOTYPE_REACTIONS_EXTENSION } from "../runtime/prototype-contract";
 
@@ -11,6 +11,7 @@ export function canvasNodeFromWasmProjection(node: CoreProjectionNode): CanvasNo
   const instanceMetadata = node.kind === "instance" ? instanceMetadataFromExtensions(node.extensions) : undefined;
   const slotMetadata = node.kind === "slot" ? slotMetadataFromExtensions(node.extensions) : undefined;
   const componentSetMetadata = node.kind === "componentSet" ? componentSetMetadataFromExtensions(node.extensions, node.id) : undefined;
+  const componentPropertyReferences = componentPropertyReferencesFromExtensions(node.extensions);
   const connectorMetadata = node.kind === "connector" ? connectorMetadataFromExtensions(node.extensions) : undefined;
   const embedMetadata = node.kind === "embed" ? embedMetadataFromExtensions(node.extensions) : undefined;
   const highlightHandleMirroring = node.kind === "highlight" ? highlightHandleMirroringFromExtensions(node.extensions) : undefined;
@@ -52,8 +53,21 @@ export function canvasNodeFromWasmProjection(node: CoreProjectionNode): CanvasNo
     id: node.id, pageId: node.pageId, parentId: node.parentId ?? undefined, name: node.name, kind: node.kind, x: node.x, y: node.y, width: node.width, height: node.height,
     rotation: node.rotation, fill: node.fill, fillColor: node.fillColor, fillGradient: node.fillGradient, fills: node.fills, fillStack: node.fillStack ?? undefined, positionId: node.positionId,
     stroke: node.stroke, strokeColor: node.strokeColor, strokeGradient: node.strokeGradient, strokes: node.strokes, strokeStack: node.strokeStack ?? undefined, strokeWidth: node.strokeWidth, strokeCapStart: node.strokeCapStart, strokeCapEnd: node.strokeCapEnd, strokeJoin: node.strokeJoin, strokeMiterLimit: node.strokeMiterLimit, strokeDashPattern: node.strokeDashPattern, strokeWeights: node.strokeWeights?.length === 4 ? [node.strokeWeights[0], node.strokeWeights[1], node.strokeWeights[2], node.strokeWeights[3]] : undefined, strokeAlign: node.strokeAlign, arcData: node.arcData, parametricShape: node.parametricShape, vectorPath: node.vectorPath, booleanOperation: node.booleanOperation, relativeTransform: node.relativeTransform, clipsContent: node.clipsContent,
-    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: normalizeAutoLayout(node.autoLayout), opacity: node.opacity, blendMode: node.blendMode, dropShadow: node.dropShadow, effectStack: node.effectStack, text: node.text, codeLanguage, componentMetadata, instanceMetadata, slotMetadata, componentSetMetadata, connectorMetadata, embedMetadata, highlightHandleMirroring, interactiveSlideElementType, linkUnfurlMetadata, mediaMetadata, shapeWithTextType, slideMetadata, stickyMetadata, tableMetadata, tableCellMetadata, textPathMetadata, transformModifiers, widgetMetadata, textProperties, reactions: canvasReactions.length ? canvasReactions : undefined, prototypeMetadata, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden, isMask: node.isMask, extensions: node.extensions,
+    radius: node.cornerRadius, cornerRadii: node.cornerRadii?.length === 4 ? [node.cornerRadii[0], node.cornerRadii[1], node.cornerRadii[2], node.cornerRadii[3]] : undefined, cornerSmoothing: node.cornerSmoothing, constraints: node.constraints, autoLayout: normalizeAutoLayout(node.autoLayout), opacity: node.opacity, blendMode: node.blendMode, dropShadow: node.dropShadow, effectStack: node.effectStack, text: node.text, codeLanguage, componentMetadata, instanceMetadata, slotMetadata, componentSetMetadata, componentPropertyReferences, connectorMetadata, embedMetadata, highlightHandleMirroring, interactiveSlideElementType, linkUnfurlMetadata, mediaMetadata, shapeWithTextType, slideMetadata, stickyMetadata, tableMetadata, tableCellMetadata, textPathMetadata, transformModifiers, widgetMetadata, textProperties, reactions: canvasReactions.length ? canvasReactions : undefined, prototypeMetadata, assetId: node.assetId, visible: node.visible, locked: node.locked, contentsHidden: node.contentsHidden, isMask: node.isMask, extensions: node.extensions,
   };
+}
+
+function componentPropertyReferencesFromExtensions(extensions: CanvasNode["extensions"]): DocumentComponentPropertyReferences | undefined {
+  const bytes = extensions?.[COMPONENT_PROPERTY_REFERENCES_EXTENSION];
+  try {
+    const value = bytes && JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes))) as Record<string, unknown>;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const entries = Object.entries(value);
+    if (entries.some(([key, propertyName]) => !["visible", "characters", "mainComponent"].includes(key) || typeof propertyName !== "string" || !propertyName)) return undefined;
+    return Object.fromEntries(entries) as DocumentComponentPropertyReferences;
+  } catch {
+    return undefined;
+  }
 }
 
 function codeLanguageFromExtensions(extensions: CanvasNode["extensions"]): string {

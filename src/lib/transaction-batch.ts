@@ -1,4 +1,4 @@
-import { createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type DocumentVectorPath, type EditorClipboard, type EditorCommand } from "./editor-protocol";
+import { COMPONENT_PROPERTY_REFERENCES_EXTENSION, createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type DocumentVectorPath, type EditorClipboard, type EditorCommand } from "./editor-protocol";
 import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, positionIdForLayerInsertion, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
@@ -53,6 +53,7 @@ const EXTENSION_BACKED_PATCH_KEYS = new Set<keyof CanvasNode>([
   "instanceMetadata",
   "slotMetadata",
   "componentSetMetadata",
+  "componentPropertyReferences",
   "connectorMetadata",
   "embedMetadata",
   "highlightHandleMirroring",
@@ -71,6 +72,11 @@ const EXTENSION_BACKED_PATCH_KEYS = new Set<keyof CanvasNode>([
 
 export function coreProjectionNode(node: CanvasNode): CoreProjectionNode {
   const extensions = { ...node.extensions };
+  if (node.componentPropertyReferences !== undefined) {
+    extensions[COMPONENT_PROPERTY_REFERENCES_EXTENSION] = [...new TextEncoder().encode(JSON.stringify(node.componentPropertyReferences))];
+  } else {
+    delete extensions[COMPONENT_PROPERTY_REFERENCES_EXTENSION];
+  }
   if (node.reactions !== undefined) extensions[PROTOTYPE_REACTIONS_EXTENSION] = encodePrototypeValue(validatePrototypeReactions(node.reactions));
   if (node.prototypeMetadata !== undefined) extensions[PROTOTYPE_METADATA_EXTENSION] = encodePrototypeValue(validatePrototypeMetadata(node.prototypeMetadata));
   if (node.kind === "codeBlock") extensions["figma.code-block.language.v1"] = [...new TextEncoder().encode(node.codeLanguage ?? "PLAINTEXT")];
