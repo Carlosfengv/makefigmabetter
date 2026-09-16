@@ -1479,12 +1479,13 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     issues.push({ sourceId, capability: "auto-layout", outcome: "rejected", reason: "Only Frame nodes may own an Auto Layout mode." });
     return undefined;
   }
-  const gridTrack = (value: unknown): { type: "flex" | "fixed"; value: number } | undefined => {
+  const gridTrack = (value: unknown): NonNullable<DocumentAutoLayout["gridRows"]>[number] | undefined => {
     const track = record(value);
     const type = string(track?.type);
     const size = finite(track?.value);
-    if (type === "FLEX" && size !== undefined && size > 0) return { type: "flex", value: size };
+    if (type === "FLEX" && (size ?? 1) > 0) return { type: "flex", value: size ?? 1 };
     if (type === "FIXED" && size !== undefined && size >= 0) return { type: "fixed", value: size };
+    if (type === "HUG" && size === undefined) return { type: "hug" };
     return undefined;
   };
   const gridTracks = (value: unknown, countValue: unknown) => {
@@ -1493,7 +1494,7 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     const explicit = (source ?? []).map(gridTrack);
     if (explicit.length > 0) {
       return explicit.length <= 128 && explicit.every(Boolean)
-        ? explicit as { type: "flex" | "fixed"; value: number }[]
+        ? explicit as NonNullable<DocumentAutoLayout["gridRows"]>
         : undefined;
     }
     if (countValue === undefined) return [{ type: "flex" as const, value: 1 }];
@@ -1508,15 +1509,25 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const gridItemsPositioning = string(node.gridItemsPositioning);
   const gridRowGap = grid ? finite(node.gridRowGap) ?? (node.gridRowGap === undefined ? 0 : undefined) : undefined;
   const gridColumnGap = grid ? finite(node.gridColumnGap) ?? (node.gridColumnGap === undefined ? 0 : undefined) : undefined;
+  const gridHasFillHugCycle = grid && gridRows && gridColumns && (array(node.children) ?? [])
+    .filter((child) => string(record(child)?.layoutPositioning) !== "ABSOLUTE")
+    .some((child, index) => {
+      const source = record(child);
+      const row = Math.floor(index / gridColumns.length);
+      const column = index % gridColumns.length;
+      return (gridRows[row]?.type === "hug" && string(source?.layoutSizingVertical) === "FILL")
+        || (gridColumns[column]?.type === "hug" && string(source?.layoutSizingHorizontal) === "FILL");
+    });
   if (grid && (
     !gridRows || !gridColumns || gridRowGap === undefined || gridColumnGap === undefined
     || gridRowGap < 0 || gridColumnGap < 0
     || gridRows.length * gridColumns.length > 4096
+    || gridHasFillHugCycle
     || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE")
     || gridItemsPositioning !== "ROW_AUTO_FLOW"
   )) {
     extensions["figma.rest.grid-auto-layout.v1"] = jsonBytes({ gridRowCount: node.gridRowCount, gridColumnCount: node.gridColumnCount, gridRowSizes: node.gridRowSizes, gridColumnSizes: node.gridColumnSizes, gridRowGap: node.gridRowGap, gridColumnGap: node.gridColumnGap, gridAutoTracks: node.gridAutoTracks, gridItemsPositioning: node.gridItemsPositioning });
-    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, HUG/FILL cycles, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
     return undefined;
   }
   return {

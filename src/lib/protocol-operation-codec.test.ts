@@ -933,7 +933,7 @@ describe("protocol operation codec", () => {
     const autoLayout = {
       mode: "grid" as const, padding: [8, 12, 16, 20] as [number, number, number, number], itemSpacing: 0, wrap: false,
       primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false,
-      gridRows: [{ type: "fixed" as const, value: 64 }, { type: "flex" as const, value: 1 }],
+      gridRows: [{ type: "fixed" as const, value: 64 }, { type: "hug" as const }],
       gridColumns: [{ type: "flex" as const, value: 2 }, { type: "fixed" as const, value: 80 }],
       gridRowGap: 12, gridColumnGap: 20,
     };
@@ -941,7 +941,7 @@ describe("protocol operation codec", () => {
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
     expect(batch.operations[0]?.createNode?.node?.autoLayout).toMatchObject({
       mode: LayoutMode.LAYOUT_MODE_GRID,
-      gridRows: [{ type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 64 }, { type: GridTrackType.GRID_TRACK_TYPE_FLEX, value: 1 }],
+      gridRows: [{ type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 64 }, { type: GridTrackType.GRID_TRACK_TYPE_HUG, value: 0 }],
       gridColumns: [{ type: GridTrackType.GRID_TRACK_TYPE_FLEX, value: 2 }, { type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 80 }],
       gridRowGap: 12,
       gridColumnGap: 20,

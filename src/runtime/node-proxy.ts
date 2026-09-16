@@ -4,6 +4,7 @@ import type { RuntimeNodeHandle } from "./node-registry";
 import type { RuntimeContainerNodeProxy } from "./container-node-proxy";
 import type {
   DocumentComponentMetadata,
+  AutoLayoutGridTrack,
   DocumentComponentSetMetadata,
   DocumentComponentPropertyReferences,
   DocumentBooleanOperation,
@@ -121,8 +122,8 @@ export type M1SceneNodeType = ExternalNodeType;
 export type M1NodeType = "DOCUMENT" | "PAGE" | M1SceneNodeType;
 export const M1_NODE_TYPES: readonly M1NodeType[] = Object.freeze(["DOCUMENT", "PAGE", ...EXTERNAL_NODE_TYPES]);
 export type RuntimeLayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
-export type RuntimeGridTrackType = "FLEX" | "FIXED";
-export type RuntimeGridTrackSize = { type: RuntimeGridTrackType; value: number };
+export type RuntimeGridTrackType = "FLEX" | "FIXED" | "HUG";
+export type RuntimeGridTrackSize = { type: RuntimeGridTrackType; value?: number };
 export type RuntimeLayoutSizing = "FIXED" | "HUG" | "FILL";
 export type RuntimeAxisSizingMode = "FIXED" | "AUTO";
 export type RuntimePrimaryAxisAlignment = "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
@@ -185,8 +186,8 @@ type RuntimeAutoLayout = Readonly<{
   minHeight?: number;
   maxHeight?: number;
   absolute: boolean;
-  gridRows?: readonly Readonly<{ type: "flex" | "fixed"; value: number }>[];
-  gridColumns?: readonly Readonly<{ type: "flex" | "fixed"; value: number }>[];
+  gridRows?: readonly AutoLayoutGridTrack[];
+  gridColumns?: readonly AutoLayoutGridTrack[];
   gridRowGap?: number;
   gridColumnGap?: number;
 }>;
@@ -4047,7 +4048,7 @@ export class RuntimeNodeProxy {
     if (this.autoLayout().mode !== "grid") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
   }
 
-  private gridTracks(axis: "row" | "column"): readonly Readonly<{ type: "flex" | "fixed"; value: number }>[] {
+  private gridTracks(axis: "row" | "column"): readonly AutoLayoutGridTrack[] {
     this.assertGridFrame();
     return axis === "row" ? (this.autoLayout().gridRows ?? []) : (this.autoLayout().gridColumns ?? []);
   }
@@ -4073,15 +4074,32 @@ export class RuntimeNodeProxy {
     this.writeAutoLayout(axis === "row" ? { gridRowGap: value } : { gridColumnGap: value });
   }
 
-  private writeGridTrack(axis: "row" | "column", index: number, patch: Partial<{ type: "flex" | "fixed"; value: number }>): void {
+  private writeGridTrack(axis: "row" | "column", index: number, patch: { type?: "flex" | "fixed" | "hug"; value?: number }): void {
     const tracks = [...this.gridTracks(axis)];
     const current = tracks[index];
     if (!current) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
-    const next = { ...current, ...patch };
-    if (!Number.isFinite(next.value) || (next.type === "flex" ? next.value <= 0 : next.value < 0)) {
+    const type = patch.type ?? current.type;
+    if (type === "hug") {
+      if (patch.value !== undefined) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+      const columnCount = this.gridTracks("column").length;
+      const hasFillCycle = this.host.childrenOf(this.id)
+        .filter((child) => !child.autoLayout().absolute)
+        .some((child, childIndex) => {
+          const occupiesTrack = axis === "row"
+            ? Math.floor(childIndex / columnCount) === index
+            : childIndex % columnCount === index;
+          return occupiesTrack && child.readLayoutSizing(axis === "column") === "FILL";
+        });
+      if (hasFillCycle) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+      tracks[index] = { type };
+      this.writeAutoLayout(axis === "row" ? { gridRows: tracks } : { gridColumns: tracks });
+      return;
+    }
+    const value = patch.value ?? ("value" in current ? current.value : 1);
+    if (!Number.isFinite(value) || (type === "flex" ? value <= 0 : value < 0)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
     }
-    tracks[index] = next;
+    tracks[index] = { type, value };
     this.writeAutoLayout(axis === "row" ? { gridRows: tracks } : { gridColumns: tracks });
   }
 
@@ -4089,17 +4107,28 @@ export class RuntimeNodeProxy {
     return this.gridTracks(axis).map((_track, index) => {
       const nodeId = this.id;
       const readTrack = () => this.gridTracks(axis)[index]!;
-      const writeTrack = (patch: Partial<{ type: "flex" | "fixed"; value: number }>) => this.writeGridTrack(axis, index, patch);
+      const writeTrack = (patch: { type?: "flex" | "fixed" | "hug"; value?: number }) => this.writeGridTrack(axis, index, patch);
       return {
         get type(): RuntimeGridTrackType {
-          return readTrack().type === "fixed" ? "FIXED" : "FLEX";
+          const type = readTrack().type;
+          return type === "fixed" ? "FIXED" : type === "hug" ? "HUG" : "FLEX";
         },
         set type(value: RuntimeGridTrackType) {
-          if (value !== "FLEX" && value !== "FIXED") throw runtimeError("INVALID_ARGUMENT", { nodeId });
-          writeTrack({ type: value.toLowerCase() as "flex" | "fixed" });
+          if (value !== "FLEX" && value !== "FIXED" && value !== "HUG") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+          writeTrack({ type: value.toLowerCase() as "flex" | "fixed" | "hug" });
         },
-        get value(): number { return readTrack().value; },
-        set value(value: number) { writeTrack({ value }); },
+        get value(): number | undefined {
+          const track = readTrack();
+          return "value" in track ? track.value : undefined;
+        },
+        set value(value: number | undefined) {
+          if (value === undefined) {
+            if (readTrack().type !== "flex") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+            writeTrack({ value: 1 });
+          } else {
+            writeTrack({ value });
+          }
+        },
       };
     });
   }

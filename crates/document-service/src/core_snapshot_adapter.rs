@@ -477,6 +477,18 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version < makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout
+                .grid_rows
+                .iter()
+                .chain(&layout.grid_columns)
+                .any(|track| matches!(track, GridTrack::Hug))
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
         && document
@@ -1035,6 +1047,27 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout
+                            .grid_rows
+                            .iter()
+                            .chain(&layout.grid_columns)
+                            .any(|track| track.r#type == v1::GridTrackType::Hug as i32)
+                    })
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if declared_engine_semantics_version
         < makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
         && snapshot
@@ -2093,6 +2126,7 @@ fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
     let (r#type, value) = match value {
         GridTrack::Flex(value) => (v1::GridTrackType::Flex, *value),
         GridTrack::Fixed(value) => (v1::GridTrackType::Fixed, *value),
+        GridTrack::Hug => (v1::GridTrackType::Hug, 0.0),
     };
     v1::GridTrack {
         r#type: r#type as i32,
@@ -2104,6 +2138,7 @@ fn grid_track_from_proto(value: v1::GridTrack) -> Result<GridTrack, ServiceError
     match v1::GridTrackType::try_from(value.r#type).map_err(|_| ServiceError::ReducerRejected)? {
         v1::GridTrackType::Flex => Ok(GridTrack::Flex(value.value)),
         v1::GridTrackType::Fixed => Ok(GridTrack::Fixed(value.value)),
+        v1::GridTrackType::Hug => Ok(GridTrack::Hug),
         v1::GridTrackType::Unspecified => Err(ServiceError::ReducerRejected),
     }
 }
@@ -5547,6 +5582,40 @@ mod tests {
             restored.text_properties_for_node(NodeId(54)),
             Some(&properties)
         );
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_fifty_seven_for_grid_hug_tracks() {
+        let mut document = Document::with_id(DocumentId(71));
+        let mut frame = leaf(NodeId(71), None, NodeKind::Frame);
+        frame.name = "Grid".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, frame).unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Hug],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            ..AutoLayout::default()
+        };
+        document
+            .seed_auto_layout(NodeId(71), layout.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 71_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(restored.auto_layout_for_node(NodeId(71)), layout);
     }
 
     #[test]

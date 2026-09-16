@@ -72,7 +72,8 @@ function normalizeGridTracks(value: unknown): DocumentAutoLayout["gridRows"] {
   for (const candidate of value) {
     if (!candidate || typeof candidate !== "object") continue;
     const { type, value } = candidate as { type?: unknown; value?: unknown };
-    if (type === "fixed" && typeof value === "number" && Number.isFinite(value) && value >= 0) tracks.push({ type, value });
+    if (type === "hug") tracks.push({ type });
+    else if (type === "fixed" && typeof value === "number" && Number.isFinite(value) && value >= 0) tracks.push({ type, value });
     else if (type === "flex" && typeof value === "number" && Number.isFinite(value) && value > 0) tracks.push({ type, value });
   }
   return tracks.length ? tracks.slice(0, 128) : [{ type: "flex", value: 1 }];

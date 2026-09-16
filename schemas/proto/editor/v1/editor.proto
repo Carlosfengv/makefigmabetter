@@ -247,17 +247,18 @@ enum WrapTrackAlignment {
   WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2;
 }
 
-// W12-L's first Grid Auto Layout slice. HUG tracks, explicit child placement,
-// spans and automatic row creation remain outside this versioned subset.
+// W12-L Grid Auto Layout tracks. Explicit child placement, spans and automatic
+// row creation remain outside this versioned subset.
 enum GridTrackType {
   GRID_TRACK_TYPE_UNSPECIFIED = 0;
   GRID_TRACK_TYPE_FLEX = 1;
   GRID_TRACK_TYPE_FIXED = 2;
+  GRID_TRACK_TYPE_HUG = 3;
 }
 
 message GridTrack {
   GridTrackType type = 1;
-  // FLEX uses fractional units; FIXED uses logical pixels.
+  // FLEX uses fractional units; FIXED uses logical pixels; HUG ignores value.
   double value = 2;
 }
 
@@ -289,7 +290,8 @@ message AutoLayout {
   // Figma counterAxisAlignContent. Omission/default is AUTO; SPACE_BETWEEN is
   // valid only when wrap is true.
   optional WrapTrackAlignment wrap_track_alignment = 19;
-  // Grid fields require engine semantics 56. Non-GRID layouts must omit them.
+  // Grid fields require engine semantics 56; HUG tracks require semantics 57.
+  // Non-GRID layouts must omit them.
   repeated GridTrack grid_rows = 20;
   repeated GridTrack grid_columns = 21;
   optional double grid_row_gap = 22;

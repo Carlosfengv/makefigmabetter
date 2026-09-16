@@ -111,6 +111,48 @@ describe("Figma REST import planning", () => {
     });
   });
 
+  it("imports HUG Grid tracks and defaults an omitted FLEX weight to one", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-hug-track",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 240 },
+        layoutMode: "GRID", gridRowCount: 2, gridColumnCount: 1,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "HUG" }, { type: "FLEX" }],
+        gridColumnSizes: [{ type: "FIXED", value: 80 }],
+        children: [],
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.nodes[0]?.autoLayout).toMatchObject({
+      mode: "grid",
+      gridRows: [{ type: "hug" }, { type: "flex", value: 1 }],
+      gridColumns: [{ type: "fixed", value: 80 }],
+    });
+  });
+
+  it("preserves a Grid whose FILL child would cyclically size a HUG track", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-hug-fill-cycle",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 240 },
+        layoutMode: "GRID", gridRowCount: 1, gridColumnCount: 1,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "FIXED", value: 80 }],
+        gridColumnSizes: [{ type: "HUG" }],
+        children: [{
+          id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 40, height: 40 },
+          layoutSizingHorizontal: "FILL",
+        }],
+      }] }] },
+    }, ids());
+
+    expect(plan.nodes[0]?.autoLayout).toBeUndefined();
+    expect(plan.nodes[0]?.extensions?.["figma.rest.grid-auto-layout.v1"]).toBeDefined();
+    expect(plan.issues).toContainEqual(expect.objectContaining({ capability: "grid-auto-layout", outcome: "preserved-extension" }));
+  });
+
   it("preserves malformed Grid tracks instead of coercing them to defaults", () => {
     const plan = planFigmaRestImport({
       version: "grid-invalid-track",

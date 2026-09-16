@@ -82,8 +82,9 @@ pub const TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 53;
 pub const PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 54;
 pub const TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 55;
 pub const GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION: u32 = 56;
+pub const GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION: u32 = 57;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -117,6 +118,18 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout
+                .grid_rows
+                .iter()
+                .chain(&layout.grid_columns)
+                .any(|track| matches!(track, GridTrack::Hug))
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
         && document
             .nodes()
@@ -672,6 +685,26 @@ pub fn document_from_snapshot_with_engine_semantics(
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version < GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout
+                            .grid_rows
+                            .iter()
+                            .chain(&layout.grid_columns)
+                            .any(|track| track.r#type == v1::GridTrackType::Hug as i32)
+                    })
+            })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION
         && snapshot
             .page_chunks
@@ -1837,6 +1870,7 @@ fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
     let (r#type, value) = match value {
         GridTrack::Flex(value) => (v1::GridTrackType::Flex, *value),
         GridTrack::Fixed(value) => (v1::GridTrackType::Fixed, *value),
+        GridTrack::Hug => (v1::GridTrackType::Hug, 0.0),
     };
     v1::GridTrack {
         r#type: r#type as i32,
@@ -1847,6 +1881,7 @@ fn grid_track_from_proto(value: v1::GridTrack) -> Result<GridTrack, SnapshotErro
     match v1::GridTrackType::try_from(value.r#type).map_err(|_| SnapshotError::Invalid)? {
         v1::GridTrackType::Flex => Ok(GridTrack::Flex(value.value)),
         v1::GridTrackType::Fixed => Ok(GridTrack::Fixed(value.value)),
+        v1::GridTrackType::Hug => Ok(GridTrack::Hug),
         v1::GridTrackType::Unspecified => Err(SnapshotError::Invalid),
     }
 }
@@ -3747,6 +3782,34 @@ mod tests {
         .unwrap();
         assert_eq!(restored.auto_layout_for_node(frame.id), layout);
         assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn grid_hug_tracks_require_semantics_fifty_seven() {
+        let mut document = Document::with_id(DocumentId(78));
+        let frame = node(8, NodeKind::Frame, None);
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Hug],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            ..AutoLayout::default()
+        };
+        document.seed_auto_layout(frame.id, layout.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bytes = snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot(
+            &bytes,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.auto_layout_for_node(frame.id), layout);
     }
 
     #[test]

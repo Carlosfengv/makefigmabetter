@@ -377,6 +377,7 @@ pub enum WrapTrackAlignment {
 pub enum GridTrack {
     Flex(f64),
     Fixed(f64),
+    Hug,
 }
 
 /// Container and child inputs live in a separate canonical table, which keeps
@@ -6070,37 +6071,97 @@ impl Document {
                     {
                         return Err(CommandError::AutoLayoutUnsupported);
                     }
-                    let resolve_tracks = |tracks: &[GridTrack], extent: f64, gap: f64| {
-                        let gaps = gap * tracks.len().saturating_sub(1) as f64;
-                        let fixed = tracks
-                            .iter()
-                            .map(|track| match track {
-                                GridTrack::Fixed(value) => *value,
-                                GridTrack::Flex(_) => 0.0,
-                            })
-                            .sum::<f64>();
-                        let flex = tracks
-                            .iter()
-                            .map(|track| match track {
-                                GridTrack::Flex(value) => *value,
-                                GridTrack::Fixed(_) => 0.0,
-                            })
-                            .sum::<f64>();
-                        if fixed + gaps > extent {
-                            return Err(CommandError::InvalidAutoLayout);
-                        }
-                        let remaining = (extent - fixed - gaps).max(0.0);
-                        Ok(tracks
-                            .iter()
-                            .map(|track| match track {
-                                GridTrack::Fixed(value) => *value,
-                                GridTrack::Flex(value) => remaining * *value / flex,
-                            })
-                            .collect::<Vec<_>>())
+                    let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
+                        max.map(|limit| value.min(limit))
+                            .unwrap_or(value)
+                            .max(min.unwrap_or(0.0))
                     };
-                    let row_sizes = resolve_tracks(&layout.grid_rows, content_height, row_gap)?;
-                    let column_sizes =
-                        resolve_tracks(&layout.grid_columns, content_width, column_gap)?;
+                    let mut hug_rows = vec![0.0_f64; layout.grid_rows.len()];
+                    let mut hug_columns = vec![0.0_f64; layout.grid_columns.len()];
+                    let mut prepared = Vec::with_capacity(flow.len());
+                    for (index, child) in flow.into_iter().enumerate() {
+                        let row = index / layout.grid_columns.len();
+                        let column = index % layout.grid_columns.len();
+                        let child_layout = self.auto_layout_for_node(child.id);
+                        let (width_sizing, height_sizing) =
+                            self.auto_layout_child_sizing(&child, true);
+                        if width_sizing == LayoutSizing::Hug
+                            || height_sizing == LayoutSizing::Hug
+                            || child_layout.wrap
+                            || child_layout.align_self.is_some()
+                        {
+                            return Err(CommandError::AutoLayoutUnsupported);
+                        }
+                        if layout.grid_columns[column] == GridTrack::Hug {
+                            if width_sizing == LayoutSizing::Fill {
+                                return Err(CommandError::AutoLayoutUnsupported);
+                            }
+                            hug_columns[column] = hug_columns[column].max(clamp_size(
+                                child.width,
+                                child_layout.min_width,
+                                child_layout.max_width,
+                            ));
+                        }
+                        if layout.grid_rows[row] == GridTrack::Hug {
+                            if height_sizing == LayoutSizing::Fill {
+                                return Err(CommandError::AutoLayoutUnsupported);
+                            }
+                            hug_rows[row] = hug_rows[row].max(clamp_size(
+                                child.height,
+                                child_layout.min_height,
+                                child_layout.max_height,
+                            ));
+                        }
+                        prepared.push((
+                            child,
+                            row,
+                            column,
+                            child_layout,
+                            width_sizing,
+                            height_sizing,
+                        ));
+                    }
+                    let resolve_tracks =
+                        |tracks: &[GridTrack], hug_sizes: &[f64], extent: f64, gap: f64| {
+                            let gaps = gap * tracks.len().saturating_sub(1) as f64;
+                            let fixed = tracks
+                                .iter()
+                                .enumerate()
+                                .map(|(index, track)| match track {
+                                    GridTrack::Fixed(value) => *value,
+                                    GridTrack::Flex(_) => 0.0,
+                                    GridTrack::Hug => hug_sizes[index],
+                                })
+                                .sum::<f64>();
+                            let flex = tracks
+                                .iter()
+                                .map(|track| match track {
+                                    GridTrack::Flex(value) => *value,
+                                    GridTrack::Fixed(_) | GridTrack::Hug => 0.0,
+                                })
+                                .sum::<f64>();
+                            if fixed + gaps > extent {
+                                return Err(CommandError::InvalidAutoLayout);
+                            }
+                            let remaining = (extent - fixed - gaps).max(0.0);
+                            Ok(tracks
+                                .iter()
+                                .enumerate()
+                                .map(|(index, track)| match track {
+                                    GridTrack::Fixed(value) => *value,
+                                    GridTrack::Flex(value) => remaining * *value / flex,
+                                    GridTrack::Hug => hug_sizes[index],
+                                })
+                                .collect::<Vec<_>>())
+                        };
+                    let row_sizes =
+                        resolve_tracks(&layout.grid_rows, &hug_rows, content_height, row_gap)?;
+                    let column_sizes = resolve_tracks(
+                        &layout.grid_columns,
+                        &hug_columns,
+                        content_width,
+                        column_gap,
+                    )?;
                     let offsets = |sizes: &[f64], gap: f64| {
                         let mut cursor = 0.0;
                         sizes
@@ -6114,24 +6175,8 @@ impl Document {
                     };
                     let row_offsets = offsets(&row_sizes, row_gap);
                     let column_offsets = offsets(&column_sizes, column_gap);
-                    for (index, child) in flow.into_iter().enumerate() {
-                        let row = index / column_sizes.len();
-                        let column = index % column_sizes.len();
-                        let child_layout = self.auto_layout_for_node(child.id);
-                        let (width_sizing, height_sizing) =
-                            self.auto_layout_child_sizing(&child, true);
-                        if width_sizing == LayoutSizing::Hug
-                            || height_sizing == LayoutSizing::Hug
-                            || child_layout.wrap
-                            || child_layout.align_self.is_some()
-                        {
-                            return Err(CommandError::AutoLayoutUnsupported);
-                        }
-                        let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
-                            max.map(|limit| value.min(limit))
-                                .unwrap_or(value)
-                                .max(min.unwrap_or(0.0))
-                        };
+                    for (child, row, column, child_layout, width_sizing, height_sizing) in prepared
+                    {
                         let width = clamp_size(
                             if width_sizing == LayoutSizing::Fill {
                                 column_sizes[column]
@@ -9220,13 +9265,12 @@ fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
                 match track {
                     GridTrack::Flex(_) => hasher.update([0]),
                     GridTrack::Fixed(_) => hasher.update([1]),
+                    GridTrack::Hug => hasher.update([2]),
                 }
-                hash_number(
-                    hasher,
-                    match track {
-                        GridTrack::Flex(value) | GridTrack::Fixed(value) => *value,
-                    },
-                );
+                match track {
+                    GridTrack::Flex(value) | GridTrack::Fixed(value) => hash_number(hasher, *value),
+                    GridTrack::Hug => hash_number(hasher, 0.0),
+                }
             }
         }
         for gap in [layout.grid_row_gap, layout.grid_column_gap] {
@@ -9248,6 +9292,7 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
             && tracks.iter().all(|track| match track {
                 GridTrack::Flex(value) => value.is_finite() && *value > 0.0,
                 GridTrack::Fixed(value) => value.is_finite() && *value >= 0.0,
+                GridTrack::Hug => true,
             })
     };
     let grid_valid = if layout.mode == LayoutMode::Grid {
@@ -12502,6 +12547,87 @@ mod tests {
         document.redo().unwrap();
         assert_eq!(document.canonical_hash(), hash);
         assert_eq!(document.node(second.id).map(|node| node.width), Some(180.0));
+    }
+
+    #[test]
+    fn grid_hug_tracks_measure_fixed_children_and_reject_fill_cycles() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.x = 10.0;
+        frame.y = 20.0;
+        frame.width = 300.0;
+        frame.height = 200.0;
+        let mut first = node(2);
+        first.parent_id = Some(frame.id);
+        first.width = 40.0;
+        first.height = 20.0;
+        let mut second = node(3);
+        second.parent_id = Some(frame.id);
+        second.width = 60.0;
+        second.height = 30.0;
+        let mut third = node(4);
+        third.parent_id = Some(frame.id);
+        third.width = 50.0;
+        third.height = 70.0;
+        let grid = AutoLayout {
+            mode: LayoutMode::Grid,
+            padding: [10.0, 10.0, 10.0, 10.0],
+            grid_rows: vec![GridTrack::Hug, GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Hug, GridTrack::Flex(1.0)],
+            grid_row_gap: Some(10.0),
+            grid_column_gap: Some(10.0),
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::Create(third.clone()),
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: grid,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(second.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((80.0, 30.0, 60.0, 30.0))
+        );
+        assert_eq!(
+            document
+                .node(third.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((20.0, 70.0, 50.0, 70.0))
+        );
+
+        let hash = document.canonical_hash();
+        let fill_hug_track = AutoLayout {
+            primary_sizing: LayoutSizing::Fill,
+            ..AutoLayout::default()
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAutoLayout {
+                        id: first.id,
+                        layout: fill_hug_track,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::AutoLayoutUnsupported)
+        );
+        assert_eq!(document.canonical_hash(), hash);
     }
 
     #[test]

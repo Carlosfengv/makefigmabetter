@@ -112,7 +112,10 @@ export type AutoLayoutAlignment = "start" | "center" | "end" | "spaceBetween" | 
 /** Figma counterAxisAlignContent's Phase 2 wrapped-track subset. */
 export type AutoLayoutTrackAlignment = "auto" | "spaceBetween";
 export type AutoLayoutSizing = "fixed" | "hug" | "fill";
-export type AutoLayoutGridTrack = Readonly<{ type: "flex" | "fixed"; value: number }>;
+export type AutoLayoutGridTrack = Readonly<
+  { type: "flex" | "fixed"; value: number }
+  | { type: "hug" }
+>;
 export interface DocumentAutoLayout {
   mode: AutoLayoutMode;
   padding: [number, number, number, number];
@@ -134,8 +137,8 @@ export interface DocumentAutoLayout {
   minHeight?: number;
   maxHeight?: number;
   absolute: boolean;
-  /** Present only on a Grid container. The first supported subset places
-   * non-absolute children in document order using row-major auto-flow. */
+  /** Present only on a Grid container. Children use row-major auto-flow;
+   * HUG tracks measure the largest fixed-size child assigned to the track. */
   gridRows?: AutoLayoutGridTrack[];
   gridColumns?: AutoLayoutGridTrack[];
   gridRowGap?: number;

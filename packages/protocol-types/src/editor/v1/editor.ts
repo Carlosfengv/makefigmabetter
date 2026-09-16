@@ -193,13 +193,14 @@ export enum WrapTrackAlignment {
 }
 
 /**
- * W12-L's first Grid Auto Layout slice. HUG tracks, explicit child placement,
- * spans and automatic row creation remain outside this versioned subset.
+ * W12-L Grid Auto Layout tracks. Explicit child placement, spans and automatic
+ * row creation remain outside this versioned subset.
  */
 export enum GridTrackType {
   GRID_TRACK_TYPE_UNSPECIFIED = 0,
   GRID_TRACK_TYPE_FLEX = 1,
   GRID_TRACK_TYPE_FIXED = 2,
+  GRID_TRACK_TYPE_HUG = 3,
   UNRECOGNIZED = -1,
 }
 
@@ -532,7 +533,7 @@ export interface Constraints {
 
 export interface GridTrack {
   type: GridTrackType;
-  /** FLEX uses fractional units; FIXED uses logical pixels. */
+  /** FLEX uses fractional units; FIXED uses logical pixels; HUG ignores value. */
   value: number;
 }
 
@@ -576,7 +577,10 @@ export interface AutoLayout {
   wrapTrackAlignment?:
     | WrapTrackAlignment
     | undefined;
-  /** Grid fields require engine semantics 56. Non-GRID layouts must omit them. */
+  /**
+   * Grid fields require engine semantics 56; HUG tracks require semantics 57.
+   * Non-GRID layouts must omit them.
+   */
   gridRows: GridTrack[];
   gridColumns: GridTrack[];
   gridRowGap?: number | undefined;

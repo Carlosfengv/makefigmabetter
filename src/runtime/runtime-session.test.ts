@@ -3178,6 +3178,7 @@ describe("M1 RuntimeSession", () => {
     grid.gridColumnGap = 20;
     grid.gridRowSizes[0]!.type = "FIXED";
     grid.gridRowSizes[0]!.value = 64;
+    grid.gridRowSizes[1]!.type = "HUG";
     grid.gridColumnSizes[1]!.type = "FIXED";
     grid.gridColumnSizes[1]!.value = 80;
 
@@ -3188,7 +3189,7 @@ describe("M1 RuntimeSession", () => {
     expect(grid.gridColumnGap).toBe(20);
     expect(grid.gridRowSizes.map((track) => ({ type: track.type, value: track.value }))).toEqual([
       { type: "FIXED", value: 64 },
-      { type: "FLEX", value: 1 },
+      { type: "HUG", value: undefined },
     ]);
     expect(grid.gridColumnSizes.map((track) => ({ type: track.type, value: track.value }))).toEqual([
       { type: "FLEX", value: 1 },
@@ -3206,7 +3207,7 @@ describe("M1 RuntimeSession", () => {
         patch: {
           autoLayout: expect.objectContaining({
             mode: "grid",
-            gridRows: [{ type: "fixed", value: 64 }, { type: "flex", value: 1 }],
+            gridRows: [{ type: "fixed", value: 64 }, { type: "hug" }],
             gridColumns: [{ type: "flex", value: 1 }, { type: "fixed", value: 80 }],
             gridRowGap: 12,
             gridColumnGap: 20,
@@ -3229,6 +3230,20 @@ describe("M1 RuntimeSession", () => {
     expect(grid.gridRowCount).toBe(2);
     expect(grid.gridColumnCount).toBe(2);
     await expect(session.commitAsync()).resolves.toBe(1);
+  });
+
+  it("rejects a HUG track that contains a FILL child before staging", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    const fill = session.createRectangle();
+    grid.appendChild(fill);
+    fill.layoutSizingHorizontal = "FILL";
+
+    expect(isRuntimeError(captureError(() => {
+      grid.gridColumnSizes[0]!.type = "HUG";
+    }), "INVALID_ARGUMENT")).toBe(true);
+    expect(grid.gridColumnSizes[0]!.type).toBe("FLEX");
   });
 
   it("admits FILL, STRETCH and nested HUG children in a wrapped Frame", async () => {

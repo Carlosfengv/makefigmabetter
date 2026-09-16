@@ -936,7 +936,17 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=70).contains(&snapshot.schema_version)
+    if !(1..=71).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 71
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout
+                        .grid_rows
+                        .iter()
+                        .chain(&layout.grid_columns)
+                        .any(|track| track.r#type == "hug")
+                })
+            }))
         || (snapshot.schema_version < 70
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -1630,7 +1640,8 @@ struct ProjectionAutoLayout {
 #[serde(rename_all = "camelCase")]
 struct ProjectionGridTrack {
     r#type: String,
-    value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    value: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2359,7 +2370,16 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self
+        let schema_version = if self.document.nodes().any(|node| {
+            let layout = self.document.auto_layout_for_node(node.id);
+            layout
+                .grid_rows
+                .iter()
+                .chain(&layout.grid_columns)
+                .any(|track| matches!(track, GridTrack::Hug))
+        }) {
+            71
+        } else if self
             .document
             .nodes()
             .any(|node| self.document.auto_layout_for_node(node.id).mode == LayoutMode::Grid)
@@ -7125,19 +7145,32 @@ fn projection_grid_track(track: GridTrack) -> ProjectionGridTrack {
     match track {
         GridTrack::Flex(value) => ProjectionGridTrack {
             r#type: "flex".into(),
-            value,
+            value: Some(value),
         },
         GridTrack::Fixed(value) => ProjectionGridTrack {
             r#type: "fixed".into(),
-            value,
+            value: Some(value),
+        },
+        GridTrack::Hug => ProjectionGridTrack {
+            r#type: "hug".into(),
+            value: None,
         },
     }
 }
 
 fn grid_track_from_projection(track: &ProjectionGridTrack) -> Result<GridTrack, JsValue> {
     match track.r#type.as_str() {
-        "flex" => Ok(GridTrack::Flex(track.value)),
-        "fixed" => Ok(GridTrack::Fixed(track.value)),
+        "flex" => Ok(GridTrack::Flex(
+            track
+                .value
+                .ok_or_else(|| JsValue::from_str("INVALID_AUTO_LAYOUT"))?,
+        )),
+        "fixed" => Ok(GridTrack::Fixed(
+            track
+                .value
+                .ok_or_else(|| JsValue::from_str("INVALID_AUTO_LAYOUT"))?,
+        )),
+        "hug" if track.value.is_none() => Ok(GridTrack::Hug),
         _ => Err(JsValue::from_str("INVALID_AUTO_LAYOUT")),
     }
 }
@@ -11528,6 +11561,42 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 69;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v71_round_trips_grid_hug_tracks_and_v70_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let mut frame = existing_rect(NodeId(0x71));
+        frame.kind = NodeKind::Frame;
+        frame.width = 320.0;
+        frame.height = 200.0;
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, frame.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![GridTrack::Hug, GridTrack::Flex(1.0)],
+            grid_columns: vec![GridTrack::Fixed(80.0)],
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(frame.id, layout.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":71"));
+        assert!(snapshot.contains("\"type\":\"hug\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 70;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

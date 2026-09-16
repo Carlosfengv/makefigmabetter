@@ -16,6 +16,7 @@ import {
   WrapTrackAlignment as ProtoWrapTrackAlignment,
   LayoutMode as ProtoLayoutMode,
   LayoutSizing as ProtoLayoutSizing,
+  GridTrackType as ProtoGridTrackType,
   LineHeightUnit as ProtoLineHeightUnit,
   LeadingTrim as ProtoLeadingTrim,
   TextListType as ProtoTextListType,
@@ -414,8 +415,14 @@ function autoLayoutProto(layout: DocumentAutoLayout | undefined) {
     primarySizing: layoutSizing(value.primarySizing), counterSizing: layoutSizing(value.counterSizing),
     minWidth: bound(value.minWidth), maxWidth: bound(value.maxWidth), minHeight: bound(value.minHeight), maxHeight: bound(value.maxHeight), absolute: value.absolute,
     alignSelf: value.alignSelf ? layoutAlignment(value.alignSelf) : undefined,
-    gridRows: (value.gridRows ?? []).map((track) => ({ type: track.type === "fixed" ? 2 : 1, value: track.value })),
-    gridColumns: (value.gridColumns ?? []).map((track) => ({ type: track.type === "fixed" ? 2 : 1, value: track.value })),
+    gridRows: (value.gridRows ?? []).map((track) => ({
+      type: track.type === "hug" ? ProtoGridTrackType.GRID_TRACK_TYPE_HUG : track.type === "fixed" ? ProtoGridTrackType.GRID_TRACK_TYPE_FIXED : ProtoGridTrackType.GRID_TRACK_TYPE_FLEX,
+      value: "value" in track ? track.value : 0,
+    })),
+    gridColumns: (value.gridColumns ?? []).map((track) => ({
+      type: track.type === "hug" ? ProtoGridTrackType.GRID_TRACK_TYPE_HUG : track.type === "fixed" ? ProtoGridTrackType.GRID_TRACK_TYPE_FIXED : ProtoGridTrackType.GRID_TRACK_TYPE_FLEX,
+      value: "value" in track ? track.value : 0,
+    })),
     gridRowGap: bound(value.gridRowGap), gridColumnGap: bound(value.gridColumnGap),
   };
 }
