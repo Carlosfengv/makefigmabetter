@@ -607,6 +607,8 @@ function editorKind(type: string): Extract<EditorTransaction["commands"][number]
     FRAME: "frame",
     GROUP: "group",
     SECTION: "section",
+    COMPONENT: "component",
+    SLICE: "slice",
     RECTANGLE: "rectangle",
     ELLIPSE: "ellipse",
     POLYGON: "polygon",

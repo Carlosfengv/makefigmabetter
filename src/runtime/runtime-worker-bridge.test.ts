@@ -227,6 +227,60 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("lowers Component and Slice creates with their durable creation metadata", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot: snapshotAt(4) });
+    void bridge.submit({
+      transactionId: "tx-component-slice-create",
+      baseRevision: 4,
+      operations: [
+        {
+          type: "create",
+          node: {
+            id: "00000000-0000-4000-8000-000000000023",
+            type: "COMPONENT",
+            parentId: "page",
+            siblingIndex: 1,
+            name: "Card",
+            width: 100,
+            height: 100,
+            componentMetadata: {
+              key: "00000000-0000-4000-8000-000000000023",
+              remote: false,
+              description: "",
+              descriptionMarkdown: "",
+              documentationLinks: [],
+              componentPropertyDefinitions: {},
+            },
+          },
+        },
+        {
+          type: "create",
+          node: {
+            id: "00000000-0000-4000-8000-000000000024",
+            type: "SLICE",
+            parentId: "page",
+            siblingIndex: 2,
+            name: "Slice",
+            width: 320,
+            height: 180,
+            fill: "transparent",
+            stroke: "transparent",
+            strokeWidth: 0,
+          },
+        },
+      ],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "component", componentMetadata: expect.objectContaining({ remote: false }) }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ kind: "slice", width: 320, height: 180, strokeWidth: 0 }) }),
+    ]);
+    expect(resolveCoreBatch(snapshotAt(4).nodes, posted[0]!.transaction.commands)).toBeDefined();
+    bridge.close();
+  });
+
   it("lowers bounded special-node Runtime creates without dropping their durable metadata", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
