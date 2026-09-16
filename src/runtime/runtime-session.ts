@@ -598,6 +598,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       paintStyleResource: (styleId: string): DocumentPaintStyleResource | undefined => this.paintStyleResource(styleId),
       setPaintStyle: (style: DocumentPaintStyleResource): void => this.setPaintStyle(style),
       deletePaintStyle: (styleId: string): void => this.deletePaintStyle(styleId),
+      hasImageHash: (hash: string): boolean => this.hasImageHash(hash),
       consumersForPaintStyle: (styleId: string) => Object.freeze(this.projectionStore
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node))
@@ -627,6 +628,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       fontNameForStyle: (style: DocumentTextStyleResource): RuntimeFontName => style.style.font
         ? this.fontNameForReference(style.style.font)
         : DEFAULT_RUNTIME_FONT_NAME,
+      resolveFontName: (fontName: RuntimeFontName) => this.resolveFontName(fontName),
       consumersForTextStyle: (styleId: string): readonly RuntimeNodeProxy[] => this.projectionStore
         .listLiveNodes()
         .filter((node) => this.isNodeVisible(node) && runtimeNodeUsesTextStyle(node, styleId))

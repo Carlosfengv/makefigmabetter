@@ -76,6 +76,8 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("paint-stack.runtime-strokes")).toMatchObject({ property: "strokes" });
     expect(runtimeCapability("paint-stack.runtime-strokes")?.nodeTypes).toContain("LINE");
     expect(runtimeCapability("paint-stack.runtime-strokes")?.nodeTypes).not.toContain("TEXT");
+    expect(runtimeCapability("style.catalog-runtime")?.property).toContain("TextStyle.fontSize");
+    expect(runtimeCapability("style.catalog-runtime")?.property).toContain("PaintStyle.paints");
     expect(runtimeCapability("geometry.parametric-runtime")).toMatchObject({
       status: "partial",
       nodeTypes: ["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "HIGHLIGHT", "LINE", "BOOLEAN_OPERATION"],

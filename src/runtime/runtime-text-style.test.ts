@@ -93,11 +93,43 @@ describe("TextStyle resource runtime", () => {
 
     style.name = "Typography/Body";
     style.descriptionMarkdown = "Default body copy **updated**";
+    style.fontSize = 18;
+    style.textDecoration = "UNDERLINE";
+    style.letterSpacing = { value: 1.5, unit: "PIXELS" };
+    style.lineHeight = { value: 125, unit: "PERCENT" };
+    style.leadingTrim = "CAP_HEIGHT";
+    style.paragraphIndent = 4;
+    style.paragraphSpacing = 8;
+    style.textWrapStyle = "BALANCE";
+    style.listSpacing = 6;
+    style.hangingPunctuation = true;
+    style.hangingList = true;
+    style.textCase = "UPPER";
     expect(style.name).toBe("Typography/Body");
     expect(style.description).toBe("Default body copy **updated**");
+    expect(style.fontSize).toBe(18);
+    expect(style.textDecoration).toBe("UNDERLINE");
+    expect(style.letterSpacing).toEqual({ value: 1.5, unit: "PIXELS" });
+    expect(style.lineHeight).toEqual({ value: 125, unit: "PERCENT" });
+    expect(style.leadingTrim).toBe("CAP_HEIGHT");
+    expect(style.paragraphIndent).toBe(4);
+    expect(style.paragraphSpacing).toBe(8);
+    expect(style.textWrapStyle).toBe("BALANCE");
+    expect(style.listSpacing).toBe(6);
+    expect(style.hangingPunctuation).toBe(true);
+    expect(style.hangingList).toBe(true);
+    expect(style.textCase).toBe("UPPER");
     expect((await session.getStyleByIdAsync(style.id))?.name).toBe("Typography/Body");
     expect(isRuntimeError(capture(() => { style.name = " "; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.name = "界".repeat(400); }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.letterSpacing = { value: 10, unit: "PERCENT" }; }), "INVALID_ARGUMENT")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.currentProjection().textStyles?.find((candidate) => candidate.id === style.id)).toMatchObject({
+      name: "Typography/Body",
+      style: { fontSize: 18, letterSpacing: 1.5, textDecoration: "underline", leadingTrim: "capHeight", textCase: "upper" },
+      paragraph: { lineHeight: 125, lineHeightUnit: "percent", paragraphIndent: 4, paragraphSpacing: 8, textWrapStyle: "balance", listSpacing: 6, hangingPunctuation: true, hangingList: true },
+    });
 
     style.remove();
     expect(await session.getStyleByIdAsync(style.id)).toBeNull();

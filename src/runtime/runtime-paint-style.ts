@@ -1,5 +1,5 @@
 import type { DocumentPaintStyleResource } from "../lib/editor-protocol";
-import { runtimePaintsFromDocumentStack, type RuntimePaint } from "./runtime-paint";
+import { documentPaintStackFromRuntime, runtimePaintsFromDocumentStack, type RuntimePaint } from "./runtime-paint";
 import type { RuntimeNodeProxy } from "./node-proxy";
 import { runtimeError } from "./runtime-errors";
 
@@ -7,6 +7,7 @@ export type RuntimePaintStyleHost = Readonly<{
   paintStyleResource(styleId: string): DocumentPaintStyleResource | undefined;
   setPaintStyle(style: DocumentPaintStyleResource): void;
   deletePaintStyle(styleId: string): void;
+  hasImageHash(hash: string): boolean;
   consumersForPaintStyle(styleId: string): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly string[] }>[];
   getPluginData(styleId: string, key: string): string;
   setPluginData(styleId: string, key: string, value: string): void;
@@ -16,7 +17,7 @@ export type RuntimePaintStyleHost = Readonly<{
   getSharedPluginDataKeys(styleId: string, namespace: string): readonly string[];
 }>;
 
-/** Read projection of one canonical PaintStyle resource. */
+/** Live projection of one canonical PaintStyle resource. */
 export class RuntimePaintStyle {
   readonly type = "PAINT" as const;
 
@@ -45,7 +46,9 @@ export class RuntimePaintStyle {
   get documentationLinks(): readonly { readonly uri: string }[] { return Object.freeze([]); }
   set documentationLinks(_value: readonly { readonly uri: string }[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
   get paints(): readonly RuntimePaint[] { return Object.freeze([...runtimePaintsFromDocumentStack(this.current().paints)]); }
-  set paints(_value: readonly RuntimePaint[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set paints(value: readonly RuntimePaint[]) {
+    this.write({ paints: documentPaintStackFromRuntime(value, (hash) => this.host.hasImageHash(hash)) });
+  }
   get boundVariables(): undefined { return undefined; }
 
   get consumers(): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly string[] }>[] {
@@ -81,7 +84,7 @@ export class RuntimePaintStyle {
     return resource;
   }
 
-  private write(patch: Pick<Partial<DocumentPaintStyleResource>, "name" | "description">): void {
+  private write(patch: Partial<DocumentPaintStyleResource>): void {
     const resource = this.current();
     if (resource.remote) throw runtimeError("UNSUPPORTED_FEATURE");
     this.host.setPaintStyle({ ...structuredClone(resource), ...patch });

@@ -98,9 +98,24 @@ describe("PaintStyle resource runtime", () => {
 
     style.name = "Color/Brand";
     style.description = "Primary brand surface";
+    style.paints = [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 }, opacity: 0.8 }];
     expect(style.name).toBe("Color/Brand");
     expect(style.descriptionMarkdown).toBe("Primary brand surface");
+    expect(style.paints).toEqual([{
+      type: "SOLID",
+      color: { r: 0.1, g: 0.2, b: 0.3 },
+      visible: true,
+      opacity: 0.8,
+      blendMode: "NORMAL",
+    }]);
     expect(isRuntimeError(capture(() => { style.description = "bad\0value"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.paints = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 2 }]; }), "INVALID_ARGUMENT")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.currentProjection().paintStyles?.find((candidate) => candidate.id === style.id)).toMatchObject({
+      name: "Color/Brand",
+      paints: { layers: [{ opacity: 0.8, blendMode: "normal", paint: { color: { space: "srgb", components: [0.1, 0.2, 0.3], alpha: 1 } } }] },
+    });
 
     style.remove();
     expect(await session.getStyleByIdAsync(style.id)).toBeNull();

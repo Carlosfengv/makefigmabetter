@@ -8,6 +8,7 @@ export type RuntimeTextStyleHost = Readonly<{
   setTextStyle(style: DocumentTextStyleResource): void;
   deleteTextStyle(styleId: string): void;
   fontNameForStyle(style: DocumentTextStyleResource): RuntimeFontName;
+  resolveFontName(fontName: RuntimeFontName): DocumentTextStyleResource["style"]["font"];
   consumersForTextStyle(styleId: string): readonly RuntimeNodeProxy[];
   getPluginData(styleId: string, key: string): string;
   setPluginData(styleId: string, key: string, value: string): void;
@@ -17,8 +18,7 @@ export type RuntimeTextStyleHost = Readonly<{
   getSharedPluginDataKeys(styleId: string, namespace: string): readonly string[];
 }>;
 
-/** Read projection of one canonical TextStyle resource. Resource mutation is
- * introduced separately so this object never pretends a local write succeeded. */
+/** Live projection of one canonical TextStyle resource. */
 export class RuntimeTextStyle {
   readonly type = "TEXT" as const;
 
@@ -48,17 +48,26 @@ export class RuntimeTextStyle {
   set documentationLinks(_value: readonly { readonly uri: string }[]) { throw runtimeError("UNSUPPORTED_FEATURE"); }
 
   get fontSize(): number { return this.current().style.fontSize; }
-  set fontSize(_value: number) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set fontSize(value: number) {
+    if (!Number.isFinite(value) || value <= 0) throw runtimeError("INVALID_ARGUMENT");
+    this.writeStyle({ fontSize: value });
+  }
   get fontName(): RuntimeFontName { return this.host.fontNameForStyle(this.current()); }
-  set fontName(_value: RuntimeFontName) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set fontName(value: RuntimeFontName) { this.writeStyle({ font: this.host.resolveFontName(value) }); }
   get textDecoration(): "NONE" | "UNDERLINE" | "STRIKETHROUGH" {
     return (this.current().style.textDecoration?.toUpperCase() as "UNDERLINE" | "STRIKETHROUGH" | undefined) ?? "NONE";
   }
-  set textDecoration(_value: "NONE" | "UNDERLINE" | "STRIKETHROUGH") { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set textDecoration(value: "NONE" | "UNDERLINE" | "STRIKETHROUGH") {
+    if (value !== "NONE" && value !== "UNDERLINE" && value !== "STRIKETHROUGH") throw runtimeError("INVALID_ARGUMENT");
+    this.writeStyle({ textDecoration: value === "NONE" ? undefined : value === "UNDERLINE" ? "underline" : "strikethrough" });
+  }
   get letterSpacing(): Readonly<{ value: number; unit: "PIXELS" }> {
     return Object.freeze({ value: this.current().style.letterSpacing, unit: "PIXELS" });
   }
-  set letterSpacing(_value: Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set letterSpacing(value: Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>) {
+    if (!value || value.unit !== "PIXELS" || !Number.isFinite(value.value)) throw runtimeError("INVALID_ARGUMENT");
+    this.writeStyle({ letterSpacing: value.value });
+  }
   get lineHeight(): Readonly<{ unit: "AUTO" } | { value: number; unit: "PIXELS" | "PERCENT" }> {
     const resource = this.current();
     if (resource.paragraph.lineHeightUnit === "auto") return Object.freeze({ unit: "AUTO" });
@@ -67,23 +76,52 @@ export class RuntimeTextStyle {
       unit: resource.paragraph.lineHeightUnit === "percent" ? "PERCENT" : "PIXELS",
     });
   }
-  set lineHeight(_value: Readonly<{ unit: "AUTO" } | { value: number; unit: "PIXELS" | "PERCENT" }>) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set lineHeight(value: Readonly<{ unit: "AUTO" } | { value: number; unit: "PIXELS" | "PERCENT" }>) {
+    if (!value || !["AUTO", "PIXELS", "PERCENT"].includes(value.unit)
+      || (value.unit !== "AUTO" && (!Number.isFinite(value.value) || value.value <= 0))) {
+      throw runtimeError("INVALID_ARGUMENT");
+    }
+    this.writeParagraph(value.unit === "AUTO"
+      ? { lineHeight: undefined, lineHeightUnit: "auto" }
+      : { lineHeight: value.value, lineHeightUnit: value.unit === "PERCENT" ? "percent" : undefined });
+  }
   get leadingTrim(): "CAP_HEIGHT" | "NONE" { return this.current().style.leadingTrim === "capHeight" ? "CAP_HEIGHT" : "NONE"; }
-  set leadingTrim(_value: "CAP_HEIGHT" | "NONE") { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set leadingTrim(value: "CAP_HEIGHT" | "NONE") {
+    if (value !== "CAP_HEIGHT" && value !== "NONE") throw runtimeError("INVALID_ARGUMENT");
+    this.writeStyle({ leadingTrim: value === "CAP_HEIGHT" ? "capHeight" : undefined });
+  }
   get paragraphIndent(): number { return this.current().paragraph.paragraphIndent ?? 0; }
-  set paragraphIndent(_value: number) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set paragraphIndent(value: number) {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ paragraphIndent: value || undefined });
+  }
   get paragraphSpacing(): number { return this.current().paragraph.paragraphSpacing; }
-  set paragraphSpacing(_value: number) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set paragraphSpacing(value: number) {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ paragraphSpacing: value });
+  }
   get textWrapStyle(): "AUTO" | "BALANCE" | "PRETTY" {
     return (this.current().paragraph.textWrapStyle?.toUpperCase() as "BALANCE" | "PRETTY" | undefined) ?? "AUTO";
   }
-  set textWrapStyle(_value: "AUTO" | "BALANCE" | "PRETTY") { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set textWrapStyle(value: "AUTO" | "BALANCE" | "PRETTY") {
+    if (value !== "AUTO" && value !== "BALANCE" && value !== "PRETTY") throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ textWrapStyle: value === "AUTO" ? undefined : value === "BALANCE" ? "balance" : "pretty" });
+  }
   get listSpacing(): number { return this.current().paragraph.listSpacing ?? 0; }
-  set listSpacing(_value: number) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set listSpacing(value: number) {
+    if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ listSpacing: value || undefined });
+  }
   get hangingPunctuation(): boolean { return this.current().paragraph.hangingPunctuation ?? false; }
-  set hangingPunctuation(_value: boolean) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set hangingPunctuation(value: boolean) {
+    if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ hangingPunctuation: value || undefined });
+  }
   get hangingList(): boolean { return this.current().paragraph.hangingList ?? false; }
-  set hangingList(_value: boolean) { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set hangingList(value: boolean) {
+    if (typeof value !== "boolean") throw runtimeError("INVALID_ARGUMENT");
+    this.writeParagraph({ hangingList: value || undefined });
+  }
   get textCase(): "ORIGINAL" | "UPPER" | "LOWER" | "TITLE" | "SMALL_CAPS" | "SMALL_CAPS_FORCED" {
     const value = this.current().style.textCase;
     if (!value) return "ORIGINAL";
@@ -91,7 +129,17 @@ export class RuntimeTextStyle {
     if (value === "smallCapsForced") return "SMALL_CAPS_FORCED";
     return value.toUpperCase() as "UPPER" | "LOWER" | "TITLE";
   }
-  set textCase(_value: "ORIGINAL" | "UPPER" | "LOWER" | "TITLE" | "SMALL_CAPS" | "SMALL_CAPS_FORCED") { throw runtimeError("UNSUPPORTED_FEATURE"); }
+  set textCase(value: "ORIGINAL" | "UPPER" | "LOWER" | "TITLE" | "SMALL_CAPS" | "SMALL_CAPS_FORCED") {
+    const textCase = value === "ORIGINAL" ? undefined
+      : value === "SMALL_CAPS" ? "smallCaps"
+        : value === "SMALL_CAPS_FORCED" ? "smallCapsForced"
+          : value === "UPPER" ? "upper"
+            : value === "LOWER" ? "lower"
+              : value === "TITLE" ? "title"
+                : null;
+    if (textCase === null) throw runtimeError("INVALID_ARGUMENT");
+    this.writeStyle({ textCase });
+  }
   get boundVariables(): undefined { return undefined; }
 
   get consumers(): readonly Readonly<{ node: RuntimeNodeProxy; fields: readonly ["textStyleId"] }>[] {
@@ -134,9 +182,19 @@ export class RuntimeTextStyle {
     return resource;
   }
 
-  private write(patch: Pick<Partial<DocumentTextStyleResource>, "name" | "description">): void {
+  private write(patch: Partial<DocumentTextStyleResource>): void {
     const resource = this.current();
     if (resource.remote) throw runtimeError("UNSUPPORTED_FEATURE");
     this.host.setTextStyle({ ...structuredClone(resource), ...patch });
+  }
+
+  private writeStyle(patch: Partial<DocumentTextStyleResource["style"]>): void {
+    const resource = this.current();
+    this.write({ style: { ...structuredClone(resource.style), ...patch } });
+  }
+
+  private writeParagraph(patch: Partial<DocumentTextStyleResource["paragraph"]>): void {
+    const resource = this.current();
+    this.write({ paragraph: { ...structuredClone(resource.paragraph), ...patch } });
   }
 }
