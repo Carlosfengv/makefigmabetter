@@ -64,6 +64,7 @@ import { boundsIntersect, viewportWorldBounds } from "@/lib/scene-visibility";
 import { createSpatialGridIndex } from "@/lib/spatial-grid";
 import { renderDpr, resolveRenderQuality, vectorPresentationTolerance, type RenderQualityState } from "@/lib/render-quality";
 import { canvasDesignTokens, canvasFont } from "@/lib/canvas-design-tokens";
+import { canvasTextEditingHidesWholeNode } from "@/lib/canvas-text-edit";
 import { showsPersistentCanvasLayerName } from "@/lib/canvas-layer-name";
 import { cacheAsset, readCachedAsset } from "@/lib/asset-byte-cache";
 import { firstAvailableResource, LatestResourceLoad } from "@/lib/latest-resource-load";
@@ -1992,9 +1993,13 @@ async function deriveRustTextLayout(
 async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "text-caret-layout" }>) {
   try {
     const wasm = await loadWasmRuntime();
-    const node = nodes.find((candidate) => candidate.id === request.nodeId && candidate.kind === "text");
-    let shaped = node && (node.text ?? "") === request.text ? rustTextLayoutFor(node) : undefined;
-    if (!shaped && node && (node.text ?? "") === request.text) {
+    const node = nodes.find((candidate) =>
+      candidate.id === request.nodeId
+      && (candidate.kind === "text" || candidate.kind === "shapeWithText"));
+    let shaped = node?.kind === "text" && (node.text ?? "") === request.text
+      ? rustTextLayoutFor(node)
+      : undefined;
+    if (!shaped && node?.kind === "text" && (node.text ?? "") === request.text) {
       const shapedRequest = rustTextLayoutRequest(node);
       if (shapedRequest) {
         const candidate = await deriveRustTextLayout(shapedRequest);
@@ -5993,6 +5998,7 @@ function renderSpecialNodeOverlay(ctx: OffscreenCanvasRenderingContext2D, node: 
  * records used by ordinary Text. Shape geometry remains owned by the special
  * node path above; only the inset text box is clipped here. */
 function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number) {
+  if (node.id === editingTextNodeId) return;
   const source = node.text ?? "";
   if (!source) return;
   const inset = 10 * viewport.zoom;
@@ -7958,7 +7964,7 @@ function render(
   const visibleNodes = [...candidateIds]
     .map((id) => nodeById.get(id))
     .filter((node): node is CanvasNode => Boolean(node
-      && node.id !== editingTextNodeId
+      && !canvasTextEditingHidesWholeNode(node, editingTextNodeId)
       && (repeatRetainedSourceIds.has(node.id) || boundsIntersect(nodeBoundsById.get(node.id) ?? rotatedNodeBounds(node), viewportBounds))))
     .sort((left, right) => (activeNodeOrderById.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (activeNodeOrderById.get(right.id) ?? Number.MAX_SAFE_INTEGER));
   // `nodeById` and the spatial grid intentionally build their own projected
@@ -8188,11 +8194,15 @@ function render(
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
-      const pageNodes = !editingTextNodeId && !pageFacts.hasSlices
+      const hidesWholeEditingNode = pageVisibleNodes.some((node) =>
+        canvasTextEditingHidesWholeNode(node, editingTextNodeId));
+      const pageNodes = !hidesWholeEditingNode && !pageFacts.hasSlices
         ? pageVisibleNodes
         : sceneNodesInPaintOrder(
             compiledScene?.scene,
-            pageVisibleNodes.filter((node) => node.id !== editingTextNodeId && node.kind !== "slice"),
+            pageVisibleNodes.filter((node) =>
+              !canvasTextEditingHidesWholeNode(node, editingTextNodeId)
+              && node.kind !== "slice"),
           );
       const pageHasRelativeTransform = pageFacts.hasRelativeTransform;
       const planKey = currentScenePresentationKey();

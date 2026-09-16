@@ -87,7 +87,14 @@ import {
   textParagraphWrapStyleAt,
 } from "@/lib/text-layout";
 import { styledTextSpans } from "@/lib/text-style-runs";
-import { hangingTextLocalBounds } from "@/lib/world-visual-bounds";
+import {
+  canvasTextEditBox,
+  canvasTextEditContainsPoint,
+  canvasTextEditFallbackFontSize,
+  canvasTextEditLocalPoint,
+  isCanvasTextEditableNode,
+  type CanvasTextEditableNode,
+} from "@/lib/canvas-text-edit";
 import {
   patchTextStyleRuns,
   rebaseTextStyleRuns,
@@ -806,10 +813,11 @@ function textReplacementProperties(
   node: CanvasNode,
   text: string,
 ): DocumentTextProperties {
+  const shapeWithText = node.kind === "shapeWithText";
   const properties: DocumentTextProperties = node.textProperties ?? {
     runs: [],
     paragraph: {
-      alignment: "left",
+      alignment: shapeWithText ? "center" : "left",
       lineHeight: DEFAULT_TEXT_LINE_HEIGHT,
       paragraphSpacing: 0,
     },
@@ -909,41 +917,6 @@ function resolveTextAutoSizePatch(
     ...patch,
     height,
     ...(properties.autoSize === "widthAndHeight" ? { width } : {}),
-  };
-}
-
-function textNodeContainsPoint(
-  node: CanvasNode,
-  point: { x: number; y: number },
-) {
-  if (node.kind !== "text" || node.visible === false) return false;
-  const centerX = node.x + node.width / 2;
-  const centerY = node.y + node.height / 2;
-  const radians = (-node.rotation * Math.PI) / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  const dx = point.x - centerX;
-  const dy = point.y - centerY;
-  const localX = dx * cosine - dy * sine + node.width / 2;
-  const localY = dx * sine + dy * cosine + node.height / 2;
-  const bounds = hangingTextLocalBounds(node) ?? { x: 0, y: 0, width: node.width, height: node.height };
-  return localX >= bounds.x
-    && localX <= bounds.x + bounds.width
-    && localY >= bounds.y
-    && localY <= bounds.y + bounds.height;
-}
-
-function textLocalPoint(node: CanvasNode, point: { x: number; y: number }) {
-  const centerX = node.x + node.width / 2;
-  const centerY = node.y + node.height / 2;
-  const radians = (-node.rotation * Math.PI) / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  const dx = point.x - centerX;
-  const dy = point.y - centerY;
-  return {
-    x: dx * cosine - dy * sine + node.width / 2,
-    y: dx * sine + dy * cosine + node.height / 2,
   };
 }
 
@@ -1216,13 +1189,17 @@ function normalizedContentEditableText(editor: HTMLElement) {
 
 /** Converts a Canvas double-click into the same insertion position the text
  * editor would select if it had received that pointer event directly. */
-function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
+function textCaretAtPoint(
+  node: CanvasTextEditableNode,
+  point: { x: number; y: number },
+) {
   const text = node.text ?? "";
   const properties = node.textProperties;
   const primary = properties?.runs[0];
-  const fontSize = primary?.fontSize ?? 31;
+  const fontSize = primary?.fontSize ?? canvasTextEditFallbackFontSize(node);
   const letterSpacing = primary?.letterSpacing ?? 0;
-  const local = textLocalPoint(node, point);
+  const local = canvasTextEditLocalPoint(node, point);
+  const editBox = canvasTextEditBox(node);
   const ctx =
     typeof document === "undefined"
       ? undefined
@@ -1239,7 +1216,7 @@ function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
   const listMarkerGutter = textListMarkerGutterForProperties(text, properties, measure);
   const lines = layoutTextRanges({
     text,
-    maxWidth: Math.max(1, node.width),
+    maxWidth: editBox.width,
     firstLineIndent: (_index, start) => textParagraphIndentAt(properties, start)
       + textListMarkerBaseIndent(properties, listMarkerGutter, start),
     paragraphIndent: (_index, start) => textListIndentationOffset(text, properties, start, listMarkerGutter),
@@ -1248,7 +1225,34 @@ function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
     measure,
   });
   const bytes = new TextEncoder().encode(text);
-  let lineTop = 0;
+  let totalHeight = 0;
+  let totalPreviousEnd = 0;
+  let totalPreviousParagraphStart = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const skipped = new TextDecoder().decode(
+      bytes.slice(totalPreviousEnd, line.start),
+    );
+    const first = textLineStartsParagraph(lineIndex, skipped);
+    const paragraphStart = textParagraphStartAtOffset(text, line.start);
+    if (lineIndex > 0 && first) {
+      totalHeight += textParagraphGap(
+        properties,
+        totalPreviousParagraphStart,
+        paragraphStart,
+      );
+      totalPreviousParagraphStart = paragraphStart;
+    }
+    totalHeight += resolvedTextLineHeightAt(
+      properties,
+      paragraphStart,
+      fontSize,
+    );
+    totalPreviousEnd = line.end;
+  }
+  let lineTop = editBox.y +
+    (editBox.verticallyCentered
+      ? Math.max(0, (editBox.height - totalHeight) / 2)
+      : 0);
   let previousEnd = 0;
   let previousParagraphStart = 0;
   for (const [lineIndex, line] of lines.entries()) {
@@ -1266,12 +1270,21 @@ function textCaretAtPoint(node: CanvasNode, point: { x: number; y: number }) {
       const lineWidth = measure(line.text);
       const indent = textListIndentationOffset(text, properties, line.start, listMarkerGutter)
         + (first ? textParagraphIndentAt(properties, paragraphStart) + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0);
-      const lineBoxWidth = Math.max(0, node.width - indent);
-      const alignment = properties?.paragraph.alignment ?? "left";
+      const lineBoxWidth = Math.max(0, editBox.width - indent);
+      const alignment =
+        properties?.paragraph.alignment ??
+        (node.kind === "shapeWithText" ? "center" : "left");
       const hanging = properties?.paragraph.hangingPunctuation
         ? textHangingPunctuationOffsets(line.text, line.direction, measure)
         : { left: 0, right: 0 };
-      let x = textAlignedLineLeft(indent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+      let x = textAlignedLineLeft(
+        editBox.x + indent,
+        lineBoxWidth,
+        lineWidth,
+        alignment,
+        line.direction,
+        hanging,
+      );
       let index = utf16IndexAtUtf8Offset(text, line.start);
       for (const grapheme of segmentGraphemes(line.text)) {
         const width = measure(grapheme);
@@ -2235,7 +2248,7 @@ export function EditorShell({
     const node = snapshot.nodes.find(
       (candidate) =>
         candidate.id === canvasTextEdit.nodeId &&
-        candidate.kind === "text" &&
+        isCanvasTextEditableNode(candidate) &&
         (candidate.pageId ?? defaultPageId) === snapshot.activePageId,
     );
     needsCanvasTextCaretRecoveryRef.current = false;
@@ -4573,7 +4586,10 @@ export function EditorShell({
     };
     const target = [...snapshot.nodes]
       .reverse()
-      .find((node) => textNodeContainsPoint(node, point));
+      .find(
+        (node): node is CanvasTextEditableNode =>
+          canvasTextEditContainsPoint(node, point),
+      );
     if (!target) return;
     const fontAssetId = (
       target.textProperties?.runs[0]?.font
@@ -4606,18 +4622,20 @@ export function EditorShell({
       selectionAnchor: caret,
       rustCaretReady: false,
     });
-    const local = textLocalPoint(target, point);
-    const primary = target.textProperties?.runs[0]
-      ?? (target.text ? undefined : target.textProperties?.baseStyle);
-    requestCanvasCaretLayout(target.id, text, caret, {
-      x: local.x,
-      y: local.y,
-      width: target.width,
-      fontSize: primary?.fontSize ?? 31,
-      lineHeight: resolvedTextLineHeight(target.textProperties, primary?.fontSize ?? 31),
-      paragraphSpacing: textParagraphGap(target.textProperties),
-      alignment: target.textProperties?.paragraph.alignment ?? "left",
-    });
+    if (target.kind === "text") {
+      const local = canvasTextEditLocalPoint(target, point);
+      const primary = target.textProperties?.runs[0]
+        ?? (target.text ? undefined : target.textProperties?.baseStyle);
+      requestCanvasCaretLayout(target.id, text, caret, {
+        x: local.x,
+        y: local.y,
+        width: target.width,
+        fontSize: primary?.fontSize ?? 31,
+        lineHeight: resolvedTextLineHeight(target.textProperties, primary?.fontSize ?? 31),
+        paragraphSpacing: textParagraphGap(target.textProperties),
+        alignment: target.textProperties?.paragraph.alignment ?? "left",
+      });
+    } else requestCanvasCaretLayout(target.id, text, caret);
   };
   const commitCanvasTextEdit = (domDraft?: string) => {
     if (
@@ -4748,7 +4766,8 @@ export function EditorShell({
   );
   const canvasTextNode = canvasTextEdit
     ? snapshot.nodes.find(
-        (node) => node.id === canvasTextEdit.nodeId && node.kind === "text",
+        (node): node is CanvasTextEditableNode =>
+          node.id === canvasTextEdit.nodeId && isCanvasTextEditableNode(node),
       )
     : undefined;
   useEffect(() => {
@@ -4777,17 +4796,19 @@ export function EditorShell({
   }, [canvasTextEdit?.nodeId]);
   const canvasTextStyle = canvasTextNode
     ? (() => {
+        const editBox = canvasTextEditBox(canvasTextNode);
         const primary = canvasTextEdit?.properties.runs[0];
         const fontFamily = primary?.font
           ? `"${fontFamilyForAsset(primary.font.assetId)}", `
           : "";
-        const fontSize = primary?.fontSize ?? 31;
+        const fontSize =
+          primary?.fontSize ?? canvasTextEditFallbackFontSize(canvasTextNode);
         const lineHeight = resolvedTextLineHeight(canvasTextEdit?.properties, fontSize);
         return {
-          left: `calc(50% + ${(canvasTextNode.x + snapshot.viewport.x) * snapshot.viewport.zoom}px)`,
-          top: `calc(50% + ${(canvasTextNode.y + snapshot.viewport.y) * snapshot.viewport.zoom}px)`,
-          width: `${Math.max(1, canvasTextNode.width * snapshot.viewport.zoom)}px`,
-          height: `${Math.max(1, canvasTextNode.height * snapshot.viewport.zoom)}px`,
+          left: `calc(50% + ${(canvasTextNode.x + editBox.x + snapshot.viewport.x) * snapshot.viewport.zoom}px)`,
+          top: `calc(50% + ${(canvasTextNode.y + editBox.y + snapshot.viewport.y) * snapshot.viewport.zoom}px)`,
+          width: `${editBox.width * snapshot.viewport.zoom}px`,
+          height: `${editBox.height * snapshot.viewport.zoom}px`,
           fontSize: `${fontSize * snapshot.viewport.zoom}px`,
           lineHeight: `${lineHeight * snapshot.viewport.zoom}px`,
           fontFamily: `${fontFamily}${canvasDesignTokens.typography.canvasText.family}`,
@@ -4801,9 +4822,17 @@ export function EditorShell({
           textAlign:
             canvasTextEdit?.properties.paragraph.alignment === "justify"
               ? "left"
-              : (canvasTextEdit?.properties.paragraph.alignment ?? "left"),
+              : (canvasTextEdit?.properties.paragraph.alignment ??
+                (canvasTextNode.kind === "shapeWithText" ? "center" : "left")),
           transform: `rotate(${canvasTextNode.rotation}deg)`,
           transformOrigin: "center center",
+          ...(editBox.verticallyCentered
+            ? ({
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "center",
+              } as const)
+            : {}),
         } as const;
       })()
     : undefined;
@@ -7167,8 +7196,16 @@ export function EditorShell({
                           "justify"
                         ? "left"
                         : canvasTextEdit.properties.paragraph.alignment,
-                  lineHeight: `${resolvedTextLineHeightAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom}px`,
-                  minHeight: `${resolvedTextLineHeightAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom}px`,
+                  lineHeight: `${resolvedTextLineHeightAt(
+                    canvasTextEdit.properties,
+                    paragraph.start,
+                    canvasTextEditFallbackFontSize(canvasTextNode),
+                  ) * snapshot.viewport.zoom}px`,
+                  minHeight: `${resolvedTextLineHeightAt(
+                    canvasTextEdit.properties,
+                    paragraph.start,
+                    canvasTextEditFallbackFontSize(canvasTextNode),
+                  ) * snapshot.viewport.zoom}px`,
                   textIndent: `${textParagraphIndentAt(canvasTextEdit.properties, paragraph.start) * snapshot.viewport.zoom + textListMarkerBaseIndent(canvasTextEdit.properties, canvasTextEditListMarkerGutter, paragraph.start)}px`,
                   paddingInlineStart: `${textListIndentationOffset(canvasTextEdit.draft, canvasTextEdit.properties, paragraph.start, canvasTextEditListMarkerGutter)}px`,
                   textWrap: textParagraphWrapStyleAt(canvasTextEdit.properties, paragraph.start),
