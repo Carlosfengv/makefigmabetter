@@ -913,6 +913,64 @@ describe("M1 RuntimeSession", () => {
     expect(component.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
   });
 
+  it("binds Variables to text ranges, rebases them with edits, and refreshes materialized values", () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      variableCollections: [{
+        id: "text-collection",
+        key: "",
+        name: "Text",
+        remote: false,
+        hiddenFromPublishing: false,
+        modes: [{ modeId: "default", name: "Default" }, { modeId: "large", name: "Large" }],
+        defaultModeId: "default",
+      }],
+      variables: [{
+        id: "text-size",
+        key: "",
+        name: "Text size",
+        description: "",
+        remote: false,
+        hiddenFromPublishing: false,
+        collectionId: "text-collection",
+        resolvedType: "FLOAT",
+        valuesByMode: { default: 24, large: 36 },
+        scopes: ["FONT_SIZE"],
+      }],
+    };
+    const session = new RuntimeSession({ sessionId: "text-range-alias", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const text = session.createText();
+    text.characters = "AB";
+    const variable = session.variables.getVariableById("text-size")!;
+
+    text.setRangeBoundVariable(0, 1, "fontSize", variable);
+    expect(text.getRangeFontSize(0, 1)).toBe(24);
+    expect(text.getRangeBoundVariable(0, 1, "fontSize")).toEqual({ type: "VARIABLE_ALIAS", id: "text-size" });
+    expect(text.getRangeBoundVariable(0, 2, "fontSize")).toBe(RUNTIME_MIXED);
+    expect(text.boundVariables?.fontSize).toEqual([{ type: "VARIABLE_ALIAS", id: "text-size" }]);
+    expect(text.getStyledTextSegments(["boundVariables"], 0, 1)).toEqual([{
+      characters: "A",
+      start: 0,
+      end: 1,
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "text-size" } },
+    }]);
+    expect(session.variableIsBound("text-size")).toBe(true);
+    expect(isRuntimeError(captureError(() => session.deleteVariable("text-size")), "INVALID_ARGUMENT")).toBe(true);
+
+    text.insertCharacters(1, "X", "BEFORE");
+    expect(text.characters).toBe("AXB");
+    expect(text.getRangeBoundVariable(0, 2, "fontSize")).toEqual({ type: "VARIABLE_ALIAS", id: "text-size" });
+
+    session.setVariable({ ...projection.variables![0]!, valuesByMode: { default: 30, large: 42 } });
+    expect(text.getRangeFontSize(0, 2)).toBe(30);
+    text.setExplicitVariableModeForCollection(session.variables.getVariableCollectionById("text-collection")!, "large");
+    expect(text.getRangeFontSize(0, 2)).toBe(42);
+
+    text.setRangeFontSize(0, 2, 18);
+    expect(text.getRangeBoundVariable(0, 2, "fontSize")).toBeNull();
+    expect(session.variableIsBound("text-size")).toBe(false);
+  });
+
   it("binds VariableAlias values to Instance properties and recomputes referenced layers", async () => {
     const projection: RuntimeProjection = {
       ...initial,

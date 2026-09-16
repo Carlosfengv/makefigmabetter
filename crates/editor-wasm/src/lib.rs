@@ -936,7 +936,22 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=68).contains(&snapshot.schema_version)
+    if !(1..=69).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 69
+            && snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| {
+                        run.variable_bindings
+                            .as_ref()
+                            .is_some_and(|value| !value.is_empty())
+                    }) || properties.base_style.as_ref().is_some_and(|style| {
+                        style
+                            .variable_bindings
+                            .as_ref()
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                })
+            }))
         || (snapshot.schema_version < 68
             && snapshot.paint_styles.as_ref().is_some_and(|styles| {
                 styles
@@ -1704,6 +1719,8 @@ struct ProjectionTextStyleRun {
     text_style_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     paint_style_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_bindings: Option<Box<std::collections::BTreeMap<String, String>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1750,6 +1767,8 @@ struct ProjectionTextStyle {
     text_style_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     paint_style_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_bindings: Option<Box<std::collections::BTreeMap<String, String>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1961,7 +1980,7 @@ struct ProjectionTextProperties {
     #[serde(default)]
     max_lines: Option<u32>,
     #[serde(default)]
-    base_style: Option<ProjectionTextStyle>,
+    base_style: Option<Box<ProjectionTextStyle>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2315,7 +2334,22 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self
+        let schema_version = if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties
+                        .runs
+                        .iter()
+                        .any(|run| !run.variable_bindings.is_empty())
+                        || properties
+                            .base_style
+                            .as_ref()
+                            .is_some_and(|style| !style.variable_bindings.is_empty())
+                })
+        }) {
+            69
+        } else if self
             .document
             .paint_styles()
             .any(|style| !style.variable_bindings.is_empty())
@@ -6028,6 +6062,8 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .collect(),
                 text_style_id: run.text_style_id.clone(),
                 paint_style_id: run.paint_style_id.clone(),
+                variable_bindings: (!run.variable_bindings.is_empty())
+                    .then(|| Box::new(run.variable_bindings.clone())),
             })
             .collect(),
         paragraph: ProjectionParagraphStyle {
@@ -6107,10 +6143,8 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
         text_truncation: (properties.text_truncation == TextTruncation::Ending)
             .then(|| "ending".into()),
         max_lines: properties.max_lines,
-        base_style: properties
-            .base_style
-            .as_ref()
-            .map(|style| ProjectionTextStyle {
+        base_style: properties.base_style.as_ref().map(|style| {
+            Box::new(ProjectionTextStyle {
                 font: style.font.as_ref().map(projection_font_reference),
                 font_size: style.font_size,
                 font_weight: style.font_weight,
@@ -6148,7 +6182,10 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .collect(),
                 text_style_id: style.text_style_id.clone(),
                 paint_style_id: style.paint_style_id.clone(),
-            }),
+                variable_bindings: (!style.variable_bindings.is_empty())
+                    .then(|| Box::new(style.variable_bindings.clone())),
+            })
+        }),
     }
 }
 
@@ -6169,7 +6206,7 @@ fn projection_text_style_resource(resource: &TextStyleResource) -> ProjectionTex
             .map(|uri| ProjectionDocumentationLink { uri: uri.clone() })
             .collect(),
         remote: resource.remote,
-        style: projected
+        style: *projected
             .base_style
             .expect("text style projection always has a base style"),
         letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
@@ -6191,7 +6228,7 @@ fn text_style_resource_from_projection(
         fallback_fonts: Vec::new(),
         text_truncation: None,
         max_lines: None,
-        base_style: Some(resource.style.clone()),
+        base_style: Some(Box::new(resource.style.clone())),
     };
     let properties = text_properties_from_projection(Some(&projected))?
         .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_RESOURCE"))?;
@@ -6501,6 +6538,11 @@ fn text_properties_from_projection(
                                 .collect(),
                             text_style_id: run.text_style_id.clone(),
                             paint_style_id: run.paint_style_id.clone(),
+                            variable_bindings: run
+                                .variable_bindings
+                                .as_deref()
+                                .cloned()
+                                .unwrap_or_default(),
                         })
                     })
                     .collect::<Result<Vec<_>, JsValue>>()?,
@@ -6669,6 +6711,11 @@ fn text_properties_from_projection(
                                 .collect(),
                             text_style_id: style.text_style_id.clone(),
                             paint_style_id: style.paint_style_id.clone(),
+                            variable_bindings: style
+                                .variable_bindings
+                                .as_deref()
+                                .cloned()
+                                .unwrap_or_default(),
                         })
                     })
                     .transpose()?,
@@ -10702,6 +10749,7 @@ mod tests {
                     open_type_features: Default::default(),
                     text_style_id: text_style_id.map(str::to_owned),
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                 }],
                 paragraph: ProjectionParagraphStyle {
                     alignment: "center".into(),
@@ -11277,6 +11325,94 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 67;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v69_round_trips_text_range_variable_bindings_and_v68_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let collection = VariableCollectionResource {
+            id: "VC:text".into(),
+            key: String::new(),
+            name: "Text".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:size".into(),
+            key: String::new(),
+            name: "Size".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(24.0))].into(),
+            scopes: vec!["FONT_SIZE".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        engine
+            .document
+            .seed_variable_collection(collection)
+            .unwrap();
+        engine.document.seed_variable(variable.clone()).unwrap();
+        let mut text = existing_rect(NodeId(0x69));
+        text.kind = NodeKind::Text;
+        text.text = "A".into();
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, text)
+            .unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 24.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: None,
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: None,
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                open_type_features: Vec::new(),
+                text_style_id: None,
+                paint_style_id: None,
+                variable_bindings: [("fontSize".into(), variable.id)].into(),
+            }],
+            ..TextProperties::default()
+        };
+        engine
+            .document
+            .seed_text_properties(NodeId(0x69), properties.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":69"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.text_properties_for_node(NodeId(0x69)),
+            Some(&properties)
+        );
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 68;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

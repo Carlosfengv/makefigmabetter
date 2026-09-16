@@ -45,10 +45,12 @@ import {
 } from "../lib/node-capabilities";
 import { isolatesNormalBlend, nodeBlendExtensionPatch } from "../lib/node-blend-semantics";
 import { parseFigmaSvgPaths } from "../lib/figma-svg-path";
+import { utf16IndexAtUtf8Offset } from "../lib/rust-text-caret";
 import { vectorPathSvgD } from "../lib/vector-path";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 import { canonicalConnectorEndpoint, isFigmaConnectorStrokeCap, projectFigmaConnectorEndpoint, type FigmaConnectorEndpoint, type FigmaConnectorStrokeCap } from "../lib/connector-endpoint";
 import { fontsForRuntimeTextRange, patchRuntimeParagraphIndent, patchRuntimeParagraphIndentation, patchRuntimeParagraphLineHeight, patchRuntimeParagraphListSpacing, patchRuntimeParagraphListType, patchRuntimeParagraphSpacing, patchRuntimeParagraphTextWrapStyle, patchRuntimeTextRange, replaceRuntimeTextRangeWithStyles, runtimeParagraphIndentationsForRange, runtimeParagraphIndentsForRange, runtimeParagraphLineHeightsForRange, runtimeParagraphListSpacingsForRange, runtimeParagraphListTypesForRange, runtimeParagraphSpacingsForRange, runtimeParagraphTextWrapStylesForRange, runtimeTextRange, runtimeTextStylesForRange, sameRuntimeLineHeight, updateRuntimeText, type RuntimeParagraphLineHeight, type RuntimeTextInsertionStyle, type RuntimeTextStylePatch } from "./runtime-text";
+import { patchTextStyleRunVariableBinding } from "../lib/text-style-run-edit";
 import { DEFAULT_RUNTIME_FONT_NAME, sameRuntimeFontName, type RuntimeFontName } from "./runtime-font-name";
 import { documentTextCase, isRuntimeTextCase, runtimeTextCase, type RuntimeTextCase } from "../lib/text-case";
 import { colorToSrgbCss } from "../lib/color-rendering";
@@ -297,6 +299,21 @@ const RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS = [
 ] as const;
 const RUNTIME_VARIABLE_BINDABLE_NODE_FIELD_SET = new Set<string>(RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS);
 export type RuntimeVariableBindableNodeField = typeof RUNTIME_VARIABLE_BINDABLE_NODE_FIELDS[number];
+const RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS = [
+  "fontFamily",
+  "fontSize",
+  "fontStyle",
+  "fontWeight",
+  "letterSpacing",
+  "lineHeight",
+  "paragraphSpacing",
+  "paragraphIndent",
+] as const;
+const RUNTIME_VARIABLE_BINDABLE_TEXT_FIELD_SET = new Set<string>(RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS);
+export type RuntimeVariableBindableTextField = typeof RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS[number];
+function isRuntimeVariableBindableTextField(value: string): value is RuntimeVariableBindableTextField {
+  return RUNTIME_VARIABLE_BINDABLE_TEXT_FIELD_SET.has(value);
+}
 type RuntimeEffectVariableField = "color" | "radius" | "spread" | "offsetX" | "offsetY";
 const RUNTIME_EFFECT_VARIABLE_FIELDS: readonly RuntimeEffectVariableField[] = ["color", "radius", "spread", "offsetX", "offsetY"];
 function isRuntimeEffectVariableField(value: string): value is RuntimeEffectVariableField {
@@ -410,6 +427,140 @@ function runtimePaintStyleIdForRange(
   return values.some((value) => value !== values[0]) ? RUNTIME_MIXED : values[0]!;
 }
 
+function runtimeTextBoundVariableForRange(
+  text: string,
+  properties: DocumentTextProperties | undefined,
+  start: number,
+  end: number,
+  field: RuntimeVariableBindableTextField,
+): RuntimeVariableAlias | null | typeof RUNTIME_MIXED {
+  runtimeTextRange(text, start, end);
+  const styles = runtimeTextStylesForRange(text, properties, start, end);
+  const values = (styles.length ? styles : properties?.baseStyle ? [properties.baseStyle] : [])
+    .map((style) => style.variableBindings?.[field]);
+  if (!values.length || values.every((value) => value === undefined)) return null;
+  const first = values[0];
+  if (!first || values.some((value) => value !== first)) return RUNTIME_MIXED;
+  return Object.freeze({ type: "VARIABLE_ALIAS", id: first });
+}
+
+function textVariableBindingAliases(properties: DocumentTextProperties | undefined) {
+  const aliases: Partial<Record<RuntimeVariableBindableTextField, readonly RuntimeVariableAlias[]>> = {};
+  for (const field of RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS) {
+    const ids = (properties?.runs ?? []).flatMap((run) => run.variableBindings?.[field] ? [run.variableBindings[field]!] : []);
+    if (!ids.length && properties?.baseStyle?.variableBindings?.[field]) ids.push(properties.baseStyle.variableBindings[field]!);
+    if (ids.length) aliases[field] = Object.freeze(ids.map((id) => Object.freeze({ type: "VARIABLE_ALIAS" as const, id })));
+  }
+  return aliases;
+}
+
+export function materializeRuntimeTextVariableBinding(
+  host: RuntimeNodeHost,
+  nodeId: string,
+  text: string,
+  properties: DocumentTextProperties,
+  start: number,
+  end: number,
+  field: RuntimeVariableBindableTextField,
+  variableId: string | undefined,
+  defaults: Readonly<{ fontSize: number; fontWeight: number; italic: boolean; letterSpacing: number; lineHeight: number }>,
+  resolvedOverride?: Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }>,
+): DocumentTextProperties {
+  const range = runtimeTextRange(text, start, end);
+  let next = properties;
+  if (variableId !== undefined) {
+    const resolved = resolvedOverride ?? host.resolveVariableValue(variableId, nodeId);
+    const expectsString = field === "fontFamily" || field === "fontStyle";
+    if ((expectsString && resolved.resolvedType !== "STRING") || (!expectsString && resolved.resolvedType !== "FLOAT")) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    if (expectsString) {
+      if (typeof resolved.value !== "string") throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      const sources = text.length === 0 && properties.baseStyle
+        ? [{ start: range.start, end: range.end, style: properties.baseStyle }]
+        : properties.runs
+          .filter((run) => run.start < range.end && run.end > range.start)
+          .map((style) => ({ start: Math.max(style.start, range.start), end: Math.min(style.end, range.end), style }));
+      for (const source of sources) {
+        const current = source.style.font ? host.fontNameForReference(source.style.font) : DEFAULT_RUNTIME_FONT_NAME;
+        const fontName = field === "fontFamily"
+          ? { family: resolved.value, style: current.style }
+          : { family: current.family, style: resolved.value };
+        const font = host.resolveFontName(fontName);
+        if (!font) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId });
+        host.assertFontsLoaded([font]);
+        next = patchRuntimeTextRange(
+          text,
+          next,
+          utf16IndexAtUtf8Offset(text, source.start),
+          utf16IndexAtUtf8Offset(text, source.end),
+          { font },
+          defaults,
+        );
+      }
+    } else {
+      if (typeof resolved.value !== "number" || !Number.isFinite(resolved.value)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      const value = resolved.value;
+      if ((field === "fontSize" || field === "lineHeight") && value <= 0) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      if ((field === "paragraphSpacing" || field === "paragraphIndent") && value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      if (field === "fontWeight" && (!Number.isInteger(value) || value < 1 || value > 1000)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      if (field === "fontSize") next = patchRuntimeTextRange(text, next, start, end, { fontSize: value }, defaults);
+      else if (field === "fontWeight") next = patchRuntimeTextRange(text, next, start, end, { fontWeight: value }, defaults);
+      else if (field === "letterSpacing") next = patchRuntimeTextRange(text, next, start, end, { letterSpacing: value }, defaults);
+      else if (field === "lineHeight") next = patchRuntimeParagraphLineHeight(text, next, start, end, { value, unit: "PIXELS" });
+      else if (field === "paragraphSpacing") next = patchRuntimeParagraphSpacing(text, next, start, end, value);
+      else if (field === "paragraphIndent") next = patchRuntimeParagraphIndent(text, next, start, end, value);
+    }
+  }
+  return patchTextStyleRunVariableBinding(text, next, range.start, range.end, field, variableId);
+}
+
+function clearRuntimeTextVariableBindings(
+  text: string,
+  properties: DocumentTextProperties,
+  start: number,
+  end: number,
+  fields: readonly RuntimeVariableBindableTextField[],
+): DocumentTextProperties {
+  const range = runtimeTextRange(text, start, end);
+  return fields.reduce(
+    (next, field) => patchTextStyleRunVariableBinding(text, next, range.start, range.end, field, undefined),
+    properties,
+  );
+}
+
+function variableFieldsForTextPatch(patch: RuntimeTextStylePatch): readonly RuntimeVariableBindableTextField[] {
+  const fields: RuntimeVariableBindableTextField[] = [];
+  if (Object.hasOwn(patch, "font")) fields.push("fontFamily", "fontStyle");
+  if (Object.hasOwn(patch, "fontSize")) fields.push("fontSize");
+  if (Object.hasOwn(patch, "fontWeight")) fields.push("fontWeight");
+  if (Object.hasOwn(patch, "letterSpacing")) fields.push("letterSpacing");
+  return fields;
+}
+
+export function materializeRuntimeTextVariableBindings(
+  host: RuntimeNodeHost,
+  nodeId: string,
+  text: string,
+  properties: DocumentTextProperties,
+  defaults: Readonly<{ fontSize: number; fontWeight: number; italic: boolean; letterSpacing: number; lineHeight: number }>,
+  resolver: (variableId: string) => Readonly<{ value: DocumentVariableValue; resolvedType: DocumentVariableResolvedType }> = (variableId) => host.resolveVariableValue(variableId, nodeId),
+): DocumentTextProperties {
+  let next = properties;
+  const sources = text.length === 0 && properties.baseStyle
+    ? [{ start: 0, end: 0, style: properties.baseStyle }]
+    : properties.runs.map((style) => ({ start: style.start, end: style.end, style }));
+  for (const source of sources) {
+    const start = utf16IndexAtUtf8Offset(text, source.start);
+    const end = utf16IndexAtUtf8Offset(text, source.end);
+    for (const [field, variableId] of Object.entries(source.style.variableBindings ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      next = materializeRuntimeTextVariableBinding(host, nodeId, text, next, start, end, field, variableId, defaults, resolver(variableId));
+    }
+  }
+  return next;
+}
+
 function applyRuntimeTextStyleRange(
   text: string,
   properties: DocumentTextProperties | undefined,
@@ -446,6 +597,7 @@ function applyRuntimeTextStyleRange(
     paintStyleId: undefined,
   };
   let next = patchRuntimeTextRange(text, properties, start, end, patch, defaults);
+  next = clearRuntimeTextVariableBindings(text, next, start, end, RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS);
   if (start === 0 && end === text.length) {
     return {
       ...next,
@@ -884,7 +1036,8 @@ export class RuntimeTextSublayerProxy {
     const text = this.characters;
     const properties = this.textProperties();
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(text, properties));
-    this.write({ textProperties: patchRuntimeParagraphLineHeight(text, properties, 0, text.length, value) });
+    const patched = patchRuntimeParagraphLineHeight(text, properties, 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["lineHeight"]) });
   }
 
   get paragraphSpacing(): number | typeof RUNTIME_MIXED {
@@ -897,7 +1050,8 @@ export class RuntimeTextSublayerProxy {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphSpacing(text, this.textProperties(), 0, text.length, value) });
+    const patched = patchRuntimeParagraphSpacing(text, this.textProperties(), 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["paragraphSpacing"]) });
   }
 
   get paragraphIndent(): number | typeof RUNTIME_MIXED {
@@ -910,7 +1064,8 @@ export class RuntimeTextSublayerProxy {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphIndent(text, this.textProperties(), 0, text.length, value) });
+    const patched = patchRuntimeParagraphIndent(text, this.textProperties(), 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["paragraphIndent"]) });
   }
 
   get textWrapStyle(): "AUTO" | "BALANCE" | "PRETTY" | typeof RUNTIME_MIXED {
@@ -976,7 +1131,8 @@ export class RuntimeTextSublayerProxy {
     const text = this.characters;
     const properties = this.textProperties();
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(text, properties, start, end));
-    this.write({ textProperties: patchRuntimeParagraphLineHeight(text, properties, start, end, value) });
+    const patched = patchRuntimeParagraphLineHeight(text, properties, start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["lineHeight"]) });
   }
 
   getRangeParagraphSpacing(start: number, end: number): number | typeof RUNTIME_MIXED {
@@ -989,7 +1145,8 @@ export class RuntimeTextSublayerProxy {
     this.assertTextRange(start, end);
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphSpacing(text, this.textProperties(), start, end, value) });
+    const patched = patchRuntimeParagraphSpacing(text, this.textProperties(), start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["paragraphSpacing"]) });
   }
 
   getRangeParagraphIndent(start: number, end: number): number | typeof RUNTIME_MIXED {
@@ -1002,7 +1159,8 @@ export class RuntimeTextSublayerProxy {
     this.assertTextRange(start, end);
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphIndent(text, this.textProperties(), start, end, value) });
+    const patched = patchRuntimeParagraphIndent(text, this.textProperties(), start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["paragraphIndent"]) });
   }
 
   getRangeTextWrapStyle(start: number, end: number): "AUTO" | "BALANCE" | "PRETTY" | typeof RUNTIME_MIXED {
@@ -1105,6 +1263,35 @@ export class RuntimeTextSublayerProxy {
       end,
       (font) => this.host.fontNameForReference(font),
     );
+  }
+
+  getRangeBoundVariable(start: number, end: number, field: RuntimeVariableBindableTextField): RuntimeVariableAlias | null | typeof RUNTIME_MIXED {
+    if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    return runtimeTextBoundVariableForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end, field);
+  }
+
+  setRangeBoundVariable(start: number, end: number, field: RuntimeVariableBindableTextField, variable: Readonly<{ id: string }> | null): void {
+    if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const variableId = variable?.id;
+    if (variable !== null && (!variableId || !this.host.variableResource(variableId))) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    const text = this.characters;
+    const properties = this.textProperties();
+    this.write({ textProperties: materializeRuntimeTextVariableBinding(this.host, this.handle.nodeId, text, properties, start, end, field, variableId, SHAPE_WITH_TEXT_DEFAULTS) });
+  }
+
+  get boundVariables(): Readonly<Partial<Record<RuntimeVariableBindableTextField, RuntimeVariableAlias>>> | undefined {
+    const aliases: Partial<Record<RuntimeVariableBindableTextField, RuntimeVariableAlias>> = {};
+    for (const field of RUNTIME_VARIABLE_BINDABLE_TEXT_FIELDS) {
+      const value = this.getRangeBoundVariable(0, this.characters.length, field);
+      if (value !== null && value !== RUNTIME_MIXED) aliases[field] = value;
+    }
+    return Object.keys(aliases).length ? Object.freeze(aliases) : undefined;
+  }
+
+  setBoundVariable(field: RuntimeVariableBindableTextField, variable: Readonly<{ id: string }> | null): void {
+    this.setRangeBoundVariable(0, this.characters.length, field, variable);
   }
 
   getRangeFontSize(start: number, end: number): number | typeof RUNTIME_MIXED {
@@ -1285,7 +1472,8 @@ export class RuntimeTextSublayerProxy {
     const properties = node.textProperties as DocumentTextProperties | undefined;
     const replacesFont = Object.prototype.hasOwnProperty.call(patch, "font");
     if (start === end) {
-      const next = patchRuntimeTextRange(text, properties, start, end, patch, SHAPE_WITH_TEXT_DEFAULTS);
+      const patched = patchRuntimeTextRange(text, properties, start, end, patch, SHAPE_WITH_TEXT_DEFAULTS);
+      const next = clearRuntimeTextVariableBindings(text, patched, start, end, variableFieldsForTextPatch(patch));
       if (text.length === 0) {
         this.host.assertFontsLoaded(replacesFont
           ? patch.font ? [patch.font] : []
@@ -1297,7 +1485,8 @@ export class RuntimeTextSublayerProxy {
     this.host.assertFontsLoaded(replacesFont
       ? patch.font ? [patch.font] : []
       : fontsForRuntimeTextRange(text, properties, start, end));
-    this.write({ textProperties: patchRuntimeTextRange(text, properties, start, end, patch, SHAPE_WITH_TEXT_DEFAULTS) });
+    const patched = patchRuntimeTextRange(text, properties, start, end, patch, SHAPE_WITH_TEXT_DEFAULTS);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, variableFieldsForTextPatch(patch)) });
   }
 
   private applyTextStyleRange(start: number, end: number, styleId: string): void {
@@ -1507,9 +1696,18 @@ export class RuntimeNodeProxy {
     if (effectValues.length) aliases.effects = Object.freeze(effectValues);
     const componentPropertyBindings = variableAliases(variableComponentPropertyBindingsFromExtensions(node.extensions));
     if (Object.keys(componentPropertyBindings).length) aliases.componentProperties = componentPropertyBindings;
+    Object.assign(aliases, textVariableBindingAliases(node.textProperties as DocumentTextProperties | undefined));
     return Object.keys(aliases).length ? Object.freeze(aliases) : undefined;
   }
-  setBoundVariable(field: RuntimeVariableBindableNodeField, variable: RuntimeVariable | string | null): void {
+  setBoundVariable(field: RuntimeVariableBindableNodeField | RuntimeVariableBindableTextField, variable: RuntimeVariable | string | null): void {
+    if (isRuntimeVariableBindableTextField(field)) {
+      this.assertText();
+      if (typeof variable === "string") this.host.assertSynchronousDocumentAccess();
+      const resource = typeof variable === "string" ? this.host.variableResource(variable) : variable;
+      if (variable !== null && (!resource || !this.host.variableResource(resource.id))) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+      this.setRangeBoundVariable(0, this.characters.length, field, resource ?? null);
+      return;
+    }
     if (!isRuntimeVariableBindableNodeField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     if (typeof variable === "string") this.host.assertSynchronousDocumentAccess();
     const node = this.read();
@@ -2855,7 +3053,8 @@ export class RuntimeNodeProxy {
     const text = this.characters;
     const properties = this.currentTextProperties();
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(text, properties));
-    this.write({ textProperties: patchRuntimeParagraphLineHeight(text, properties, 0, text.length, value) });
+    const patched = patchRuntimeParagraphLineHeight(text, properties, 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["lineHeight"]) });
   }
 
   getRangeLineHeight(start: number, end: number): RuntimeLineHeight | typeof RUNTIME_MIXED {
@@ -2870,7 +3069,8 @@ export class RuntimeNodeProxy {
     const text = this.characters;
     const properties = this.currentTextProperties();
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(text, properties, start, end));
-    this.write({ textProperties: patchRuntimeParagraphLineHeight(text, properties, start, end, value) });
+    const patched = patchRuntimeParagraphLineHeight(text, properties, start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["lineHeight"]) });
   }
 
   get paragraphSpacing(): number | typeof RUNTIME_MIXED {
@@ -2890,7 +3090,8 @@ export class RuntimeNodeProxy {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphSpacing(text, this.currentTextProperties(), 0, text.length, value) });
+    const patched = patchRuntimeParagraphSpacing(text, this.currentTextProperties(), 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["paragraphSpacing"]) });
   }
 
   getRangeParagraphSpacing(start: number, end: number): number | typeof RUNTIME_MIXED {
@@ -2903,7 +3104,8 @@ export class RuntimeNodeProxy {
     this.assertParagraphText();
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphSpacing(text, this.currentTextProperties(), start, end, value) });
+    const patched = patchRuntimeParagraphSpacing(text, this.currentTextProperties(), start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["paragraphSpacing"]) });
   }
 
   get paragraphIndent(): number | typeof RUNTIME_MIXED {
@@ -2923,7 +3125,8 @@ export class RuntimeNodeProxy {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphIndent(text, this.currentTextProperties(), 0, text.length, value) });
+    const patched = patchRuntimeParagraphIndent(text, this.currentTextProperties(), 0, text.length, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, 0, text.length, ["paragraphIndent"]) });
   }
 
   getRangeParagraphIndent(start: number, end: number): number | typeof RUNTIME_MIXED {
@@ -2936,7 +3139,8 @@ export class RuntimeNodeProxy {
     this.assertParagraphText();
     if (!Number.isFinite(value) || value < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const text = this.characters;
-    this.write({ textProperties: patchRuntimeParagraphIndent(text, this.currentTextProperties(), start, end, value) });
+    const patched = patchRuntimeParagraphIndent(text, this.currentTextProperties(), start, end, value);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, ["paragraphIndent"]) });
   }
 
   get textWrapStyle(): "AUTO" | "BALANCE" | "PRETTY" | typeof RUNTIME_MIXED {
@@ -3057,6 +3261,25 @@ export class RuntimeNodeProxy {
   setRangeHyperlink(start: number, end: number, value: RuntimeHyperlinkTarget | null): void {
     this.assertText();
     this.setTextRange(start, end, { hyperlink: canonicalHyperlink(value) });
+  }
+
+  getRangeBoundVariable(start: number, end: number, field: RuntimeVariableBindableTextField): RuntimeVariableAlias | null | typeof RUNTIME_MIXED {
+    this.assertText();
+    if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    return runtimeTextBoundVariableForRange(text, node.textProperties as DocumentTextProperties | undefined, start, end, field);
+  }
+
+  setRangeBoundVariable(start: number, end: number, field: RuntimeVariableBindableTextField, variable: Readonly<{ id: string }> | null): void {
+    this.assertText();
+    if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const variableId = variable?.id;
+    if (variable !== null && (!variableId || !this.host.variableResource(variableId))) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    const text = typeof node.characters === "string" ? node.characters : "";
+    const properties = updateRuntimeText(text, text, node.textProperties as DocumentTextProperties | undefined).textProperties;
+    this.write({ textProperties: materializeRuntimeTextVariableBinding(this.host, this.id, text, properties, start, end, field, variableId, DEFAULT_RUNTIME_TEXT_STYLE) });
   }
 
   /** Runtime's asset-addressed equivalent of Figma's font-name range setter.
@@ -3541,6 +3764,21 @@ export class RuntimeNodeProxy {
     }
     Object.assign(patch, this.paintVariableValuePatch(override));
     Object.assign(patch, this.effectVariableValuePatch(override));
+    const node = this.read();
+    const textProperties = node.textProperties as DocumentTextProperties | undefined;
+    if (textProperties) {
+      const text = typeof node.characters === "string" ? node.characters : "";
+      const defaults = this.type === "SHAPE_WITH_TEXT" ? SHAPE_WITH_TEXT_DEFAULTS : DEFAULT_RUNTIME_TEXT_STYLE;
+      const next = materializeRuntimeTextVariableBindings(
+        this.host,
+        this.id,
+        text,
+        textProperties,
+        defaults,
+        (variableId) => this.host.resolveVariableValue(variableId, this.id, override),
+      );
+      if (JSON.stringify(next) !== JSON.stringify(textProperties)) patch.textProperties = next;
+    }
     return patch;
   }
 
@@ -4110,7 +4348,8 @@ export class RuntimeNodeProxy {
     const properties = node.textProperties as never;
     const replacesFont = Object.prototype.hasOwnProperty.call(patch, "font");
     if (start === end) {
-      const next = patchRuntimeTextRange(text, properties, start, end, patch);
+      const patched = patchRuntimeTextRange(text, properties, start, end, patch);
+      const next = clearRuntimeTextVariableBindings(text, patched, start, end, variableFieldsForTextPatch(patch));
       if (text.length === 0) {
         const fonts = replacesFont
           ? patch.font ? [patch.font] : []
@@ -4124,7 +4363,8 @@ export class RuntimeNodeProxy {
       ? patch.font ? [patch.font] : []
       : fontsForRuntimeTextRange(text, properties, start, end);
     this.host.assertFontsLoaded(fonts);
-    this.write({ textProperties: patchRuntimeTextRange(text, properties, start, end, patch) });
+    const patched = patchRuntimeTextRange(text, properties, start, end, patch);
+    this.write({ textProperties: clearRuntimeTextVariableBindings(text, patched, start, end, variableFieldsForTextPatch(patch)) });
   }
 
   private applyTextStyleRange(start: number, end: number, styleId: string): void {

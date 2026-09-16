@@ -556,6 +556,8 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       leadingTrim: run.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
       openTypeFeatures: openTypeFeaturesProto(run.openTypeFeatures),
       textStyleId: run.textStyleId,
+      paintStyleId: run.paintStyleId,
+      variableBindings: styleVariableBindingsProto(run.variableBindings),
     })),
     paragraph: {
       alignment: value.paragraph.alignment === "left" ? TextAlignment.TEXT_ALIGNMENT_LEFT : value.paragraph.alignment === "center" ? TextAlignment.TEXT_ALIGNMENT_CENTER : value.paragraph.alignment === "right" ? TextAlignment.TEXT_ALIGNMENT_RIGHT : TextAlignment.TEXT_ALIGNMENT_JUSTIFY,
@@ -615,6 +617,8 @@ function textPropertiesProto(properties: DocumentTextProperties | undefined) {
       leadingTrim: value.baseStyle.leadingTrim === "capHeight" ? ProtoLeadingTrim.LEADING_TRIM_CAP_HEIGHT : undefined,
       openTypeFeatures: openTypeFeaturesProto(value.baseStyle.openTypeFeatures),
       textStyleId: value.baseStyle.textStyleId,
+      paintStyleId: value.baseStyle.paintStyleId,
+      variableBindings: styleVariableBindingsProto(value.baseStyle.variableBindings),
     } : undefined,
     paragraphStyleRuns: (value.paragraphStyleRuns ?? []).map((run) => ({
       start: run.start,
@@ -650,6 +654,12 @@ function openTypeFeaturesProto(features: Readonly<Record<string, boolean>> | und
   return Object.entries(features ?? {})
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
     .map(([tag, enabled]) => ({ tag, enabled }));
+}
+
+function styleVariableBindingsProto(bindings: Readonly<Record<string, string>> | undefined) {
+  return Object.entries(bindings ?? {})
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([field, variableId]) => ({ field, variableId }));
 }
 
 function hyperlinkProto(value: NonNullable<DocumentTextProperties["runs"][number]["hyperlink"]>) {

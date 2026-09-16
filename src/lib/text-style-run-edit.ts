@@ -290,6 +290,43 @@ export function patchTextStyleRuns(
   return { ...properties, runs: mergeAdjacentRuns(runs.filter((run) => run.start < run.end)) };
 }
 
+/** Updates one Variable alias over a canonical UTF-8 text range while keeping
+ * the stored binding identity attached to the same run slices as their values. */
+export function patchTextStyleRunVariableBinding(
+  text: string,
+  properties: DocumentTextProperties,
+  start: number,
+  end: number,
+  field: string,
+  variableId: string | undefined,
+): DocumentTextProperties {
+  const byteLength = new TextEncoder().encode(text).byteLength;
+  const from = Math.max(0, Math.min(byteLength, Math.floor(Math.min(start, end))));
+  const to = Math.max(from, Math.min(byteLength, Math.floor(Math.max(start, end))));
+  const update = (style: TextStyle): TextStyle => {
+    const variableBindings = { ...(style.variableBindings ?? {}) };
+    if (variableId === undefined) delete variableBindings[field];
+    else variableBindings[field] = variableId;
+    return {
+      ...style,
+      ...(Object.keys(variableBindings).length ? { variableBindings } : { variableBindings: undefined }),
+    };
+  };
+  if (text.length === 0 && from === 0 && to === 0 && properties.baseStyle) {
+    return { ...properties, baseStyle: update(properties.baseStyle) };
+  }
+  if (from === to || !hasCompleteValidRunCoverage(text, properties.runs)) return properties;
+  const runs: TextRun[] = [];
+  for (const run of properties.runs) {
+    if (run.start < from) runs.push({ ...run, end: Math.min(run.end, from) });
+    const overlapStart = Math.max(run.start, from);
+    const overlapEnd = Math.min(run.end, to);
+    if (overlapStart < overlapEnd) runs.push({ ...update(run), start: overlapStart, end: overlapEnd });
+    if (run.end > to) runs.push({ ...run, start: Math.max(run.start, to) });
+  }
+  return { ...properties, runs: mergeAdjacentRuns(runs.filter((run) => run.start < run.end)) };
+}
+
 function replacementRun(runs: readonly TextRun[], offset: number): TextRun | undefined {
   const containing = runs.find((run) => run.start <= offset && offset < run.end);
   if (containing) return containing;
@@ -363,5 +400,6 @@ function sameStyle(left: TextRun, right: TextRun) {
     && left.leadingTrim === right.leadingTrim
     && JSON.stringify(left.openTypeFeatures) === JSON.stringify(right.openTypeFeatures)
     && left.textStyleId === right.textStyleId
-    && left.paintStyleId === right.paintStyleId;
+    && left.paintStyleId === right.paintStyleId
+    && JSON.stringify(left.variableBindings) === JSON.stringify(right.variableBindings);
 }

@@ -3,6 +3,7 @@ import { NodeRegistry, type RuntimeNodeHandle } from "./node-registry";
 import {
   M1_NODE_TYPES,
   RuntimeNodeProxy,
+  materializeRuntimeTextVariableBindings,
   type M1NodeType,
   type M1SceneNodeType,
   type RuntimeComponentPropertyEdit,
@@ -416,7 +417,8 @@ export class RuntimeSession implements RuntimeContainerHost {
     const variableOverrides = new Map([[variable.id, variable]]);
     const styleOperations = this.styleVariableOperations(variableOverrides);
     const operations = this.componentPropertyVariableOperations(variableOverrides);
-    this.enqueueOperations([{ type: "setVariable", variable }, ...styleOperations, ...operations]);
+    const textOperations = this.textRangeVariableOperations(variableOverrides);
+    this.enqueueOperations([{ type: "setVariable", variable }, ...styleOperations, ...textOperations, ...operations]);
   }
 
   deleteVariable(id: string): void {
@@ -437,7 +439,9 @@ export class RuntimeSession implements RuntimeContainerHost {
         variablePaintBindingsFromExtensions(node.extensions),
         variableEffectBindingsFromExtensions(node.extensions),
         variableComponentPropertyBindingsFromExtensions(node.extensions),
-      ].some((bindings) => Object.values(bindings).includes(id));
+      ].some((bindings) => Object.values(bindings).includes(id))
+        || (node.textProperties as DocumentTextProperties | undefined)?.runs.some((run) => Object.values(run.variableBindings ?? {}).includes(id)) === true
+        || Object.values((node.textProperties as DocumentTextProperties | undefined)?.baseStyle?.variableBindings ?? {}).includes(id);
     });
   }
 
@@ -446,7 +450,8 @@ export class RuntimeSession implements RuntimeContainerHost {
     const collectionOverrides = new Map([[collection.id, collection]]);
     const styleOperations = this.styleVariableOperations(variableOverrides, collectionOverrides);
     const operations = this.componentPropertyVariableOperations(variableOverrides, collectionOverrides);
-    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...styleOperations, ...operations]);
+    const textOperations = this.textRangeVariableOperations(variableOverrides, collectionOverrides);
+    this.enqueueOperations([{ type: "setVariableCollection", collection, variables }, ...styleOperations, ...textOperations, ...operations]);
   }
 
   deleteVariableCollection(id: string): void {
@@ -3675,6 +3680,42 @@ export class RuntimeSession implements RuntimeContainerHost {
       });
     }
     return operations;
+  }
+
+  private textRangeVariableOperations(
+    variableOverrides: ReadonlyMap<string, DocumentVariableResource>,
+    collectionOverrides: ReadonlyMap<string, DocumentVariableCollectionResource> = new Map(),
+  ): PendingProjectionOperation[] {
+    const nodes = this.projectionStore.listLiveNodes().filter((node) => {
+      const properties = node.textProperties as DocumentTextProperties | undefined;
+      return properties?.runs.some((run) => Object.keys(run.variableBindings ?? {}).length > 0)
+        || Boolean(properties?.baseStyle && Object.keys(properties.baseStyle.variableBindings ?? {}).length > 0);
+    });
+    if (nodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
+    return nodes.flatMap((node) => {
+      const properties = node.textProperties as DocumentTextProperties;
+      const text = typeof node.characters === "string" ? node.characters : "";
+      const defaults = node.type === "SHAPE_WITH_TEXT"
+        ? { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0, lineHeight: 20 }
+        : { fontSize: 31, fontWeight: 400, italic: false, letterSpacing: 0, lineHeight: 20 };
+      const next = materializeRuntimeTextVariableBindings(
+        this,
+        node.id,
+        text,
+        properties,
+        defaults,
+        (variableId) => this.resolveVariableValueFromResources(
+          variableId,
+          node.id,
+          undefined,
+          variableOverrides,
+          collectionOverrides,
+        ),
+      );
+      return JSON.stringify(next) === JSON.stringify(properties)
+        ? []
+        : [{ type: "update" as const, nodeId: node.id, patch: { textProperties: next } }];
+    });
   }
 
   private styleVariableOperations(

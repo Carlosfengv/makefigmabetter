@@ -96,7 +96,7 @@ describe("runtimeStyledTextSegments", () => {
     ]);
   });
 
-  it("returns linked text style identities and deterministic empty unsupported fields", () => {
+  it("returns linked text style identities and deterministic empty binding maps", () => {
     expect(runtimeStyledTextSegments(
       "A😀\nBC",
       properties,
@@ -110,7 +110,7 @@ describe("runtimeStyledTextSegments", () => {
       textStyleId: "S:body",
       fillStyleId: "S:body-fill",
       openTypeFeatures: {},
-      boundVariables: undefined,
+      boundVariables: {},
       textStyleOverrides: [],
     }, {
       characters: "BC",
@@ -119,7 +119,7 @@ describe("runtimeStyledTextSegments", () => {
       textStyleId: "S:caption",
       fillStyleId: "S:caption-fill",
       openTypeFeatures: {},
-      boundVariables: undefined,
+      boundVariables: {},
       textStyleOverrides: [],
     }]);
   });

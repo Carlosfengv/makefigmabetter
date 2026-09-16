@@ -80,9 +80,10 @@ pub const STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 51;
 pub const TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 52;
 pub const TEXT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 53;
 pub const PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 54;
+pub const TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 55;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
 pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
+    TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -116,6 +117,15 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_variable_bindings)
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && document
             .paint_styles()
@@ -1048,6 +1058,14 @@ pub fn document_from_snapshot_with_engine_semantics(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_open_type_features)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version
+                < TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_variable_bindings)
             {
                 return Err(SnapshotError::Invalid);
             }
@@ -2162,6 +2180,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 open_type_features: open_type_features_to_proto(&run.open_type_features),
                 text_style_id: run.text_style_id.clone(),
                 paint_style_id: run.paint_style_id.clone(),
+                variable_bindings: style_variable_bindings_to_proto(&run.variable_bindings),
                 text_decoration_color: run
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2233,6 +2252,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 open_type_features: open_type_features_to_proto(&style.open_type_features),
                 text_style_id: style.text_style_id.clone(),
                 paint_style_id: style.paint_style_id.clone(),
+                variable_bindings: style_variable_bindings_to_proto(&style.variable_bindings),
                 text_decoration_color: style
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2324,6 +2344,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(run.open_type_features)?,
                     text_style_id: run.text_style_id,
                     paint_style_id: run.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(run.variable_bindings)?,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2446,6 +2467,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(style.open_type_features)?,
                     text_style_id: style.text_style_id,
                     paint_style_id: style.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(style.variable_bindings)?,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2932,6 +2954,43 @@ fn text_properties_has_open_type_features(properties: &TextProperties) -> bool {
             .base_style
             .as_ref()
             .is_some_and(|style| !style.open_type_features.is_empty())
+}
+
+fn text_properties_has_variable_bindings(properties: &TextProperties) -> bool {
+    properties
+        .runs
+        .iter()
+        .any(|run| !run.variable_bindings.is_empty())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| !style.variable_bindings.is_empty())
+}
+
+fn style_variable_bindings_to_proto(
+    bindings: &BTreeMap<String, String>,
+) -> Vec<v1::StyleVariableBinding> {
+    bindings
+        .iter()
+        .map(|(field, variable_id)| v1::StyleVariableBinding {
+            field: field.clone(),
+            variable_id: variable_id.clone(),
+        })
+        .collect()
+}
+
+fn style_variable_bindings_from_proto(
+    bindings: Vec<v1::StyleVariableBinding>,
+) -> Result<BTreeMap<String, String>, SnapshotError> {
+    let count = bindings.len();
+    let result = bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if result.len() != count {
+        return Err(SnapshotError::Invalid);
+    }
+    Ok(result)
 }
 
 fn text_properties_has_text_style_link(properties: &TextProperties) -> bool {
@@ -3856,6 +3915,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     paragraph: ParagraphStyle {
@@ -4901,6 +4961,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -4983,6 +5044,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5054,6 +5116,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }),
             ..TextProperties::default()
@@ -5123,6 +5186,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5216,6 +5280,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5285,6 +5350,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -5365,6 +5431,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -5498,6 +5565,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5565,6 +5633,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5632,6 +5701,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5702,6 +5772,7 @@ mod tests {
             open_type_features: Vec::new(),
             text_style_id: None,
             paint_style_id: None,
+            variable_bindings: Default::default(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5774,6 +5845,7 @@ mod tests {
             open_type_features: Vec::new(),
             text_style_id: None,
             paint_style_id: None,
+            variable_bindings: Default::default(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -5850,6 +5922,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: Some(TextDecorationColor {
                     color: Color {
                         space: ColorSpace::Srgb,
@@ -5931,6 +6004,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
             }],
             ..TextProperties::default()
         };
@@ -6002,6 +6076,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
             }],
             ..TextProperties::default()
         };
@@ -6076,6 +6151,7 @@ mod tests {
             ],
             text_style_id: None,
             paint_style_id: None,
+            variable_bindings: Default::default(),
         };
         let properties = TextProperties {
             runs: vec![style],
@@ -6232,6 +6308,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
             },
             letter_spacing_unit: None,
             variable_bindings: BTreeMap::new(),
@@ -6550,6 +6627,112 @@ mod tests {
     }
 
     #[test]
+    fn text_range_variable_bindings_round_trip_and_require_semantics_fifty_five() {
+        let mut document = Document::with_id(DocumentId(180));
+        let collection = VariableCollectionResource {
+            id: "VC:text".into(),
+            key: String::new(),
+            name: "Text".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:size".into(),
+            key: String::new(),
+            name: "Size".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(24.0))].into(),
+            scopes: vec!["FONT_SIZE".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        document.seed_variable_collection(collection).unwrap();
+        document.seed_variable(variable.clone()).unwrap();
+        let mut text = node(180, NodeKind::Text, None);
+        text.text = "A".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let mut style = TextStyleRun {
+            start: 0,
+            end: 1,
+            font: None,
+            font_size: 24.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: None,
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: None,
+            text_decoration_color: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            open_type_features: Vec::new(),
+            text_style_id: None,
+            paint_style_id: None,
+            variable_bindings: BTreeMap::new(),
+        };
+        style
+            .variable_bindings
+            .insert("fontSize".into(), variable.id.clone());
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(180), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot = snapshot_from_document(
+            &document,
+            TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            180_u128.to_be_bytes(),
+            hash,
+            TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(180)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version =
+            TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                180_u128.to_be_bytes(),
+                hash,
+                TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
     fn style_publishable_metadata_round_trips_and_requires_semantics_fifty_one() {
         let mut document = Document::with_id(DocumentId(176));
         let text_style = TextStyleResource {
@@ -6582,6 +6765,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
             },
             letter_spacing_unit: None,
             variable_bindings: BTreeMap::new(),

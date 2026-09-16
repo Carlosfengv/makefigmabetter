@@ -2440,6 +2440,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 open_type_features: open_type_features_to_proto(&run.open_type_features),
                 text_style_id: run.text_style_id.clone(),
                 paint_style_id: run.paint_style_id.clone(),
+                variable_bindings: style_variable_bindings_to_proto(&run.variable_bindings),
                 text_decoration_color: run
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2511,6 +2512,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 open_type_features: open_type_features_to_proto(&style.open_type_features),
                 text_style_id: style.text_style_id.clone(),
                 paint_style_id: style.paint_style_id.clone(),
+                variable_bindings: style_variable_bindings_to_proto(&style.variable_bindings),
                 text_decoration_color: style
                     .text_decoration_color
                     .map(text_decoration_color_to_proto),
@@ -2603,6 +2605,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(run.open_type_features),
                     text_style_id: run.text_style_id,
                     paint_style_id: run.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(run.variable_bindings)?,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2722,6 +2725,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(style.open_type_features),
                     text_style_id: style.text_style_id,
                     paint_style_id: style.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(style.variable_bindings)?,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2768,6 +2772,32 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
             })
             .collect(),
     }
+}
+
+fn style_variable_bindings_to_proto(
+    bindings: &BTreeMap<String, String>,
+) -> Vec<v1::StyleVariableBinding> {
+    bindings
+        .iter()
+        .map(|(field, variable_id)| v1::StyleVariableBinding {
+            field: field.clone(),
+            variable_id: variable_id.clone(),
+        })
+        .collect()
+}
+
+fn style_variable_bindings_from_proto(
+    bindings: Vec<v1::StyleVariableBinding>,
+) -> Result<BTreeMap<String, String>, ServiceError> {
+    let count = bindings.len();
+    let result = bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if result.len() != count {
+        return Err(ServiceError::ReducerRejected);
+    }
+    Ok(result)
 }
 
 fn text_style_resource_from_proto(
@@ -4160,6 +4190,7 @@ mod tests {
                     open_type_features: Vec::new(),
                     text_style_id: None,
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -4184,6 +4215,7 @@ mod tests {
                     open_type_features: Vec::new(),
                     text_style_id: None,
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                     text_decoration_color: None,
                 },
             ],
@@ -5481,6 +5513,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5539,6 +5572,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }),
             ..TextProperties::default()
@@ -5598,6 +5632,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -5737,6 +5772,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5766,6 +5802,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5795,6 +5832,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5824,6 +5862,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5853,6 +5892,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5882,6 +5922,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: Some(TextDecorationColor {
                             color: Color {
                                 space: ColorSpace::Srgb,
@@ -5920,6 +5961,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -5949,6 +5991,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: None,
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()
@@ -6158,6 +6201,7 @@ mod tests {
                         open_type_features: Vec::new(),
                         text_style_id: Some("S:heading".into()),
                         paint_style_id: None,
+                        variable_bindings: Default::default(),
                         text_decoration_color: None,
                     }],
                     ..TextProperties::default()

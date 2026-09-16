@@ -64,7 +64,7 @@ export type RuntimeStyledTextSegmentValues = Readonly<{
   textWrapStyle: "AUTO" | "BALANCE" | "PRETTY";
   hyperlink: Readonly<{ type: "URL" | "NODE"; value: string }> | null;
   openTypeFeatures: Readonly<Record<string, boolean>>;
-  boundVariables: undefined;
+  boundVariables: Readonly<Record<string, Readonly<{ type: "VARIABLE_ALIAS"; id: string }>>>;
   textStyleOverrides: readonly never[];
 }>;
 
@@ -190,7 +190,12 @@ function segmentFieldValue(
     case "textWrapStyle": return wrapStyle(paragraphRun?.textWrapStyle ?? properties.paragraph.textWrapStyle ?? "auto");
     case "hyperlink": return style.hyperlink ? structuredClone(style.hyperlink) : null;
     case "openTypeFeatures": return { ...(style.openTypeFeatures ?? {}) };
-    case "boundVariables": return undefined;
+    case "boundVariables": return Object.freeze(Object.fromEntries(
+      Object.entries(style.variableBindings ?? {}).map(([key, id]) => [
+        key,
+        Object.freeze({ type: "VARIABLE_ALIAS" as const, id }),
+      ]),
+    ));
     case "textStyleOverrides": return [];
   }
 }

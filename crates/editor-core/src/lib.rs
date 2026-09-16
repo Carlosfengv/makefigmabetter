@@ -788,6 +788,9 @@ pub struct TextStyleRun {
     /// resolved PaintStack remains embedded so rendering never depends on a
     /// mutable external resource lookup.
     pub paint_style_id: Option<String>,
+    /// Sorted bindings for Figma's eight Variable-bindable text fields. Values
+    /// remain materialized in this run and its paragraph records.
+    pub variable_bindings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2723,6 +2726,20 @@ impl Document {
         }) {
             return Err(CommandError::InvalidVariable);
         }
+        if self.node_text_properties.values().any(|properties| {
+            properties.runs.iter().any(|run| {
+                run.variable_bindings
+                    .values()
+                    .any(|variable_id| variable_id == id)
+            }) || properties.base_style.as_ref().is_some_and(|style| {
+                style
+                    .variable_bindings
+                    .values()
+                    .any(|variable_id| variable_id == id)
+            })
+        }) {
+            return Err(CommandError::InvalidVariable);
+        }
         self.variables.remove(id);
         self.variable_catalog_bytes = self
             .variable_catalog_bytes
@@ -2833,6 +2850,20 @@ impl Document {
                 .variable_bindings
                 .iter()
                 .any(|binding| removed_ids.contains(binding.variable_id.as_str()))
+        }) {
+            return Err(CommandError::InvalidVariableCollection);
+        }
+        if self.node_text_properties.values().any(|properties| {
+            properties.runs.iter().any(|run| {
+                run.variable_bindings
+                    .values()
+                    .any(|variable_id| removed_ids.contains(variable_id.as_str()))
+            }) || properties.base_style.as_ref().is_some_and(|style| {
+                style
+                    .variable_bindings
+                    .values()
+                    .any(|variable_id| removed_ids.contains(variable_id.as_str()))
+            })
         }) {
             return Err(CommandError::InvalidVariableCollection);
         }
@@ -2978,14 +3009,7 @@ impl Document {
         Ok(())
     }
 
-    fn insert_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
-        if self.text_styles.contains_key(&style.id) {
-            return Err(CommandError::DuplicateTextStyle { id: style.id });
-        }
-        if self.paint_styles.contains_key(&style.id) {
-            return Err(CommandError::InvalidTextStyle);
-        }
-        let bytes = style.estimated_bytes();
+    fn valid_text_style_resource(&self, style: &TextStyleResource) -> bool {
         let mut properties = TextProperties::default();
         properties.paragraph = style.paragraph.clone();
         properties.base_style = Some(style.style.clone());
@@ -3003,19 +3027,30 @@ impl Document {
             && style.description_markdown.len() <= MAX_STYLE_DESCRIPTION_BYTES
             && !style.description_markdown.contains('\0')
             && valid_style_documentation_links(&style.documentation_links);
-        if !valid_identity
+        valid_identity
+            && style.style.start == 0
+            && style.style.end == 0
+            && style.style.text_style_id.is_none()
+            && style.style.paint_style_id.is_none()
+            && style.style.hyperlink.is_none()
+            && (style.letter_spacing_unit != Some(TextStyleLetterSpacingUnit::Percent)
+                || (-100.0..=10_000.0).contains(&style.style.letter_spacing))
+            && self.valid_text_style_variable_bindings(&style.variable_bindings)
+            && self.valid_text_properties("", &properties)
+    }
+
+    fn insert_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
+        if self.text_styles.contains_key(&style.id) {
+            return Err(CommandError::DuplicateTextStyle { id: style.id });
+        }
+        if self.paint_styles.contains_key(&style.id) {
+            return Err(CommandError::InvalidTextStyle);
+        }
+        let bytes = style.estimated_bytes();
+        if !self.valid_text_style_resource(&style)
             || bytes > MAX_TEXT_STYLE_RESOURCE_BYTES
             || self.text_styles.len() >= MAX_TEXT_STYLE_RESOURCES
             || self.text_style_bytes.saturating_add(bytes) > MAX_TEXT_STYLE_CATALOG_BYTES
-            || style.style.start != 0
-            || style.style.end != 0
-            || style.style.text_style_id.is_some()
-            || style.style.paint_style_id.is_some()
-            || style.style.hyperlink.is_some()
-            || (style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent)
-                && !(-100.0..=10_000.0).contains(&style.style.letter_spacing))
-            || !self.valid_text_style_variable_bindings(&style.variable_bindings)
-            || !self.valid_text_properties("", &properties)
         {
             return Err(CommandError::InvalidTextStyle);
         }
@@ -3036,11 +3071,19 @@ impl Document {
         if before.remote || style.remote || before.key != style.key {
             return Err(CommandError::InvalidTextStyle);
         }
-        self.text_styles.remove(&style.id);
-        self.text_style_bytes = self
+        let bytes = style.estimated_bytes();
+        let next_catalog_bytes = self
             .text_style_bytes
-            .saturating_sub(before.estimated_bytes());
-        self.insert_text_style(style)?;
+            .saturating_sub(before.estimated_bytes())
+            .saturating_add(bytes);
+        if !self.valid_text_style_resource(&style)
+            || bytes > MAX_TEXT_STYLE_RESOURCE_BYTES
+            || next_catalog_bytes > MAX_TEXT_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidTextStyle);
+        }
+        self.text_style_bytes = next_catalog_bytes;
+        self.text_styles.insert(style.id.clone(), style);
         Ok(before)
     }
 
@@ -3410,6 +3453,49 @@ impl Document {
     }
 
     fn apply(&mut self, command: &Command) -> Result<AppliedChange, CommandError> {
+        match command {
+            Command::RegisterTextStyle { style } => {
+                self.insert_text_style(style.clone())?;
+                Ok(AppliedChange::TextStyleRegistered {
+                    style: style.clone(),
+                })
+            }
+            Command::RegisterPaintStyle { style } => {
+                self.insert_paint_style(style.clone())?;
+                Ok(AppliedChange::PaintStyleRegistered {
+                    style: style.clone(),
+                })
+            }
+            Command::SetTextStyle { style } => {
+                let before = self.replace_text_style(style.clone())?;
+                Ok(AppliedChange::TextStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeleteTextStyle { id } => {
+                let style = self.remove_text_style(id)?;
+                Ok(AppliedChange::TextStyleDeleted { style })
+            }
+            Command::SetPaintStyle { style } => {
+                let before = self.replace_paint_style(style.clone())?;
+                Ok(AppliedChange::PaintStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeletePaintStyle { id } => {
+                let style = self.remove_paint_style(id)?;
+                Ok(AppliedChange::PaintStyleDeleted { style })
+            }
+            _ => self.apply_non_style_command(command),
+        }
+    }
+
+    fn apply_non_style_command(
+        &mut self,
+        command: &Command,
+    ) -> Result<AppliedChange, CommandError> {
         match command {
             Command::CreatePage(page) => {
                 if page.name.trim().is_empty() {
@@ -4976,39 +5062,13 @@ impl Document {
                     asset: asset.clone(),
                 })
             }
-            Command::RegisterTextStyle { style } => {
-                self.insert_text_style(style.clone())?;
-                Ok(AppliedChange::TextStyleRegistered {
-                    style: style.clone(),
-                })
-            }
-            Command::RegisterPaintStyle { style } => {
-                self.insert_paint_style(style.clone())?;
-                Ok(AppliedChange::PaintStyleRegistered {
-                    style: style.clone(),
-                })
-            }
-            Command::SetTextStyle { style } => {
-                let before = self.replace_text_style(style.clone())?;
-                Ok(AppliedChange::TextStyleChanged {
-                    before,
-                    after: style.clone(),
-                })
-            }
-            Command::DeleteTextStyle { id } => {
-                let style = self.remove_text_style(id)?;
-                Ok(AppliedChange::TextStyleDeleted { style })
-            }
-            Command::SetPaintStyle { style } => {
-                let before = self.replace_paint_style(style.clone())?;
-                Ok(AppliedChange::PaintStyleChanged {
-                    before,
-                    after: style.clone(),
-                })
-            }
-            Command::DeletePaintStyle { id } => {
-                let style = self.remove_paint_style(id)?;
-                Ok(AppliedChange::PaintStyleDeleted { style })
+            Command::RegisterTextStyle { .. }
+            | Command::RegisterPaintStyle { .. }
+            | Command::SetTextStyle { .. }
+            | Command::DeleteTextStyle { .. }
+            | Command::SetPaintStyle { .. }
+            | Command::DeletePaintStyle { .. } => {
+                unreachable!("style commands are dispatched first")
             }
             Command::RegisterVariableCollection { collection } => {
                 self.insert_variable_collection(collection.clone())?;
@@ -7586,6 +7646,7 @@ impl Document {
             && style.paint_style_id.as_ref().is_none_or(|id| {
                 !id.is_empty() && id.len() <= MAX_STYLE_ID_BYTES && !id.contains('\0')
             })
+            && self.valid_text_style_variable_bindings(&style.variable_bindings)
             && style.hyperlink.as_ref().is_none_or(|hyperlink| {
                 !hyperlink.value.is_empty()
                     && hyperlink.value.len() <= MAX_TEXT_HYPERLINK_BYTES
@@ -8473,6 +8534,11 @@ impl TextProperties {
                             .sum::<usize>()
                         + run.text_style_id.as_ref().map_or(0, String::len)
                         + run.paint_style_id.as_ref().map_or(0, String::len)
+                        + run
+                            .variable_bindings
+                            .iter()
+                            .map(|(field, id)| field.len() + id.len())
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
             + self.paragraph_style_runs.len() * std::mem::size_of::<ParagraphStyleRun>()
@@ -8504,6 +8570,11 @@ impl TextProperties {
                             .sum::<usize>()
                         + style.text_style_id.as_ref().map_or(0, String::len)
                         + style.paint_style_id.as_ref().map_or(0, String::len)
+                        + style
+                            .variable_bindings
+                            .iter()
+                            .map(|(field, id)| field.len() + id.len())
+                            .sum::<usize>()
                 })
                 .unwrap_or(0)
             + self
@@ -9529,6 +9600,36 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
                 }
                 None => hasher.update([0]),
             }
+        }
+    }
+    if properties
+        .runs
+        .iter()
+        .any(|run| !run.variable_bindings.is_empty())
+        || properties
+            .base_style
+            .as_ref()
+            .is_some_and(|style| !style.variable_bindings.is_empty())
+    {
+        hasher.update(b"makefigma/editor-core/text-range-variable-bindings-v1");
+        hash_len(hasher, properties.runs.len());
+        for run in &properties.runs {
+            hash_len(hasher, run.variable_bindings.len());
+            for (field, id) in &run.variable_bindings {
+                hash_text(hasher, field);
+                hash_text(hasher, id);
+            }
+        }
+        match &properties.base_style {
+            Some(style) => {
+                hasher.update([1]);
+                hash_len(hasher, style.variable_bindings.len());
+                for (field, id) in &style.variable_bindings {
+                    hash_text(hasher, field);
+                    hash_text(hasher, id);
+                }
+            }
+            None => hasher.update([0]),
         }
     }
     hasher.update([match properties.paragraph.alignment {
@@ -11815,6 +11916,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
             },
             letter_spacing_unit: None,
             variable_bindings: BTreeMap::new(),
@@ -13337,6 +13439,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -13435,6 +13538,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -13534,6 +13638,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -13624,6 +13729,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -19138,6 +19244,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -19239,6 +19346,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: pixels,
@@ -19334,6 +19442,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: ParagraphStyle {
@@ -20329,6 +20438,7 @@ mod tests {
             open_type_features: Vec::new(),
             text_style_id: None,
             paint_style_id: None,
+            variable_bindings: Default::default(),
             text_decoration_color: None,
         };
         let properties = TextProperties {
@@ -20434,6 +20544,7 @@ mod tests {
                     open_type_features: Vec::new(),
                     text_style_id: None,
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -20457,6 +20568,7 @@ mod tests {
                     open_type_features: Vec::new(),
                     text_style_id: None,
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                     text_decoration_color: None,
                 },
                 TextStyleRun {
@@ -20480,6 +20592,7 @@ mod tests {
                     open_type_features: Vec::new(),
                     text_style_id: None,
                     paint_style_id: None,
+                    variable_bindings: Default::default(),
                     text_decoration_color: None,
                 },
             ],
@@ -20609,6 +20722,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -20687,6 +20801,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -20771,6 +20886,7 @@ mod tests {
             ],
             text_style_id: None,
             paint_style_id: None,
+            variable_bindings: Default::default(),
         };
         let properties = TextProperties {
             runs: vec![style],
@@ -20956,6 +21072,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -21060,6 +21177,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -21424,6 +21542,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             ..TextProperties::default()
@@ -23424,6 +23543,7 @@ mod tests {
                                     open_type_features: Vec::new(),
                                     text_style_id: None,
                                     paint_style_id: None,
+                                    variable_bindings: Default::default(),
                                     text_decoration_color: None,
                                 }],
                                 ..TextProperties::default()
@@ -23633,6 +23753,96 @@ mod tests {
         assert_eq!(
             document.seed_text_style(missing),
             Err(CommandError::InvalidTextStyle)
+        );
+    }
+
+    #[test]
+    fn text_range_variable_bindings_are_typed_hashed_and_protect_variables() {
+        let mut document = Document::with_id(DocumentId(923));
+        let collection = VariableCollectionResource {
+            id: "VC:text-range".into(),
+            key: String::new(),
+            name: "Text range".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:text-size".into(),
+            key: String::new(),
+            name: "Text size".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(24.0))].into(),
+            scopes: vec!["FONT_SIZE".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        document.seed_variable(variable.clone()).unwrap();
+        let mut text = node(923);
+        text.kind = NodeKind::Text;
+        text.text = "A".into();
+        document.seed_node(text).unwrap();
+        let baseline = document.canonical_hash();
+        let mut run = text_style_resource("S:template").style;
+        run.start = 0;
+        run.end = 1;
+        run.variable_bindings
+            .insert("fontSize".into(), variable.id.clone());
+        document
+            .seed_text_properties(
+                NodeId(923),
+                TextProperties {
+                    runs: vec![run.clone()],
+                    ..TextProperties::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), baseline);
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariable {
+                        id: variable.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariable)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariableCollection {
+                        id: collection.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariableCollection)
+        );
+
+        run.variable_bindings = [("fontFamily".into(), variable.id.clone())].into();
+        assert_eq!(
+            document.seed_text_properties(
+                NodeId(923),
+                TextProperties {
+                    runs: vec![run],
+                    ..TextProperties::default()
+                },
+            ),
+            Err(CommandError::InvalidTextProperties)
         );
     }
 

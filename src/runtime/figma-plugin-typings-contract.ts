@@ -130,6 +130,8 @@ export function assertFigmaPluginTypingsContract(
   text.maxLines = 2;
   text.insertCharacters(0, "A", "AFTER");
   text.setRangeFontSize(0, 1, 16);
+  if (floatVariable) text.setRangeBoundVariable(0, 1, "fontSize", floatVariable);
+  void text.getRangeBoundVariable(0, 1, "fontSize");
   text.letterSpacing = { value: 1, unit: "PIXELS" };
   void text.getRangeLetterSpacing(0, 1);
   text.setRangeLetterSpacing(0, 1, { value: -0.25, unit: "PIXELS" });
@@ -205,7 +207,7 @@ export function assertFigmaPluginTypingsContract(
   text.setRangeHyperlink(0, 1, { type: "NODE", value: "1:2" });
   text.setRangeFills(0, 1, [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: .5 }]);
   void text.getRangeFills(0, 1);
-  void text.getStyledTextSegments(["fontName", "fontSize", "fontWeight", "fontStyle", "textCase", "lineHeight", "fills", "listOptions", "listSpacing", "indentation", "paragraphIndent", "paragraphSpacing", "textWrapStyle", "hyperlink"]);
+  void text.getStyledTextSegments(["fontName", "fontSize", "fontWeight", "fontStyle", "textCase", "lineHeight", "fills", "listOptions", "listSpacing", "indentation", "paragraphIndent", "paragraphSpacing", "textWrapStyle", "hyperlink", "boundVariables"]);
   text.deleteCharacters(0, 1);
 
   const action: Action = { type: "URL", url: "https://example.com", openInNewTab: true };

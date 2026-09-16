@@ -129,6 +129,18 @@ pub fn commands_from_payload_with_semantics(
         });
     }
     if engine_semantics_version
+        < makefigma_document_codec::TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_range_variable_bindings)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum:
+                makefigma_document_codec::TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(operation_has_paint_style_links)
     {
@@ -1055,6 +1067,19 @@ fn operation_text_properties(operation: &v1::ResolvedOperation) -> Option<&v1::T
         Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
         _ => None,
     }
+}
+
+fn operation_has_text_range_variable_bindings(operation: &v1::ResolvedOperation) -> bool {
+    operation_text_properties(operation).is_some_and(|properties| {
+        properties
+            .runs
+            .iter()
+            .any(|run| !run.variable_bindings.is_empty())
+            || properties
+                .base_style
+                .as_ref()
+                .is_some_and(|style| !style.variable_bindings.is_empty())
+    })
 }
 
 fn open_type_features_from_proto(
@@ -2337,6 +2362,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(run.open_type_features),
                     text_style_id: run.text_style_id,
                     paint_style_id: run.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(run.variable_bindings)?,
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2456,6 +2482,7 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     open_type_features: open_type_features_from_proto(style.open_type_features),
                     text_style_id: style.text_style_id,
                     paint_style_id: style.paint_style_id,
+                    variable_bindings: style_variable_bindings_from_proto(style.variable_bindings)?,
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
@@ -2520,6 +2547,20 @@ fn text_style_resource_from_proto(
         style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
         paragraph: properties.paragraph,
     })
+}
+
+fn style_variable_bindings_from_proto(
+    bindings: Vec<v1::StyleVariableBinding>,
+) -> Result<BTreeMap<String, String>, ServiceError> {
+    let count = bindings.len();
+    let result = bindings
+        .into_iter()
+        .map(|binding| (binding.field, binding.variable_id))
+        .collect::<BTreeMap<_, _>>();
+    if result.len() != count {
+        return Err(ServiceError::InvalidEnvelope);
+    }
+    Ok(result)
 }
 
 fn paint_style_resource_from_proto(
@@ -4135,6 +4176,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -4225,6 +4267,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
                 ..Default::default()
             }),
@@ -4279,6 +4322,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
                 ..Default::default()
             }],
@@ -4587,6 +4631,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4655,6 +4700,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4731,6 +4777,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4810,6 +4857,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4889,6 +4937,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: None,
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -4965,6 +5014,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 text_decoration_color: Some(v1::TextDecorationColor {
                     color: Some(color()),
                     visible: true,
@@ -5045,6 +5095,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -5098,6 +5149,7 @@ mod tests {
                 open_type_features: Vec::new(),
                 text_style_id: None,
                 paint_style_id: None,
+                variable_bindings: Default::default(),
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -5219,6 +5271,7 @@ mod tests {
                 font_size: 16.0,
                 font_weight: 400,
                 paint_style_id: Some("S:accent".into()),
+                variable_bindings: Default::default(),
                 ..Default::default()
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -5246,6 +5299,59 @@ mod tests {
         assert!(
             matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::TEXT_PAINT_STYLE_LINK_ENGINE_SEMANTICS_VERSION).unwrap().as_slice(), [Command::SetTextProperties { properties, .. }] if properties.runs[0].paint_style_id.as_deref() == Some("S:accent"))
         );
+    }
+
+    #[test]
+    fn text_range_variable_binding_operations_require_semantics_fifty_five() {
+        let properties = v1::TextProperties {
+            runs: vec![v1::TextStyleRun {
+                start: 0,
+                end: 1,
+                font_size: 24.0,
+                font_weight: 400,
+                variable_bindings: vec![v1::StyleVariableBinding {
+                    field: "fontSize".into(),
+                    variable_id: "V:size".into(),
+                }],
+                ..Default::default()
+            }],
+            paragraph: Some(v1::ParagraphStyle {
+                alignment: v1::TextAlignment::Left as i32,
+                line_height: Some(24.0),
+                ..Default::default()
+            }),
+            auto_size: v1::TextAutoSize::Fixed as i32,
+            ..Default::default()
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![v1::ResolvedOperation {
+                kind: Some(v1::resolved_operation::Kind::SetTextProperties(
+                    v1::SetTextProperties {
+                        node_id: 17_u128.to_be_bytes().to_vec(),
+                        properties: Some(properties),
+                    },
+                )),
+            }],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0].variable_bindings.get("fontSize").map(String::as_str) == Some("V:size")
+        ));
     }
 
     #[test]

@@ -580,6 +580,9 @@ message TextStyleRun {
   // Figma PaintStyle identity for this text range's fills. Presence requires
   // engine semantics 47 and is independent of the owning node's fill link.
   optional string paint_style_id = 21;
+  // Sorted, typed Variable bindings for Figma's range-bindable text fields.
+  // Presence requires engine semantics 55.
+  repeated StyleVariableBinding variable_bindings = 22;
 }
 
 message OpenTypeFeatureSetting {

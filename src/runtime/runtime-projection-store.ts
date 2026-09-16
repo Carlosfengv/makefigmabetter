@@ -1,7 +1,7 @@
 import { runtimeError } from "./runtime-errors";
 import { validRuntimeStyleDocumentationLinks } from "./runtime-style-metadata";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
-import type { DocumentPaintStyleResource, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
+import type { DocumentPaintStyleResource, DocumentTextProperties, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 
 export type RuntimeProjectionNode = Readonly<{
@@ -159,6 +159,7 @@ export class RuntimeProjectionStore {
       this.listPaintStyles(),
       this.listVariableCollections(),
       this.listVariables(),
+      [...this.composedNodeMap().values()],
       transaction.operations,
       transaction.transactionId,
     );
@@ -315,6 +316,7 @@ export class RuntimeProjectionStore {
         [...paintStyles.values()],
         [...collections.values()],
         [...variables.values()],
+        [...nodes.values()],
         transaction.operations,
         transaction.transactionId,
       );
@@ -329,6 +331,7 @@ function validateResourceOperations(
   basePaintStyles: readonly DocumentPaintStyleResource[],
   baseCollections: readonly DocumentVariableCollectionResource[],
   baseVariables: readonly DocumentVariableResource[],
+  baseNodes: readonly RuntimeProjectionNode[],
   operations: readonly PendingProjectionOperation[],
   transactionId: string,
 ): void {
@@ -336,6 +339,7 @@ function validateResourceOperations(
   const paintStyles = new Map(basePaintStyles.map((value) => [value.id, value]));
   const collections = new Map(baseCollections.map((value) => [value.id, value]));
   const variables = new Map(baseVariables.map((value) => [value.id, value]));
+  const bindingNodes = effectiveVariableBindingNodes(baseNodes, operations);
   for (const operation of operations) {
     if (operation.type === "registerTextStyle") {
       const value = operation.style;
@@ -406,6 +410,7 @@ function validateResourceOperations(
       if (variables.get(operation.id)?.remote !== false
         || [...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).includes(operation.id))
         || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => binding.variableId === operation.id))
+        || bindingNodes.some((node) => textPropertiesBindVariable(node.textProperties as DocumentTextProperties | undefined, operation.id))
         || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
@@ -426,11 +431,38 @@ function validateResourceOperations(
       const removed = new Set([...variables.values()].filter((value) => value.collectionId === operation.id).map((value) => value.id));
       if ([...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).some((id) => removed.has(id)))
         || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => removed.has(binding.variableId)))
+        || bindingNodes.some((node) => textPropertiesBindAnyVariable(node.textProperties as DocumentTextProperties | undefined, removed))
         || [...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       removed.forEach((id) => variables.delete(id));
       collections.delete(operation.id);
     }
   }
+}
+
+function textPropertiesBindVariable(properties: DocumentTextProperties | undefined, variableId: string): boolean {
+  return properties?.runs.some((run) => Object.values(run.variableBindings ?? {}).includes(variableId)) === true
+    || Object.values(properties?.baseStyle?.variableBindings ?? {}).includes(variableId);
+}
+
+function effectiveVariableBindingNodes(
+  baseNodes: readonly RuntimeProjectionNode[],
+  operations: readonly PendingProjectionOperation[],
+): readonly RuntimeProjectionNode[] {
+  const nodes = new Map(baseNodes.map((node) => [node.id, node]));
+  for (const operation of operations) {
+    if (operation.type === "create") nodes.set(operation.node.id, operation.node);
+    else if (operation.type === "update") {
+      const node = nodes.get(operation.nodeId);
+      if (node) nodes.set(operation.nodeId, { ...node, ...operation.patch });
+    } else if (operation.type === "remove") nodes.delete(operation.nodeId);
+    else if ("replacement" in operation) nodes.set(operation.replacement.id, operation.replacement);
+  }
+  return [...nodes.values()];
+}
+
+function textPropertiesBindAnyVariable(properties: DocumentTextProperties | undefined, variableIds: ReadonlySet<string>): boolean {
+  return properties?.runs.some((run) => Object.values(run.variableBindings ?? {}).some((id) => variableIds.has(id))) === true
+    || Object.values(properties?.baseStyle?.variableBindings ?? {}).some((id) => variableIds.has(id));
 }
 
 function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource): boolean {

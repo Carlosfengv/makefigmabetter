@@ -821,7 +821,14 @@ export interface TextStyleRun {
    * Figma PaintStyle identity for this text range's fills. Presence requires
    * engine semantics 47 and is independent of the owning node's fill link.
    */
-  paintStyleId?: string | undefined;
+  paintStyleId?:
+    | string
+    | undefined;
+  /**
+   * Sorted, typed Variable bindings for Figma's range-bindable text fields.
+   * Presence requires engine semantics 55.
+   */
+  variableBindings: StyleVariableBinding[];
 }
 
 export interface OpenTypeFeatureSetting {
@@ -4894,6 +4901,7 @@ function createBaseTextStyleRun(): TextStyleRun {
     openTypeFeatures: [],
     textStyleId: undefined,
     paintStyleId: undefined,
+    variableBindings: [],
   };
 }
 
@@ -4961,6 +4969,9 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     }
     if (message.paintStyleId !== undefined) {
       writer.uint32(170).string(message.paintStyleId);
+    }
+    for (const v of message.variableBindings) {
+      StyleVariableBinding.encode(v!, writer.uint32(178).fork()).join();
     }
     return writer;
   },
@@ -5140,6 +5151,14 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
           message.paintStyleId = reader.string();
           continue;
         }
+        case 22: {
+          if (tag !== 178) {
+            break;
+          }
+
+          message.variableBindings.push(StyleVariableBinding.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5188,6 +5207,7 @@ export const TextStyleRun: MessageFns<TextStyleRun> = {
     message.openTypeFeatures = object.openTypeFeatures?.map((e) => OpenTypeFeatureSetting.fromPartial(e)) || [];
     message.textStyleId = object.textStyleId ?? undefined;
     message.paintStyleId = object.paintStyleId ?? undefined;
+    message.variableBindings = object.variableBindings?.map((e) => StyleVariableBinding.fromPartial(e)) || [];
     return message;
   },
 };

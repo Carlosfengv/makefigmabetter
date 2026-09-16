@@ -300,6 +300,8 @@ export interface DocumentTextStyle {
   textStyleId?: string;
   /** Linked Figma PaintStyle identity for this range's fills. */
   paintStyleId?: string;
+  /** Figma Variable aliases keyed by the eight range-bindable text fields. */
+  variableBindings?: Readonly<Record<string, string>>;
 }
 
 export interface DocumentTextProperties {
