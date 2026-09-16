@@ -225,6 +225,8 @@ export interface RuntimeNodeHost {
   getSharedPluginData(nodeId: string, namespace: string, key: string): string;
   setSharedPluginData(nodeId: string, namespace: string, key: string, value: string): void;
   getSharedPluginDataKeys(nodeId: string, namespace: string): readonly string[];
+  getRelaunchData(nodeId: string): Readonly<Record<string, string>>;
+  setRelaunchData(nodeId: string, data: Readonly<Record<string, string>>): void;
 }
 
 export type RuntimeComponentPropertyType = "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT";
@@ -3377,6 +3379,17 @@ export class RuntimeNodeProxy {
   getSharedPluginDataKeys(namespace: string): readonly string[] {
     this.assertLive();
     return this.host.getSharedPluginDataKeys(this.handle.nodeId, namespace);
+  }
+
+  getRelaunchData(): Readonly<Record<string, string>> {
+    this.assertLive();
+    return this.host.getRelaunchData(this.handle.nodeId);
+  }
+
+  setRelaunchData(data: Readonly<Record<string, string>>): void {
+    this.assertLive();
+    this.assertMutable();
+    this.host.setRelaunchData(this.handle.nodeId, data);
   }
 
   /** Figma-shaped M4D export entry. The result is derived from a confirmed,

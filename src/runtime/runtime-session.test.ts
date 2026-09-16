@@ -59,6 +59,49 @@ describe("M1 RuntimeSession", () => {
     expect(unscopedFrame.getSharedPluginData("com.example.tokens", "background")).toBe("#ffffff");
   });
 
+  it("replaces plugin-scoped relaunch data without disturbing other plugins", async () => {
+    const alphaTransport = new InMemoryTransport(initial);
+    const alpha = new RuntimeSession({ sessionId: "relaunch-a", pluginId: "com.example.alpha", projection: initial, transport: alphaTransport, scheduleMicrotask: () => {} });
+    const alphaFrame = (await alpha.getNodeByIdAsync("frame"))!;
+
+    expect(alphaFrame.getRelaunchData()).toEqual({});
+    alphaFrame.setRelaunchData({ open: "", edit: "Edit this node" });
+    expect(alphaFrame.getRelaunchData()).toEqual({ edit: "Edit this node", open: "" });
+    const transactionId = alpha.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = alpha.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => alphaFrame.setRelaunchData({ edit: "x".repeat(1001) })), "RESOURCE_LIMIT")).toBe(true);
+    expect(isRuntimeError(captureError(() => alphaFrame.setRelaunchData({ "": "invalid" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(alpha.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+    await alpha.commitAsync();
+
+    const betaProjection = alphaTransport.currentProjection();
+    const betaTransport = new InMemoryTransport(betaProjection);
+    const beta = new RuntimeSession({ sessionId: "relaunch-b", pluginId: "com.example.beta", projection: betaProjection, transport: betaTransport, scheduleMicrotask: () => {} });
+    const betaFrame = (await beta.getNodeByIdAsync("frame"))!;
+    expect(betaFrame.getRelaunchData()).toEqual({});
+    betaFrame.setRelaunchData({ inspect: "Inspect this node" });
+    expect(betaFrame.getRelaunchData()).toEqual({ inspect: "Inspect this node" });
+    await beta.commitAsync();
+
+    const combinedProjection = betaTransport.currentProjection();
+    const alphaAgainTransport = new InMemoryTransport(combinedProjection);
+    const alphaAgain = new RuntimeSession({ sessionId: "relaunch-a-again", pluginId: "com.example.alpha", projection: combinedProjection, transport: alphaAgainTransport, scheduleMicrotask: () => {} });
+    const alphaFrameAgain = (await alphaAgain.getNodeByIdAsync("frame"))!;
+    expect(alphaFrameAgain.getRelaunchData()).toEqual({ edit: "Edit this node", open: "" });
+    alphaFrameAgain.setRelaunchData({});
+    expect(alphaFrameAgain.getRelaunchData()).toEqual({});
+    await alphaAgain.commitAsync();
+
+    const betaAgainProjection = alphaAgainTransport.currentProjection();
+    const betaAgain = new RuntimeSession({ sessionId: "relaunch-b-again", pluginId: "com.example.beta", projection: betaAgainProjection, transport: new InMemoryTransport(betaAgainProjection), scheduleMicrotask: () => {} });
+    expect((await betaAgain.getNodeByIdAsync("frame"))!.getRelaunchData()).toEqual({ inspect: "Inspect this node" });
+
+    const unscoped = new RuntimeSession({ sessionId: "relaunch-none", projection: combinedProjection, transport: new InMemoryTransport(combinedProjection), scheduleMicrotask: () => {} });
+    const unscopedFrame = (await unscoped.getNodeByIdAsync("frame"))!;
+    expect(isRuntimeError(captureError(() => unscopedFrame.getRelaunchData()), "PERMISSION_DENIED")).toBe(true);
+    expect(isRuntimeError(captureError(() => unscopedFrame.setRelaunchData({ open: "" })), "PERMISSION_DENIED")).toBe(true);
+  });
+
   it("projects Figma-shaped fill and stroke stacks before Ack and validates image hashes", async () => {
     const projection: RuntimeProjection = {
       revision: 0,

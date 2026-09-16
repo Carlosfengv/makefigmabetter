@@ -95,8 +95,10 @@ const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
 ]);
 const RUNTIME_PLUGIN_DATA_PREFIX = "figma.plugin-data.v1/";
 const RUNTIME_SHARED_PLUGIN_DATA_PREFIX = "figma.shared-plugin-data.v1/";
+const RUNTIME_RELAUNCH_DATA_PREFIX = "figma.relaunch-data.v1/";
 const MAX_RUNTIME_PLUGIN_DATA_ENTRIES = 64;
 const MAX_RUNTIME_PLUGIN_DATA_BYTES = 64 * 1024;
+const MAX_RUNTIME_RELAUNCH_DESCRIPTION_LENGTH = 1000;
 
 export type RuntimeSessionOptions = Readonly<{
   sessionId: string;
@@ -2642,6 +2644,52 @@ export class RuntimeSession implements RuntimeContainerHost {
       .sort((left, right) => left.localeCompare(right));
   }
 
+  getRelaunchData(nodeId: string): Readonly<Record<string, string>> {
+    const node = this.runtimePluginDataNode(nodeId);
+    const bytes = node.extensions && typeof node.extensions === "object"
+      ? (node.extensions as Record<string, unknown>)[this.runtimeRelaunchDataStorageKey()]
+      : undefined;
+    if (!Array.isArray(bytes) || bytes.length > MAX_RUNTIME_PLUGIN_DATA_BYTES || !bytes.every(validRuntimeExtensionByte)) return {};
+    try {
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const entries = Object.entries(parsed);
+      if (entries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES || entries.some(([command, description]) => (
+        !validRuntimePluginDataPart(command)
+        || typeof description !== "string"
+        || description.length > MAX_RUNTIME_RELAUNCH_DESCRIPTION_LENGTH
+      ))) return {};
+      return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right))) as Readonly<Record<string, string>>;
+    } catch {
+      return {};
+    }
+  }
+
+  setRelaunchData(nodeId: string, data: Readonly<Record<string, string>>): void {
+    const node = this.runtimePluginDataNode(nodeId);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const prototype = Object.getPrototypeOf(data);
+    if (prototype !== Object.prototype && prototype !== null) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const entries = Object.entries(data);
+    if (entries.length > MAX_RUNTIME_PLUGIN_DATA_ENTRIES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    if (entries.some(([command, description]) => !validRuntimePluginDataPart(command) || typeof description !== "string")) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    if (entries.some(([, description]) => description.length > MAX_RUNTIME_RELAUNCH_DESCRIPTION_LENGTH)) {
+      throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    }
+    const sortedData = Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
+    const encoded = [...new TextEncoder().encode(JSON.stringify(sortedData))];
+    if (encoded.length > MAX_RUNTIME_PLUGIN_DATA_BYTES) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+      ? structuredClone(node.extensions as Record<string, number[]>)
+      : {};
+    const storageKey = this.runtimeRelaunchDataStorageKey();
+    if (entries.length) extensions[storageKey] = encoded;
+    else delete extensions[storageKey];
+    this.enqueueUpdate(nodeId, { extensions });
+  }
+
   private runtimePluginDataNode(nodeId: string): RuntimeProjectionNode {
     const node = this.runtimeDataNode(nodeId);
     this.runtimePluginDataPrefix();
@@ -2667,6 +2715,11 @@ export class RuntimeSession implements RuntimeContainerHost {
   private runtimeSharedPluginDataPrefix(namespace: string): string {
     if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
     return `${RUNTIME_SHARED_PLUGIN_DATA_PREFIX}${namespace}/`;
+  }
+
+  private runtimeRelaunchDataStorageKey(): string {
+    if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
+    return `${RUNTIME_RELAUNCH_DATA_PREFIX}${this.pluginId}`;
   }
 
   private validRuntimePluginDataKey(key: string): string {

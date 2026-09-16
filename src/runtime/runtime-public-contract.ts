@@ -74,6 +74,8 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void rectangle.getSharedPluginData("namespace", "key");
   rectangle.setSharedPluginData("namespace", "key", "value");
   void rectangle.getSharedPluginDataKeys("namespace");
+  rectangle.setRelaunchData({ edit: "Edit this node", open: "" });
+  void rectangle.getRelaunchData();
   const highlight = runtime.currentPage.findOne((candidate) => candidate.type === "HIGHLIGHT");
   if (highlight?.type === "HIGHLIGHT") {
     void highlight.vectorPaths;
