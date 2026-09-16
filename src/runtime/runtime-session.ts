@@ -13,6 +13,7 @@ import { RuntimeTransactionClient, type RuntimeTransactionTransport } from "./ru
 import {
   createId,
   type DocumentComponentMetadata,
+  type DocumentComponentSetMetadata,
   type DocumentAsset,
   type DocumentBooleanOperation,
   type DocumentVectorPath,
@@ -60,6 +61,11 @@ const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
 const INSTANCE_CLONE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
   "INSTANCE", "SLOT", "CONNECTOR", "SHAPE_WITH_TEXT", "TEXT_PATH", "TRANSFORM_GROUP",
+]);
+const RUNTIME_CLONE_TYPES = new Set<M1SceneNodeType>([
+  "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
+  "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
+  "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET",
 ]);
 
 export type RuntimeSessionOptions = Readonly<{
@@ -1324,22 +1330,133 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   cloneNode(nodeId: string): RuntimeNodeProxy {
+    this.assertOpen();
     const source = this.projectionStore.getNode(nodeId);
     if (!source || source.removed === true) throw runtimeError("NODE_REMOVED", { nodeId });
-    const id = this.createId();
-    const copy = structuredClone(source) as Record<string, unknown>;
-    delete copy.id;
-    delete copy.removed;
-    const clone: RuntimeProjectionNode = {
-      ...structuredClone(copy),
-      id,
-      type: source.type,
-      parentId: source.parentId,
-      name: `${typeof source.name === "string" ? source.name : source.type} copy`,
-      siblingIndex: this.siblingsOf(source.parentId).length,
+    if (!RUNTIME_CLONE_TYPES.has(source.type as M1SceneNodeType)) {
+      throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId });
+    }
+
+    const subtree: RuntimeProjectionNode[] = [];
+    const visited = new Set<string>();
+    const visit = (node: RuntimeProjectionNode): void => {
+      if (visited.has(node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
+      visited.add(node.id);
+      if (subtree.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+      if (!RUNTIME_CLONE_TYPES.has(node.type as M1SceneNodeType)) {
+        throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: node.id });
+      }
+      subtree.push(node);
+      this.siblingsOf(node.id).forEach(visit);
     };
-    this.enqueueOperations([{ type: "create", node: clone }]);
-    return this.proxyFor(id);
+    visit(source);
+
+    const currentPage = this.projectionStore.getNode(this.currentPageId)!;
+    const sourceWorld = runtimeWorldTransformForNode((id) => this.projectionStore.getNode(id), source);
+    const pageWorld = runtimeWorldTransformForNode((id) => this.projectionStore.getNode(id), currentPage);
+    const pageInverse = pageWorld && invertRuntimeTransform(pageWorld);
+    if (!sourceWorld || !pageInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
+    const rootTransform = multiplyRuntimeTransforms(pageInverse, sourceWorld);
+    const pageSiblings = this.siblingsOf(this.currentPageId);
+    const rootPositionId = positionIdForLayerInsertion(pageSiblings, pageSiblings.length);
+    if (!rootPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+
+    const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
+    const clonedComponentIds = new Set(subtree
+      .filter((node) => node.type === "COMPONENT" && (node.id === source.id || (source.type === "COMPONENT_SET" && node.parentId === source.id)))
+      .map((node) => node.id));
+    const instanceRoots = new Set(subtree
+      .filter((node) => node.type === "COMPONENT" && !clonedComponentIds.has(node.id))
+      .map((node) => node.id));
+    const instanceRootFor = new Map<string, string>();
+    for (const node of subtree) {
+      const instanceRootId = instanceRoots.has(node.id) ? node.id : node.parentId ? instanceRootFor.get(node.parentId) : undefined;
+      if (instanceRootId) instanceRootFor.set(node.id, instanceRootId);
+    }
+    const operations = subtree.map((original): PendingProjectionOperation => {
+      const id = ids.get(original.id)!;
+      const isRoot = original.id === source.id;
+      const instanceRootId = instanceRootFor.get(original.id);
+      const becomesInstance = instanceRootId === original.id;
+      const type = isRoot && original.type === "SLOT" ? "FRAME" : becomesInstance ? "INSTANCE" : original.type;
+      const clone: Record<string, unknown> = {
+        ...structuredClone(original),
+        id,
+        type,
+        parentId: isRoot ? this.currentPageId : ids.get(original.parentId!),
+        pageId: this.currentPageId,
+        siblingIndex: isRoot ? pageSiblings.length : original.siblingIndex,
+        positionId: isRoot ? rootPositionId : original.positionId,
+        x: isRoot ? rootTransform.e : original.x,
+        y: isRoot ? rootTransform.f : original.y,
+        rotation: isRoot ? Math.atan2(rootTransform.b, rootTransform.a) * 180 / Math.PI : original.rotation,
+        relativeTransform: isRoot ? rootTransform : original.relativeTransform,
+        removed: false,
+      };
+      if (instanceRootId) {
+        const extensions = clone.extensions && typeof clone.extensions === "object" && !Array.isArray(clone.extensions)
+          ? structuredClone(clone.extensions as Record<string, number[]>)
+          : {};
+        delete extensions["figma.component.metadata.v1"];
+        extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(original.id)];
+        clone.extensions = extensions;
+      }
+      if (clone.vectorPath && typeof clone.vectorPath === "object") {
+        const path = clone.vectorPath as DocumentVectorPath;
+        clone.vectorPath = {
+          ...path,
+          subpaths: path.subpaths.map((subpath) => ({
+            ...subpath,
+            points: subpath.points.map((point) => ({ ...point, id: this.createId() })),
+          })),
+        };
+      }
+      if (becomesInstance) {
+        const metadata = original.componentMetadata as DocumentComponentMetadata | undefined;
+        if (!metadata) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: original.id });
+        delete clone.componentMetadata;
+        clone.instanceMetadata = {
+          mainComponentId: original.id,
+          scaleFactor: 1,
+          componentProperties: Object.fromEntries(Object.entries(metadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
+            definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]])),
+          overrides: [],
+          isExposedInstance: false,
+        };
+      } else if (clone.componentMetadata && typeof clone.componentMetadata === "object") {
+        clone.componentMetadata = { ...(clone.componentMetadata as DocumentComponentMetadata), key: id, remote: false };
+      }
+      if (clone.componentSetMetadata && typeof clone.componentSetMetadata === "object") {
+        clone.componentSetMetadata = { ...(clone.componentSetMetadata as DocumentComponentSetMetadata), key: id, remote: false };
+      }
+      if (clone.instanceMetadata && typeof clone.instanceMetadata === "object") {
+        const metadata = clone.instanceMetadata as Record<string, unknown>;
+        const mainComponentId = typeof metadata.mainComponentId === "string" && clonedComponentIds.has(metadata.mainComponentId)
+          ? ids.get(metadata.mainComponentId)!
+          : metadata.mainComponentId;
+        clone.instanceMetadata = { ...metadata, mainComponentId };
+      }
+      if (clone.slotMetadata && typeof clone.slotMetadata === "object") {
+        const metadata = clone.slotMetadata as Record<string, unknown>;
+        const sourceSlotId = typeof metadata.sourceSlotId === "string" ? ids.get(metadata.sourceSlotId) ?? metadata.sourceSlotId : metadata.sourceSlotId;
+        if (type === "FRAME") delete clone.slotMetadata;
+        else clone.slotMetadata = { ...metadata, sourceSlotId };
+      }
+      if (type === "FRAME" && original.type === "SLOT") {
+        const extensions = clone.extensions && typeof clone.extensions === "object" && !Array.isArray(clone.extensions)
+          ? structuredClone(clone.extensions as Record<string, number[]>)
+          : {};
+        delete extensions["figma.slot.metadata.v1"];
+        clone.extensions = extensions;
+      }
+      if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") {
+        clone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
+      }
+      if (Array.isArray(clone.reactions)) clone.reactions = remapRuntimeReactions(clone.reactions, ids);
+      return { type: "create", node: clone as RuntimeProjectionNode };
+    });
+    this.enqueueOperations(operations);
+    return this.proxyFor(ids.get(source.id)!);
   }
 
   childrenOf(parentId: string): readonly RuntimeNodeProxy[] {
@@ -1691,6 +1808,37 @@ function instanceMainComponentId(node: RuntimeProjectionNode): string | undefine
   if (!metadata || typeof metadata !== "object") return undefined;
   const mainComponentId = (metadata as { mainComponentId?: unknown }).mainComponentId;
   return typeof mainComponentId === "string" ? mainComponentId : undefined;
+}
+
+function remapRuntimeConnectorMetadata(
+  metadata: DocumentConnectorMetadata,
+  ids: ReadonlyMap<string, string>,
+): DocumentConnectorMetadata {
+  const remapEndpoint = (endpoint: DocumentConnectorMetadata["start"]): DocumentConnectorMetadata["start"] => ({
+    ...structuredClone(endpoint),
+    ...(endpoint.endpointNodeId ? { endpointNodeId: ids.get(endpoint.endpointNodeId) ?? endpoint.endpointNodeId } : {}),
+  });
+  return { ...structuredClone(metadata), start: remapEndpoint(metadata.start), end: remapEndpoint(metadata.end) };
+}
+
+function remapRuntimeReactions(reactions: readonly unknown[], ids: ReadonlyMap<string, string>): unknown[] {
+  return reactions.map((reaction) => {
+    if (!reaction || typeof reaction !== "object" || !Array.isArray((reaction as { actions?: unknown }).actions)) {
+      return structuredClone(reaction);
+    }
+    const value = reaction as { actions: unknown[] } & Record<string, unknown>;
+    return {
+      ...structuredClone(value),
+      actions: value.actions.map((action) => {
+        if (!action || typeof action !== "object") return structuredClone(action);
+        const next = structuredClone(action) as Record<string, unknown>;
+        if (typeof next.destinationId === "string" && ids.has(next.destinationId)) {
+          next.destinationId = ids.get(next.destinationId)!;
+        }
+        return next;
+      }),
+    };
+  });
 }
 
 function runtimeOwnsAutoLayout(node: RuntimeProjectionNode): boolean {

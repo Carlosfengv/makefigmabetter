@@ -23,6 +23,11 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("node.create-runtime")?.property).toContain("ComponentNode.createInstance");
     expect(runtimeCapability("node.create-runtime")?.property).toContain("createComponentFromNode");
     expect(runtimeCapability("node.sync-write")).toMatchObject({ status: "partial" });
+    expect(runtimeCapability("node.clone-runtime")).toMatchObject({
+      status: "partial",
+      property: "clone",
+      nodeTypes: expect.arrayContaining(["FRAME", "COMPONENT", "SLOT", "EMBED", "MEDIA"]),
+    });
     expect(runtimeCapability("node.sync-write")?.property).not.toMatch(/fills|strokes/);
     expect(runtimeCapability("paint-stack.runtime")).toMatchObject({ property: "fills" });
     expect(runtimeCapability("paint-stack.runtime")?.nodeTypes).toContain("TEXT");

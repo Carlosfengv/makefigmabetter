@@ -343,6 +343,8 @@ export function assertFigmaPluginTypingsContract(
   ];
   const media: MediaNode = figma.createGif("admitted-gif-hash");
   void media.mediaData.hash;
+  const clonedFrame: FrameNode = figma.createFrame().clone();
+  void clonedFrame.children;
   const preview: Promise<EmbedNode | LinkUnfurlNode> = figma.createLinkPreviewAsync("https://example.com");
   void preview;
 

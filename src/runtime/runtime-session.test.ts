@@ -317,10 +317,154 @@ describe("M1 RuntimeSession", () => {
     const clone = text.clone();
 
     expect(text.parent).toBe(frame);
-    expect(frame.children).toEqual([text, clone]);
+    expect(frame.children).toEqual([text]);
     expect(session.currentPage.findAll(() => true).map((node) => node.id)).toEqual(["frame", frame.id, text.id, clone.id]);
-    expect(clone.parent).toBe(frame);
-    expect(clone.name).toBe("Text copy");
+    expect(clone.parent).toBe(session.currentPage);
+    expect(clone.name).toBe("Text");
+  });
+
+  it("deep-clones a container into currentPage and remaps internal identities", async () => {
+    const transport = new InMemoryTransport(initial);
+    let nextId = 0;
+    const session = new RuntimeSession({
+      sessionId: "deep-clone",
+      projection: initial,
+      transport,
+      scheduleMicrotask: () => {},
+      createId: () => `clone-${++nextId}`,
+    });
+    const frame = session.createFrame();
+    frame.x = 100;
+    frame.y = 50;
+    const rectangle = session.createRectangle();
+    const connector = session.createConnector();
+    const vector = session.createVector();
+    frame.appendChild(rectangle);
+    frame.appendChild(connector);
+    frame.appendChild(vector);
+    rectangle.x = 12;
+    rectangle.y = 8;
+    connector.connectorStart = { endpointNodeId: rectangle.id, magnet: "AUTO" };
+    const clone = frame.clone();
+
+    expect(clone).toBeInstanceOf(RuntimeContainerNodeProxy);
+    const cloneChildren = (clone as RuntimeContainerNodeProxy).children;
+    expect(clone.parent).toBe(session.currentPage);
+    expect(clone).toMatchObject({ type: "FRAME", x: 100, y: 50, name: "Frame" });
+    expect(cloneChildren.map((node) => node.type)).toEqual(["RECTANGLE", "CONNECTOR", "VECTOR"]);
+    expect(cloneChildren.map((node) => node.id)).not.toEqual([rectangle.id, connector.id, vector.id]);
+    expect(cloneChildren[1]!.connectorStart).toEqual({ endpointNodeId: cloneChildren[0]!.id, magnet: "AUTO" });
+    const sourcePointIds = (session.projectionStore.getNode(vector.id)?.vectorPath as { subpaths: Array<{ points: Array<{ id: string }> }> }).subpaths[0]!.points.map((point) => point.id);
+    const clonedPointIds = (session.projectionStore.getNode(cloneChildren[2]!.id)?.vectorPath as { subpaths: Array<{ points: Array<{ id: string }> }> }).subpaths[0]!.points.map((point) => point.id);
+    expect(clonedPointIds).not.toEqual(sourcePointIds);
+
+    await session.commitAsync();
+    expect((await session.getNodeByIdAsync(clone.id))?.removed).not.toBe(true);
+  });
+
+  it("gives cloned components fresh local publication identities", () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const component = session.createComponent();
+    component.appendChild(session.createRectangle());
+    const clone = component.clone();
+
+    expect(clone).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(clone).toMatchObject({ type: "COMPONENT", key: clone.id, remote: false });
+    expect((clone as RuntimeContainerNodeProxy).children).toHaveLength(1);
+    expect(clone.id).not.toBe(component.id);
+    expect(clone.key).not.toBe(component.key);
+  });
+
+  it("duplicates ComponentSet variants as new Components", () => {
+    const componentMetadata = {
+      key: "variant-key",
+      remote: false,
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      componentPropertyDefinitions: {},
+    };
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        {
+          id: "set",
+          type: "COMPONENT_SET",
+          name: "Button",
+          parentId: "page",
+          siblingIndex: 1,
+          x: 120,
+          y: 40,
+          width: 200,
+          height: 100,
+          componentSetMetadata: { key: "set-key", remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], variantGroupProperties: {} },
+        },
+        { id: "variant", type: "COMPONENT", name: "State=Default", parentId: "set", siblingIndex: 0, width: 100, height: 40, componentMetadata },
+        { id: "variant-child", type: "RECTANGLE", name: "Surface", parentId: "variant", siblingIndex: 0, width: 100, height: 40 },
+      ],
+    };
+    let sequence = 0;
+    const session = new RuntimeSession({ sessionId: "component-set-clone", projection, transport: new InMemoryTransport(projection), createId: () => `set-clone-${++sequence}`, scheduleMicrotask: () => {} });
+    const source = session.currentPage.children.find((node) => node.id === "set") as RuntimeContainerNodeProxy;
+    const clone = source.clone() as RuntimeContainerNodeProxy;
+    const clonedVariant = clone.children[0] as RuntimeContainerNodeProxy;
+
+    expect(clone).toMatchObject({ type: "COMPONENT_SET", key: clone.id, remote: false });
+    expect(clonedVariant).toMatchObject({ type: "COMPONENT", key: clonedVariant.id, remote: false });
+    expect(clonedVariant.children).toHaveLength(1);
+    expect(clonedVariant.key).not.toBe("variant-key");
+  });
+
+  it("turns a nested component into an instance of the original when cloning a frame", async () => {
+    const session = sessionFor(new InMemoryTransport(initial));
+    const frame = session.createFrame();
+    const component = session.createComponent();
+    component.appendChild(session.createRectangle());
+    frame.appendChild(component);
+
+    const clone = frame.clone() as RuntimeContainerNodeProxy;
+    const clonedInstance = clone.children[0] as RuntimeContainerNodeProxy;
+
+    expect(clonedInstance.type).toBe("INSTANCE");
+    expect(await clonedInstance.getMainComponentAsync()).toBe(component);
+    expect(clonedInstance.children).toHaveLength(1);
+    expect(clonedInstance.children[0]?.type).toBe("RECTANGLE");
+  });
+
+  it("returns a plain Frame for a cloned Slot and rejects unsupported hierarchy clones", () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [...initial.nodes, {
+        id: "slot",
+        type: "SLOT",
+        name: "Content",
+        parentId: "page",
+        siblingIndex: 1,
+        x: 10,
+        y: 20,
+        width: 100,
+        height: 100,
+        slotMetadata: { sourceSlotId: "source-slot" },
+        extensions: { "figma.slot.metadata.v1": [1, 2, 3] },
+      }],
+    };
+    const session = new RuntimeSession({
+      sessionId: "slot-clone",
+      projection,
+      transport: new InMemoryTransport(projection),
+      createId: () => "slot-clone",
+      scheduleMicrotask: () => {},
+    });
+    const slot = session.currentPage.children.find((node) => node.id === "slot")!;
+    const clone = slot.clone();
+
+    expect(clone.type).toBe("FRAME");
+    expect(session.projectionStore.getNode(clone.id)).not.toHaveProperty("slotMetadata");
+    expect(session.projectionStore.getNode(clone.id)?.extensions).not.toHaveProperty("figma.slot.metadata.v1");
+    const transactionCount = session.projectionStore.pendingTransactionIds().length;
+    expect(isRuntimeError(captureError(() => session.currentPage.clone()), "UNSUPPORTED_NODE_TYPE")).toBe(true);
+    expect(session.projectionStore.pendingTransactionIds()).toHaveLength(transactionCount);
   });
 
   it("creates local components and paint-free slice export regions through the transaction fence", async () => {

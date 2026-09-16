@@ -74,6 +74,16 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     limitation: "M2/W12 supports P0 geometry, NONE/HEIGHT/WIDTH_AND_HEIGHT textAutoResize, DISABLED/ENDING textTruncation with nullable positive maxLines, Text range writes, presence-bearing multi-paint Solid/Linear/Radial/Angular/Diamond/Image getRangeFills/setRangeFills with hidden, opacity, blend and mixed-stack reads, and Canonical IMAGE binding through the Runtime transaction fence. The node-specific fill and stroke surfaces are declared separately; the deprecated textAutoResize TRUNCATE spelling and remaining text mixins stay staged.",
   },
   {
+    id: "node.clone-runtime",
+    editorTypes: ["figma", "figjam"],
+    documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
+    nodeTypes: ["FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE", "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT", "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET"],
+    property: "clone",
+    surface: "write",
+    status: "partial",
+    limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame. Page, Slide hierarchy, TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
+  },
+  {
     id: "paint-stack.runtime",
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,

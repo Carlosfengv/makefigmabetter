@@ -3,6 +3,7 @@ import type { EditorSnapshot, MainToWorker } from "../lib/editor-protocol";
 import { resolveCoreBatch } from "../lib/transaction-batch";
 import { RuntimeWorkerBridge, runtimeProjectionFromEditorSnapshot } from "./runtime-worker-bridge";
 import { isRuntimeError } from "./runtime-errors";
+import { RuntimeSession } from "./runtime-session";
 
 describe("RuntimeWorkerBridge", () => {
   it("resolves on-demand Boolean paths only for the requested Worker revision", async () => {
@@ -205,6 +206,41 @@ describe("RuntimeWorkerBridge", () => {
       }),
     ]);
     bridge.close();
+  });
+
+  it("lowers a Runtime deep clone to an ordered Core subtree", async () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const snapshot = snapshotAt(4);
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0;
+    const session = new RuntimeSession({
+      sessionId: "clone-core-lowering",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const frame = session.createFrame();
+    frame.appendChild(session.createRectangle());
+    const clone = frame.clone();
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: frame.id, kind: "frame" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: frame.id, kind: "rectangle" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: clone.id, kind: "frame" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: clone.id, kind: "rectangle" }) }),
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: clone.id, kind: "frame" }),
+      expect.objectContaining({ parentId: clone.id, kind: "rectangle" }),
+    ]));
+
+    bridge.close();
+    await commit;
   });
 
   it("preserves parametric and vector geometry when lowering Runtime creates", () => {
