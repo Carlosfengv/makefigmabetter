@@ -412,6 +412,10 @@ pub struct AutoLayout {
     pub grid_columns: Vec<GridTrack>,
     pub grid_row_gap: Option<f64>,
     pub grid_column_gap: Option<f64>,
+    /// Direct-child span in a row-auto-flow Grid. Omission is the canonical
+    /// one-track default; explicit one is rejected at the protocol boundary.
+    pub grid_row_span: Option<u32>,
+    pub grid_column_span: Option<u32>,
 }
 
 impl Default for AutoLayout {
@@ -437,6 +441,8 @@ impl Default for AutoLayout {
             grid_columns: Vec::new(),
             grid_row_gap: None,
             grid_column_gap: None,
+            grid_row_span: None,
+            grid_column_span: None,
         }
     }
 }
@@ -6063,12 +6069,11 @@ impl Document {
                     }
                     let row_gap = layout.grid_row_gap.unwrap_or(0.0);
                     let column_gap = layout.grid_column_gap.unwrap_or(0.0);
-                    if flow.len()
-                        > layout
-                            .grid_rows
-                            .len()
-                            .saturating_mul(layout.grid_columns.len())
-                    {
+                    let cell_count = layout
+                        .grid_rows
+                        .len()
+                        .saturating_mul(layout.grid_columns.len());
+                    if flow.len() > cell_count {
                         return Err(CommandError::AutoLayoutUnsupported);
                     }
                     let clamp_size = |value: f64, min: Option<f64>, max: Option<f64>| {
@@ -6078,10 +6083,9 @@ impl Document {
                     };
                     let mut hug_rows = vec![0.0_f64; layout.grid_rows.len()];
                     let mut hug_columns = vec![0.0_f64; layout.grid_columns.len()];
+                    let mut occupied = vec![false; cell_count];
                     let mut prepared = Vec::with_capacity(flow.len());
-                    for (index, child) in flow.into_iter().enumerate() {
-                        let row = index / layout.grid_columns.len();
-                        let column = index % layout.grid_columns.len();
+                    for child in flow {
                         let child_layout = self.auto_layout_for_node(child.id);
                         let (width_sizing, height_sizing) =
                             self.auto_layout_child_sizing(&child, true);
@@ -6092,30 +6096,126 @@ impl Document {
                         {
                             return Err(CommandError::AutoLayoutUnsupported);
                         }
-                        if layout.grid_columns[column] == GridTrack::Hug {
-                            if width_sizing == LayoutSizing::Fill {
-                                return Err(CommandError::AutoLayoutUnsupported);
-                            }
-                            hug_columns[column] = hug_columns[column].max(clamp_size(
-                                child.width,
-                                child_layout.min_width,
-                                child_layout.max_width,
-                            ));
+                        let row_span = child_layout.grid_row_span.unwrap_or(1) as usize;
+                        let column_span = child_layout.grid_column_span.unwrap_or(1) as usize;
+                        if row_span > layout.grid_rows.len()
+                            || column_span > layout.grid_columns.len()
+                        {
+                            return Err(CommandError::AutoLayoutUnsupported);
                         }
-                        if layout.grid_rows[row] == GridTrack::Hug {
-                            if height_sizing == LayoutSizing::Fill {
-                                return Err(CommandError::AutoLayoutUnsupported);
+                        let mut placement = None;
+                        'cells: for index in 0..cell_count {
+                            let row = index / layout.grid_columns.len();
+                            let column = index % layout.grid_columns.len();
+                            if row + row_span > layout.grid_rows.len()
+                                || column + column_span > layout.grid_columns.len()
+                            {
+                                continue;
                             }
-                            hug_rows[row] = hug_rows[row].max(clamp_size(
-                                child.height,
-                                child_layout.min_height,
-                                child_layout.max_height,
-                            ));
+                            for occupied_row in row..row + row_span {
+                                for occupied_column in column..column + column_span {
+                                    if occupied
+                                        [occupied_row * layout.grid_columns.len() + occupied_column]
+                                    {
+                                        continue 'cells;
+                                    }
+                                }
+                            }
+                            placement = Some((row, column));
+                            break;
                         }
+                        let (row, column) = placement.ok_or(CommandError::AutoLayoutUnsupported)?;
+                        for occupied_row in row..row + row_span {
+                            for occupied_column in column..column + column_span {
+                                occupied
+                                    [occupied_row * layout.grid_columns.len() + occupied_column] =
+                                    true;
+                            }
+                        }
+
+                        let measure_hug_tracks =
+                            |tracks: &[GridTrack],
+                             hug_sizes: &mut [f64],
+                             start: usize,
+                             span: usize,
+                             sizing: LayoutSizing,
+                             child_size: f64,
+                             min: Option<f64>,
+                             max: Option<f64>,
+                             gap: f64|
+                             -> Result<(), CommandError> {
+                                let selected = &tracks[start..start + span];
+                                let hug_indices = selected
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(index, track)| {
+                                        (*track == GridTrack::Hug).then_some(start + index)
+                                    })
+                                    .collect::<Vec<_>>();
+                                if hug_indices.is_empty() {
+                                    return Ok(());
+                                }
+                                if sizing == LayoutSizing::Fill {
+                                    return Err(CommandError::AutoLayoutUnsupported);
+                                }
+                                let measured = clamp_size(child_size, min, max);
+                                if span == 1 {
+                                    hug_sizes[start] = hug_sizes[start].max(measured);
+                                    return Ok(());
+                                }
+                                if selected
+                                    .iter()
+                                    .any(|track| matches!(track, GridTrack::Flex(_)))
+                                {
+                                    return Ok(());
+                                }
+                                let fixed = selected
+                                    .iter()
+                                    .map(|track| match track {
+                                        GridTrack::Fixed(value) => *value,
+                                        GridTrack::Flex(_) | GridTrack::Hug => 0.0,
+                                    })
+                                    .sum::<f64>()
+                                    + gap * span.saturating_sub(1) as f64;
+                                let existing = hug_indices
+                                    .iter()
+                                    .map(|index| hug_sizes[*index])
+                                    .sum::<f64>();
+                                let addition = (measured - fixed - existing).max(0.0)
+                                    / hug_indices.len() as f64;
+                                for index in hug_indices {
+                                    hug_sizes[index] += addition;
+                                }
+                                Ok(())
+                            };
+                        measure_hug_tracks(
+                            &layout.grid_columns,
+                            &mut hug_columns,
+                            column,
+                            column_span,
+                            width_sizing,
+                            child.width,
+                            child_layout.min_width,
+                            child_layout.max_width,
+                            column_gap,
+                        )?;
+                        measure_hug_tracks(
+                            &layout.grid_rows,
+                            &mut hug_rows,
+                            row,
+                            row_span,
+                            height_sizing,
+                            child.height,
+                            child_layout.min_height,
+                            child_layout.max_height,
+                            row_gap,
+                        )?;
                         prepared.push((
                             child,
                             row,
                             column,
+                            row_span,
+                            column_span,
                             child_layout,
                             width_sizing,
                             height_sizing,
@@ -6175,11 +6275,27 @@ impl Document {
                     };
                     let row_offsets = offsets(&row_sizes, row_gap);
                     let column_offsets = offsets(&column_sizes, column_gap);
-                    for (child, row, column, child_layout, width_sizing, height_sizing) in prepared
+                    let span_extent = |sizes: &[f64], start: usize, span: usize, gap: f64| {
+                        sizes[start..start + span].iter().sum::<f64>()
+                            + gap * span.saturating_sub(1) as f64
+                    };
+                    for (
+                        child,
+                        row,
+                        column,
+                        row_span,
+                        column_span,
+                        child_layout,
+                        width_sizing,
+                        height_sizing,
+                    ) in prepared
                     {
+                        let cell_width =
+                            span_extent(&column_sizes, column, column_span, column_gap);
+                        let cell_height = span_extent(&row_sizes, row, row_span, row_gap);
                         let width = clamp_size(
                             if width_sizing == LayoutSizing::Fill {
-                                column_sizes[column]
+                                cell_width
                             } else {
                                 child.width
                             },
@@ -6188,15 +6304,15 @@ impl Document {
                         );
                         let height = clamp_size(
                             if height_sizing == LayoutSizing::Fill {
-                                row_sizes[row]
+                                cell_height
                             } else {
                                 child.height
                             },
                             child_layout.min_height,
                             child_layout.max_height,
                         );
-                        if (width_sizing == LayoutSizing::Fill && width > column_sizes[column])
-                            || (height_sizing == LayoutSizing::Fill && height > row_sizes[row])
+                        if (width_sizing == LayoutSizing::Fill && width > cell_width)
+                            || (height_sizing == LayoutSizing::Fill && height > cell_height)
                         {
                             return Err(CommandError::InvalidAutoLayout);
                         }
@@ -9283,6 +9399,11 @@ fn hash_auto_layout(hasher: &mut Sha256, layout: &AutoLayout) {
             }
         }
     }
+    if layout.grid_row_span.is_some() || layout.grid_column_span.is_some() {
+        hasher.update(b"makefigma/editor-core/grid-span-v1");
+        hasher.update(layout.grid_row_span.unwrap_or(1).to_be_bytes());
+        hasher.update(layout.grid_column_span.unwrap_or(1).to_be_bytes());
+    }
 }
 
 fn valid_auto_layout(layout: &AutoLayout) -> bool {
@@ -9356,6 +9477,12 @@ fn valid_auto_layout(layout: &AutoLayout) -> bool {
             layout.align_self,
             Some(LayoutAlignment::SpaceBetween | LayoutAlignment::Baseline)
         )
+        && layout
+            .grid_row_span
+            .is_none_or(|value| (2..=128).contains(&value))
+        && layout
+            .grid_column_span
+            .is_none_or(|value| (2..=128).contains(&value))
         && grid_valid
 }
 
@@ -12628,6 +12755,174 @@ mod tests {
             Err(CommandError::AutoLayoutUnsupported)
         );
         assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn grid_row_auto_flow_places_spanning_children_and_rejects_overspan_atomically() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 260.0;
+        frame.height = 170.0;
+        let mut first = node(2);
+        first.parent_id = Some(frame.id);
+        let mut second = node(3);
+        second.parent_id = Some(frame.id);
+        second.width = 20.0;
+        second.height = 20.0;
+        let mut third = node(4);
+        third.parent_id = Some(frame.id);
+        let grid = AutoLayout {
+            mode: LayoutMode::Grid,
+            grid_rows: vec![
+                GridTrack::Fixed(50.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Fixed(50.0),
+            ],
+            grid_columns: vec![
+                GridTrack::Fixed(80.0),
+                GridTrack::Fixed(80.0),
+                GridTrack::Fixed(80.0),
+            ],
+            grid_row_gap: Some(10.0),
+            grid_column_gap: Some(10.0),
+            ..AutoLayout::default()
+        };
+        let fill_two_by_two = AutoLayout {
+            primary_sizing: LayoutSizing::Fill,
+            counter_sizing: LayoutSizing::Fill,
+            grid_row_span: Some(2),
+            grid_column_span: Some(2),
+            ..AutoLayout::default()
+        };
+        let fill_two_columns = AutoLayout {
+            primary_sizing: LayoutSizing::Fill,
+            counter_sizing: LayoutSizing::Fill,
+            grid_column_span: Some(2),
+            ..AutoLayout::default()
+        };
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(first.clone()),
+                        Command::Create(second.clone()),
+                        Command::Create(third.clone()),
+                        Command::SetAutoLayout {
+                            id: first.id,
+                            layout: fill_two_by_two,
+                        },
+                        Command::SetAutoLayout {
+                            id: third.id,
+                            layout: fill_two_columns,
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: grid,
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(
+            document
+                .node(first.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((0.0, 0.0, 170.0, 110.0))
+        );
+        assert_eq!(
+            document.node(second.id).map(|node| (node.x, node.y)),
+            Some((180.0, 0.0))
+        );
+        assert_eq!(
+            document
+                .node(third.id)
+                .map(|node| (node.x, node.y, node.width, node.height)),
+            Some((0.0, 120.0, 170.0, 50.0))
+        );
+
+        let hash = document.canonical_hash();
+        let overspan = AutoLayout {
+            grid_row_span: Some(4),
+            ..document.auto_layout_for_node(second.id)
+        };
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetAutoLayout {
+                        id: second.id,
+                        layout: overspan,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::AutoLayoutUnsupported)
+        );
+        assert_eq!(document.canonical_hash(), hash);
+    }
+
+    #[test]
+    fn grid_spanning_child_contributes_to_hug_tracks_without_flex() {
+        let mut document = Document::empty();
+        let mut frame = node(1);
+        frame.width = 110.0;
+        frame.height = 50.0;
+        let mut spanning = node(2);
+        spanning.parent_id = Some(frame.id);
+        spanning.width = 110.0;
+        spanning.height = 20.0;
+        let mut left = node(3);
+        left.parent_id = Some(frame.id);
+        left.width = 10.0;
+        left.height = 10.0;
+        let mut right = node(4);
+        right.parent_id = Some(frame.id);
+        right.width = 10.0;
+        right.height = 10.0;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![
+                        Command::Create(frame.clone()),
+                        Command::Create(spanning.clone()),
+                        Command::Create(left.clone()),
+                        Command::Create(right.clone()),
+                        Command::SetAutoLayout {
+                            id: spanning.id,
+                            layout: AutoLayout {
+                                grid_column_span: Some(2),
+                                ..AutoLayout::default()
+                            },
+                        },
+                        Command::SetAutoLayout {
+                            id: frame.id,
+                            layout: AutoLayout {
+                                mode: LayoutMode::Grid,
+                                grid_rows: vec![GridTrack::Fixed(20.0), GridTrack::Fixed(20.0)],
+                                grid_columns: vec![GridTrack::Hug, GridTrack::Hug],
+                                grid_row_gap: Some(10.0),
+                                grid_column_gap: Some(10.0),
+                                ..AutoLayout::default()
+                            },
+                        },
+                    ],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.node(left.id).map(|node| (node.x, node.y)),
+            Some((0.0, 30.0))
+        );
+        assert_eq!(
+            document.node(right.id).map(|node| (node.x, node.y)),
+            Some((60.0, 30.0))
+        );
     }
 
     #[test]

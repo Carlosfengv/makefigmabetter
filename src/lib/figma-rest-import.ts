@@ -1466,7 +1466,19 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const grid = mode === "GRID";
   const absolute = string(node.layoutPositioning) === "ABSOLUTE";
   const alignSelf = childAlignment(string(node.layoutAlign));
-  if (!horizontal && !vertical && !grid && !absolute && !alignSelf) {
+  const rawGridRowSpan = finite(node.gridRowSpan);
+  const rawGridColumnSpan = finite(node.gridColumnSpan);
+  const validGridSpan = (value: number | undefined) => value === undefined || (Number.isInteger(value) && value >= 1 && value <= 128);
+  const hasGridSpan = node.gridRowSpan !== undefined || node.gridColumnSpan !== undefined;
+  const validGridSpanField = (source: unknown, value: number | undefined) =>
+    source === undefined || (value !== undefined && validGridSpan(value));
+  const gridSpansValid = validGridSpanField(node.gridRowSpan, rawGridRowSpan)
+    && validGridSpanField(node.gridColumnSpan, rawGridColumnSpan);
+  if (hasGridSpan && !gridSpansValid) {
+    extensions["figma.rest.grid-child.v1"] = jsonBytes({ gridRowSpan: node.gridRowSpan, gridColumnSpan: node.gridColumnSpan });
+    issues.push({ sourceId, capability: "grid-child-span", outcome: "preserved-extension", reason: "Grid child spans must be integers from 1 to 128." });
+  }
+  if (!horizontal && !vertical && !grid && !absolute && !alignSelf && !hasGridSpan) {
     return undefined;
   }
   const mappedMode = horizontal ? "horizontal" : vertical ? "vertical" : grid ? "grid" : "none";
@@ -1509,25 +1521,55 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
   const gridItemsPositioning = string(node.gridItemsPositioning);
   const gridRowGap = grid ? finite(node.gridRowGap) ?? (node.gridRowGap === undefined ? 0 : undefined) : undefined;
   const gridColumnGap = grid ? finite(node.gridColumnGap) ?? (node.gridColumnGap === undefined ? 0 : undefined) : undefined;
-  const gridHasFillHugCycle = grid && gridRows && gridColumns && (array(node.children) ?? [])
-    .filter((child) => string(record(child)?.layoutPositioning) !== "ABSOLUTE")
-    .some((child, index) => {
+  const gridPlacements = grid && gridRows && gridColumns ? (() => {
+    const occupied = Array.from({ length: gridRows.length * gridColumns.length }, () => false);
+    const placements: { source: JsonRecord; row: number; column: number; rowSpan: number; columnSpan: number }[] = [];
+    for (const child of (array(node.children) ?? []).filter((candidate) => string(record(candidate)?.layoutPositioning) !== "ABSOLUTE")) {
       const source = record(child);
-      const row = Math.floor(index / gridColumns.length);
-      const column = index % gridColumns.length;
-      return (gridRows[row]?.type === "hug" && string(source?.layoutSizingVertical) === "FILL")
-        || (gridColumns[column]?.type === "hug" && string(source?.layoutSizingHorizontal) === "FILL");
-    });
+      if (!source) return undefined;
+      const parsedRowSpan = finite(source.gridRowSpan);
+      const parsedColumnSpan = finite(source.gridColumnSpan);
+      if (!validGridSpanField(source.gridRowSpan, parsedRowSpan)
+        || !validGridSpanField(source.gridColumnSpan, parsedColumnSpan)) return undefined;
+      const rowSpan = parsedRowSpan ?? 1;
+      const columnSpan = parsedColumnSpan ?? 1;
+      let placement: { row: number; column: number } | undefined;
+      for (let index = 0; index < occupied.length; index += 1) {
+        const row = Math.floor(index / gridColumns.length);
+        const column = index % gridColumns.length;
+        if (row + rowSpan > gridRows.length || column + columnSpan > gridColumns.length) continue;
+        let available = true;
+        for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+          for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+            if (occupied[occupiedRow * gridColumns.length + occupiedColumn]) { available = false; break; }
+          }
+        }
+        if (available) { placement = { row, column }; break; }
+      }
+      if (!placement) return undefined;
+      for (let occupiedRow = placement.row; occupiedRow < placement.row + rowSpan; occupiedRow += 1) {
+        for (let occupiedColumn = placement.column; occupiedColumn < placement.column + columnSpan; occupiedColumn += 1) {
+          occupied[occupiedRow * gridColumns.length + occupiedColumn] = true;
+        }
+      }
+      placements.push({ source, ...placement, rowSpan, columnSpan });
+    }
+    return placements;
+  })() : undefined;
+  const gridHasFillHugCycle = gridPlacements?.some(({ source, row, column, rowSpan, columnSpan }) =>
+    (gridRows!.slice(row, row + rowSpan).some((track) => track.type === "hug") && string(source.layoutSizingVertical) === "FILL")
+    || (gridColumns!.slice(column, column + columnSpan).some((track) => track.type === "hug") && string(source.layoutSizingHorizontal) === "FILL"));
   if (grid && (
     !gridRows || !gridColumns || gridRowGap === undefined || gridColumnGap === undefined
     || gridRowGap < 0 || gridColumnGap < 0
     || gridRows.length * gridColumns.length > 4096
+    || !gridPlacements
     || gridHasFillHugCycle
     || (gridAutoTracks !== undefined && gridAutoTracks !== "NONE")
     || gridItemsPositioning !== "ROW_AUTO_FLOW"
   )) {
     extensions["figma.rest.grid-auto-layout.v1"] = jsonBytes({ gridRowCount: node.gridRowCount, gridColumnCount: node.gridColumnCount, gridRowSizes: node.gridRowSizes, gridColumnSizes: node.gridColumnSizes, gridRowGap: node.gridRowGap, gridColumnGap: node.gridColumnGap, gridAutoTracks: node.gridAutoTracks, gridItemsPositioning: node.gridItemsPositioning });
-    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, HUG/FILL cycles, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
+    issues.push({ sourceId, capability: "grid-auto-layout", outcome: "preserved-extension", reason: "Invalid tracks, unplaceable spans, HUG/FILL cycles, automatic rows, manual placement or an oversized track matrix is outside the bounded row-major Grid subset." });
     return undefined;
   }
   return {
@@ -1551,6 +1593,8 @@ function layout(node: JsonRecord, kind: NodeKind, sourceId: string, issues: Figm
     gridColumns,
     gridRowGap,
     gridColumnGap,
+    gridRowSpan: gridSpansValid && rawGridRowSpan !== undefined && rawGridRowSpan !== 1 ? rawGridRowSpan : undefined,
+    gridColumnSpan: gridSpansValid && rawGridColumnSpan !== undefined && rawGridColumnSpan !== 1 ? rawGridColumnSpan : undefined,
   };
 }
 

@@ -132,6 +132,79 @@ describe("Figma REST import planning", () => {
     });
   });
 
+  it("imports bounded row-auto-flow child spans without losing occupancy order", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-spans",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 260, height: 170 },
+        layoutMode: "GRID", gridRowCount: 3, gridColumnCount: 3, gridRowGap: 10, gridColumnGap: 10,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: Array.from({ length: 3 }, () => ({ type: "FIXED", value: 50 })),
+        gridColumnSizes: Array.from({ length: 3 }, () => ({ type: "FIXED", value: 80 })),
+        children: [{
+          id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 170, height: 110 },
+          gridRowSpan: 2, gridColumnSpan: 2,
+        }, {
+          id: "1:3", type: "RECTANGLE", relativeTransform: [[1, 0, 180], [0, 1, 0]], absoluteBoundingBox: { x: 180, y: 0, width: 20, height: 20 },
+        }, {
+          id: "1:4", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 120]], absoluteBoundingBox: { x: 0, y: 120, width: 170, height: 50 },
+          gridColumnSpan: 2,
+        }],
+      }] }] },
+    }, ids());
+
+    expect(plan.issues).toEqual([]);
+    expect(plan.nodes[0]?.autoLayout?.mode).toBe("grid");
+    expect(plan.nodes[1]?.autoLayout).toMatchObject({ gridRowSpan: 2, gridColumnSpan: 2 });
+    expect(plan.nodes[2]?.autoLayout?.gridRowSpan).toBeUndefined();
+    expect(plan.nodes[3]?.autoLayout).toMatchObject({ gridColumnSpan: 2 });
+  });
+
+  it("preserves a Grid when child spans cannot fit its track matrix", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-span-overflow",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 50 },
+        layoutMode: "GRID", gridRowCount: 1, gridColumnCount: 1,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "FIXED", value: 50 }],
+        gridColumnSizes: [{ type: "FIXED", value: 80 }],
+        children: [{
+          id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 50 },
+          gridColumnSpan: 2,
+        }],
+      }] }] },
+    }, ids());
+
+    expect(plan.nodes[0]?.autoLayout).toBeUndefined();
+    expect(plan.nodes[0]?.extensions?.["figma.rest.grid-auto-layout.v1"]).toBeDefined();
+    expect(plan.issues).toContainEqual(expect.objectContaining({ capability: "grid-auto-layout", outcome: "preserved-extension" }));
+  });
+
+  it("preserves malformed child span types instead of treating them as one", () => {
+    const plan = planFigmaRestImport({
+      version: "grid-span-malformed",
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [{
+        id: "1:1", type: "FRAME", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 50 },
+        layoutMode: "GRID", gridRowCount: 1, gridColumnCount: 1,
+        gridItemsPositioning: "ROW_AUTO_FLOW", gridAutoTracks: "NONE",
+        gridRowSizes: [{ type: "FIXED", value: 50 }],
+        gridColumnSizes: [{ type: "FIXED", value: 80 }],
+        children: [{
+          id: "1:2", type: "RECTANGLE", relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 50 },
+          gridColumnSpan: "2",
+        }],
+      }] }] },
+    }, ids());
+
+    expect(plan.nodes[0]?.autoLayout).toBeUndefined();
+    expect(plan.nodes[1]?.extensions?.["figma.rest.grid-child.v1"]).toBeDefined();
+    expect(plan.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ capability: "grid-auto-layout", outcome: "preserved-extension" }),
+      expect.objectContaining({ capability: "grid-child-span", outcome: "preserved-extension" }),
+    ]));
+  });
+
   it("preserves a Grid whose FILL child would cyclically size a HUG track", () => {
     const plan = planFigmaRestImport({
       version: "grid-hug-fill-cycle",

@@ -247,8 +247,8 @@ enum WrapTrackAlignment {
   WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN = 2;
 }
 
-// W12-L Grid Auto Layout tracks. Explicit child placement, spans and automatic
-// row creation remain outside this versioned subset.
+// W12-L Grid Auto Layout tracks. Explicit child placement and automatic row
+// creation remain outside this versioned subset.
 enum GridTrackType {
   GRID_TRACK_TYPE_UNSPECIFIED = 0;
   GRID_TRACK_TYPE_FLEX = 1;
@@ -296,6 +296,10 @@ message AutoLayout {
   repeated GridTrack grid_columns = 21;
   optional double grid_row_gap = 22;
   optional double grid_column_gap = 23;
+  // Direct-child row-auto-flow spans require semantics 58. Omission means one
+  // track; canonical writers omit the explicit value one.
+  optional uint32 grid_row_span = 24;
+  optional uint32 grid_column_span = 25;
 }
 
 enum ColorSpace {

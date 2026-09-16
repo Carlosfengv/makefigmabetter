@@ -83,8 +83,9 @@ pub const PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 54;
 pub const TEXT_RANGE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION: u32 = 55;
 pub const GRID_AUTO_LAYOUT_ENGINE_SEMANTICS_VERSION: u32 = 56;
 pub const GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION: u32 = 57;
+pub const GRID_SPAN_ENGINE_SEMANTICS_VERSION: u32 = 58;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_SPAN_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -118,6 +119,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_SPAN_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+        })
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             let layout = document.auto_layout_for_node(node.id);
@@ -685,6 +694,22 @@ pub fn document_from_snapshot_with_engine_semantics(
         return Err(SnapshotError::UnsupportedEngineSemantics);
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version < GRID_SPAN_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+                    })
+            })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
         && snapshot
             .page_chunks
@@ -1864,6 +1889,8 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         grid_columns: value.grid_columns.iter().map(grid_track_to_proto).collect(),
         grid_row_gap: value.grid_row_gap,
         grid_column_gap: value.grid_column_gap,
+        grid_row_span: value.grid_row_span,
+        grid_column_span: value.grid_column_span,
     }
 }
 fn grid_track_to_proto(value: &GridTrack) -> v1::GridTrack {
@@ -1976,6 +2003,8 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, SnapshotE
             .collect::<Result<_, _>>()?,
         grid_row_gap: value.grid_row_gap,
         grid_column_gap: value.grid_column_gap,
+        grid_row_span: value.grid_row_span,
+        grid_column_span: value.grid_column_span,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -4214,6 +4243,34 @@ mod tests {
         let restored = document_from_wire_snapshot(&snapshot).unwrap();
         assert_eq!(restored.node(NodeId(7)).unwrap().kind, NodeKind::Slice);
         assert_eq!(restored.node(NodeId(7)).unwrap().rotation, 15.0);
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
+    }
+
+    #[test]
+    fn grid_spans_require_semantics_fifty_eight() {
+        let mut document = Document::with_id(DocumentId(79));
+        let child = node(9, NodeKind::Rectangle, None);
+        document
+            .seed_node_on_page(DEFAULT_PAGE_ID, child.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            grid_row_span: Some(2),
+            grid_column_span: Some(3),
+            ..AutoLayout::default()
+        };
+        document.seed_auto_layout(child.id, layout.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let bytes = snapshot_from_document(&document, CURRENT_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot(
+            &bytes,
+            document.id().0.to_be_bytes(),
+            document.canonical_hash(),
+        )
+        .unwrap();
+        assert_eq!(restored.auto_layout_for_node(child.id), layout);
         assert_eq!(restored.canonical_hash(), document.canonical_hash());
     }
 

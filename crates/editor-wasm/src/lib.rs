@@ -936,7 +936,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=71).contains(&snapshot.schema_version)
+    if !(1..=72).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 72
+            && snapshot.nodes.iter().any(|node| {
+                node.auto_layout.as_ref().is_some_and(|layout| {
+                    layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+                })
+            }))
         || (snapshot.schema_version < 71
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -1634,6 +1640,10 @@ struct ProjectionAutoLayout {
     grid_row_gap: Option<f64>,
     #[serde(default)]
     grid_column_gap: Option<f64>,
+    #[serde(default)]
+    grid_row_span: Option<u32>,
+    #[serde(default)]
+    grid_column_span: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2371,6 +2381,11 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            let layout = self.document.auto_layout_for_node(node.id);
+            layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+        }) {
+            72
+        } else if self.document.nodes().any(|node| {
             let layout = self.document.auto_layout_for_node(node.id);
             layout
                 .grid_rows
@@ -7138,6 +7153,8 @@ fn projection_auto_layout(layout: AutoLayout) -> Option<ProjectionAutoLayout> {
             .collect(),
         grid_row_gap: layout.grid_row_gap,
         grid_column_gap: layout.grid_column_gap,
+        grid_row_span: layout.grid_row_span,
+        grid_column_span: layout.grid_column_span,
     })
 }
 
@@ -7234,6 +7251,8 @@ fn auto_layout_from_projection(
             .collect::<Result<_, _>>()?,
         grid_row_gap: value.grid_row_gap,
         grid_column_gap: value.grid_column_gap,
+        grid_row_span: value.grid_row_span,
+        grid_column_span: value.grid_column_span,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -11597,6 +11616,39 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 70;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v72_round_trips_grid_spans_and_v71_rejects_them() {
+        let mut engine = DocumentEngine::new();
+        let child = existing_rect(NodeId(0x72));
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, child.clone())
+            .unwrap();
+        let layout = AutoLayout {
+            grid_row_span: Some(2),
+            grid_column_span: Some(3),
+            ..AutoLayout::default()
+        };
+        engine
+            .document
+            .seed_auto_layout(child.id, layout.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":72"));
+        assert!(snapshot.contains("\"gridRowSpan\":2"));
+        assert!(snapshot.contains("\"gridColumnSpan\":3"));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.document.auto_layout_for_node(child.id), layout);
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 71;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

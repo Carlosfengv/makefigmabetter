@@ -3232,6 +3232,47 @@ describe("M1 RuntimeSession", () => {
     await expect(session.commitAsync()).resolves.toBe(1);
   });
 
+  it("places row-auto-flow children across bounded row and column spans", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const grid = session.createFrame();
+    grid.layoutMode = "GRID";
+    grid.gridRowCount = 3;
+    grid.gridColumnCount = 3;
+    const first = session.createRectangle();
+    const second = session.createRectangle();
+    const third = session.createRectangle();
+    grid.appendChild(first);
+    grid.appendChild(second);
+    grid.appendChild(third);
+
+    first.gridRowSpan = 2;
+    first.gridColumnSpan = 2;
+    third.gridColumnSpan = 2;
+
+    expect([first.gridRowAnchorIndex, first.gridColumnAnchorIndex]).toEqual([0, 0]);
+    expect([second.gridRowAnchorIndex, second.gridColumnAnchorIndex]).toEqual([0, 2]);
+    expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([2, 0]);
+    expect(first.gridRowSpan).toBe(2);
+    expect(first.gridColumnSpan).toBe(2);
+    expect(isRuntimeError(captureError(() => { second.gridRowSpan = 4; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { first.setGridChildPosition(1, 1); }), "INVALID_ARGUMENT")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "update",
+        nodeId: first.id,
+        patch: { autoLayout: expect.objectContaining({ gridRowSpan: 2, gridColumnSpan: 2 }) },
+      }),
+      expect.objectContaining({
+        type: "update",
+        nodeId: third.id,
+        patch: { autoLayout: expect.objectContaining({ gridColumnSpan: 2 }) },
+      }),
+    ]));
+  });
+
   it("rejects a HUG track that contains a FILL child before staging", () => {
     const session = sessionFor(new InMemoryTransport(initial));
     const grid = session.createFrame();
@@ -3244,6 +3285,17 @@ describe("M1 RuntimeSession", () => {
       grid.gridColumnSizes[0]!.type = "HUG";
     }), "INVALID_ARGUMENT")).toBe(true);
     expect(grid.gridColumnSizes[0]!.type).toBe("FLEX");
+
+    const reverseSession = sessionFor(new InMemoryTransport(initial));
+    const hugGrid = reverseSession.createFrame();
+    hugGrid.layoutMode = "GRID";
+    hugGrid.gridColumnSizes[0]!.type = "HUG";
+    const fixed = reverseSession.createRectangle();
+    hugGrid.appendChild(fixed);
+    expect(isRuntimeError(captureError(() => {
+      fixed.layoutSizingHorizontal = "FILL";
+    }), "INVALID_ARGUMENT")).toBe(true);
+    expect(fixed.layoutSizingHorizontal).toBe("FIXED");
   });
 
   it("admits FILL, STRETCH and nested HUG children in a wrapped Frame", async () => {

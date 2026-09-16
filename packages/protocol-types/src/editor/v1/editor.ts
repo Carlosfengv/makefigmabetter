@@ -193,8 +193,8 @@ export enum WrapTrackAlignment {
 }
 
 /**
- * W12-L Grid Auto Layout tracks. Explicit child placement, spans and automatic
- * row creation remain outside this versioned subset.
+ * W12-L Grid Auto Layout tracks. Explicit child placement and automatic row
+ * creation remain outside this versioned subset.
  */
 export enum GridTrackType {
   GRID_TRACK_TYPE_UNSPECIFIED = 0,
@@ -584,7 +584,15 @@ export interface AutoLayout {
   gridRows: GridTrack[];
   gridColumns: GridTrack[];
   gridRowGap?: number | undefined;
-  gridColumnGap?: number | undefined;
+  gridColumnGap?:
+    | number
+    | undefined;
+  /**
+   * Direct-child row-auto-flow spans require semantics 58. Omission means one
+   * track; canonical writers omit the explicit value one.
+   */
+  gridRowSpan?: number | undefined;
+  gridColumnSpan?: number | undefined;
 }
 
 export interface Color {
@@ -2848,6 +2856,8 @@ function createBaseAutoLayout(): AutoLayout {
     gridColumns: [],
     gridRowGap: undefined,
     gridColumnGap: undefined,
+    gridRowSpan: undefined,
+    gridColumnSpan: undefined,
   };
 }
 
@@ -2921,6 +2931,12 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     }
     if (message.gridColumnGap !== undefined) {
       writer.uint32(185).double(message.gridColumnGap);
+    }
+    if (message.gridRowSpan !== undefined) {
+      writer.uint32(192).uint32(message.gridRowSpan);
+    }
+    if (message.gridColumnSpan !== undefined) {
+      writer.uint32(200).uint32(message.gridColumnSpan);
     }
     return writer;
   },
@@ -3116,6 +3132,22 @@ export const AutoLayout: MessageFns<AutoLayout> = {
           message.gridColumnGap = reader.double();
           continue;
         }
+        case 24: {
+          if (tag !== 192) {
+            break;
+          }
+
+          message.gridRowSpan = reader.uint32();
+          continue;
+        }
+        case 25: {
+          if (tag !== 200) {
+            break;
+          }
+
+          message.gridColumnSpan = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3153,6 +3185,8 @@ export const AutoLayout: MessageFns<AutoLayout> = {
     message.gridColumns = object.gridColumns?.map((e) => GridTrack.fromPartial(e)) || [];
     message.gridRowGap = object.gridRowGap ?? undefined;
     message.gridColumnGap = object.gridColumnGap ?? undefined;
+    message.gridRowSpan = object.gridRowSpan ?? undefined;
+    message.gridColumnSpan = object.gridColumnSpan ?? undefined;
     return message;
   },
 };

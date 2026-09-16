@@ -477,6 +477,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version < makefigma_document_codec::GRID_SPAN_ENGINE_SEMANTICS_VERSION
+        && document.nodes().any(|node| {
+            let layout = document.auto_layout_for_node(node.id);
+            layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version < makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             let layout = document.auto_layout_for_node(node.id);
@@ -1047,6 +1055,23 @@ pub fn document_from_snapshot(
         });
     }
     let declared_engine_semantics_version = snapshot.engine_semantics_version;
+    if declared_engine_semantics_version
+        < makefigma_document_codec::GRID_SPAN_ENGINE_SEMANTICS_VERSION
+        && snapshot
+            .page_chunks
+            .iter()
+            .flat_map(|page| &page.nodes)
+            .any(|node| {
+                v1::SceneNode::decode(node.canonical_node.as_slice())
+                    .ok()
+                    .and_then(|node| node.auto_layout)
+                    .is_some_and(|layout| {
+                        layout.grid_row_span.is_some() || layout.grid_column_span.is_some()
+                    })
+            })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if declared_engine_semantics_version
         < makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION
         && snapshot
@@ -2119,6 +2144,8 @@ fn auto_layout_to_proto(value: &AutoLayout) -> v1::AutoLayout {
         grid_columns: value.grid_columns.iter().map(grid_track_to_proto).collect(),
         grid_row_gap: value.grid_row_gap,
         grid_column_gap: value.grid_column_gap,
+        grid_row_span: value.grid_row_span,
+        grid_column_span: value.grid_column_span,
     }
 }
 
@@ -2239,6 +2266,8 @@ fn auto_layout_from_proto(value: v1::AutoLayout) -> Result<AutoLayout, ServiceEr
             .collect::<Result<_, _>>()?,
         grid_row_gap: value.grid_row_gap,
         grid_column_gap: value.grid_column_gap,
+        grid_row_span: value.grid_row_span,
+        grid_column_span: value.grid_column_span,
     };
     if matches!(layout.primary_alignment, LayoutAlignment::Baseline)
         || matches!(layout.counter_alignment, LayoutAlignment::SpaceBetween)
@@ -5616,6 +5645,39 @@ mod tests {
             document_from_snapshot(&snapshot, 71_u128.to_be_bytes(), document.canonical_hash())
                 .unwrap();
         assert_eq!(restored.auto_layout_for_node(NodeId(71)), layout);
+    }
+
+    #[test]
+    fn service_snapshot_adapter_requires_semantics_fifty_eight_for_grid_spans() {
+        let mut document = Document::with_id(DocumentId(72));
+        let mut child = leaf(NodeId(72), None, NodeKind::Rectangle);
+        child.name = "Spanning child".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, child).unwrap();
+        let layout = AutoLayout {
+            grid_row_span: Some(2),
+            grid_column_span: Some(3),
+            ..AutoLayout::default()
+        };
+        document
+            .seed_auto_layout(NodeId(72), layout.clone())
+            .unwrap();
+
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::GRID_HUG_TRACK_ENGINE_SEMANTICS_VERSION,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::GRID_SPAN_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 72_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(restored.auto_layout_for_node(NodeId(72)), layout);
     }
 
     #[test]

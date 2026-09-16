@@ -11,6 +11,13 @@ const finiteNonNegative = (value: unknown, fallback = 0) =>
 const optionalFiniteNonNegative = (value: unknown) =>
   value === null || value === undefined ? undefined : finiteNonNegative(value);
 
+const optionalGridSpan = (value: unknown) =>
+  value === null || value === undefined || value === 1
+    ? undefined
+    : typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 128
+      ? value
+      : undefined;
+
 /**
  * Old imported snapshots can contain the Auto Layout mode while omitting
  * fields introduced later. Presentation code must treat those omissions as
@@ -63,6 +70,8 @@ export function normalizeAutoLayout(
     gridColumns: mode === "grid" ? normalizeGridTracks(source.gridColumns) : undefined,
     gridRowGap: mode === "grid" ? optionalFiniteNonNegative(source.gridRowGap) ?? 0 : undefined,
     gridColumnGap: mode === "grid" ? optionalFiniteNonNegative(source.gridColumnGap) ?? 0 : undefined,
+    gridRowSpan: optionalGridSpan(source.gridRowSpan),
+    gridColumnSpan: optionalGridSpan(source.gridColumnSpan),
   };
 }
 

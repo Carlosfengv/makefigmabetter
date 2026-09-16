@@ -308,6 +308,12 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   gridFrame.gridRowSizes[0]!.value = 64;
   void gridFrame.gridAutoTracks;
   void gridFrame.gridItemsPositioning;
+  const gridChild = runtime.createRectangle();
+  gridFrame.appendChild(gridChild);
+  gridChild.gridRowSpan = 2;
+  gridChild.gridColumnSpan = 2;
+  void gridChild.gridRowAnchorIndex;
+  void gridChild.gridColumnAnchorIndex;
   const connector = runtime.createConnector();
   connector.connectorLineType = "ELBOWED";
   connector.reconnect({ position: { x: 0, y: 0 } }, { position: { x: 200, y: 80 } });

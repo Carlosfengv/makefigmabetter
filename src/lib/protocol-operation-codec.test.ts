@@ -936,6 +936,7 @@ describe("protocol operation codec", () => {
       gridRows: [{ type: "fixed" as const, value: 64 }, { type: "hug" as const }],
       gridColumns: [{ type: "flex" as const, value: 2 }, { type: "fixed" as const, value: 80 }],
       gridRowGap: 12, gridColumnGap: 20,
+      gridRowSpan: 2, gridColumnSpan: 2,
     };
     const node = { ...createNode("frame", 10, 20), id, autoLayout };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
@@ -945,6 +946,8 @@ describe("protocol operation codec", () => {
       gridColumns: [{ type: GridTrackType.GRID_TRACK_TYPE_FLEX, value: 2 }, { type: GridTrackType.GRID_TRACK_TYPE_FIXED, value: 80 }],
       gridRowGap: 12,
       gridColumnGap: 20,
+      gridRowSpan: 2,
+      gridColumnSpan: 2,
     });
   });
 

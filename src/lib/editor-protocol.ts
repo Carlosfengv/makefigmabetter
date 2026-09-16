@@ -143,6 +143,9 @@ export interface DocumentAutoLayout {
   gridColumns?: AutoLayoutGridTrack[];
   gridRowGap?: number;
   gridColumnGap?: number;
+  /** Direct Grid-child spans. Omission is the canonical one-track default. */
+  gridRowSpan?: number;
+  gridColumnSpan?: number;
 }
 export type AutoLayoutPaddingSide = "top" | "right" | "bottom" | "left";
 /** Stable line-height for text records that predate an explicit paragraph value. */
