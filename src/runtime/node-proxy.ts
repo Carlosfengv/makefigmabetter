@@ -124,6 +124,8 @@ export const M1_NODE_TYPES: readonly M1NodeType[] = Object.freeze(["DOCUMENT", "
 export type RuntimeLayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
 export type RuntimeGridTrackType = "FLEX" | "FIXED" | "HUG";
 export type RuntimeGridTrackSize = { type: RuntimeGridTrackType; value?: number };
+export type RuntimeGridTrackReorderOptions = Readonly<{ fromIndices: readonly number[]; insertionIndex: number }>;
+export type RuntimeGridTrackReorderEntry = Readonly<{ from: number; to: number }>;
 export type RuntimeLayoutSizing = "FIXED" | "HUG" | "FILL";
 export type RuntimeAxisSizingMode = "FIXED" | "AUTO";
 export type RuntimePrimaryAxisAlignment = "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
@@ -3449,6 +3451,12 @@ export class RuntimeNodeProxy {
   set gridColumnGap(value: number) { this.writeGridGap("column", value); }
   get gridRowSizes(): RuntimeGridTrackSize[] { return this.gridTrackProxies("row"); }
   get gridColumnSizes(): RuntimeGridTrackSize[] { return this.gridTrackProxies("column"); }
+  reorderRows(options: RuntimeGridTrackReorderOptions): readonly RuntimeGridTrackReorderEntry[] {
+    return this.reorderGridTracks("row", options);
+  }
+  reorderColumns(options: RuntimeGridTrackReorderOptions): readonly RuntimeGridTrackReorderEntry[] {
+    return this.reorderGridTracks("column", options);
+  }
   get gridAutoTracks(): "NONE" { this.assertGridFrame(); return "NONE"; }
   set gridAutoTracks(value: "NONE") { this.assertGridFrame(); if (value !== "NONE") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id }); }
   get gridItemsPositioning(): "ROW_AUTO_FLOW" | "MANUAL" {
@@ -4148,6 +4156,68 @@ export class RuntimeNodeProxy {
     this.writeAutoLayout(axis === "row" ? { gridRowGap: value } : { gridColumnGap: value });
   }
 
+  private reorderGridTracks(axis: "row" | "column", options: RuntimeGridTrackReorderOptions): readonly RuntimeGridTrackReorderEntry[] {
+    this.assertGridFrame();
+    const tracks = [...this.gridTracks(axis)];
+    if (!options || !Array.isArray(options.fromIndices) || !Number.isInteger(options.insertionIndex)
+      || options.insertionIndex < 0 || options.insertionIndex > tracks.length
+      || options.fromIndices.some((index) => !Number.isInteger(index) || index < 0 || index >= tracks.length)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.id });
+    }
+    const selected = new Set(options.fromIndices);
+    if (selected.size === 0) return [];
+    const placements = this.gridPlacements();
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const placement of placements.values()) {
+        const start = axis === "row" ? placement.row : placement.column;
+        const span = axis === "row" ? placement.rowSpan : placement.columnSpan;
+        const intersectsSelection = Array.from({ length: span }, (_, offset) => start + offset)
+          .some((index) => selected.has(index));
+        const splitsAtInsertion = start < options.insertionIndex && options.insertionIndex < start + span;
+        if (!intersectsSelection && !splitsAtInsertion) continue;
+        for (let index = start; index < start + span; index += 1) {
+          if (!selected.has(index)) { selected.add(index); expanded = true; }
+        }
+      }
+    }
+    const moved = [...selected].sort((left, right) => left - right);
+    const remaining = tracks.map((_track, index) => index).filter((index) => !selected.has(index));
+    const insertion = options.insertionIndex - moved.filter((index) => index < options.insertionIndex).length;
+    const order = [...remaining.slice(0, insertion), ...moved, ...remaining.slice(insertion)];
+    const oldToNew = new Map(order.map((from, to) => [from, to]));
+    const anchors = new Map<string, { row: number; column: number }>();
+    if (this.gridItemsPositioning === "MANUAL") {
+      for (const placement of placements.values()) {
+        const start = axis === "row" ? placement.row : placement.column;
+        const span = axis === "row" ? placement.rowSpan : placement.columnSpan;
+        const mapped = Array.from({ length: span }, (_, offset) => oldToNew.get(start + offset)!);
+        const nextStart = Math.min(...mapped);
+        if (Math.max(...mapped) - nextStart + 1 !== span) throw runtimeError("INVALID_ARGUMENT", { nodeId: placement.child.id });
+        anchors.set(placement.child.id, axis === "row"
+          ? { row: nextStart, column: placement.column }
+          : { row: placement.row, column: nextStart });
+      }
+    }
+    const nextTracks = order.map((index) => tracks[index]!);
+    const rows = axis === "row" ? nextTracks : this.gridTracks("row");
+    const columns = axis === "column" ? nextTracks : this.gridTracks("column");
+    this.gridPlacements(rows, columns, undefined, anchors);
+    for (const [nodeId, anchor] of anchors) {
+      const child = this.host.proxyFor(nodeId);
+      const layout = child.autoLayout();
+      if (layout.gridRowAnchor !== anchor.row || layout.gridColumnAnchor !== anchor.column) {
+        child.writeAutoLayout({ gridRowAnchor: anchor.row, gridColumnAnchor: anchor.column });
+      }
+    }
+    this.writeAutoLayout(axis === "row" ? { gridRows: nextTracks } : { gridColumns: nextTracks });
+    return tracks.flatMap((_track, from) => {
+      const to = oldToNew.get(from)!;
+      return from === to ? [] : [{ from, to }];
+    });
+  }
+
   private writeGridTrack(axis: "row" | "column", index: number, patch: { type?: "flex" | "fixed" | "hug"; value?: number }): void {
     const tracks = [...this.gridTracks(axis)];
     const current = tracks[index];
@@ -4254,6 +4324,7 @@ export class RuntimeNodeProxy {
     rows = this.gridTracks("row"),
     columns = this.gridTracks("column"),
     override?: { nodeId: string; rowSpan: number; columnSpan: number; row?: number; column?: number },
+    anchorOverrides: ReadonlyMap<string, { row: number; column: number }> = new Map(),
   ): Map<string, { child: RuntimeNodeProxy; row: number; column: number; rowSpan: number; columnSpan: number }> {
     this.assertGridFrame();
     const occupied = Array.from({ length: rows.length * columns.length }, () => false);
@@ -4263,7 +4334,7 @@ export class RuntimeNodeProxy {
       const rowSpan = override?.nodeId === child.id ? override.rowSpan : childLayout.gridRowSpan ?? 1;
       const columnSpan = override?.nodeId === child.id ? override.columnSpan : childLayout.gridColumnSpan ?? 1;
       let placement: { row: number; column: number } | undefined = this.gridItemsPositioning === "MANUAL"
-        ? {
+        ? anchorOverrides.get(child.id) ?? {
             row: override?.nodeId === child.id && override.row !== undefined ? override.row : childLayout.gridRowAnchor!,
             column: override?.nodeId === child.id && override.column !== undefined ? override.column : childLayout.gridColumnAnchor!,
           }

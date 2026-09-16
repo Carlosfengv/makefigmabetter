@@ -280,6 +280,13 @@ export function assertFigmaPluginTypingsContract(
   frame.strokeBottomWeight = 3;
   frame.strokeLeftWeight = 4;
   frame.appendChild(rectangle);
+  if (false) {
+    frame.layoutMode = "GRID";
+    frame.gridItemsPositioning = "MANUAL";
+    frame.appendChildAt(rectangle, 0, 0);
+    void frame.reorderRows({ fromIndices: [0], insertionIndex: 1 });
+    void frame.reorderColumns({ fromIndices: [0], insertionIndex: 1 });
+  }
   if (floatVariable) {
     frame.setBoundVariable("itemSpacing", floatVariable);
     frame.setBoundVariable("paddingLeft", floatVariable);

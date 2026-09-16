@@ -3,7 +3,7 @@ import { RuntimeNodeProxy, type M1NodeType, type RuntimeNodeHost } from "./node-
 import type { RuntimeNodeHandle } from "./node-registry";
 
 export interface RuntimeContainerHost extends RuntimeNodeHost {
-  reparent(nodeId: string, parentId: string, index: number): void;
+  reparent(nodeId: string, parentId: string, index: number, gridPosition?: Readonly<{ row: number; column: number }>): void;
   findDescendants(parentId: string): readonly RuntimeNodeProxy[];
   assertCanQueryDescendants(parentId: string): void;
   loadPageAsync(pageId: string): Promise<void>;
@@ -25,6 +25,18 @@ export class RuntimeContainerNodeProxy extends RuntimeNodeProxy {
 
   appendChild(node: RuntimeNodeProxy): RuntimeNodeProxy {
     return this.insertChild(this.children.length, node);
+  }
+
+  appendChildAt(node: RuntimeNodeProxy, rowIndex: number, columnIndex: number): RuntimeNodeProxy {
+    this.assertLive();
+    this.assertMutable();
+    if (!Number.isInteger(rowIndex) || rowIndex < 0 || !Number.isInteger(columnIndex) || columnIndex < 0
+      || node.handle.sessionId !== this.handle.sessionId || node.removed || node.id === this.id
+      || this.host.findDescendants(node.id).some((child) => child.id === this.id)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: node.handle.nodeId });
+    }
+    this.host.reparent(node.id, this.id, this.children.length, { row: rowIndex, column: columnIndex });
+    return node;
   }
 
   insertChild(index: number, node: RuntimeNodeProxy): RuntimeNodeProxy {

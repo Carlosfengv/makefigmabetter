@@ -3115,8 +3115,12 @@ export class RuntimeSession implements RuntimeContainerHost {
     return () => this.viewStateListeners.delete(listener);
   }
 
-  reparent(nodeId: string, parentId: string, index: number): void {
+  reparent(nodeId: string, parentId: string, index: number, gridPosition?: Readonly<{ row: number; column: number }>): void {
     this.assertOpen();
+    if (gridPosition && (!Number.isInteger(gridPosition.row) || gridPosition.row < 0
+      || !Number.isInteger(gridPosition.column) || gridPosition.column < 0)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
     const node = this.projectionStore.getNode(nodeId);
     if (!node || node.removed === true) throw runtimeError("NODE_REMOVED", { nodeId });
     const parent = this.projectionStore.getNode(parentId);
@@ -3140,8 +3144,11 @@ export class RuntimeSession implements RuntimeContainerHost {
       primarySizing: "fixed", counterSizing: "fixed", absolute: false,
     } satisfies DocumentAutoLayout;
     let placementLayout: DocumentAutoLayout | undefined;
+    if (gridPosition && (parentLayout?.mode !== "grid" || parentLayout.gridItemsPositioning !== "manual" || nodeLayout.absolute)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: parentId });
+    }
     if (parentLayout?.mode === "grid" && parentLayout.gridItemsPositioning === "manual" && !nodeLayout.absolute) {
-      if (node.parentId === parentId && nodeLayout.gridRowAnchor !== undefined && nodeLayout.gridColumnAnchor !== undefined) {
+      if (!gridPosition && node.parentId === parentId && nodeLayout.gridRowAnchor !== undefined && nodeLayout.gridColumnAnchor !== undefined) {
         placementLayout = nodeLayout;
       } else {
         const rows = parentLayout.gridRows?.length ?? 0;
@@ -3168,18 +3175,29 @@ export class RuntimeSession implements RuntimeContainerHost {
         }
         const rowSpan = nodeLayout.gridRowSpan ?? 1;
         const columnSpan = nodeLayout.gridColumnSpan ?? 1;
-        let anchor: { row: number; column: number } | undefined;
-        for (let slot = 0; slot < occupied.length; slot += 1) {
-          const row = Math.floor(slot / columns);
-          const column = slot % columns;
-          if (row + rowSpan > rows || column + columnSpan > columns) continue;
-          let available = true;
-          for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
-            for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
-              if (occupied[occupiedRow * columns + occupiedColumn]) { available = false; break; }
+        let anchor: { row: number; column: number } | undefined = gridPosition ? { ...gridPosition } : undefined;
+        if (anchor && (anchor.row + rowSpan > rows || anchor.column + columnSpan > columns)) {
+          throw runtimeError("INVALID_ARGUMENT", { nodeId });
+        }
+        if (anchor) {
+          for (let occupiedRow = anchor.row; occupiedRow < anchor.row + rowSpan; occupiedRow += 1) {
+            for (let occupiedColumn = anchor.column; occupiedColumn < anchor.column + columnSpan; occupiedColumn += 1) {
+              if (occupied[occupiedRow * columns + occupiedColumn]) throw runtimeError("INVALID_ARGUMENT", { nodeId });
             }
           }
-          if (available) { anchor = { row, column }; break; }
+        } else {
+          for (let slot = 0; slot < occupied.length; slot += 1) {
+            const row = Math.floor(slot / columns);
+            const column = slot % columns;
+            if (row + rowSpan > rows || column + columnSpan > columns) continue;
+            let available = true;
+            for (let occupiedRow = row; occupiedRow < row + rowSpan && available; occupiedRow += 1) {
+              for (let occupiedColumn = column; occupiedColumn < column + columnSpan; occupiedColumn += 1) {
+                if (occupied[occupiedRow * columns + occupiedColumn]) { available = false; break; }
+              }
+            }
+            if (available) { anchor = { row, column }; break; }
+          }
         }
         if (!anchor) throw runtimeError("INVALID_ARGUMENT", { nodeId });
         placementLayout = { ...nodeLayout, gridRowAnchor: anchor.row, gridColumnAnchor: anchor.column };

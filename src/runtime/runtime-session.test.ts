@@ -3280,6 +3280,8 @@ describe("M1 RuntimeSession", () => {
     grid.layoutMode = "GRID";
     grid.gridRowCount = 3;
     grid.gridColumnCount = 3;
+    grid.gridRowSizes.forEach((track, index) => { track.type = "FIXED"; track.value = (index + 1) * 10; });
+    grid.gridColumnSizes.forEach((track, index) => { track.type = "FIXED"; track.value = (index + 1) * 20; });
     const first = session.createRectangle();
     const second = session.createRectangle();
     const third = session.createRectangle();
@@ -3303,17 +3305,46 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => first.setGridChildPosition(1, 1)), "INVALID_ARGUMENT")).toBe(true);
 
     const fourth = session.createRectangle();
-    grid.appendChild(fourth);
+    grid.appendChildAt(fourth, 0, 2);
     expect([fourth.gridRowAnchorIndex, fourth.gridColumnAnchorIndex]).toEqual([0, 2]);
+    const rejected = session.createRectangle();
+    expect(isRuntimeError(captureError(() => grid.appendChildAt(rejected, 1, 1)), "INVALID_ARGUMENT")).toBe(true);
+    expect(grid.children.some((child) => child.id === rejected.id)).toBe(false);
+
+    expect(grid.reorderRows({ fromIndices: [0], insertionIndex: 3 })).toEqual([
+      { from: 0, to: 1 }, { from: 1, to: 2 }, { from: 2, to: 0 },
+    ]);
+    expect(grid.gridRowSizes.map((track) => track.value)).toEqual([30, 10, 20]);
+    expect([first.gridRowAnchorIndex, third.gridRowAnchorIndex, second.gridRowAnchorIndex]).toEqual([1, 0, 0]);
+    expect(grid.reorderColumns({ fromIndices: [0], insertionIndex: 3 })).toEqual([
+      { from: 0, to: 1 }, { from: 1, to: 2 }, { from: 2, to: 0 },
+    ]);
+    expect(grid.gridColumnSizes.map((track) => track.value)).toEqual([60, 20, 40]);
+    expect([first.gridColumnAnchorIndex, third.gridColumnAnchorIndex, second.gridColumnAnchorIndex]).toEqual([1, 1, 0]);
     fourth.layoutPositioning = "ABSOLUTE";
     fourth.layoutPositioning = "AUTO";
-    expect([fourth.gridRowAnchorIndex, fourth.gridColumnAnchorIndex]).toEqual([0, 2]);
+    expect([fourth.gridRowAnchorIndex, fourth.gridColumnAnchorIndex]).toEqual([1, 0]);
+    await expect(session.commitAsync()).resolves.toBe(1);
+    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: grid.id,
+        patch: { autoLayout: expect.objectContaining({
+          gridItemsPositioning: "manual",
+          gridRows: [{ type: "fixed", value: 30 }, { type: "fixed", value: 10 }, { type: "fixed", value: 20 }],
+          gridColumns: [{ type: "fixed", value: 60 }, { type: "fixed", value: 20 }, { type: "fixed", value: 40 }],
+        }) },
+      }),
+      expect.objectContaining({
+        nodeId: first.id,
+        patch: { autoLayout: expect.objectContaining({ gridRowAnchor: 1, gridColumnAnchor: 1 }) },
+      }),
+    ]));
 
     grid.gridItemsPositioning = "ROW_AUTO_FLOW";
     expect(grid.gridItemsPositioning).toBe("ROW_AUTO_FLOW");
     expect([third.gridRowAnchorIndex, third.gridColumnAnchorIndex]).toEqual([0, 0]);
-    await expect(session.commitAsync()).resolves.toBe(1);
-    expect(transport.submitted[0]!.operations).toEqual(expect.arrayContaining([
+    await expect(session.commitAsync()).resolves.toBe(2);
+    expect(transport.submitted[1]!.operations).toEqual(expect.arrayContaining([
       expect.objectContaining({
         nodeId: grid.id,
         patch: { autoLayout: expect.objectContaining({ gridItemsPositioning: undefined }) },

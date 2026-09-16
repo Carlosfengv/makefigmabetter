@@ -310,6 +310,10 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   void gridFrame.gridItemsPositioning;
   const gridChild = runtime.createRectangle();
   gridFrame.appendChild(gridChild);
+  gridFrame.gridItemsPositioning = "MANUAL";
+  gridFrame.appendChildAt(gridChild, 0, 0);
+  void gridFrame.reorderRows({ fromIndices: [0], insertionIndex: 1 });
+  void gridFrame.reorderColumns({ fromIndices: [0], insertionIndex: 1 });
   gridChild.gridRowSpan = 2;
   gridChild.gridColumnSpan = 2;
   void gridChild.gridRowAnchorIndex;
