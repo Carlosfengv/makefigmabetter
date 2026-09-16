@@ -10,9 +10,10 @@ use editor_core::{
     ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
-    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -88,6 +89,19 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            operation_text_style(operation).is_some_and(|style| {
+                style.letter_spacing_unit == Some(v1::TextStyleLetterSpacingUnit::Percent as i32)
+            })
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum:
+                makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version
@@ -524,6 +538,15 @@ fn operation_has_style_publishable_metadata(operation: &v1::ResolvedOperation) -
             !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
         }),
         _ => false,
+    }
+}
+
+fn operation_text_style(operation: &v1::ResolvedOperation) -> Option<&v1::TextStyleResource> {
+    use v1::resolved_operation::Kind;
+    match operation.kind.as_ref()? {
+        Kind::RegisterTextStyle(value) => value.style.as_ref(),
+        Kind::SetTextStyle(value) => value.style.as_ref(),
+        _ => None,
     }
 }
 
@@ -2439,6 +2462,17 @@ fn text_style_resource_from_proto(
             .into_iter()
             .map(|link| link.uri)
             .collect(),
+        letter_spacing_unit: resource
+            .letter_spacing_unit
+            .map(
+                |unit| match v1::TextStyleLetterSpacingUnit::try_from(unit) {
+                    Ok(v1::TextStyleLetterSpacingUnit::Percent) => {
+                        Ok(TextStyleLetterSpacingUnit::Percent)
+                    }
+                    _ => Err(ServiceError::InvalidEnvelope),
+                },
+            )
+            .transpose()?,
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::InvalidEnvelope)?,
         paragraph: properties.paragraph,
@@ -2937,7 +2971,8 @@ mod tests {
         Command, Document, HyperlinkType, LeadingTrim, LineHeightUnit, NodeId, Origin,
         ParagraphListType, ParagraphStyleRun, PointId, TextDecoration, TextDecorationColor,
         TextDecorationOffset, TextDecorationStyle, TextDecorationThickness, TextListType,
-        TextTruncation, TextWrapStyle, Transaction, TransactionId, geometry::Point,
+        TextStyleLetterSpacingUnit, TextTruncation, TextWrapStyle, Transaction, TransactionId,
+        geometry::Point,
     };
     use makefigma_protocol::v1;
     use prost::Message;
@@ -5163,6 +5198,7 @@ mod tests {
             description: "Body copy".into(),
             description_markdown: String::new(),
             documentation_links: Vec::new(),
+            letter_spacing_unit: None,
             remote: true,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5250,6 +5286,7 @@ mod tests {
             documentation_links: vec![v1::DocumentationLink {
                 uri: "https://example.com/styles/body".into(),
             }],
+            letter_spacing_unit: None,
             remote: false,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,
@@ -5285,6 +5322,31 @@ mod tests {
                     && style.description_markdown == "**Body** copy"
                     && style.documentation_links == ["https://example.com/styles/body"]
         ));
+
+        let mut percent_batch = v1::ResolvedOperationBatch::decode(payload.as_slice()).unwrap();
+        let Some(v1::resolved_operation::Kind::SetTextStyle(value)) =
+            percent_batch.operations[0].kind.as_mut()
+        else {
+            panic!("expected set TextStyle operation");
+        };
+        let percent_style = value.style.as_mut().unwrap();
+        percent_style.letter_spacing_unit = Some(v1::TextStyleLetterSpacingUnit::Percent as i32);
+        percent_style.style.as_mut().unwrap().letter_spacing = 10.0;
+        let percent_payload = percent_batch.encode_to_vec();
+        assert!(
+            matches!(commands_from_payload_with_semantics(&percent_payload, makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &percent_payload,
+                makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextStyle { style }]
+                if style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent)
+                    && style.style.letter_spacing == 10.0
+        ));
     }
 
     #[test]
@@ -5296,6 +5358,7 @@ mod tests {
             description: String::new(),
             description_markdown: String::new(),
             documentation_links: Vec::new(),
+            letter_spacing_unit: None,
             remote: false,
             style: Some(v1::TextStyleRun {
                 font_size: 16.0,

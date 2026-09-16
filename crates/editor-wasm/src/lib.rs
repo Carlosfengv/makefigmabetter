@@ -13,10 +13,10 @@ use editor_core::{
     ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    Transaction, TransactionId, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, Transaction, TransactionId, VariableCollectionResource,
+    VariableMode, VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
+    VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -934,7 +934,13 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=65).contains(&snapshot.schema_version)
+    if !(1..=66).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 66
+            && snapshot.text_styles.as_ref().is_some_and(|styles| {
+                styles
+                    .iter()
+                    .any(|style| style.letter_spacing_unit.is_some())
+            }))
         || (snapshot.schema_version < 65
             && (snapshot.text_styles.as_ref().is_some_and(|styles| {
                 styles.iter().any(|style| {
@@ -1748,7 +1754,15 @@ struct ProjectionTextStyleResource {
     #[serde(default)]
     remote: bool,
     style: ProjectionTextStyle,
+    #[serde(default)]
+    letter_spacing_unit: Option<ProjectionTextStyleLetterSpacingUnit>,
     paragraph: ProjectionParagraphStyle,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProjectionTextStyleLetterSpacingUnit {
+    Percent,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2274,7 +2288,13 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.text_styles().any(|style| {
+        let schema_version = if self
+            .document
+            .text_styles()
+            .any(|style| style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent))
+        {
+            66
+        } else if self.document.text_styles().any(|style| {
             !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
         }) || self.document.paint_styles().any(|style| {
             !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
@@ -6113,6 +6133,9 @@ fn projection_text_style_resource(resource: &TextStyleResource) -> ProjectionTex
         style: projected
             .base_style
             .expect("text style projection always has a base style"),
+        letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
+            TextStyleLetterSpacingUnit::Percent => ProjectionTextStyleLetterSpacingUnit::Percent,
+        }),
         paragraph: projected.paragraph,
     }
 }
@@ -6147,6 +6170,9 @@ fn text_style_resource_from_projection(
         style: properties
             .base_style
             .ok_or_else(|| JsValue::from_str("INVALID_TEXT_STYLE_RESOURCE"))?,
+        letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
+            ProjectionTextStyleLetterSpacingUnit::Percent => TextStyleLetterSpacingUnit::Percent,
+        }),
         paragraph: properties.paragraph,
     })
 }
@@ -10973,6 +10999,62 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 64;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v66_round_trips_percent_text_style_tracking_and_v65_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([{
+            "type": "registerTextStyle",
+            "style": {
+                "id": "S:tracking",
+                "key": "",
+                "name": "Tracking",
+                "description": "",
+                "remote": false,
+                "style": {
+                    "fontSize": 16.0,
+                    "fontWeight": 400,
+                    "italic": false,
+                    "letterSpacing": 10.0
+                },
+                "letterSpacingUnit": "percent",
+                "paragraph": {
+                    "alignment": "left",
+                    "lineHeight": 24.0,
+                    "paragraphSpacing": 0.0
+                }
+            }
+        }]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000066",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":66"));
+        assert!(snapshot.contains("\"letterSpacingUnit\":\"percent\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored
+                .document
+                .text_style("S:tracking")
+                .unwrap()
+                .letter_spacing_unit,
+            Some(TextStyleLetterSpacingUnit::Percent)
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 65;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

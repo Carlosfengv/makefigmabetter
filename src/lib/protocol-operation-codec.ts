@@ -28,6 +28,7 @@ import {
   TextDecorationStyle as ProtoTextDecorationStyle,
   TextDecorationOffsetUnit as ProtoTextDecorationOffsetUnit,
   TextDecorationThicknessUnit as ProtoTextDecorationThicknessUnit,
+  TextStyleLetterSpacingUnit,
   TextTruncation,
   TextWrapStyle as ProtoTextWrapStyle,
   VariableResolvedType as ProtoVariableResolvedType,
@@ -276,6 +277,9 @@ function textStyleResourceProto(resource: DocumentTextStyleResource) {
     remote: resource.remote,
     style: properties.baseStyle,
     paragraph: properties.paragraph,
+    letterSpacingUnit: resource.letterSpacingUnit === "percent"
+      ? TextStyleLetterSpacingUnit.TEXT_STYLE_LETTER_SPACING_UNIT_PERCENT
+      : undefined,
   };
 }
 

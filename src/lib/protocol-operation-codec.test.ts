@@ -1,4 +1,4 @@
-import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
+import { BlendMode, ColorSpace, ConstraintType, HyperlinkType, ImageScaleMode, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, NodeKind, ResolvedOperationBatch, StrokeAlign, StrokeCap, TextAlignment, TextCase, TextDecoration, TextDecorationOffsetUnit, TextDecorationStyle, TextDecorationThicknessUnit, TextListType, TextStyleLetterSpacingUnit, TextWrapStyle, VariableResolvedType, WrapTrackAlignment } from "@makefigma/protocol-types";
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { encodeCoreBatchPayload, encodeCreatePagePayload, encodeRegisterResourcePayload, idBytes } from "./protocol-operation-codec";
@@ -37,6 +37,7 @@ describe("protocol operation codec", () => {
         documentationLinks: [{ uri: "https://example.com/styles/body" }],
         remote: true,
         style: { fontSize: 16, fontWeight: 450, italic: false, letterSpacing: .25, textCase: "smallCaps" },
+        letterSpacingUnit: "percent",
         paragraph: { alignment: "left", lineHeight: 150, lineHeightUnit: "percent", paragraphSpacing: 6 },
       },
     }]));
@@ -51,6 +52,7 @@ describe("protocol operation codec", () => {
       documentationLinks: [{ uri: "https://example.com/styles/body" }],
       remote: true,
       style: { fontSize: 16, fontWeight: 450, letterSpacing: .25, textCase: TextCase.TEXT_CASE_SMALL_CAPS },
+      letterSpacingUnit: TextStyleLetterSpacingUnit.TEXT_STYLE_LETTER_SPACING_UNIT_PERCENT,
       paragraph: { alignment: TextAlignment.TEXT_ALIGNMENT_LEFT, lineHeight: 150, lineHeightUnit: LineHeightUnit.LINE_HEIGHT_UNIT_PERCENT, paragraphSpacing: 6 },
     });
   });

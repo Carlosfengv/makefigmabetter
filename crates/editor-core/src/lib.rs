@@ -918,7 +918,14 @@ pub struct TextStyleResource {
     pub documentation_links: Vec<String>,
     pub remote: bool,
     pub style: TextStyleRun,
+    /// Absence preserves the legacy PIXELS unit and existing resource hashes.
+    pub letter_spacing_unit: Option<TextStyleLetterSpacingUnit>,
     pub paragraph: ParagraphStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextStyleLetterSpacingUnit {
+    Percent,
 }
 
 /// A complete, document-owned Figma PaintStyle resource. The ordered paint
@@ -2958,6 +2965,8 @@ impl Document {
             || style.style.text_style_id.is_some()
             || style.style.paint_style_id.is_some()
             || style.style.hyperlink.is_some()
+            || (style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent)
+                && !(-100.0..=10_000.0).contains(&style.style.letter_spacing))
             || !self.valid_text_properties("", &properties)
         {
             return Err(CommandError::InvalidTextStyle);
@@ -9229,6 +9238,9 @@ fn hash_text_style_resource(hasher: &mut Sha256, resource: &TextStyleResource) {
     properties.paragraph = resource.paragraph.clone();
     properties.base_style = Some(resource.style.clone());
     hash_text_properties(hasher, &properties);
+    if resource.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent) {
+        hasher.update(b"makefigma/editor-core/text-style-letter-spacing-percent-v1");
+    }
     hash_style_publishable_metadata(
         hasher,
         &resource.description_markdown,
@@ -11674,6 +11686,7 @@ mod tests {
                 text_style_id: None,
                 paint_style_id: None,
             },
+            letter_spacing_unit: None,
             paragraph: TextProperties::default().paragraph,
         }
     }
@@ -14466,6 +14479,8 @@ mod tests {
         changed_text.name = "Typography/Body".into();
         changed_text.description_markdown = "**Body** copy".into();
         changed_text.documentation_links = vec!["https://example.com/styles/body".into()];
+        changed_text.style.letter_spacing = 10.0;
+        changed_text.letter_spacing_unit = Some(TextStyleLetterSpacingUnit::Percent);
         let text_hash_before_update = text_document.canonical_hash();
         text_document
             .submit(
@@ -14567,6 +14582,13 @@ mod tests {
         assert_eq!(
             Document::empty().seed_paint_style(too_many_links),
             Err(CommandError::InvalidPaintStyle)
+        );
+        let mut invalid_percent = text_style_resource("S:invalid-percent");
+        invalid_percent.style.letter_spacing = -101.0;
+        invalid_percent.letter_spacing_unit = Some(TextStyleLetterSpacingUnit::Percent);
+        assert_eq!(
+            Document::empty().seed_text_style(invalid_percent),
+            Err(CommandError::InvalidTextStyle)
         );
     }
 

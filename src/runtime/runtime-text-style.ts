@@ -69,12 +69,23 @@ export class RuntimeTextStyle {
     if (value !== "NONE" && value !== "UNDERLINE" && value !== "STRIKETHROUGH") throw runtimeError("INVALID_ARGUMENT");
     this.writeStyle({ textDecoration: value === "NONE" ? undefined : value === "UNDERLINE" ? "underline" : "strikethrough" });
   }
-  get letterSpacing(): Readonly<{ value: number; unit: "PIXELS" }> {
-    return Object.freeze({ value: this.current().style.letterSpacing, unit: "PIXELS" });
+  get letterSpacing(): Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }> {
+    const resource = this.current();
+    return Object.freeze({
+      value: resource.style.letterSpacing,
+      unit: resource.letterSpacingUnit === "percent" ? "PERCENT" : "PIXELS",
+    });
   }
   set letterSpacing(value: Readonly<{ value: number; unit: "PIXELS" | "PERCENT" }>) {
-    if (!value || value.unit !== "PIXELS" || !Number.isFinite(value.value)) throw runtimeError("INVALID_ARGUMENT");
-    this.writeStyle({ letterSpacing: value.value });
+    if (!value || (value.unit !== "PIXELS" && value.unit !== "PERCENT") || !Number.isFinite(value.value)
+      || (value.unit === "PERCENT" && (value.value < -100 || value.value > 10_000))) {
+      throw runtimeError("INVALID_ARGUMENT");
+    }
+    const resource = this.current();
+    this.write({
+      style: { ...structuredClone(resource.style), letterSpacing: value.value },
+      letterSpacingUnit: value.unit === "PERCENT" ? "percent" : undefined,
+    });
   }
   get lineHeight(): Readonly<{ unit: "AUTO" } | { value: number; unit: "PIXELS" | "PERCENT" }> {
     const resource = this.current();

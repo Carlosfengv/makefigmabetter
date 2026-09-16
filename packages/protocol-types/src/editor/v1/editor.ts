@@ -362,6 +362,12 @@ export enum LineHeightUnit {
   UNRECOGNIZED = -1,
 }
 
+export enum TextStyleLetterSpacingUnit {
+  TEXT_STYLE_LETTER_SPACING_UNIT_UNSPECIFIED = 0,
+  TEXT_STYLE_LETTER_SPACING_UNIT_PERCENT = 1,
+  UNRECOGNIZED = -1,
+}
+
 export enum VariableResolvedType {
   VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0,
   VARIABLE_RESOLVED_TYPE_BOOLEAN = 1,
@@ -997,6 +1003,7 @@ export interface TextStyleResource {
   paragraph?: ParagraphStyle | undefined;
   descriptionMarkdown: string;
   documentationLinks: DocumentationLink[];
+  letterSpacingUnit?: TextStyleLetterSpacingUnit | undefined;
 }
 
 export interface PaintStyleResource {
@@ -6003,6 +6010,7 @@ function createBaseTextStyleResource(): TextStyleResource {
     paragraph: undefined,
     descriptionMarkdown: "",
     documentationLinks: [],
+    letterSpacingUnit: undefined,
   };
 }
 
@@ -6034,6 +6042,9 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
     }
     for (const v of message.documentationLinks) {
       DocumentationLink.encode(v!, writer.uint32(74).fork()).join();
+    }
+    if (message.letterSpacingUnit !== undefined) {
+      writer.uint32(80).int32(message.letterSpacingUnit);
     }
     return writer;
   },
@@ -6117,6 +6128,14 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
           message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.letterSpacingUnit = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6144,6 +6163,7 @@ export const TextStyleResource: MessageFns<TextStyleResource> = {
       : undefined;
     message.descriptionMarkdown = object.descriptionMarkdown ?? "";
     message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
+    message.letterSpacingUnit = object.letterSpacingUnit ?? undefined;
     return message;
   },
 };

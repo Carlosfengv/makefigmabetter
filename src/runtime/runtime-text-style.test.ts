@@ -100,7 +100,7 @@ describe("TextStyle resource runtime", () => {
     style.documentationLinks = [{ uri: "https://design.example/text/body-v2" }];
     style.fontSize = 18;
     style.textDecoration = "UNDERLINE";
-    style.letterSpacing = { value: 1.5, unit: "PIXELS" };
+    style.letterSpacing = { value: 10, unit: "PERCENT" };
     style.lineHeight = { value: 125, unit: "PERCENT" };
     style.leadingTrim = "CAP_HEIGHT";
     style.paragraphIndent = 4;
@@ -116,7 +116,7 @@ describe("TextStyle resource runtime", () => {
     expect(style.documentationLinks).toEqual([{ uri: "https://design.example/text/body-v2" }]);
     expect(style.fontSize).toBe(18);
     expect(style.textDecoration).toBe("UNDERLINE");
-    expect(style.letterSpacing).toEqual({ value: 1.5, unit: "PIXELS" });
+    expect(style.letterSpacing).toEqual({ value: 10, unit: "PERCENT" });
     expect(style.lineHeight).toEqual({ value: 125, unit: "PERCENT" });
     expect(style.leadingTrim).toBe("CAP_HEIGHT");
     expect(style.paragraphIndent).toBe(4);
@@ -129,7 +129,7 @@ describe("TextStyle resource runtime", () => {
     expect((await session.getStyleByIdAsync(style.id))?.name).toBe("Typography/Body");
     expect(isRuntimeError(capture(() => { style.name = " "; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.name = "界".repeat(400); }), "INVALID_ARGUMENT")).toBe(true);
-    expect(isRuntimeError(capture(() => { style.letterSpacing = { value: 10, unit: "PERCENT" }; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(capture(() => { style.letterSpacing = { value: -101, unit: "PERCENT" }; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.documentationLinks = [{ uri: "javascript:alert(1)" }]; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(capture(() => { style.documentationLinks = [{ uri: "https://design.example/one" }, { uri: "https://design.example/two" }]; }), "INVALID_ARGUMENT")).toBe(true);
 
@@ -139,7 +139,8 @@ describe("TextStyle resource runtime", () => {
       description: "Default body copy",
       descriptionMarkdown: "Default body copy **updated**",
       documentationLinks: [{ uri: "https://design.example/text/body-v2" }],
-      style: { fontSize: 18, letterSpacing: 1.5, textDecoration: "underline", leadingTrim: "capHeight", textCase: "upper" },
+      style: { fontSize: 18, letterSpacing: 10, textDecoration: "underline", leadingTrim: "capHeight", textCase: "upper" },
+      letterSpacingUnit: "percent",
       paragraph: { lineHeight: 125, lineHeightUnit: "percent", paragraphIndent: 4, paragraphSpacing: 8, textWrapStyle: "balance", listSpacing: 6, hangingPunctuation: true, hangingList: true },
     });
 
@@ -199,6 +200,15 @@ describe("TextStyle resource runtime", () => {
   it("applies and unlinks a complete TextStyle value atomically", async () => {
     const styledProjection: RuntimeProjection = {
       ...projection,
+      textStyles: [
+        ...(projection.textStyles ?? []),
+        {
+          ...projection.textStyles![0]!,
+          id: "S:tracking",
+          style: { ...projection.textStyles![0]!.style, letterSpacing: 10 },
+          letterSpacingUnit: "percent",
+        },
+      ],
       nodes: [
         ...projection.nodes.map((node) => node.id === "text" ? {
           ...node,
@@ -239,9 +249,10 @@ describe("TextStyle resource runtime", () => {
     expect(isRuntimeError(capture(() => { text.textStyleId = "S:missing"; }), "RESOURCE_UNAVAILABLE")).toBe(true);
 
     const shape = (await session.getNodeByIdAsync("shape"))!;
-    await shape.text.setTextStyleIdAsync("S:body");
-    expect(shape.text.textStyleId).toBe("S:body");
+    await shape.text.setTextStyleIdAsync("S:tracking");
+    expect(shape.text.textStyleId).toBe("S:tracking");
     expect(shape.text.fontSize).toBe(16);
+    expect(shape.text.letterSpacing).toEqual({ value: 1.6, unit: "PIXELS" });
   });
 
   it("supports async range application in dynamic-page mode and rejects unsupported partial paragraph projection", async () => {

@@ -12,10 +12,10 @@ use editor_core::{
     ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
     StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
     TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
-    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
-    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
-    can_parent_contain_child,
+    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
+    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
+    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
+    WrapTrackAlignment, can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -76,9 +76,10 @@ pub const VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 48;
 pub const VARIABLE_CODE_SYNTAX_ENGINE_SEMANTICS_VERSION: u32 = 49;
 pub const STYLE_LIFECYCLE_ENGINE_SEMANTICS_VERSION: u32 = 50;
 pub const STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION: u32 = 51;
+pub const TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION: u32 = 52;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
 pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION;
+    TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -112,6 +113,13 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
+        && document
+            .text_styles()
+            .any(|style| style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent))
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
         && (document.text_styles().any(style_has_publishable_metadata)
             || document
@@ -661,6 +669,14 @@ pub fn document_from_snapshot_with_engine_semantics(
                 .paint_styles
                 .iter()
                 .any(paint_style_proto_has_publishable_metadata))
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    if declared_engine_semantics_version
+        < TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
+        && snapshot.text_styles.iter().any(|style| {
+            style.letter_spacing_unit == Some(v1::TextStyleLetterSpacingUnit::Percent as i32)
+        })
     {
         return Err(SnapshotError::Invalid);
     }
@@ -2431,6 +2447,9 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
             .iter()
             .map(|uri| v1::DocumentationLink { uri: uri.clone() })
             .collect(),
+        letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
+            TextStyleLetterSpacingUnit::Percent => v1::TextStyleLetterSpacingUnit::Percent as i32,
+        }),
     }
 }
 
@@ -2474,6 +2493,17 @@ fn text_style_resource_from_proto(
             .into_iter()
             .map(|link| link.uri)
             .collect(),
+        letter_spacing_unit: resource
+            .letter_spacing_unit
+            .map(
+                |unit| match v1::TextStyleLetterSpacingUnit::try_from(unit) {
+                    Ok(v1::TextStyleLetterSpacingUnit::Percent) => {
+                        Ok(TextStyleLetterSpacingUnit::Percent)
+                    }
+                    _ => Err(SnapshotError::Invalid),
+                },
+            )
+            .transpose()?,
         remote: resource.remote,
         style: properties.base_style.ok_or(SnapshotError::Invalid)?,
         paragraph: properties.paragraph,
@@ -6127,6 +6157,7 @@ mod tests {
                 text_style_id: None,
                 paint_style_id: None,
             },
+            letter_spacing_unit: None,
             paragraph,
         };
         document.seed_text_style(style.clone()).unwrap();
@@ -6153,6 +6184,52 @@ mod tests {
                 172_u128.to_be_bytes(),
                 hash,
                 TEXT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+
+        let mut percent_document = Document::with_id(DocumentId(177));
+        let mut percent_style = style;
+        percent_style.id = "S:tracking".into();
+        percent_style.style.letter_spacing = 10.0;
+        percent_style.letter_spacing_unit = Some(TextStyleLetterSpacingUnit::Percent);
+        percent_document
+            .seed_text_style(percent_style.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &percent_document,
+                TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let percent_hash = percent_document.canonical_hash();
+        let percent_snapshot = snapshot_from_document(
+            &percent_document,
+            TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let percent_restored = document_from_snapshot_with_engine_semantics(
+            &percent_snapshot,
+            177_u128.to_be_bytes(),
+            percent_hash,
+            TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            percent_restored.text_style("S:tracking"),
+            Some(&percent_style)
+        );
+        let mut percent_mislabeled =
+            v1::DocumentSnapshot::decode(percent_snapshot.as_slice()).unwrap();
+        percent_mislabeled.engine_semantics_version =
+            TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &percent_mislabeled.encode_to_vec(),
+                177_u128.to_be_bytes(),
+                percent_hash,
+                TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );
@@ -6235,6 +6312,7 @@ mod tests {
                 text_style_id: None,
                 paint_style_id: None,
             },
+            letter_spacing_unit: None,
             paragraph: TextProperties::default().paragraph,
         };
         let paint_style = PaintStyleResource {

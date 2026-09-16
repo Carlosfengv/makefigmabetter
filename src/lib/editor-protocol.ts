@@ -369,6 +369,8 @@ export interface DocumentTextStyleResource {
   documentationLinks: Array<{ uri: string }>;
   remote: boolean;
   style: DocumentTextStyle;
+  /** Omission preserves the legacy PIXELS representation. */
+  letterSpacingUnit?: "percent";
   paragraph: DocumentTextProperties["paragraph"];
 }
 

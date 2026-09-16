@@ -341,7 +341,7 @@ function validateResourceOperations(
       const value = operation.style;
       if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id)
         || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
-        || !Number.isFinite(value.style.letterSpacing) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       textStyles.set(value.id, value);
@@ -350,7 +350,7 @@ function validateResourceOperations(
       const before = textStyles.get(value.id);
       if (!before || before.remote || !validPendingStyleIdentity(value) || value.remote || before.key !== value.key
         || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
-        || !Number.isFinite(value.style.letterSpacing) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
+        || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
       }
       textStyles.set(value.id, value);
@@ -432,6 +432,14 @@ function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPa
     && !value.descriptionMarkdown.includes("\0") && encoder.encode(value.descriptionMarkdown).byteLength <= 32 * 1_024
     && validRuntimeStyleDocumentationLinks(value.documentationLinks)
     && value.key === "");
+}
+
+function validTextStyleLetterSpacing(value: DocumentTextStyleResource): boolean {
+  return Number.isFinite(value.style.letterSpacing)
+    && (value.letterSpacingUnit === undefined
+      || (value.letterSpacingUnit === "percent"
+        && value.style.letterSpacing >= -100
+        && value.style.letterSpacing <= 10_000));
 }
 
 function validateVariableAliases(variables: ReadonlyMap<string, DocumentVariableResource>, transactionId: string): void {

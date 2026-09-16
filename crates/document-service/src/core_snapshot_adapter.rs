@@ -11,10 +11,10 @@ use editor_core::{
     PaintStyleResource, ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape,
     PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase,
     TextDecoration, TextDecorationColor, TextDecorationOffset, TextDecorationStyle,
-    TextDecorationThickness, TextListType, TextProperties, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    TextDecorationThickness, TextListType, TextProperties, TextStyleLetterSpacingUnit,
+    TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle, VariableCollectionResource,
+    VariableMode, VariableResolvedType, VariableResource, VariableValue, VectorPath, VectorPoint,
+    VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -477,6 +477,14 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
+        && document
+            .text_styles()
+            .any(|style| style.letter_spacing_unit == Some(TextStyleLetterSpacingUnit::Percent))
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::STYLE_PUBLISHABLE_METADATA_ENGINE_SEMANTICS_VERSION
         && (document.text_styles().any(|style| {
@@ -1035,6 +1043,14 @@ pub fn document_from_snapshot(
         }) || snapshot.paint_styles.iter().any(|style| {
             !style.description_markdown.is_empty() || !style.documentation_links.is_empty()
         }))
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if declared_engine_semantics_version
+        < makefigma_document_codec::TEXT_STYLE_PERCENT_LETTER_SPACING_ENGINE_SEMANTICS_VERSION
+        && snapshot.text_styles.iter().any(|style| {
+            style.letter_spacing_unit == Some(v1::TextStyleLetterSpacingUnit::Percent as i32)
+        })
     {
         return Err(ServiceError::ReducerRejected);
     }
@@ -2706,6 +2722,9 @@ fn text_style_resource_to_proto(resource: &TextStyleResource) -> v1::TextStyleRe
             .iter()
             .map(|uri| v1::DocumentationLink { uri: uri.clone() })
             .collect(),
+        letter_spacing_unit: resource.letter_spacing_unit.map(|unit| match unit {
+            TextStyleLetterSpacingUnit::Percent => v1::TextStyleLetterSpacingUnit::Percent as i32,
+        }),
     }
 }
 
@@ -2733,6 +2752,17 @@ fn text_style_resource_from_proto(
             .into_iter()
             .map(|link| link.uri)
             .collect(),
+        letter_spacing_unit: resource
+            .letter_spacing_unit
+            .map(
+                |unit| match v1::TextStyleLetterSpacingUnit::try_from(unit) {
+                    Ok(v1::TextStyleLetterSpacingUnit::Percent) => {
+                        Ok(TextStyleLetterSpacingUnit::Percent)
+                    }
+                    _ => Err(ServiceError::ReducerRejected),
+                },
+            )
+            .transpose()?,
         remote: resource.remote,
         style: properties.base_style.ok_or(ServiceError::ReducerRejected)?,
         paragraph: properties.paragraph,

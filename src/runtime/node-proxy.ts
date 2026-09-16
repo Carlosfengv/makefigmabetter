@@ -428,7 +428,9 @@ function applyRuntimeTextStyleRange(
     fontSize: style.fontSize,
     fontWeight: style.fontWeight,
     italic: style.italic,
-    letterSpacing: style.letterSpacing,
+    letterSpacing: resource.letterSpacingUnit === "percent"
+      ? style.letterSpacing * style.fontSize / 100
+      : style.letterSpacing,
     color: structuredClone(style.color),
     fillStack: structuredClone(style.fillStack),
     textCase: style.textCase,
