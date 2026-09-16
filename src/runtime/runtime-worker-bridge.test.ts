@@ -702,6 +702,55 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("writes shared ComponentSet properties to every variant and linked Instance through Core", async () => {
+    const setId = "00000000-0000-4000-8000-0000000000c1";
+    const baseId = "00000000-0000-4000-8000-0000000000c2";
+    const hoverId = "00000000-0000-4000-8000-0000000000c3";
+    const baseInstanceId = "00000000-0000-4000-8000-0000000000c4";
+    const hoverInstanceId = "00000000-0000-4000-8000-0000000000c5";
+    const variantDefinition = { State: { type: "VARIANT" as const, defaultValue: "Default", variantOptions: ["Default", "Hover"] } };
+    const setMetadata = { key: setId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: variantDefinition, variantGroupProperties: { State: { values: ["Default", "Hover"] } } };
+    const componentMetadata = (id: string) => ({ key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} });
+    const instanceMetadata = (mainComponentId: string) => ({ mainComponentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false });
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: setId, pageId: "page", kind: "componentSet", name: "Button", x: 0, y: 0, width: 240, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentSetMetadata: setMetadata },
+        { id: baseId, pageId: "page", parentId: setId, kind: "component", name: "State=Default", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: componentMetadata(baseId) },
+        { id: hoverId, pageId: "page", parentId: setId, kind: "component", name: "State=Hover", x: 140, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: componentMetadata(hoverId) },
+        { id: baseInstanceId, pageId: "page", kind: "instance", name: "Default instance", x: 0, y: 100, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: instanceMetadata(baseId) },
+        { id: hoverInstanceId, pageId: "page", kind: "instance", name: "Hover instance", x: 140, y: 100, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: instanceMetadata(hoverId) },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "component-set-properties-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const set = session.currentPage.children.find((node) => node.id === setId)!;
+    const propertyName = set.addComponentProperty("Enabled", "BOOLEAN", true);
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "update", id: setId, patch: { componentSetMetadata: expect.objectContaining({ componentPropertyDefinitions: expect.objectContaining({ [propertyName]: { type: "BOOLEAN", defaultValue: true } }) }) } }),
+      expect.objectContaining({ type: "update", id: baseId, patch: { componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) } }),
+      expect.objectContaining({ type: "update", id: hoverId, patch: { componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) } }),
+      expect.objectContaining({ type: "update", id: baseInstanceId, patch: { instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) } }),
+      expect.objectContaining({ type: "update", id: hoverInstanceId, patch: { instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) } }),
+    ]);
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: setId, componentSetMetadata: expect.objectContaining({ componentPropertyDefinitions: expect.objectContaining({ [propertyName]: { type: "BOOLEAN", defaultValue: true } }) }) }),
+      expect.objectContaining({ id: baseId, componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) }),
+      expect.objectContaining({ id: hoverId, componentMetadata: expect.objectContaining({ componentPropertyDefinitions: { [propertyName]: { type: "BOOLEAN", defaultValue: true } } }) }),
+      expect.objectContaining({ id: baseInstanceId, instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) }),
+      expect.objectContaining({ id: hoverInstanceId, instanceMetadata: expect.objectContaining({ componentProperties: { [propertyName]: true } }) }),
+    ]));
+    bridge.close();
+    await commit;
+  });
+
   it("combines Components into a ComponentSet through one Core batch", async () => {
     const baseId = "00000000-0000-4000-8000-000000000048";
     const hoverId = "00000000-0000-4000-8000-000000000049";

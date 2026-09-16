@@ -1944,19 +1944,19 @@ export class RuntimeNodeProxy {
     defaultValue: string | boolean | RuntimeVariableAlias,
     options?: RuntimeComponentPropertyOptions,
   ): string {
-    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (this.type !== "COMPONENT" && this.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     this.assertMutable();
     return this.host.addComponentProperty(this.handle.nodeId, propertyName, type, defaultValue, options);
   }
 
   editComponentProperty(propertyName: string, value: RuntimeComponentPropertyEdit): string {
-    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (this.type !== "COMPONENT" && this.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     this.assertMutable();
     return this.host.editComponentProperty(this.handle.nodeId, propertyName, value);
   }
 
   deleteComponentProperty(propertyName: string): void {
-    if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (this.type !== "COMPONENT" && this.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     this.assertMutable();
     this.host.deleteComponentProperty(this.handle.nodeId, propertyName);
   }

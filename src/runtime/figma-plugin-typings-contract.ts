@@ -187,6 +187,9 @@ export function assertFigmaPluginTypingsContract(
   instance.removeOverrides();
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;
+  const setPropertyName: string = componentSet.addComponentProperty("Label", "TEXT", "Continue");
+  const renamedSetProperty: string = componentSet.editComponentProperty(setPropertyName, { name: "Title", defaultValue: "Save" });
+  componentSet.deleteComponentProperty(renamedSetProperty);
   const polygon: PolygonNode = figma.createPolygon();
   polygon.pointCount = polygon.pointCount;
   const star: StarNode = figma.createStar();

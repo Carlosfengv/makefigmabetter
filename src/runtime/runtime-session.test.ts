@@ -856,6 +856,74 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(set.id))?.children).toEqual([base, hover]);
   });
 
+  it("mutates shared ComponentSet properties across variants, Instances and referenced sublayers", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const base = session.createComponent();
+    base.name = "State=Default";
+    const baseSurface = session.createRectangle();
+    base.appendChild(baseSurface);
+    const hover = session.createComponent();
+    hover.name = "State=Hover";
+    const hoverSurface = session.createRectangle();
+    hover.appendChild(hoverSurface);
+    const set = session.combineAsVariants([base, hover], session.currentPage);
+    const baseInstance = base.createInstance();
+    const hoverInstance = hover.createInstance();
+
+    const enabled = set.addComponentProperty("Enabled", "BOOLEAN", false);
+    expect(set.componentPropertyDefinitions).toMatchObject({
+      State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] },
+      [enabled]: { type: "BOOLEAN", defaultValue: false },
+    });
+    expect(base.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
+    expect(hover.componentPropertyDefinitions[enabled]).toEqual({ type: "BOOLEAN", defaultValue: false });
+    expect(baseInstance.componentPropertyValues[enabled]).toBe(false);
+    expect(hoverInstance.componentPropertyValues[enabled]).toBe(false);
+
+    baseSurface.componentPropertyReferences = { visible: enabled };
+    hoverSurface.componentPropertyReferences = { visible: enabled };
+    const baseInstanceSurface = baseInstance.children[0]!;
+    const hoverInstanceSurface = hoverInstance.children[0]!;
+    baseInstance.setProperties({ [enabled]: true });
+    expect(baseInstanceSurface.visible).toBe(true);
+    expect(hoverInstanceSurface.visible).toBe(false);
+
+    const renamed = set.editComponentProperty(enabled, { name: "Shown", defaultValue: true });
+    expect(set.componentPropertyDefinitions).not.toHaveProperty(enabled);
+    expect(base.componentPropertyDefinitions[renamed]).toEqual({ type: "BOOLEAN", defaultValue: true });
+    expect(hover.componentPropertyDefinitions[renamed]).toEqual({ type: "BOOLEAN", defaultValue: true });
+    expect(baseSurface.componentPropertyReferences).toEqual({ visible: renamed });
+    expect(hoverInstanceSurface.componentPropertyReferences).toEqual({ visible: renamed });
+    expect(baseInstance.componentPropertyValues[renamed]).toBe(true);
+    expect(hoverInstance.componentPropertyValues[renamed]).toBe(true);
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => set.addComponentProperty("Theme", "VARIANT", "Light")), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => set.editComponentProperty("State", { name: "Mode" })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => set.deleteComponentProperty("State")), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    set.deleteComponentProperty(renamed);
+    expect(set.componentPropertyDefinitions).not.toHaveProperty(renamed);
+    expect(base.componentPropertyDefinitions).not.toHaveProperty(renamed);
+    expect(hover.componentPropertyDefinitions).not.toHaveProperty(renamed);
+    expect(baseInstance.componentPropertyValues).not.toHaveProperty(renamed);
+    expect(hoverInstance.componentPropertyValues).not.toHaveProperty(renamed);
+    expect(baseSurface.componentPropertyReferences).toBeNull();
+    expect(hoverInstanceSurface.componentPropertyReferences).toBeNull();
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: set.id, patch: { componentSetMetadata: expect.any(Object) } }),
+      expect.objectContaining({ type: "update", nodeId: base.id, patch: { componentMetadata: expect.any(Object) } }),
+      expect.objectContaining({ type: "update", nodeId: hover.id, patch: { componentMetadata: expect.any(Object) } }),
+      expect.objectContaining({ type: "update", nodeId: baseInstance.id, patch: { instanceMetadata: expect.any(Object) } }),
+      expect.objectContaining({ type: "update", nodeId: hoverInstance.id, patch: { instanceMetadata: expect.any(Object) } }),
+    ]));
+  });
+
   it("atomically replaces a Frame with a local Component and preserves its subtree", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

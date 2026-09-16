@@ -31,6 +31,9 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const componentSet = runtime.combineAsVariants([component, componentVariant], runtime.currentPage);
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;
+  const setPropertyName = componentSet.addComponentProperty("Label", "TEXT", "Continue");
+  const renamedSetProperty = componentSet.editComponentProperty(setPropertyName, { name: "Title", defaultValue: "Save" });
+  componentSet.deleteComponentProperty(renamedSetProperty);
   void slot.children;
   void instance.children;
   void instance.getMainComponentAsync();
