@@ -444,8 +444,29 @@ describe("WebGPU scene vertex projection", () => {
         instances: new Float32Array([0, 0, 100, 100, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0]),
         renderedNodeIds: new Set(["canonical-shape"]),
       };
-      expect(renderer.render({ nodes: [rectangle], viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 1, precomputedInstances: canonicalBatch }).renderedNodeIds).toEqual(new Set(["canonical-shape"]));
-      expect(renderer.render({ nodes: [rectangle], viewport: { x: 3, y: 2, zoom: 1.2 }, width: 10, height: 10, dpr: 1, sceneKey: 1 }).gpuUploadBytes).toBe(32);
+      const scene = [rectangle];
+      const initial = renderer.render({ nodes: scene, viewport: { x: 0, y: 0, zoom: 1 }, width: 10, height: 10, dpr: 1, sceneKey: 1, precomputedInstances: canonicalBatch });
+      expect(initial.renderedNodeIds).toEqual(new Set(["canonical-shape"]));
+      const cameraOnly = renderer.render({
+        nodes: scene,
+        viewport: { x: 3, y: 2, zoom: 1.2 },
+        width: 10,
+        height: 10,
+        dpr: 1,
+        sceneKey: 1,
+        precomputedAdmission: {
+          accepted: true,
+          resourceBytes: 123,
+          framebufferBytes: 0,
+          vertexBytes: 0,
+          textureBytes: 0,
+          textAtlasBytes: 0,
+          renderableNodeCount: 1,
+        },
+      });
+      expect(cameraOnly.gpuUploadBytes).toBe(32);
+      expect(cameraOnly.resourceBytes).toBe(123);
+      expect(cameraOnly.renderedNodeIds).toBe(initial.renderedNodeIds);
       const moved = { ...rectangle, x: 24, y: 16 };
       expect(renderer.render({ nodes: [moved], viewport: { x: 3, y: 2, zoom: 1.2 }, width: 10, height: 10, dpr: 1, sceneKey: "1:drag-1" }).gpuUploadBytes).toBe(GPU_SCENE_INSTANCE_BYTES_PER_NODE + GPU_CAMERA_UNIFORM_BYTES);
       const many = Array.from({ length: 12 }, () => rectangle);

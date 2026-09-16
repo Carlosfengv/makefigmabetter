@@ -318,6 +318,7 @@ let activePageRenderFactsCache: Readonly<{
   hasSubtreeComposition: boolean;
   hasRelativeTransform: boolean;
   hasSlices: boolean;
+  imageAssetIds: readonly string[];
   parentIds: ReadonlySet<string>;
 }> | undefined;
 let gpuBackendPlanCache: Readonly<{
@@ -328,6 +329,7 @@ let gpuBackendPlanCache: Readonly<{
   gpuNodes: readonly CanvasNode[];
   gpuNodeIds: ReadonlySet<string>;
   gpuImageAssetIds: ReadonlySet<string>;
+  gpuTextNodeIdsByBackendIsland: readonly ReadonlySet<string>[];
   textGlyphs: readonly WebGpuTextGlyph[];
   admission?: Readonly<{
     surfaceKey: string;
@@ -567,6 +569,9 @@ function activePageRenderFacts(pageNodes: readonly CanvasNode[]) {
     hasSubtreeComposition: pageNodes.some((node) => requiresSubtreeComposition(node, parentIds.has(node.id))),
     hasRelativeTransform: pageNodes.some((node) => Boolean(node.relativeTransform)),
     hasSlices: pageNodes.some((node) => node.kind === "slice"),
+    imageAssetIds: [...new Set(pageNodes
+      .filter((node) => node.visible !== false)
+      .flatMap(nodeImagePaintAssetIds))],
     parentIds,
   } as const;
   activePageRenderFactsCache = facts;
@@ -7942,11 +7947,6 @@ function render(
   // Cache eviction is presentation-only. Re-request each visible missing asset
   // so a page converges on the shared per-image proxy budget instead of
   // leaving an evicted layer on its striped placeholder indefinitely.
-  new Set(activeNodes()
-    .filter((node) => node.visible !== false)
-    .flatMap(nodeImagePaintAssetIds)
-    .filter((assetId) => !imageBitmaps.has(assetId)))
-    .forEach((assetId) => void ensureImageBitmap(assetId));
   const cullingStartedAt = startedAt;
   const viewportBounds = viewportWorldBounds(viewport, width, height);
   const candidateNodes = spatialGrid.query(viewportBounds);
@@ -8009,6 +8009,9 @@ function render(
   let materializedCanvasIslandPixels = 0;
   const gpuStartedAt = performance.now();
   const pageFacts = activePageRenderFacts(pageVisibleNodes);
+  pageFacts.imageAssetIds
+    .filter((assetId) => !imageBitmaps.has(assetId))
+    .forEach((assetId) => void ensureImageBitmap(assetId));
   const pageHasFrameChildren = pageFacts.hasFrameChildren;
   const pageHasAlphaMasks = pageFacts.hasAlphaMasks;
   const pageHasTransformGroupRepeat = pageFacts.hasTransformGroupRepeat;
@@ -8194,8 +8197,9 @@ function render(
     try {
       // GPU stores the whole world-space document once; the camera uniform performs
       // viewport changes. Canvas-only overlays continue to use the culled list.
-      const hidesWholeEditingNode = pageVisibleNodes.some((node) =>
-        canvasTextEditingHidesWholeNode(node, editingTextNodeId));
+      const hidesWholeEditingNode = Boolean(editingTextNodeId)
+        && pageVisibleNodes.some((node) =>
+          canvasTextEditingHidesWholeNode(node, editingTextNodeId));
       const pageNodes = !hidesWholeEditingNode && !pageFacts.hasSlices
         ? pageVisibleNodes
         : sceneNodesInPaintOrder(
@@ -8239,13 +8243,19 @@ function render(
         const gpuNodes = gpuIslands.flatMap((island) => island.nodes);
         const gpuNodeIds = new Set(gpuNodes.map((node) => node.id));
         const gpuImageAssetIds = new Set(gpuNodes.flatMap((node) => node.kind === "image" && node.assetId ? [node.assetId] : []));
+        const gpuTextNodeIdsByBackendIsland = backendIslands.map((island) =>
+          island.backend === "gpu"
+            ? new Set(island.nodes
+                .filter((node) => node.kind === "text" || node.kind === "textPath")
+                .map((node) => node.id))
+            : new Set<string>());
         const textGlyphs = [...rustTextGlyphs]
           .filter(([nodeId, cached]) => gpuNodeIds.has(nodeId) && cached.revision === revision)
           .flatMap(([, cached]) => cached.glyphs);
-        gpuPlan = { key: planKey, pageNodes, backendIslands, gpuIslands, gpuNodes, gpuNodeIds, gpuImageAssetIds, textGlyphs };
+        gpuPlan = { key: planKey, pageNodes, backendIslands, gpuIslands, gpuNodes, gpuNodeIds, gpuImageAssetIds, gpuTextNodeIdsByBackendIsland, textGlyphs };
         gpuBackendPlanCache = gpuPlan;
       }
-      const { backendIslands, gpuIslands, gpuNodes, gpuNodeIds: gpuBackendNodeIds, textGlyphs } = gpuPlan;
+      const { backendIslands, gpuIslands, gpuNodes, gpuNodeIds: gpuBackendNodeIds, gpuTextNodeIdsByBackendIsland, textGlyphs } = gpuPlan;
       const visibleStructuralNodeIds = new Set(structuralRenderNodes.map((node) => node.id));
       const visibleGpuNodes = structuralRenderNodes.filter((node) => gpuBackendNodeIds.has(node.id));
       const visibleCanvasNodes = structuralRenderNodes.filter((node) => !gpuBackendNodeIds.has(node.id));
@@ -8264,7 +8274,9 @@ function render(
         gpuBackendPlanCache = gpuPlan;
       }
       if (!frameAdmission.accepted) throw new GpuSceneResourceLimitError(frameAdmission);
-      const renderedNodeIds = new Set<string>();
+      let renderedNodeIds: ReadonlySet<string> = new Set();
+      const renderedNodeIdSets: ReadonlySet<string>[] = [];
+      let everyGpuIslandComplete = true;
       let lastResult: ReturnType<WebGpuSceneRenderer["render"]> | undefined;
       if (gpuNodes.length > 0) {
         for (let islandIndex = 0; islandIndex < backendIslands.length; islandIndex += 1) {
@@ -8303,7 +8315,7 @@ function render(
             && !pageHasRelativeTransform
             ? { instances: rustGpuScene.instances, renderedNodeIds: rustGpuScene.renderedNodeIds }
             : undefined;
-          const islandTextNodeIds = new Set(island.nodes.filter((node) => node.kind === "text" || node.kind === "textPath").map((node) => node.id));
+          const islandTextNodeIds = gpuTextNodeIdsByBackendIsland[islandIndex] ?? new Set<string>();
           const islandTextGlyphs = textGlyphs.filter((glyph) => islandTextNodeIds.has(glyph.nodeId));
           const gpuIslandStartedAt = performance.now();
           const result = gpuRenderer.render({
@@ -8316,6 +8328,7 @@ function render(
             // change. Avoid rebuilding a multi-megabyte NodeId string on every
             // camera-only frame of a large scene.
             sceneKey: `${currentScenePresentationKey()}:island-${islandIndex}`,
+            precomputedAdmission: frameAdmission,
             precomputedInstances: currentRustGpuScene,
             imageBitmaps: gpuImageBitmaps,
             textGlyphs: islandTextGlyphs,
@@ -8329,17 +8342,26 @@ function render(
           } finally {
             result.bitmap.close();
           }
-          result.renderedNodeIds.forEach((id) => renderedNodeIds.add(id));
+          renderedNodeIdSets.push(result.renderedNodeIds);
+          const islandComplete = result.renderedNodeIds.size === island.nodes.length;
+          everyGpuIslandComplete &&= islandComplete;
           // Text atlas admission is all-or-Canvas per node. Paint any node the
           // GPU declined at this exact island boundary so it cannot jump above
           // a later Canvas subtree.
-          const declinedNodes = island.nodes.filter((node) => visibleStructuralNodeIds.has(node.id) && !result.renderedNodeIds.has(node.id));
+          const declinedNodes = islandComplete
+            ? []
+            : island.nodes.filter((node) =>
+                visibleStructuralNodeIds.has(node.id)
+                && !result.renderedNodeIds.has(node.id));
           if (declinedNodes.length) renderFrameClippedTree(context!, declinedNodes, dragPreviewRootIds);
           gpuUploadBytes += result.gpuUploadBytes;
           imageBitmapMs += result.imageBitmapMs;
           gpuEffectTextureBytes = Math.max(gpuEffectTextureBytes, result.effectTextures.bytes);
           lastResult = result;
         }
+        renderedNodeIds = everyGpuIslandComplete
+          ? gpuBackendNodeIds
+          : new Set(renderedNodeIdSets.flatMap((ids) => [...ids]));
         gpuRenderedNodeIds = renderedNodeIds;
         gpuSceneBytes = frameAdmission.resourceBytes;
         orderedBackendIslandsRendered = true;

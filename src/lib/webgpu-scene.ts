@@ -54,6 +54,10 @@ export interface WebGpuSceneRenderInput {
   dpr: number;
   /** Changes only when canonical scene data or renderer generation changes. */
   sceneKey?: string | number;
+  /** Admission already computed for this exact scene/resource/surface fence.
+   * The Worker owns that cache so camera-only frames do not rescan a large
+   * immutable node array inside the renderer. */
+  precomputedAdmission?: GpuSceneResourceAdmission;
   /** A Canonical Rust-derived solid-shape batch. Text/images retain dedicated
    * passes, while transient drags may omit this and use the local fallback. */
   precomputedInstances?: { instances: Float32Array; renderedNodeIds: ReadonlySet<string> };
@@ -475,6 +479,13 @@ export class WebGpuSceneRenderer {
   private hasCachedScene = false;
   private cachedInstanceCount = 0;
   private cachedRenderedNodeIds: ReadonlySet<string> = new Set();
+  private cachedExecutionPlan: Readonly<{
+    sceneKey: string | number | undefined;
+    nodes: readonly CanvasNode[];
+    effectNode: CanvasNode | undefined;
+    normalNodes: readonly CanvasNode[];
+    imageNodes: readonly CanvasNode[];
+  }> | undefined;
   private pixelWidth = 0;
   private pixelHeight = 0;
   private failureListener: ((code: WebGpuRendererFailureCode) => void) | undefined;
@@ -541,7 +552,7 @@ export class WebGpuSceneRenderer {
   render(input: WebGpuSceneRenderInput): WebGpuSceneRenderResult {
     this.effectTextures.beginFrame();
     try {
-      const admission = admitWebGpuSceneResources(input);
+      const admission = input.precomputedAdmission ?? admitWebGpuSceneResources(input);
       if (!admission.accepted) throw new GpuSceneResourceLimitError(admission);
       const pixelWidth = Math.max(1, Math.ceil(input.width * input.dpr));
       const pixelHeight = Math.max(1, Math.ceil(input.height * input.dpr));
@@ -549,11 +560,30 @@ export class WebGpuSceneRenderer {
       // A GPU effect is always the terminal pass of the admitted prefix. Its
       // source/blur work uses separate offscreen submissions, while ordinary
       // shapes keep the cached scene buffer and retain their prior ordering.
-      const effectNode = input.nodes.find(isGpuSimpleEffectNode);
-      const normalNodes = effectNode ? input.nodes.filter((node) => node.id !== effectNode.id) : input.nodes;
+      const cachedExecutionPlan = this.cachedExecutionPlan;
+      const executionPlan = cachedExecutionPlan
+        && cachedExecutionPlan.sceneKey === input.sceneKey
+        && cachedExecutionPlan.nodes === input.nodes
+        ? cachedExecutionPlan
+        : (() => {
+            const effectNode = input.nodes.find(isGpuSimpleEffectNode);
+            const normalNodes = effectNode
+              ? input.nodes.filter((node) => node.id !== effectNode.id)
+              : input.nodes;
+            const plan = {
+              sceneKey: input.sceneKey,
+              nodes: input.nodes,
+              effectNode,
+              normalNodes,
+              imageNodes: normalNodes.filter((node) => node.kind === "image"),
+            } as const;
+            this.cachedExecutionPlan = plan;
+            return plan;
+          })();
+      const { effectNode, normalNodes, imageNodes } = executionPlan;
       const sceneChanged = !this.hasCachedScene || this.cachedSceneKey !== input.sceneKey;
       const sceneUploadBytes = sceneChanged ? this.uploadScene(normalNodes, input.sceneKey, effectNode ? undefined : input.precomputedInstances) : 0;
-      const images = this.uploadImages(normalNodes, input.imageBitmaps);
+      const images = this.uploadImages(imageNodes, input.imageBitmaps);
       const text = this.uploadTextGlyphs(input.textGlyphs);
       this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraUniform({ viewportX: input.viewport.x, viewportY: input.viewport.y, zoom: input.viewport.zoom, canvasWidth: input.width, canvasHeight: input.height, dpr: input.dpr }));
       const preparedEffect = effectNode ? this.prepareDropShadowEffects(effectNode, input, pixelWidth, pixelHeight) ?? this.prepareLayerBlurEffect(effectNode, input, pixelWidth, pixelHeight) ?? this.prepareInnerShadowEffect(effectNode, input, pixelWidth, pixelHeight) : undefined;
@@ -616,7 +646,18 @@ export class WebGpuSceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       const transferStartedAt = performance.now();
       const bitmap = this.canvas.transferToImageBitmap();
-      return { bitmap, renderedNodeIds: new Set([...this.cachedRenderedNodeIds, ...images.renderedNodeIds, ...text.renderedNodeIds, ...(preparedEffect ? [preparedEffect.nodeId] : [])]), resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + (preparedEffect?.uploadBytes ?? 0) + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt, imageTextures: images.stats, textAtlas: text.stats, effectTextures: this.effectTextures.endFrame() };
+      const hasAdditionalRenderedNodes = images.renderedNodeIds.size > 0
+        || text.renderedNodeIds.size > 0
+        || Boolean(preparedEffect);
+      const renderedNodeIds = hasAdditionalRenderedNodes
+        ? new Set([
+            ...this.cachedRenderedNodeIds,
+            ...images.renderedNodeIds,
+            ...text.renderedNodeIds,
+            ...(preparedEffect ? [preparedEffect.nodeId] : []),
+          ])
+        : this.cachedRenderedNodeIds;
+      return { bitmap, renderedNodeIds, resourceBytes: admission.resourceBytes, gpuUploadBytes: sceneUploadBytes + images.uploadBytes + text.uploadBytes + (preparedEffect?.uploadBytes ?? 0) + GPU_CAMERA_UNIFORM_BYTES, imageBitmapMs: performance.now() - transferStartedAt, imageTextures: images.stats, textAtlas: text.stats, effectTextures: this.effectTextures.endFrame() };
     } catch (error) {
       this.effectTextures.cancelFrame();
       throw error;
@@ -627,6 +668,7 @@ export class WebGpuSceneRenderer {
     this.releaseInstanceBuffer();
     this.releaseEffectInstanceBuffer();
     this.releaseImageResources();
+    this.cachedExecutionPlan = undefined;
     this.effectTextures.destroy();
     this.unitQuadBuffer.destroy?.();
     this.cameraBuffer.destroy?.();
