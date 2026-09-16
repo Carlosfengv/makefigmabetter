@@ -2584,6 +2584,42 @@ describe("M1 RuntimeSession", () => {
     });
   });
 
+  it("exposes Highlight through the complete VectorLike Runtime surface", async () => {
+    const source = createNode("highlight", 0, 0);
+    const projection: RuntimeProjection = {
+      ...initial,
+      nodes: [
+        ...initial.nodes,
+        { ...source, id: "highlight", type: "HIGHLIGHT", name: "Marker", parentId: "page", siblingIndex: 1, highlightHandleMirroring: "ANGLE" },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "highlight-vector", projection, transport, scheduleMicrotask: () => {} });
+    const highlight = (await session.getNodeByIdAsync("highlight"))!;
+
+    expect(highlight.vectorPaths).toHaveLength(1);
+    expect(highlight.vectorNetwork.vertices.length).toBeGreaterThan(0);
+    expect(highlight.handleMirroring).toBe("ANGLE");
+
+    highlight.handleMirroring = "ANGLE_AND_LENGTH";
+    expect(highlight.handleMirroring).toBe("ANGLE_AND_LENGTH");
+    expect(highlight.vectorNetwork.vertices.every((vertex) => vertex.handleMirroring === "ANGLE_AND_LENGTH")).toBe(true);
+
+    await highlight.setVectorNetworkAsync({
+      vertices: [
+        { x: 0, y: 0, handleMirroring: "ANGLE" },
+        { x: 40, y: 20, handleMirroring: "NONE" },
+      ],
+      segments: [{ start: 0, end: 1, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: -10, y: 0 } }],
+    });
+    expect(highlight.handleMirroring).toBe(RUNTIME_MIXED);
+    expect(highlight.vectorPaths[0]).toMatchObject({ windingRule: "NONE", data: expect.stringContaining("C") });
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: "highlight", patch: expect.objectContaining({ highlightHandleMirroring: "ANGLE_AND_LENGTH" }) }),
+      expect.objectContaining({ type: "update", nodeId: "highlight", patch: expect.objectContaining({ vectorPath: expect.any(Object) }) }),
+    ]));
+  });
+
   it("creates and flattens Vector Booleans with synchronous structural projection", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

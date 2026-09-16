@@ -57,8 +57,9 @@ describe("M0 runtime capability matrix", () => {
     expect(runtimeCapability("paint-stack.runtime-strokes")?.nodeTypes).not.toContain("TEXT");
     expect(runtimeCapability("geometry.parametric-runtime")).toMatchObject({
       status: "partial",
-      nodeTypes: ["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "LINE", "BOOLEAN_OPERATION"],
+      nodeTypes: ["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "HIGHLIGHT", "LINE", "BOOLEAN_OPERATION"],
     });
+    expect(runtimeCapability("geometry.parametric-runtime")?.property).toContain("handleMirroring");
     expect(runtimeCapability("layout.auto-layout-runtime")).toMatchObject({
       status: "partial",
       property: expect.stringContaining("layoutSizingHorizontal"),

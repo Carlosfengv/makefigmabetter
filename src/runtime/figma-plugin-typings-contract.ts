@@ -44,6 +44,12 @@ export function assertFigmaPluginTypingsContract(
   node.x = node.x;
   node.y = node.y;
   node.name = node.name;
+  if (node.type === "HIGHLIGHT") {
+    void node.vectorPaths;
+    node.vectorNetwork = node.vectorNetwork;
+    void node.setVectorNetworkAsync(node.vectorNetwork);
+    node.handleMirroring = "ANGLE";
+  }
   rectangle.opacity = rectangle.opacity;
   const floatVariable = figma.variables.getLocalVariables("FLOAT")[0];
   if (floatVariable) {

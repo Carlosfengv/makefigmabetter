@@ -75,6 +75,7 @@ import {
   extensionsWithRuntimeVectorNetwork,
   runtimeVectorNetworkFromCanonical,
   runtimeVectorNetworkFromExtension,
+  type RuntimeHandleMirroring,
   type RuntimeVectorNetwork,
 } from "./runtime-vector-network";
 import {
@@ -83,6 +84,7 @@ import {
   type RuntimeStyledTextSegmentField,
 } from "./runtime-styled-text-segments";
 export type { RuntimeVectorNetwork } from "./runtime-vector-network";
+export type { RuntimeHandleMirroring } from "./runtime-vector-network";
 export type { RuntimePaint } from "./runtime-paint";
 export type { RuntimeEffect } from "./runtime-effect";
 export type { RuntimeTextDecorationColor } from "./runtime-paint";
@@ -2012,7 +2014,7 @@ export class RuntimeNodeProxy {
   }
 
   get vectorPaths(): readonly RuntimeVectorPath[] {
-    if (this.type !== "VECTOR") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const path = this.read().vectorPath as DocumentVectorPath | undefined;
     if (!path) return [];
     return [{
@@ -2021,7 +2023,7 @@ export class RuntimeNodeProxy {
     }];
   }
   set vectorPaths(value: readonly RuntimeVectorPath[]) {
-    if (this.type !== "VECTOR" || !Array.isArray(value) || value.some((path) => !path || typeof path.data !== "string" || !["NONZERO", "EVENODD", "NONE"].includes(path.windingRule))) {
+    if ((this.type !== "VECTOR" && this.type !== "HIGHLIGHT") || !Array.isArray(value) || value.some((path) => !path || typeof path.data !== "string" || !["NONZERO", "EVENODD", "NONE"].includes(path.windingRule))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const parsed = parseFigmaSvgPaths(
@@ -2036,7 +2038,7 @@ export class RuntimeNodeProxy {
   }
 
   get vectorNetwork(): RuntimeVectorNetwork {
-    if (this.type !== "VECTOR") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const node = this.read();
     const path = node.vectorPath as DocumentVectorPath | undefined;
     const exactNetwork = path && runtimeVectorNetworkFromExtension(node.extensions, path);
@@ -2048,8 +2050,41 @@ export class RuntimeNodeProxy {
     );
   }
 
+  set vectorNetwork(value: RuntimeVectorNetwork) {
+    this.host.assertSynchronousDocumentAccess();
+    this.writeVectorNetwork(value);
+  }
+
   async setVectorNetworkAsync(value: RuntimeVectorNetwork): Promise<void> {
-    if (this.type !== "VECTOR") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.writeVectorNetwork(value);
+    await this.host.commitAsync();
+  }
+
+  get handleMirroring(): RuntimeHandleMirroring | typeof RUNTIME_MIXED {
+    if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    const path = node.vectorPath as DocumentVectorPath | undefined;
+    const exactNetwork = path && runtimeVectorNetworkFromExtension(node.extensions, path);
+    const values = (exactNetwork ?? this.vectorNetwork).vertices.map((vertex) => vertex.handleMirroring ?? "NONE");
+    const storedHighlightValue = isRuntimeHandleMirroring(node.highlightHandleMirroring) ? node.highlightHandleMirroring : "NONE";
+    if (this.type === "HIGHLIGHT" && !exactNetwork && values.every((value) => value === "NONE") && storedHighlightValue !== "NONE") return storedHighlightValue;
+    if (!values.length) return "NONE";
+    return values.every((value) => value === values[0]) ? values[0]! : RUNTIME_MIXED;
+  }
+
+  set handleMirroring(value: RuntimeHandleMirroring) {
+    if ((this.type !== "VECTOR" && this.type !== "HIGHLIGHT") || !["NONE", "ANGLE", "ANGLE_AND_LENGTH"].includes(value)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
+    const network = this.vectorNetwork;
+    this.writeVectorNetwork({
+      ...network,
+      vertices: network.vertices.map((vertex) => ({ ...vertex, handleMirroring: value })),
+    }, this.type === "HIGHLIGHT" ? { highlightHandleMirroring: value } : {});
+  }
+
+  private writeVectorNetwork(value: RuntimeVectorNetwork, extraPatch: Readonly<Record<string, unknown>> = {}): void {
+    if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const node = this.read();
     const converted = canonicalVectorPathFromRuntimeNetwork(value, () => this.host.allocateRuntimeId(), {
       strokeCapStart: canonicalStrokeCapValue(node.strokeCapStart),
@@ -2058,13 +2093,13 @@ export class RuntimeNodeProxy {
     });
     if ("reason" in converted) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.write({
+      ...extraPatch,
       vectorPath: converted.path,
       strokeCapStart: converted.strokeCapStart,
       strokeCapEnd: converted.strokeCapEnd,
       ...(converted.strokeJoin ? { strokeJoin: converted.strokeJoin } : {}),
       extensions: extensionsWithRuntimeVectorNetwork(node.extensions, converted.network, converted.path),
     });
-    await this.host.commitAsync();
   }
 
   async getMainComponentAsync(): Promise<RuntimeNodeProxy | null> {
@@ -4215,6 +4250,9 @@ function strokeJoinFromCanonical(value: unknown): RuntimeStrokeJoin {
 }
 function canonicalStrokeJoinValue(value: unknown): StrokeJoin { return canonicalStrokeJoin(strokeJoinFromCanonical(value))!; }
 function canonicalBooleanOperation(value: RuntimeBooleanOperation): DocumentBooleanOperation | undefined { return BOOLEAN_OPERATIONS[value]; }
+function isRuntimeHandleMirroring(value: unknown): value is RuntimeHandleMirroring {
+  return value === "NONE" || value === "ANGLE" || value === "ANGLE_AND_LENGTH";
+}
 function runtimeBooleanOperation(value: unknown): RuntimeBooleanOperation {
   const entry = Object.entries(BOOLEAN_OPERATIONS).find(([, canonical]) => canonical === (value ?? "union"));
   return (entry?.[0] as RuntimeBooleanOperation | undefined) ?? "UNION";

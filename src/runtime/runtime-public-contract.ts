@@ -68,6 +68,13 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
     void runtime.createLinkPreviewAsync("https://example.com");
   }
   const rectangle = runtime.createRectangle();
+  const highlight = runtime.currentPage.findOne((candidate) => candidate.type === "HIGHLIGHT");
+  if (highlight?.type === "HIGHLIGHT") {
+    void highlight.vectorPaths;
+    highlight.vectorNetwork = highlight.vectorNetwork;
+    void highlight.setVectorNetworkAsync(highlight.vectorNetwork);
+    highlight.handleMirroring = "ANGLE";
+  }
   const runtimeVariable = runtime.variables.getLocalVariables("FLOAT")[0];
   if (runtimeVariable) {
     runtimeVariable.setVariableCodeSyntax("WEB", "--spacing");
