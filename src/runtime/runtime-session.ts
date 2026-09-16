@@ -989,6 +989,61 @@ export class RuntimeSession implements RuntimeContainerHost {
     ]);
     return this.containerFor(id);
   }
+  resetSlot(slotId: string): void {
+    this.assertOpen();
+    const slot = this.projectionStore.getNode(slotId);
+    const metadata = slot?.slotMetadata as { sourceSlotId?: unknown } | undefined;
+    const sourceSlotId = typeof metadata?.sourceSlotId === "string" ? metadata.sourceSlotId : undefined;
+    const source = sourceSlotId ? this.projectionStore.getNode(sourceSlotId) : undefined;
+    if (!slot || slot.removed === true || slot.type !== "SLOT" || !source || source.removed === true || source.type !== "SLOT") {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: slotId });
+    }
+    const collect = (rootId: string): RuntimeProjectionNode[] => {
+      const result: RuntimeProjectionNode[] = [];
+      const visit = (parentId: string): void => {
+        this.siblingsOf(parentId).forEach((child) => {
+          if (result.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: slotId });
+          result.push(child);
+          visit(child.id);
+        });
+      };
+      visit(rootId);
+      return result;
+    };
+    const current = collect(slotId);
+    const sourceNodes = collect(source.id);
+    if (current.length + sourceNodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: slotId });
+    if (sourceNodes.some((node) => !INSTANCE_CLONE_TYPES.has(node.type as M1SceneNodeType))) {
+      throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: slotId });
+    }
+    const ids = new Map(sourceNodes.map((node) => [node.id, this.createId()]));
+    const replacements = sourceNodes.map((sourceNode): RuntimeProjectionNode => {
+      const extensions = sourceNode.extensions && typeof sourceNode.extensions === "object" && !Array.isArray(sourceNode.extensions)
+        ? structuredClone(sourceNode.extensions as Record<string, number[]>)
+        : {};
+      extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(sourceNode.id)];
+      const clone: RuntimeProjectionNode = {
+        ...structuredClone(sourceNode),
+        id: ids.get(sourceNode.id)!,
+        parentId: sourceNode.parentId === source.id ? slotId : ids.get(sourceNode.parentId!),
+        pageId: slot.pageId,
+        removed: false,
+        extensions,
+        ...(sourceNode.type === "SLOT" && sourceNode.slotMetadata && typeof sourceNode.slotMetadata === "object"
+          ? { slotMetadata: { ...(structuredClone(sourceNode.slotMetadata) as { propertyName: string }), sourceSlotId: sourceNode.id } }
+          : {}),
+      };
+      const mutableClone = clone as unknown as Record<string, unknown>;
+      if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") mutableClone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
+      if (Array.isArray(clone.reactions)) mutableClone.reactions = remapRuntimeReactions(clone.reactions, ids);
+      return clone;
+    });
+    const operations: PendingProjectionOperation[] = [
+      ...current.reverse().map((node) => ({ type: "remove" as const, nodeId: node.id })),
+      ...replacements.map((node) => ({ type: "create" as const, node })),
+    ];
+    this.enqueueOperations(operations);
+  }
   addComponentProperty(
     componentId: string,
     propertyName: string,

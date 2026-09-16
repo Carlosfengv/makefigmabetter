@@ -26,6 +26,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   instance.setProperties({});
   const slot = component.createSlot();
   void slot.limitViolations;
+  void slot.resetSlot;
   const clonedComponent = component.clone();
   void clonedComponent.id;
   const componentVariant = runtime.createComponent();

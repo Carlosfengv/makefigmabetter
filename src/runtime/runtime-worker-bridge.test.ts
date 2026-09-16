@@ -491,6 +491,48 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("resets an Instance Slot through one Core delete-create batch", async () => {
+    const componentId = "00000000-0000-4000-8000-0000000000d1";
+    const sourceSlotId = "00000000-0000-4000-8000-0000000000d2";
+    const sourceChildId = "00000000-0000-4000-8000-0000000000d3";
+    const instanceId = "00000000-0000-4000-8000-0000000000d4";
+    const instanceSlotId = "00000000-0000-4000-8000-0000000000d5";
+    const overrideId = "00000000-0000-4000-8000-0000000000d6";
+    const propertyName = "Content";
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: componentId, pageId: "page", kind: "component", name: "Card", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, componentMetadata: { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: { [propertyName]: { type: "SLOT" } } } },
+        { id: sourceSlotId, pageId: "page", parentId: componentId, kind: "slot", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, slotMetadata: { propertyName } },
+        { id: sourceChildId, pageId: "page", parentId: sourceSlotId, kind: "rectangle", name: "Default content", x: 4, y: 4, width: 92, height: 52, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: instanceId, pageId: "page", kind: "instance", name: "Card instance", x: 120, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false } },
+        { id: instanceSlotId, pageId: "page", parentId: instanceId, kind: "slot", name: "Content", x: 0, y: 0, width: 100, height: 60, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, slotMetadata: { propertyName, sourceSlotId } },
+        { id: overrideId, pageId: "page", parentId: instanceSlotId, kind: "ellipse", name: "Override", x: 8, y: 8, width: 44, height: 44, rotation: 0, fill: "#f00", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "reset-slot-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    instance.children.find((node) => node.id === instanceSlotId)!.resetSlot();
+    const replacementId = instance.children.find((node) => node.id === instanceSlotId)!.children[0]!.id;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, parentId: instanceSlotId, kind: "rectangle", name: "Default content" }) }),
+      { type: "delete", ids: [overrideId] },
+    ]);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: instanceSlotId, kind: "slot" }),
+      expect.objectContaining({ id: replacementId, parentId: instanceSlotId, kind: "rectangle", name: "Default content" }),
+    ]));
+    bridge.close();
+    await commit;
+  });
+
   it("lowers a linked Instance subtree and preserves its source-node identities", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

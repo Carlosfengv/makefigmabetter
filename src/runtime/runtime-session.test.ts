@@ -518,6 +518,35 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
+  it("resets an Instance Slot from its source contents atomically", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const instance = component.createInstance();
+    const sourceSlot = component.createSlot();
+    const sourceChild = session.createRectangle();
+    sourceChild.name = "Default content";
+    sourceSlot.appendChild(sourceChild);
+    const instanceSlot = instance.children.find((child) => child.type === "SLOT") as RuntimeContainerNodeProxy;
+    const override = session.createEllipse();
+    override.name = "Override";
+    instanceSlot.appendChild(override);
+
+    instanceSlot.resetSlot();
+    expect(override.removed).toBe(true);
+    expect(instanceSlot.children).toHaveLength(1);
+    expect(instanceSlot.children[0]).toMatchObject({ type: "RECTANGLE", name: "Default content", parent: instanceSlot });
+    expect(instanceSlot.children[0]!.id).not.toBe(sourceChild.id);
+    expect(session.projectionStore.getNode(instanceSlot.children[0]!.id)?.extensions).toHaveProperty("figma.instance.source-node.v1");
+    expect(isRuntimeError(captureError(() => sourceSlot.resetSlot()), "UNSUPPORTED_FEATURE")).toBe(true);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      { type: "remove", nodeId: override.id },
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ type: "RECTANGLE", parentId: instanceSlot.id, name: "Default content" }) }),
+    ]));
+  });
+
   it("adds, edits, renames and deletes Component properties with linked Instance projection", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

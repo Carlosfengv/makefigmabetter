@@ -358,6 +358,7 @@ export function assertFigmaPluginTypingsContract(
   void media.mediaData.hash;
   const slot: SlotNode = figma.createComponent().createSlot();
   void slot.limitViolations;
+  if (false) slot.resetSlot();
   void slot.children;
   const componentForSwap = figma.createComponent();
   const instanceForSwap = figma.createComponent().createInstance();

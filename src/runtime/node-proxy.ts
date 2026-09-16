@@ -177,6 +177,7 @@ export interface RuntimeNodeHost {
   getInstancesOfComponentAsync(componentId: string): Promise<readonly RuntimeNodeProxy[]>;
   createInstance(componentId: string): RuntimeContainerNodeProxy;
   createSlot(componentId: string): RuntimeContainerNodeProxy;
+  resetSlot(slotId: string): void;
   detachInstance(instanceId: string): RuntimeContainerNodeProxy;
   addComponentProperty(
     componentId: string,
@@ -1979,6 +1980,12 @@ export class RuntimeNodeProxy {
     if (this.type !== "COMPONENT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     this.assertMutable();
     return this.host.createSlot(this.handle.nodeId);
+  }
+
+  resetSlot(): void {
+    if (this.type !== "SLOT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
+    this.assertMutable();
+    this.host.resetSlot(this.handle.nodeId);
   }
 
   addComponentProperty(
