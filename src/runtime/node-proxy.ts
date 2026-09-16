@@ -191,6 +191,7 @@ export interface RuntimeNodeHost {
   deleteComponentProperty(componentId: string, propertyName: string): void;
   setComponentPropertyReferences(nodeId: string, references: DocumentComponentPropertyReferences | null): void;
   setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void;
+  renameVariantComponent(componentId: string, name: string): boolean;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -1421,6 +1422,9 @@ export class RuntimeNodeProxy {
   get name(): string { return this.string("name"); }
   set name(value: string) {
     if (!value.trim()) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    this.assertLive();
+    this.assertMutable();
+    if (this.type === "COMPONENT" && this.host.renameVariantComponent(this.handle.nodeId, value)) return;
     this.write({ name: value });
   }
 
@@ -1697,6 +1701,31 @@ export class RuntimeNodeProxy {
   get variantGroupProperties(): Readonly<Record<string, { values: string[] }>> {
     if (this.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     return structuredClone(this.componentSetMetadata().variantGroupProperties);
+  }
+
+  get variantProperties(): Readonly<Record<string, string>> | null {
+    if (this.type === "COMPONENT") {
+      const parent = this.parent;
+      if (parent?.type !== "COMPONENT_SET") return null;
+      const authored = runtimeVariantPropertiesFromName(this.name);
+      return Object.fromEntries(Object.entries(parent.componentPropertyDefinitions).flatMap(([name, definition]) => {
+        if (definition.type !== "VARIANT") return [];
+        const value = authored[name] ?? definition.defaultValue;
+        return typeof value === "string" ? [[name, value]] : [];
+      }));
+    }
+    if (this.type === "INSTANCE") {
+      const metadata = this.instanceMetadata();
+      if (!this.host.hasLiveNode(metadata.mainComponentId)) return null;
+      const main = this.host.proxyFor(metadata.mainComponentId);
+      const defaults = main.type === "COMPONENT" ? main.variantProperties : null;
+      if (!defaults) return null;
+      return Object.fromEntries(Object.entries(defaults).map(([name, value]) => [
+        name,
+        typeof metadata.componentProperties[name] === "string" ? metadata.componentProperties[name] as string : value,
+      ]));
+    }
+    throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
   }
 
   get componentPropertyDefinitions(): DocumentComponentMetadata["componentPropertyDefinitions"] {
@@ -2015,27 +2044,11 @@ export class RuntimeNodeProxy {
   }
 
   setProperties(properties: Readonly<Record<string, string | boolean>>): void {
-    const metadata = this.instanceMetadata();
+    this.instanceMetadata();
     if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
-    if (!this.host.hasLiveNode(metadata.mainComponentId)) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
-    const component = this.host.proxyFor(metadata.mainComponentId);
-    if (component.type !== "COMPONENT") throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: metadata.mainComponentId });
-    const definitions = component.componentPropertyDefinitions;
-    const next = { ...metadata.componentProperties };
-    for (const [name, value] of Object.entries(properties)) {
-      const definition = definitions[name];
-      if (!definition || definition.type === "SLOT") throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-      if (definition.type === "BOOLEAN" ? typeof value !== "boolean" : typeof value !== "string") {
-        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-      }
-      if (definition.type === "INSTANCE_SWAP" && (!this.host.hasLiveNode(value as string) || this.host.proxyFor(value as string).type !== "COMPONENT")) {
-        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
-      }
-      next[name] = value;
-    }
-    if (Object.keys(properties).length) this.host.setInstanceProperties(this.handle.nodeId, next);
+    if (Object.keys(properties).length) this.host.setInstanceProperties(this.handle.nodeId, properties);
   }
 
   swapComponent(component: RuntimeNodeProxy): void {
@@ -4129,6 +4142,17 @@ function runtimeBooleanOperation(value: unknown): RuntimeBooleanOperation {
 
 function isShapeWithTextType(value: unknown): value is ShapeWithTextType {
   return typeof value === "string" && SHAPE_WITH_TEXT_TYPES.has(value as ShapeWithTextType);
+}
+
+function runtimeVariantPropertiesFromName(name: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  name.split(",").forEach((part) => {
+    const separator = part.indexOf("=");
+    const property = separator < 0 ? "" : part.slice(0, separator).trim();
+    const value = separator < 0 ? "" : part.slice(separator + 1).trim();
+    if (property && value) result[property] = value;
+  });
+  return result;
 }
 
 function validConnectorCap(value: unknown): value is FigmaConnectorStrokeCap { return isFigmaConnectorStrokeCap(value); }

@@ -1033,6 +1033,57 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("renames ComponentSet variants and switches linked Instances through one Core batch", async () => {
+    const setId = "00000000-0000-4000-8000-0000000000d1";
+    const baseId = "00000000-0000-4000-8000-0000000000d2";
+    const hoverId = "00000000-0000-4000-8000-0000000000d3";
+    const baseChildId = "00000000-0000-4000-8000-0000000000d4";
+    const hoverChildId = "00000000-0000-4000-8000-0000000000d5";
+    const instanceId = "00000000-0000-4000-8000-0000000000d6";
+    const instanceChildId = "00000000-0000-4000-8000-0000000000d7";
+    const variantDefinition = { State: { type: "VARIANT" as const, defaultValue: "Default", variantOptions: ["Default", "Hover"] } };
+    const setMetadata = { key: setId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: variantDefinition, variantGroupProperties: { State: { values: ["Default", "Hover"] } } };
+    const componentMetadata = (id: string) => ({ key: id, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} });
+    const base = snapshotAt(4);
+    const common = { rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 };
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { ...common, id: setId, pageId: "page", positionId: "30000000000000000000000000000000:000000000000400080000000000000d1", kind: "componentSet", name: "Button", x: 0, y: 0, width: 240, height: 60, componentSetMetadata: setMetadata },
+        { ...common, id: baseId, pageId: "page", parentId: setId, positionId: "40000000000000000000000000000000:000000000000400080000000000000d2", kind: "component", name: "State=Default", x: 0, y: 0, width: 100, height: 60, componentMetadata: componentMetadata(baseId) },
+        { ...common, id: hoverId, pageId: "page", parentId: setId, positionId: "80000000000000000000000000000000:000000000000400080000000000000d3", kind: "component", name: "State=Hover", x: 140, y: 0, width: 100, height: 60, componentMetadata: componentMetadata(hoverId) },
+        { ...common, id: baseChildId, pageId: "page", parentId: baseId, positionId: "80000000000000000000000000000000:000000000000400080000000000000d4", kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 60 },
+        { ...common, id: hoverChildId, pageId: "page", parentId: hoverId, positionId: "80000000000000000000000000000000:000000000000400080000000000000d5", kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 60 },
+        { ...common, id: instanceId, pageId: "page", positionId: "b0000000000000000000000000000000:000000000000400080000000000000d6", kind: "instance", name: "Button instance", x: 0, y: 100, width: 100, height: 60, extensions: { "figma.instance.source-node.v1": [...new TextEncoder().encode(baseId)] }, instanceMetadata: { mainComponentId: baseId, scaleFactor: 1, componentProperties: { State: "Default" }, overrides: [], isExposedInstance: false } },
+        { ...common, id: instanceChildId, pageId: "page", parentId: instanceId, positionId: "80000000000000000000000000000000:000000000000400080000000000000d7", kind: "rectangle", name: "Surface", x: 0, y: 0, width: 100, height: 60, extensions: { "figma.instance.source-node.v1": [...new TextEncoder().encode(baseChildId)] } },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    const session = new RuntimeSession({ sessionId: "component-set-variant-core", projection: runtimeProjectionFromEditorSnapshot(snapshot), transport: bridge, scheduleMicrotask: () => {} });
+    const set = session.currentPage.children.find((node) => node.id === setId)!;
+    const instance = session.currentPage.children.find((node) => node.id === instanceId)!;
+    set.addComponentProperty("Theme", "VARIANT", "Light");
+    set.editComponentProperty("State", { name: "Mode" });
+    instance.setProperties({ Mode: "Hover" });
+    const replacementChildId = instance.children[0]!.id;
+    const commit = session.commitAsync().catch(() => undefined);
+
+    const resolved = resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: setId, componentSetMetadata: expect.objectContaining({ componentPropertyDefinitions: expect.objectContaining({ Mode: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] }, Theme: { type: "VARIANT", defaultValue: "Light", variantOptions: ["Light"] } }) }) }),
+      expect.objectContaining({ id: baseId, name: "Mode=Default, Theme=Light" }),
+      expect.objectContaining({ id: hoverId, name: "Mode=Hover, Theme=Light" }),
+      expect.objectContaining({ id: instanceId, instanceMetadata: expect.objectContaining({ mainComponentId: hoverId, componentProperties: { Mode: "Hover", Theme: "Light" } }) }),
+      expect.objectContaining({ id: replacementChildId, parentId: instanceId, kind: "rectangle" }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => node.id === instanceChildId)).toBe(false);
+    bridge.close();
+    await commit;
+  });
+
   it("combines Components into a ComponentSet through one Core batch", async () => {
     const baseId = "00000000-0000-4000-8000-000000000048";
     const hoverId = "00000000-0000-4000-8000-000000000049";

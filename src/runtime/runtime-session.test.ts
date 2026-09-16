@@ -1081,6 +1081,8 @@ describe("M1 RuntimeSession", () => {
       State: { type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] },
       Size: { type: "VARIANT", defaultValue: "Medium", variantOptions: ["Medium"] },
     });
+    expect(base.variantProperties).toEqual({ State: "Default", Size: "Medium" });
+    expect(hover.variantProperties).toEqual({ State: "Hover", Size: "Medium" });
     expect(set.children).toEqual([base, hover]);
     expect(base).toMatchObject({ parent: set, x: 0, y: 0 });
     expect(hover).toMatchObject({ parent: set, x: 140, y: 0 });
@@ -1143,11 +1145,31 @@ describe("M1 RuntimeSession", () => {
     expect(baseInstance.componentPropertyValues[renamed]).toBe(true);
     expect(hoverInstance.componentPropertyValues[renamed]).toBe(true);
 
+    const theme = set.addComponentProperty("Theme", "VARIANT", "Light");
+    expect(theme).toBe("Theme");
+    expect(set.componentPropertyDefinitions.Theme).toEqual({ type: "VARIANT", defaultValue: "Light", variantOptions: ["Light"] });
+    expect(set.variantGroupProperties.Theme).toEqual({ values: ["Light"] });
+    expect(base.name).toBe("State=Default, Theme=Light");
+    expect(hover.name).toBe("State=Hover, Theme=Light");
+    expect(base.componentPropertyDefinitions).not.toHaveProperty("Theme");
+    expect(baseInstance.componentPropertyValues.Theme).toBe("Light");
+    expect(hoverInstance.componentPropertyValues.Theme).toBe("Light");
+
+    const mode = set.editComponentProperty("State", { name: "Mode" });
+    expect(mode).toBe("Mode");
+    expect(set.componentPropertyDefinitions).not.toHaveProperty("State");
+    expect(set.componentPropertyDefinitions.Mode).toEqual({ type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Hover"] });
+    expect(base.name).toBe("Mode=Default, Theme=Light");
+    expect(hover.name).toBe("Mode=Hover, Theme=Light");
+    expect(baseInstance.componentPropertyValues).toMatchObject({ Mode: "Default", Theme: "Light" });
+    expect(hoverInstance.componentPropertyValues).toMatchObject({ Mode: "Hover", Theme: "Light" });
+
     const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
     const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
-    expect(isRuntimeError(captureError(() => set.addComponentProperty("Theme", "VARIANT", "Light")), "UNSUPPORTED_FEATURE")).toBe(true);
-    expect(isRuntimeError(captureError(() => set.editComponentProperty("State", { name: "Mode" })), "UNSUPPORTED_FEATURE")).toBe(true);
-    expect(isRuntimeError(captureError(() => set.deleteComponentProperty("State")), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => base.addComponentProperty("Tone", "VARIANT", "Quiet")), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => set.addComponentProperty("Bad,Name", "VARIANT", "Quiet")), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => set.editComponentProperty("Mode", { defaultValue: "Hover" })), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(isRuntimeError(captureError(() => set.deleteComponentProperty("Mode")), "UNSUPPORTED_FEATURE")).toBe(true);
     expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
 
     set.deleteComponentProperty(renamed);
@@ -1166,6 +1188,100 @@ describe("M1 RuntimeSession", () => {
       expect.objectContaining({ type: "update", nodeId: hover.id, patch: { componentMetadata: expect.any(Object) } }),
       expect.objectContaining({ type: "update", nodeId: baseInstance.id, patch: { instanceMetadata: expect.any(Object) } }),
       expect.objectContaining({ type: "update", nodeId: hoverInstance.id, patch: { instanceMetadata: expect.any(Object) } }),
+    ]));
+  });
+
+  it("switches an Instance to the matching variant and preserves compatible values and overrides", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const base = session.createComponent();
+    base.name = "State=Default, Size=Small";
+    const baseSurface = session.createRectangle();
+    baseSurface.name = "Surface";
+    baseSurface.opacity = 1;
+    base.appendChild(baseSurface);
+    const hover = session.createComponent();
+    hover.name = "State=Hover, Size=Large";
+    const hoverSurface = session.createRectangle();
+    hoverSurface.name = "Surface";
+    hoverSurface.opacity = 0.8;
+    hover.appendChild(hoverSurface);
+    const set = session.combineAsVariants([base, hover], session.currentPage);
+    const enabled = set.addComponentProperty("Enabled", "BOOLEAN", false);
+    const instance = base.createInstance();
+    const instanceId = instance.id;
+    instance.x = 420;
+    instance.y = 96;
+    const oldSurface = instance.children[0]!;
+    oldSurface.opacity = 0.35;
+    session.enqueueUpdate(instance.id, {
+      instanceMetadata: {
+        ...(session.projectionStore.getNode(instance.id)!.instanceMetadata as Record<string, unknown>),
+        overrides: [{ id: oldSurface.id, overriddenFields: ["opacity"] }],
+      },
+    });
+
+    expect(instance.componentPropertyValues).toMatchObject({ State: "Default", Size: "Small", [enabled]: false });
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const beforeMissingCombination = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => instance.setProperties({ State: "Hover" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(beforeMissingCombination);
+    instance.setProperties({ State: "Hover", Size: "Large", [enabled]: true });
+
+    expect(instance.id).toBe(instanceId);
+    expect(instance).toMatchObject({ x: 420, y: 96 });
+    expect((await instance.getMainComponentAsync())?.id).toBe(hover.id);
+    expect(instance.variantProperties).toEqual({ State: "Hover", Size: "Large" });
+    expect(instance.componentPropertyValues).toMatchObject({ State: "Hover", Size: "Large", [enabled]: true });
+    expect(oldSurface.removed).toBe(true);
+    expect(instance.children).toHaveLength(1);
+    expect(instance.children[0]).toMatchObject({ type: "RECTANGLE", name: "Surface", opacity: 0.35 });
+    expect(instance.overrides).toEqual([{ id: instance.children[0]!.id, overriddenFields: ["opacity"] }]);
+
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => instance.setProperties({ State: "Missing" })), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "update", nodeId: instance.id, patch: expect.objectContaining({ instanceMetadata: expect.objectContaining({ mainComponentId: hover.id, componentProperties: expect.objectContaining({ State: "Hover", Size: "Large", [enabled]: true }) }) }) }),
+      expect.objectContaining({ type: "remove", nodeId: oldSurface.id }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: instance.id, type: "RECTANGLE", opacity: 0.35 }) }),
+    ]));
+  });
+
+  it("recomputes ComponentSet variant options when a variant Component is renamed", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const base = session.createComponent();
+    base.name = "State=Default";
+    const hover = session.createComponent();
+    hover.name = "State=Hover";
+    const set = session.combineAsVariants([base, hover], session.currentPage);
+    const baseInstance = base.createInstance();
+    const hoverInstance = hover.createInstance();
+
+    hover.name = "State=Pressed";
+    expect(set.variantGroupProperties).toEqual({ State: { values: ["Default", "Pressed"] } });
+    expect(set.componentPropertyDefinitions.State).toEqual({ type: "VARIANT", defaultValue: "Default", variantOptions: ["Default", "Pressed"] });
+    expect(hover.variantProperties).toEqual({ State: "Pressed" });
+    expect(baseInstance.componentPropertyValues.State).toBe("Default");
+    expect(hoverInstance.componentPropertyValues.State).toBe("Pressed");
+
+    const transactionId = session.projectionStore.pendingTransactionIds()[0]!;
+    const operationCount = session.projectionStore.transaction(transactionId)!.operations.length;
+    expect(isRuntimeError(captureError(() => { base.name = "State=Pressed"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(session.projectionStore.transaction(transactionId)?.operations).toHaveLength(operationCount);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "update",
+        nodeId: set.id,
+        patch: { componentSetMetadata: expect.objectContaining({ variantGroupProperties: { State: { values: ["Default", "Pressed"] } } }) },
+      }),
+      expect.objectContaining({ type: "update", nodeId: hover.id, patch: { name: "State=Pressed" } }),
+      expect.objectContaining({ type: "update", nodeId: hoverInstance.id, patch: { instanceMetadata: expect.objectContaining({ componentProperties: expect.objectContaining({ State: "Pressed" }) }) } }),
     ]));
   });
 

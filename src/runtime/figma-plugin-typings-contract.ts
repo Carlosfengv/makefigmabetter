@@ -30,6 +30,11 @@ export function assertFigmaPluginTypingsContract(
   const createdInstance: InstanceNode = createdComponent.createInstance();
   const createdComponentSet: ComponentSetNode = figma.combineAsVariants([createdComponent, figma.createComponent()], figma.currentPage);
   void createdComponentSet.variantGroupProperties;
+  void createdComponent.variantProperties;
+  void createdInstance.variantProperties;
+  const createdVariantProperty: string = createdComponentSet.addComponentProperty("State", "VARIANT", "Default");
+  createdComponentSet.editComponentProperty(createdVariantProperty, { name: "Mode" });
+  createdInstance.setProperties({ Mode: "Default" });
   void createdInstance.mainComponent;
   void convertedComponent.children;
   createdSlice.resize(320, 180);

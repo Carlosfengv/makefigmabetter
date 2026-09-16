@@ -81,6 +81,10 @@ const RUNTIME_CLONE_TYPES = new Set<M1SceneNodeType>([
   "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET",
 ]);
 const RUNTIME_CLONE_DESCENDANT_TYPES = new Set<M1SceneNodeType>([...RUNTIME_CLONE_TYPES, "TABLE_CELL"]);
+const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
+  "id", "type", "kind", "parentId", "pageId", "positionId", "siblingIndex", "removed",
+  "componentMetadata", "componentSetMetadata", "instanceMetadata", "slotMetadata", "extensions",
+]);
 
 export type RuntimeSessionOptions = Readonly<{
   sessionId: string;
@@ -790,8 +794,8 @@ export class RuntimeSession implements RuntimeContainerHost {
 
     const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
     const instanceId = ids.get(componentId)!;
-    const componentProperties = Object.fromEntries(Object.entries(metadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
-      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    const componentState = this.componentPropertyState(component);
+    const componentProperties = componentState.values;
     const pageId = this.currentPage.id;
     const operations = subtree.map((source): PendingProjectionOperation => {
       const id = ids.get(source.id)!;
@@ -826,7 +830,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       };
       if (!isRoot) {
         const references = runtimeComponentPropertyReferences(clone);
-        if (references) Object.assign(clone as Record<string, unknown>, this.componentPropertyReferenceValuePatch(clone, references, componentProperties, metadata.componentPropertyDefinitions));
+        if (references) Object.assign(clone as Record<string, unknown>, this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentState.definitions));
       }
       return { type: "create", node: clone };
     });
@@ -836,8 +840,8 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.componentPropertyReferenceOrder(subtree.filter((source) => source.id !== componentId && runtimeComponentPropertyReferences(source)?.mainComponent)).forEach((source) => {
       if (runtimeNodeHasAncestorIn(source, replacedSourceRoots, (id) => this.projectionStore.getNode(id))) return;
       const references = runtimeComponentPropertyReferences(source)!;
-      if (!this.componentPropertyReferenceReplacesSubtree(source, references, componentProperties, metadata.componentPropertyDefinitions)) return;
-      const target = this.componentPropertyReferenceTarget(source, references, componentProperties, metadata.componentPropertyDefinitions)!;
+      if (!this.componentPropertyReferenceReplacesSubtree(source, references, componentProperties, componentState.definitions)) return;
+      const target = this.componentPropertyReferenceTarget(source, references, componentProperties, componentState.definitions)!;
       const targetMetadata = target.componentMetadata as DocumentComponentMetadata | undefined;
       if (!targetMetadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: source.id });
       const currentDescendants = subtree.filter((candidate) => runtimeNodeHasAncestorIn(candidate, new Set([source.id]), (id) => this.projectionStore.getNode(id)));
@@ -845,11 +849,11 @@ export class RuntimeSession implements RuntimeContainerHost {
       if (targetDescendants.some((candidate) => !INSTANCE_CLONE_TYPES.has(candidate.type as M1SceneNodeType))) {
         throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: source.id });
       }
-      const targetValues = Object.fromEntries(Object.entries(targetMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
-        definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+      const targetState = this.componentPropertyState(target);
+      const targetValues = targetState.values;
       targetDescendants.forEach((candidate) => {
         const nestedReferences = runtimeComponentPropertyReferences(candidate);
-        if (nestedReferences) this.componentPropertyReferenceValuePatch(candidate, nestedReferences, targetValues, targetMetadata.componentPropertyDefinitions);
+        if (nestedReferences) this.componentPropertyReferenceValuePatch(candidate, nestedReferences, targetValues, targetState.definitions);
       });
       plannedOperationCount += 1 + currentDescendants.length + targetDescendants.length;
       if (plannedOperationCount > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
@@ -861,7 +865,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       const clone = this.projectionStore.getNode(ids.get(source.id)!);
       const references = runtimeComponentPropertyReferences(source)!;
       if (!clone) throw runtimeError("NODE_NOT_FOUND", { nodeId: source.id });
-      this.enqueueOperations(this.componentPropertyReferenceOperations(clone, references, componentProperties, metadata.componentPropertyDefinitions, {}, true));
+      this.enqueueOperations(this.componentPropertyReferenceOperations(clone, references, componentProperties, componentState.definitions, {}, true));
     });
     return this.containerFor(instanceId);
   }
@@ -874,8 +878,8 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!instance || instance.removed === true || instance.type !== "INSTANCE" || !instanceMetadata || !component || component.removed === true || component.type !== "COMPONENT" || !componentMetadata) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
     }
-    const componentProperties = Object.fromEntries(Object.entries(componentMetadata.componentPropertyDefinitions).flatMap(([name, definition]) =>
-      definition.type === "SLOT" || definition.defaultValue === undefined ? [] : [[name, definition.defaultValue]]));
+    const componentState = this.componentPropertyState(component);
+    const componentProperties = componentState.values;
     const extensions = instance.extensions && typeof instance.extensions === "object" && !Array.isArray(instance.extensions)
       ? structuredClone(instance.extensions as Record<string, number[]>)
       : {};
@@ -883,7 +887,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     const subtreeOperations = this.replaceRuntimeSubtreeOperations(component, instance, (_source, clone) => {
       const references = runtimeComponentPropertyReferences(clone);
       if (!references) return clone;
-      return { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentMetadata.componentPropertyDefinitions) };
+      return { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, componentState.definitions) };
     });
     this.enqueueOperations([{
       type: "update",
@@ -1080,7 +1084,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     const { metadata, linkedInstances } = context;
     validateRuntimeComponentPropertyBaseName(propertyName, componentId);
     validateRuntimeComponentPropertyOptions(options, componentId);
-    if (type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    if (type === "VARIANT") {
+      return this.addVariantComponentProperty(context, propertyName, defaultValue, options);
+    }
     if (options?.description !== undefined && type !== "SLOT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     validateRuntimeComponentPropertyOptionCompatibility(type, options, componentId);
     const resolvedDefault = this.componentPropertyDefaultValue(type, defaultValue, componentId);
@@ -1125,7 +1131,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (value.defaultValue !== undefined && (existing.type === "VARIANT" || existing.type === "SLOT")) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     }
-    if (existing.type === "VARIANT") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
+    if (existing.type === "VARIANT") {
+      return this.editVariantComponentProperty(context, propertyName, value);
+    }
     if (value.description !== undefined && existing.type !== "SLOT") {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: componentId });
     }
@@ -1404,36 +1412,147 @@ export class RuntimeSession implements RuntimeContainerHost {
     };
   }
 
-  setInstanceProperties(instanceId: string, componentProperties: Readonly<Record<string, string | boolean>>): void {
+  renameVariantComponent(componentId: string, name: string): boolean {
+    this.assertOpen();
+    const component = this.projectionStore.getNode(componentId);
+    const parent = component?.type === "COMPONENT" && typeof component.parentId === "string"
+      ? this.projectionStore.getNode(component.parentId)
+      : undefined;
+    if (!component || component.removed === true || parent?.type !== "COMPONENT_SET") return false;
+    if (component.name === name) return true;
+    const context = this.mutableComponentPropertyContext(parent.id);
+    const metadata = context.metadata as DocumentComponentSetMetadata;
+    const candidates = context.components.map((candidate) => candidate.id === componentId ? { ...structuredClone(candidate), name } : candidate);
+    const variantMetadata = runtimeVariantMetadata(candidates);
+    const variantNames = Object.keys(variantMetadata.variantGroupProperties);
+    if (!variantNames.length || candidates.some((candidate) => {
+      const properties = runtimeVariantProperties(candidate);
+      return variantNames.some((property) => properties[property] === undefined);
+    })) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    const tuples = candidates.map((candidate) => JSON.stringify(variantNames.map((property) => runtimeVariantProperties(candidate)[property])));
+    if (new Set(tuples).size !== tuples.length) throw runtimeError("INVALID_ARGUMENT", { nodeId: componentId });
+    const customDefinitions = Object.fromEntries(Object.entries(metadata.componentPropertyDefinitions).filter(([, definition]) => definition.type !== "VARIANT"));
+    const definitions = { ...variantMetadata.componentPropertyDefinitions, ...structuredClone(customDefinitions) };
+    const previousVariantNames = new Set(Object.entries(metadata.componentPropertyDefinitions).flatMap(([property, definition]) => definition.type === "VARIANT" ? [property] : []));
+    const propertiesByComponent = new Map(candidates.map((candidate) => [candidate.id, runtimeVariantProperties(candidate)]));
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: parent.id,
+      patch: {
+        componentSetMetadata: {
+          ...structuredClone(metadata),
+          componentPropertyDefinitions: definitions,
+          variantGroupProperties: variantMetadata.variantGroupProperties,
+        },
+      },
+    }, { type: "update", nodeId: componentId, patch: { name } }];
+    context.linkedInstances.forEach((instance) => {
+      const instanceMetadata = instance.instanceMetadata as DocumentInstanceMetadata;
+      const componentProperties = structuredClone(instanceMetadata.componentProperties);
+      previousVariantNames.forEach((property) => { delete componentProperties[property]; });
+      const sourceProperties = propertiesByComponent.get(instanceMainComponentId(instance) ?? "") ?? {};
+      variantNames.forEach((property) => {
+        const value = sourceProperties[property] ?? variantMetadata.componentPropertyDefinitions[property]?.defaultValue;
+        if (typeof value === "string") componentProperties[property] = value;
+      });
+      operations.push({
+        type: "update",
+        nodeId: instance.id,
+        patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties } },
+      });
+    });
+    if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: componentId });
+    this.enqueueOperations(operations);
+    return true;
+  }
+
+  setInstanceProperties(instanceId: string, properties: Readonly<Record<string, string | boolean>>): void {
     this.assertOpen();
     const instance = this.projectionStore.getNode(instanceId);
-    const instanceMetadata = instance?.instanceMetadata as Record<string, unknown> | undefined;
+    const instanceMetadata = instance?.instanceMetadata as DocumentInstanceMetadata | undefined;
     if (!instance || instance.removed === true || instance.type !== "INSTANCE" || !instanceMetadata) {
       throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: instanceId });
     }
     const mainComponentId = instanceMainComponentId(instance);
     const component = mainComponentId ? this.projectionStore.getNode(mainComponentId) : undefined;
-    const definitions = component?.componentMetadata && typeof component.componentMetadata === "object"
-      ? (component.componentMetadata as DocumentComponentMetadata).componentPropertyDefinitions
-      : undefined;
-    if (!definitions) {
-      throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: instanceId });
+    if (!component || component.type !== "COMPONENT" || !component.componentMetadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: instanceId });
+    const sourceState = this.componentPropertyState(component);
+    const nextRequested = { ...sourceState.values, ...structuredClone(instanceMetadata.componentProperties), ...structuredClone(properties) };
+    for (const [name, value] of Object.entries(properties)) {
+      const definition = sourceState.definitions[name];
+      if (!definition || definition.type === "SLOT") throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+      if (definition.type === "BOOLEAN" ? typeof value !== "boolean" : typeof value !== "string") {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+      }
+      if (definition.type === "INSTANCE_SWAP" && !this.isComponentPropertySwapTarget(value)) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+      }
+      if (definition.type === "VARIANT" && definition.variantOptions && !definition.variantOptions.includes(value as string)) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: instanceId });
+      }
     }
-    const operations: PendingProjectionOperation[] = [{
-      type: "update",
-      nodeId: instanceId,
-      patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties: structuredClone(componentProperties) } },
-    }];
+    const target = this.variantTargetForProperties(component, sourceState, nextRequested, instanceId);
+    const targetState = this.componentPropertyState(target);
+    const componentProperties = { ...targetState.values };
+    Object.entries(nextRequested).forEach(([name, value]) => {
+      const before = sourceState.definitions[name];
+      const after = targetState.definitions[name];
+      if (before && after && before.type === after.type && after.type !== "SLOT") componentProperties[name] = value;
+    });
+    if (targetState.componentSet) Object.assign(componentProperties, targetState.variantProperties);
+    const operations: PendingProjectionOperation[] = [];
+    if (target.id !== component.id) {
+      const overridePlan = this.variantOverridePlan(instance, target);
+      const nextOverrides: DocumentInstanceMetadata["overrides"] = [];
+      const subtreeOperations = this.replaceRuntimeSubtreeOperations(target, instance, (source, clone) => {
+        const references = runtimeComponentPropertyReferences(clone);
+        const patched = references
+          ? { ...clone, ...this.componentPropertyReferenceValuePatch(clone, references, componentProperties, targetState.definitions) }
+          : clone;
+        const override = overridePlan.get(source.id);
+        if (!override) return patched;
+        const mutable = patched as Record<string, unknown>;
+        const retainedFields = override.fields.filter((field) => !RUNTIME_STRUCTURAL_OVERRIDE_FIELDS.has(field) && Object.hasOwn(override.node, field));
+        retainedFields.forEach((field) => { mutable[field] = structuredClone(override.node[field]); });
+        if (retainedFields.length) nextOverrides.push({ id: clone.id, overriddenFields: retainedFields });
+        return patched;
+      });
+      const extensions = instance.extensions && typeof instance.extensions === "object" && !Array.isArray(instance.extensions)
+        ? structuredClone(instance.extensions as Record<string, number[]>)
+        : {};
+      extensions[INSTANCE_SOURCE_NODE_EXTENSION] = [...new TextEncoder().encode(target.id)];
+      operations.push({
+        type: "update",
+        nodeId: instanceId,
+        patch: {
+          extensions,
+          instanceMetadata: {
+            ...structuredClone(instanceMetadata),
+            mainComponentId: target.id,
+            componentProperties,
+            overrides: nextOverrides,
+          },
+        },
+      }, ...subtreeOperations);
+    } else {
+      operations.push({
+        type: "update",
+        nodeId: instanceId,
+        patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties } },
+      });
+    }
     const descendants = this.projectionStore.listLiveNodes().filter((node) =>
       node.id !== instanceId && runtimeNodeHasAncestorIn(node, new Set([instanceId]), (id) => this.projectionStore.getNode(id)));
     if (descendants.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
-    const replacedReferenceRoots = new Set<string>();
-    this.componentPropertyReferenceOrder(descendants.filter((descendant) => runtimeComponentPropertyReferences(descendant))).forEach((descendant) => {
-      if (runtimeNodeHasAncestorIn(descendant, replacedReferenceRoots, (id) => this.projectionStore.getNode(id))) return;
-      const references = runtimeComponentPropertyReferences(descendant)!;
-      if (this.componentPropertyReferenceReplacesSubtree(descendant, references, componentProperties, definitions)) replacedReferenceRoots.add(descendant.id);
-      operations.push(...this.componentPropertyReferenceOperations(descendant, references, componentProperties, definitions));
-    });
+    if (target.id === component.id) {
+      const replacedReferenceRoots = new Set<string>();
+      this.componentPropertyReferenceOrder(descendants.filter((descendant) => runtimeComponentPropertyReferences(descendant))).forEach((descendant) => {
+        if (runtimeNodeHasAncestorIn(descendant, replacedReferenceRoots, (id) => this.projectionStore.getNode(id))) return;
+        const references = runtimeComponentPropertyReferences(descendant)!;
+        if (this.componentPropertyReferenceReplacesSubtree(descendant, references, componentProperties, targetState.definitions)) replacedReferenceRoots.add(descendant.id);
+        operations.push(...this.componentPropertyReferenceOperations(descendant, references, componentProperties, targetState.definitions));
+      });
+    }
     if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
     this.enqueueOperations(operations);
   }
@@ -2667,6 +2786,112 @@ export class RuntimeSession implements RuntimeContainerHost {
     };
   }
 
+  private componentPropertyState(component: RuntimeProjectionNode): Readonly<{
+    definitions: DocumentComponentMetadata["componentPropertyDefinitions"];
+    values: Record<string, string | boolean>;
+    componentSet?: RuntimeProjectionNode;
+    variantProperties: Record<string, string>;
+  }> {
+    const metadata = component.componentMetadata as DocumentComponentMetadata | undefined;
+    if (component.type !== "COMPONENT" || !metadata) throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: component.id });
+    const definitions = structuredClone(metadata.componentPropertyDefinitions);
+    const parent = typeof component.parentId === "string" ? this.projectionStore.getNode(component.parentId) : undefined;
+    const componentSet = parent?.type === "COMPONENT_SET" && parent.componentSetMetadata && typeof parent.componentSetMetadata === "object"
+      ? parent
+      : undefined;
+    const setMetadata = componentSet?.componentSetMetadata as DocumentComponentSetMetadata | undefined;
+    if (setMetadata) {
+      Object.entries(setMetadata.componentPropertyDefinitions).forEach(([name, definition]) => {
+        if (definition.type === "VARIANT" || definitions[name] === undefined) definitions[name] = structuredClone(definition);
+      });
+    }
+    const authoredVariants = runtimeVariantProperties(component);
+    const variantProperties: Record<string, string> = {};
+    Object.entries(definitions).forEach(([name, definition]) => {
+      if (definition.type !== "VARIANT") return;
+      const authored = authoredVariants[name];
+      const value = typeof authored === "string" && authored ? authored : definition.defaultValue;
+      if (typeof value === "string") variantProperties[name] = value;
+    });
+    const values = Object.fromEntries(Object.entries(definitions).flatMap(([name, definition]) => {
+      if (definition.type === "SLOT") return [];
+      const value = definition.type === "VARIANT" ? variantProperties[name] : definition.defaultValue;
+      return value === undefined ? [] : [[name, value]];
+    })) as Record<string, string | boolean>;
+    return { definitions, values, componentSet, variantProperties };
+  }
+
+  private variantTargetForProperties(
+    component: RuntimeProjectionNode,
+    state: ReturnType<RuntimeSession["componentPropertyState"]>,
+    values: Readonly<Record<string, string | boolean>>,
+    nodeId: string,
+  ): RuntimeProjectionNode {
+    if (!state.componentSet) return component;
+    const variantNames = Object.entries(state.definitions).flatMap(([name, definition]) => definition.type === "VARIANT" ? [name] : []);
+    if (!variantNames.length) return component;
+    const desired = Object.fromEntries(variantNames.map((name) => [name, values[name]]));
+    if (Object.values(desired).some((value) => typeof value !== "string")) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const candidates = this.siblingsOf(state.componentSet.id).filter((candidate) => {
+      if (candidate.type !== "COMPONENT") return false;
+      const properties = this.componentPropertyState(candidate).variantProperties;
+      return variantNames.every((name) => properties[name] === desired[name]);
+    });
+    if (candidates.length !== 1) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    return candidates[0]!;
+  }
+
+  private variantOverridePlan(
+    instance: RuntimeProjectionNode,
+    target: RuntimeProjectionNode,
+  ): ReadonlyMap<string, Readonly<{ node: RuntimeProjectionNode; fields: string[] }>> {
+    const metadata = instance.instanceMetadata as DocumentInstanceMetadata;
+    if (!metadata.overrides.length) return new Map();
+    const instancePaths = this.runtimeSubtreePaths(instance.id);
+    const targetPaths = this.runtimeSubtreePaths(target.id);
+    const targetByPath = new Map([...targetPaths].map(([id, path]) => [path, this.projectionStore.getNode(id)!]));
+    const currentNodes = [...instancePaths.keys()].map((id) => this.projectionStore.getNode(id)!).filter(Boolean);
+    const result = new Map<string, { node: RuntimeProjectionNode; fields: string[] }>();
+    metadata.overrides.forEach((override) => {
+      const current = currentNodes.find((node) => node.id === override.id || runtimeInstanceSourceNodeId(node) === override.id);
+      const path = current ? instancePaths.get(current.id) : undefined;
+      const targetNode = path ? targetByPath.get(path) : undefined;
+      if (!current || !targetNode || current.type !== targetNode.type) return;
+      const planned = result.get(targetNode.id);
+      result.set(targetNode.id, {
+        node: current,
+        fields: [...new Set([...(planned?.fields ?? []), ...override.overriddenFields])],
+      });
+    });
+    return result;
+  }
+
+  private runtimeSubtreePaths(rootId: string): ReadonlyMap<string, string> {
+    const result = new Map<string, string>();
+    const childrenByParent = new Map<string, RuntimeProjectionNode[]>();
+    this.projectionStore.listLiveNodes().forEach((node) => {
+      if (typeof node.parentId !== "string" || !this.isNodeVisible(node)) return;
+      const children = childrenByParent.get(node.parentId) ?? [];
+      children.push(node);
+      childrenByParent.set(node.parentId, children);
+    });
+    childrenByParent.forEach((children) => children.sort((left, right) => numericSiblingIndex(left) - numericSiblingIndex(right) || left.id.localeCompare(right.id)));
+    const visit = (parentId: string, parentPath: string): void => {
+      const occurrences = new Map<string, number>();
+      (childrenByParent.get(parentId) ?? []).forEach((child) => {
+        if (result.size >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: rootId });
+        const label = `${child.type}:${typeof child.name === "string" ? child.name : ""}`;
+        const occurrence = occurrences.get(label) ?? 0;
+        occurrences.set(label, occurrence + 1);
+        const path = `${parentPath}/${label}[${occurrence}]`;
+        result.set(child.id, path);
+        visit(child.id, path);
+      });
+    };
+    visit(rootId, "");
+    return result;
+  }
+
   private replaceRuntimeSubtreeOperations(
     sourceRoot: RuntimeProjectionNode,
     targetRoot: RuntimeProjectionNode,
@@ -2715,6 +2940,142 @@ export class RuntimeSession implements RuntimeContainerHost {
       ...current.reverse().map((node) => ({ type: "remove" as const, nodeId: node.id })),
       ...replacements.map((node) => ({ type: "create" as const, node })),
     ];
+  }
+
+  private addVariantComponentProperty(
+    context: ReturnType<RuntimeSession["mutableComponentPropertyContext"]>,
+    propertyName: string,
+    defaultValue: string | boolean | RuntimeVariableAlias,
+    options: RuntimeComponentPropertyOptions | undefined,
+  ): string {
+    if (context.owner.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: context.owner.id });
+    validateRuntimeVariantPropertyName(propertyName, context.owner.id);
+    if (typeof defaultValue !== "string" || !defaultValue || defaultValue !== defaultValue.trim() || defaultValue.includes(",") || (options && Object.keys(options).length)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: context.owner.id });
+    }
+    const metadata = context.metadata as DocumentComponentSetMetadata;
+    if (metadata.componentPropertyDefinitions[propertyName] || metadata.variantGroupProperties[propertyName]) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: context.owner.id });
+    }
+    context.components.forEach((component) => {
+      const properties = runtimeVariantProperties(component);
+      if (properties[propertyName] !== undefined) throw runtimeError("INVALID_ARGUMENT", { nodeId: component.id });
+    });
+    const baseDefinition = runtimeComponentPropertyDefinition("VARIANT", defaultValue, undefined, context.owner.id);
+    const definition = {
+      ...baseDefinition,
+      variantOptions: [defaultValue],
+    };
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: context.owner.id,
+      patch: {
+        componentSetMetadata: {
+          ...structuredClone(metadata),
+          componentPropertyDefinitions: {
+            ...structuredClone(metadata.componentPropertyDefinitions),
+            [propertyName]: definition,
+          },
+          variantGroupProperties: {
+            ...structuredClone(metadata.variantGroupProperties),
+            [propertyName]: { values: [defaultValue] },
+          },
+        },
+      },
+    }];
+    context.components.forEach((component) => {
+      operations.push({
+        type: "update",
+        nodeId: component.id,
+        patch: { name: runtimeVariantNameWithProperty(component, propertyName, defaultValue) },
+      });
+    });
+    context.linkedInstances.forEach((instance) => {
+      const instanceMetadata = instance.instanceMetadata as DocumentInstanceMetadata;
+      operations.push({
+        type: "update",
+        nodeId: instance.id,
+        patch: {
+          instanceMetadata: {
+            ...structuredClone(instanceMetadata),
+            componentProperties: {
+              ...structuredClone(instanceMetadata.componentProperties),
+              [propertyName]: defaultValue,
+            },
+          },
+        },
+      });
+    });
+    if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: context.owner.id });
+    this.enqueueOperations(operations);
+    return propertyName;
+  }
+
+  private editVariantComponentProperty(
+    context: ReturnType<RuntimeSession["mutableComponentPropertyContext"]>,
+    propertyName: string,
+    value: RuntimeComponentPropertyEdit,
+  ): string {
+    if (context.owner.type !== "COMPONENT_SET") throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: context.owner.id });
+    if (value.defaultValue !== undefined || value.preferredValues !== undefined || value.description !== undefined || value.slotSettings !== undefined) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: context.owner.id });
+    }
+    if (value.name === undefined) return propertyName;
+    const nextName = validatedRuntimeComponentPropertyBaseName(value.name, context.owner.id);
+    validateRuntimeVariantPropertyName(nextName, context.owner.id);
+    if (nextName === propertyName) return propertyName;
+    const metadata = context.metadata as DocumentComponentSetMetadata;
+    if (metadata.componentPropertyDefinitions[nextName] || metadata.variantGroupProperties[nextName]) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: context.owner.id });
+    }
+    const existing = metadata.componentPropertyDefinitions[propertyName];
+    const group = metadata.variantGroupProperties[propertyName];
+    if (!existing || existing.type !== "VARIANT" || !group) throw runtimeError("INVALID_ARGUMENT", { nodeId: context.owner.id });
+    const definitions = structuredClone(metadata.componentPropertyDefinitions);
+    const groups = structuredClone(metadata.variantGroupProperties);
+    delete definitions[propertyName];
+    delete groups[propertyName];
+    definitions[nextName] = structuredClone(existing);
+    groups[nextName] = structuredClone(group);
+    const componentNames = new Map<string, string>();
+    context.components.forEach((component) => {
+      const properties = runtimeVariantProperties(component);
+      if (properties[propertyName] === undefined || properties[nextName] !== undefined) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: component.id });
+      }
+      componentNames.set(component.id, runtimeVariantNameRenamingProperty(component, propertyName, nextName));
+    });
+    const operations: PendingProjectionOperation[] = [{
+      type: "update",
+      nodeId: context.owner.id,
+      patch: {
+        componentSetMetadata: {
+          ...structuredClone(metadata),
+          componentPropertyDefinitions: definitions,
+          variantGroupProperties: groups,
+        },
+      },
+    }];
+    context.components.forEach((component) => operations.push({
+      type: "update",
+      nodeId: component.id,
+      patch: { name: componentNames.get(component.id)! },
+    }));
+    context.linkedInstances.forEach((instance) => {
+      const instanceMetadata = instance.instanceMetadata as DocumentInstanceMetadata;
+      const componentProperties = structuredClone(instanceMetadata.componentProperties);
+      const currentValue = componentProperties[propertyName];
+      delete componentProperties[propertyName];
+      if (currentValue !== undefined) componentProperties[nextName] = currentValue;
+      operations.push({
+        type: "update",
+        nodeId: instance.id,
+        patch: { instanceMetadata: { ...structuredClone(instanceMetadata), componentProperties } },
+      });
+    });
+    if (operations.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: context.owner.id });
+    this.enqueueOperations(operations);
+    return nextName;
   }
 
   private componentPropertyDefinitionOperations(
@@ -2950,6 +3311,10 @@ function validatedRuntimeComponentPropertyBaseName(name: string, nodeId: string)
   return name;
 }
 
+function validateRuntimeVariantPropertyName(name: string, nodeId: string): void {
+  if (name !== name.trim() || /[=,]/u.test(name)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+}
+
 function validateRuntimeComponentPropertyOptions(
   options: RuntimeComponentPropertyOptions | RuntimeComponentPropertyEdit | undefined,
   nodeId: string,
@@ -3099,6 +3464,42 @@ function runtimeVariantMetadata(
     variantOptions: [...variants],
   }]));
   return { componentPropertyDefinitions, variantGroupProperties };
+}
+
+type RuntimeVariantNamePart =
+  | Readonly<{ property: string; value: string }>
+  | Readonly<{ raw: string }>;
+
+function runtimeVariantNameParts(node: RuntimeProjectionNode): RuntimeVariantNamePart[] {
+  const name = typeof node.name === "string" ? node.name : "";
+  return name.split(",").flatMap((raw): RuntimeVariantNamePart[] => {
+    const normalized = raw.trim();
+    const separator = normalized.indexOf("=");
+    const property = separator < 0 ? "" : normalized.slice(0, separator).trim();
+    const value = separator < 0 ? "" : normalized.slice(separator + 1).trim();
+    return property && value ? [{ property, value }] : normalized ? [{ raw: normalized }] : [];
+  });
+}
+
+function runtimeVariantProperties(node: RuntimeProjectionNode): Record<string, string> {
+  const result: Record<string, string> = {};
+  runtimeVariantNameParts(node).forEach((part) => {
+    if ("property" in part) result[part.property] = part.value;
+  });
+  return result;
+}
+
+function runtimeVariantName(parts: readonly RuntimeVariantNamePart[]): string {
+  return parts.map((part) => "property" in part ? `${part.property}=${part.value}` : part.raw).join(", ");
+}
+
+function runtimeVariantNameWithProperty(node: RuntimeProjectionNode, propertyName: string, value: string): string {
+  return runtimeVariantName([...runtimeVariantNameParts(node), { property: propertyName, value }]);
+}
+
+function runtimeVariantNameRenamingProperty(node: RuntimeProjectionNode, propertyName: string, nextName: string): string {
+  return runtimeVariantName(runtimeVariantNameParts(node).map((part) =>
+    "property" in part && part.property === propertyName ? { property: nextName, value: part.value } : part));
 }
 
 function runtimeNodeHasAncestorIn(

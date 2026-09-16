@@ -33,6 +33,11 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
   const componentSet = runtime.combineAsVariants([component, componentVariant], runtime.currentPage);
   void componentSet.variantGroupProperties;
   void componentSet.componentPropertyDefinitions;
+  void component.variantProperties;
+  void instance.variantProperties;
+  const variantPropertyName = componentSet.addComponentProperty("State", "VARIANT", "Default");
+  componentSet.editComponentProperty(variantPropertyName, { name: "Mode" });
+  instance.setProperties({ Mode: "Default" });
   const setPropertyName = componentSet.addComponentProperty("Label", "TEXT", "Continue");
   const renamedSetProperty = componentSet.editComponentProperty(setPropertyName, { name: "Title", defaultValue: "Save" });
   componentSet.deleteComponentProperty(renamedSetProperty);
