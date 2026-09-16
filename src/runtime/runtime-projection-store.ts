@@ -68,6 +68,14 @@ export type PendingProjectionOperation =
       childIds: readonly string[];
       temporaryPositionId: string;
       finalPositionId: string;
+    }>
+  | Readonly<{
+      type: "detachInstance";
+      sourceId: string;
+      sourceIds: readonly string[];
+      replacements: readonly RuntimeProjectionNode[];
+      temporaryPositionId: string;
+      finalPositionId: string;
     }>;
 
 export type PendingProjectionTransaction = Readonly<{
@@ -423,6 +431,19 @@ function validateOperations(
       continue;
     }
 
+    if (operation.type === "detachInstance") {
+      validateDetachInstanceOperation(read, operation, transactionId);
+      operation.replacements.forEach((replacement, index) => {
+        overlay.set(replacement.id, cloneNode({
+          ...replacement,
+          ...(index === 0 ? { positionId: operation.finalPositionId } : {}),
+          removed: false,
+        }));
+      });
+      operation.sourceIds.forEach((nodeId) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, removed: true })));
+      continue;
+    }
+
     const node = read(operation.nodeId);
     if (!node) throw runtimeError("NODE_NOT_FOUND", { transactionId, nodeId: operation.nodeId });
     if (node.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId: operation.nodeId });
@@ -495,6 +516,19 @@ function applyOperations(
       continue;
     }
 
+    if (operation.type === "detachInstance") {
+      validateDetachInstanceOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      operation.replacements.forEach((replacement, index) => {
+        nodes.set(replacement.id, cloneNode({
+          ...replacement,
+          ...(index === 0 ? { positionId: operation.finalPositionId } : {}),
+          removed: false,
+        }));
+      });
+      operation.sourceIds.forEach((nodeId) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, removed: true })));
+      continue;
+    }
+
     const node = nodes.get(operation.nodeId);
     if (!node) throw runtimeError("NODE_NOT_FOUND", { transactionId, nodeId: operation.nodeId });
     if (node.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId: operation.nodeId });
@@ -534,6 +568,46 @@ function validateComponentFromNodeOperation(
     if (!child || child.removed === true || child.parentId !== source.id) {
       throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
     }
+  });
+}
+
+function validateDetachInstanceOperation(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  operation: Extract<PendingProjectionOperation, { type: "detachInstance" }>,
+  transactionId: string,
+): void {
+  const source = read(operation.sourceId);
+  const sourceIds = new Set(operation.sourceIds);
+  const replacementIds = new Set(operation.replacements.map((node) => node.id));
+  const root = operation.replacements[0];
+  if (
+    !source ||
+    source.removed === true ||
+    source.type !== "INSTANCE" ||
+    operation.sourceIds[0] !== source.id ||
+    sourceIds.size !== operation.sourceIds.length ||
+    replacementIds.size !== operation.replacements.length ||
+    operation.sourceIds.length !== operation.replacements.length ||
+    !root ||
+    root.type !== "FRAME" ||
+    root.parentId !== source.parentId ||
+    replacementIds.has(source.id) ||
+    !operation.temporaryPositionId ||
+    !operation.finalPositionId ||
+    operation.temporaryPositionId === operation.finalPositionId
+  ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceId });
+
+  operation.sourceIds.forEach((nodeId, index) => {
+    const node = read(nodeId);
+    const replacement = operation.replacements[index];
+    if (
+      !node ||
+      node.removed === true ||
+      !replacement ||
+      read(replacement.id) ||
+      (index > 0 && (!node.parentId || !sourceIds.has(node.parentId))) ||
+      (index > 0 && (!replacement.parentId || !replacementIds.has(replacement.parentId)))
+    ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
   });
 }
 

@@ -388,7 +388,7 @@ function transactionToEditorCommands(
   };
 
   for (const operation of operations) {
-    if (operation.type === "componentFromNode") {
+    if (operation.type === "componentFromNode" || operation.type === "detachInstance") {
       flush();
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
@@ -467,6 +467,17 @@ function toEditorCommands(
       ...(operation.childIds.length ? [{ type: "reparent" as const, ids: [...operation.childIds], parentId: operation.replacement.id }] : []),
       { type: "delete", ids: [operation.sourceId] },
       { type: "reposition", positionIds: [{ id: operation.replacement.id, positionId: operation.finalPositionId }] },
+    ];
+  }
+  if (operation.type === "detachInstance") {
+    const [root, ...descendants] = operation.replacements;
+    if (!root) throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.sourceId });
+    const temporaryRoot = { ...structuredClone(root), positionId: operation.temporaryPositionId };
+    return [
+      ...toEditorCommands({ type: "create", node: temporaryRoot }, pageIds),
+      ...descendants.flatMap((node) => toEditorCommands({ type: "create", node }, pageIds)),
+      { type: "delete", ids: [operation.sourceId] },
+      { type: "reposition", positionIds: [{ id: root.id, positionId: operation.finalPositionId }] },
     ];
   }
   if (operation.type === "boolean") {

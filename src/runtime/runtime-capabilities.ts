@@ -88,10 +88,10 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     editorTypes: ["figma"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
     nodeTypes: ["INSTANCE"],
-    property: "componentPropertyValues|setProperties|swapComponent|removeOverrides|getMainComponentAsync",
+    property: "componentPropertyValues|setProperties|swapComponent|detachInstance|removeOverrides|getMainComponentAsync",
     surface: "write",
     status: "partial",
-    limitation: "Runtime reads Canonical Instance property values, resolves the main Component, removes recorded overrides, and synchronously validates BOOLEAN, TEXT, INSTANCE_SWAP and VARIANT setProperties writes against the main Component definition. swapComponent atomically changes the source link, restores the target Component's non-SLOT defaults and clears direct overrides while retaining the existing instance subtree. SLOT writes, VariableAlias values, variant-option validation, subtree reconciliation, nested-instance swap heuristics and property-reference authoring remain staged.",
+    limitation: "Runtime reads Canonical Instance property values, resolves the main Component, removes recorded overrides, and synchronously validates BOOLEAN, TEXT, INSTANCE_SWAP and VARIANT setProperties writes against the main Component definition. swapComponent atomically changes the source link, restores the target Component's non-SLOT defaults and clears direct overrides while retaining the existing instance subtree. detachInstance atomically replaces one bounded supported Instance subtree with fresh node and vector-point identities, preserves its page, geometry and layer position, removes instance metadata/source-link extensions, and returns the new Frame. SLOT writes, VariableAlias values, variant-option validation, subtree reconciliation, nested-instance swap heuristics and property-reference authoring remain staged.",
   },
   {
     id: "paint-stack.runtime",

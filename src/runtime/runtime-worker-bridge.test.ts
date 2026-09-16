@@ -670,6 +670,95 @@ describe("RuntimeWorkerBridge", () => {
     bridge.close();
   });
 
+  it("lowers Instance detachment as an ordered replacement with its final layer position restored", () => {
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    const componentId = "00000000-0000-4000-8000-000000000041";
+    const instanceId = "00000000-0000-4000-8000-000000000042";
+    const instanceChildId = "00000000-0000-4000-8000-000000000043";
+    const frameId = "00000000-0000-4000-8000-000000000044";
+    const frameChildId = "00000000-0000-4000-8000-000000000045";
+    const finalPositionId = "80000000000000000000000000000000:00000000000040008000000000000042";
+    const temporaryPositionId = "fffffffffffffffffffffffffffffffe:00000000000040008000000000000044";
+    const base = {
+      ...snapshotAt(4),
+      nodes: [
+        ...snapshotAt(4).nodes,
+        {
+          id: componentId,
+          kind: "component" as const,
+          pageId: "page",
+          name: "Card",
+          x: 0,
+          y: 0,
+          width: 120,
+          height: 80,
+          componentMetadata: { key: componentId, remote: false, description: "", descriptionMarkdown: "", documentationLinks: [], componentPropertyDefinitions: {} },
+        },
+        {
+          id: instanceId,
+          kind: "instance" as const,
+          pageId: "page",
+          positionId: finalPositionId,
+          name: "Card instance",
+          x: 160,
+          y: 20,
+          width: 120,
+          height: 80,
+          instanceMetadata: { mainComponentId: componentId, scaleFactor: 1, componentProperties: {}, overrides: [], isExposedInstance: false },
+          extensions: { "figma.instance.source-node.v1": [1] },
+        },
+        {
+          id: instanceChildId,
+          kind: "rectangle" as const,
+          parentId: instanceId,
+          pageId: "page",
+          name: "Surface",
+          x: 8,
+          y: 12,
+          width: 104,
+          height: 56,
+          extensions: { "figma.instance.source-node.v1": [2] },
+        },
+      ],
+    } satisfies EditorSnapshot;
+    bridge.observe({ type: "snapshot", snapshot: base });
+    void bridge.submit({
+      transactionId: "tx-detach-instance",
+      baseRevision: 4,
+      operations: [{
+        type: "detachInstance",
+        sourceId: instanceId,
+        sourceIds: [instanceId, instanceChildId],
+        replacements: [
+          { id: frameId, type: "FRAME", parentId: "page", pageId: "page", siblingIndex: 2, positionId: finalPositionId, name: "Card instance detached", x: 160, y: 20, width: 120, height: 80, extensions: {} },
+          { id: frameChildId, type: "RECTANGLE", parentId: frameId, pageId: "page", siblingIndex: 0, name: "Surface", x: 8, y: 12, width: 104, height: 56, extensions: {} },
+        ],
+        temporaryPositionId,
+        finalPositionId,
+      }],
+    }).catch(() => undefined);
+
+    expect(posted[0]?.transaction.commands.map((command) => command.type)).toEqual(["create", "create", "delete", "reposition"]);
+    expect(posted[0]?.transaction.commands[0]).toEqual(expect.objectContaining({
+      type: "create",
+      node: expect.objectContaining({ id: frameId, kind: "frame", positionId: temporaryPositionId }),
+    }));
+    expect(posted[0]?.transaction.commands[1]).toEqual(expect.objectContaining({
+      type: "create",
+      node: expect.objectContaining({ id: frameChildId, kind: "rectangle", parentId: frameId }),
+    }));
+    expect(posted[0]?.transaction.commands[2]).toEqual({ type: "delete", ids: [instanceId] });
+    expect(posted[0]?.transaction.commands[3]).toEqual({ type: "reposition", positionIds: [{ id: frameId, positionId: finalPositionId }] });
+    const resolved = resolveCoreBatch(base.nodes, posted[0]!.transaction.commands);
+    expect(resolved?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: frameId, kind: "frame", positionId: finalPositionId, name: "Card instance detached" }),
+      expect.objectContaining({ id: frameChildId, kind: "rectangle", parentId: frameId }),
+    ]));
+    expect(resolved?.nextNodes.some((node) => node.id === instanceId || node.id === instanceChildId)).toBe(false);
+    bridge.close();
+  });
+
   it("lowers bounded special-node Runtime creates without dropping their durable metadata", () => {
     const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
     const bridge = new RuntimeWorkerBridge((message) => posted.push(message));

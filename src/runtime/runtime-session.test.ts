@@ -672,6 +672,44 @@ describe("M1 RuntimeSession", () => {
     expect((await session.getNodeByIdAsync(slice.id))?.width).toBe(320);
   });
 
+  it("detaches an Instance into a fresh Frame subtree through one replacement transaction", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const component = session.createComponent();
+    const sourceChild = session.createRectangle();
+    component.appendChild(sourceChild);
+    const instance = component.createInstance();
+    const instanceChild = instance.children[0]!;
+    const detached = instance.detachInstance();
+
+    expect(detached).toBeInstanceOf(RuntimeContainerNodeProxy);
+    expect(detached).toMatchObject({ type: "FRAME", name: "Component instance detached", parent: session.currentPage });
+    expect(detached.id).not.toBe(instance.id);
+    expect(detached.children).toHaveLength(1);
+    expect(detached.children[0]).toMatchObject({ type: "RECTANGLE", parent: detached });
+    expect(detached.children[0]?.id).not.toBe(instanceChild.id);
+    expect(instance.removed).toBe(true);
+    expect(instanceChild.removed).toBe(true);
+    expect(session.projectionStore.getNode(detached.id)).not.toHaveProperty("instanceMetadata");
+    expect(session.projectionStore.getNode(detached.id)?.extensions).not.toHaveProperty("figma.instance.source-node.v1");
+    expect(session.projectionStore.getNode(detached.children[0]!.id)?.extensions).not.toHaveProperty("figma.instance.source-node.v1");
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "detachInstance",
+        sourceId: instance.id,
+        sourceIds: [instance.id, instanceChild.id],
+        replacements: [
+          expect.objectContaining({ id: detached.id, type: "FRAME", name: "Component instance detached" }),
+          expect.objectContaining({ id: detached.children[0]!.id, type: "RECTANGLE", parentId: detached.id }),
+        ],
+      }),
+    ]));
+    expect(await session.getNodeByIdAsync(instance.id)).toBeNull();
+    expect((await session.getNodeByIdAsync(detached.id))?.type).toBe("FRAME");
+  });
+
   it("atomically replaces a Frame with a local Component and preserves its subtree", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
@@ -3083,6 +3121,14 @@ class InMemoryTransport implements RuntimeTransactionTransport {
           if (node) nodes.set(nodeId, { ...node, parentId: operation.replacement.id, siblingIndex });
         });
         nodes.delete(operation.sourceId);
+      }
+      else if (operation.type === "detachInstance") {
+        operation.replacements.forEach((replacement, index) => nodes.set(replacement.id, {
+          ...structuredClone(replacement),
+          ...(index === 0 ? { positionId: operation.finalPositionId } : {}),
+          removed: false,
+        }));
+        operation.sourceIds.forEach((nodeId) => nodes.delete(nodeId));
       }
       else if (operation.type === "remove") nodes.delete(operation.nodeId);
       else {

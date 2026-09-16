@@ -790,6 +790,85 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations(operations);
     return this.containerFor(instanceId);
   }
+  detachInstance(instanceId: string): RuntimeContainerNodeProxy {
+    this.assertOpen();
+    const instance = this.projectionStore.getNode(instanceId);
+    if (!instance || instance.removed === true) throw runtimeError("NODE_REMOVED", { nodeId: instanceId });
+    if (instance.type !== "INSTANCE" || typeof instance.parentId !== "string") {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: instanceId });
+    }
+
+    const subtree: RuntimeProjectionNode[] = [];
+    const visited = new Set<string>();
+    const visit = (node: RuntimeProjectionNode): void => {
+      if (visited.has(node.id)) throw runtimeError("INVALID_ARGUMENT", { nodeId: node.id });
+      visited.add(node.id);
+      if (subtree.length >= this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+      if (node.id !== instanceId && !RUNTIME_CLONE_DESCENDANT_TYPES.has(node.type as M1SceneNodeType)) {
+        throw runtimeError("UNSUPPORTED_NODE_TYPE", { nodeId: node.id });
+      }
+      subtree.push(node);
+      this.siblingsOf(node.id).forEach(visit);
+    };
+    visit(instance);
+
+    const siblings = this.siblingsOf(instance.parentId);
+    const sourceIndex = siblings.findIndex((node) => node.id === instanceId);
+    if (sourceIndex < 0) throw runtimeError("NODE_NOT_FOUND", { nodeId: instanceId });
+    const remaining = siblings.filter((node) => node.id !== instanceId);
+    const finalPositionId = typeof instance.positionId === "string" && instance.positionId
+      ? instance.positionId
+      : positionIdForLayerInsertion(remaining, sourceIndex);
+    if (!finalPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId: instanceId });
+
+    const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
+    const rootId = ids.get(instanceId)!;
+    const replacements = subtree.map((source): RuntimeProjectionNode => {
+      const isRoot = source.id === instanceId;
+      const clone: Record<string, unknown> = {
+        ...structuredClone(source),
+        id: ids.get(source.id)!,
+        type: isRoot ? "FRAME" : source.type,
+        parentId: isRoot ? source.parentId : ids.get(source.parentId!),
+        siblingIndex: source.siblingIndex,
+        positionId: isRoot ? finalPositionId : source.positionId,
+        name: isRoot ? `${typeof source.name === "string" ? source.name : "Instance"} detached` : source.name,
+        instanceMetadata: undefined,
+        removed: false,
+      };
+      delete clone.instanceMetadata;
+      const extensions = clone.extensions && typeof clone.extensions === "object" && !Array.isArray(clone.extensions)
+        ? structuredClone(clone.extensions as Record<string, number[]>)
+        : {};
+      delete extensions["figma.instance.metadata.v1"];
+      delete extensions[INSTANCE_SOURCE_NODE_EXTENSION];
+      clone.extensions = extensions;
+      if (clone.vectorPath && typeof clone.vectorPath === "object") {
+        const path = clone.vectorPath as DocumentVectorPath;
+        clone.vectorPath = {
+          ...path,
+          subpaths: path.subpaths.map((subpath) => ({
+            ...subpath,
+            points: subpath.points.map((point) => ({ ...point, id: this.createId() })),
+          })),
+        };
+      }
+      if (clone.connectorMetadata && typeof clone.connectorMetadata === "object") {
+        clone.connectorMetadata = remapRuntimeConnectorMetadata(clone.connectorMetadata as DocumentConnectorMetadata, ids);
+      }
+      if (Array.isArray(clone.reactions)) clone.reactions = remapRuntimeReactions(clone.reactions, ids);
+      return clone as RuntimeProjectionNode;
+    });
+    this.enqueueOperations([{
+      type: "detachInstance",
+      sourceId: instanceId,
+      sourceIds: subtree.map((node) => node.id),
+      replacements,
+      temporaryPositionId: runtimeTemporaryPositionId(rootId, finalPositionId),
+      finalPositionId,
+    }]);
+    return this.containerFor(rootId);
+  }
   createSlot(componentId: string): RuntimeContainerNodeProxy {
     this.assertOpen();
     const component = this.projectionStore.getNode(componentId);

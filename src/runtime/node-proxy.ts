@@ -174,6 +174,7 @@ export interface RuntimeNodeHost {
   getInstancesOfComponentAsync(componentId: string): Promise<readonly RuntimeNodeProxy[]>;
   createInstance(componentId: string): RuntimeContainerNodeProxy;
   createSlot(componentId: string): RuntimeContainerNodeProxy;
+  detachInstance(instanceId: string): RuntimeContainerNodeProxy;
   enqueueUpdate(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueResizeWithoutConstraints(nodeId: string, patch: Readonly<Record<string, unknown>>): void;
   enqueueRemove(nodeId: string): void;
@@ -1937,6 +1938,11 @@ export class RuntimeNodeProxy {
         overrides: [],
       },
     });
+  }
+
+  detachInstance(): RuntimeContainerNodeProxy {
+    this.instanceMetadata();
+    return this.host.detachInstance(this.handle.nodeId);
   }
 
   removeOverrides(): void {

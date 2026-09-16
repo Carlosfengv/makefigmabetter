@@ -349,6 +349,8 @@ export function assertFigmaPluginTypingsContract(
   const instanceForSwap = figma.createComponent().createInstance();
   instanceForSwap.setProperties({});
   instanceForSwap.swapComponent(componentForSwap);
+  const detachedInstance: FrameNode = instanceForSwap.detachInstance();
+  void detachedInstance.children;
   const clonedFrame: FrameNode = figma.createFrame().clone();
   void clonedFrame.children;
   const preview: Promise<EmbedNode | LinkUnfurlNode> = figma.createLinkPreviewAsync("https://example.com");

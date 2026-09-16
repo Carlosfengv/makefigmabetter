@@ -128,6 +128,38 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("child")).toMatchObject({ parentId: "component", siblingIndex: 0, x: 8, y: 12 });
   });
 
+  it("projects detached Instance replacement trees atomically", () => {
+    const finalPositionId = "40000000000000000000000000000000:00000000000000000000000000000003";
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "instance", type: "INSTANCE", parentId: "page", siblingIndex: 0, positionId: finalPositionId, instanceMetadata: { mainComponentId: "component" } },
+        { id: "instance-child", type: "RECTANGLE", parentId: "instance", siblingIndex: 0, x: 8, y: 12 },
+      ],
+    });
+    store.stage({
+      transactionId: "tx-detach-instance",
+      baseRevision: 7,
+      operations: [{
+        type: "detachInstance",
+        sourceId: "instance",
+        sourceIds: ["instance", "instance-child"],
+        replacements: [
+          { id: "frame", type: "FRAME", parentId: "page", siblingIndex: 0, positionId: finalPositionId, name: "Card detached" },
+          { id: "frame-child", type: "RECTANGLE", parentId: "frame", siblingIndex: 0, x: 8, y: 12 },
+        ],
+        temporaryPositionId: "fffffffffffffffffffffffffffffffe:00000000000000000000000000000004",
+        finalPositionId,
+      }],
+    });
+
+    expect(store.getNode("instance")).toMatchObject({ removed: true });
+    expect(store.getNode("instance-child")).toMatchObject({ removed: true });
+    expect(store.getNode("frame")).toMatchObject({ type: "FRAME", parentId: "page", positionId: finalPositionId, removed: false });
+    expect(store.getNode("frame-child")).toMatchObject({ type: "RECTANGLE", parentId: "frame", x: 8, y: 12, removed: false });
+  });
+
   it("projects same-page cross-parent Boolean moves and reindexes each source parent", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

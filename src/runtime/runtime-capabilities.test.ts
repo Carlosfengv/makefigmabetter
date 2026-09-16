@@ -34,6 +34,7 @@ describe("M0 runtime capability matrix", () => {
       property: expect.stringContaining("setProperties"),
       nodeTypes: ["INSTANCE"],
     });
+    expect(runtimeCapability("component.instance-properties-runtime")?.property).toContain("detachInstance");
     expect(runtimeCapability("node.sync-write")?.property).not.toMatch(/fills|strokes/);
     expect(runtimeCapability("paint-stack.runtime")).toMatchObject({ property: "fills" });
     expect(runtimeCapability("paint-stack.runtime")?.nodeTypes).toContain("TEXT");
