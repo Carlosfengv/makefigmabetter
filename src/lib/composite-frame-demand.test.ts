@@ -202,6 +202,32 @@ describe("Canvas composite frame preflight", () => {
     });
   });
 
+  it("reserves one subtree pool for a presented live Boolean inside Repeat", () => {
+    const repeat = {
+      ...createNode("transformGroup", 0, 0), id: "repeat-presented-boolean",
+      transformModifiers: [{ type: "REPEAT" as const, repeatType: "LINEAR" as const, count: 1, unitType: "PIXELS" as const, offset: 100, axis: "HORIZONTAL" as const }],
+      positionId: "10000000000000000000000000000000:00000000000000000000000000000000",
+    };
+    const boolean = {
+      ...createNode("booleanOperation", 0, 0), id: "presented-boolean", parentId: repeat.id,
+      booleanOperation: "subtract" as const,
+      opacity: .65,
+      effectStack: [{ layerBlur: { visible: true, radius: 4 } }],
+      positionId: "20000000000000000000000000000000:00000000000000000000000000000000",
+    };
+    const path = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "a", x: 0, y: 0 }, { id: "b", x: 10, y: 0 }, { id: "c", x: 0, y: 10 }] }] };
+    const outer = { ...createNode("vector", 0, 0), id: "boolean-outer", parentId: boolean.id, vectorPath: path };
+    const cutout = { ...createNode("vector", 2, 2), id: "boolean-cutout", parentId: boolean.id, vectorPath: path };
+
+    expect(compositeFrameDemand([repeat, boolean, outer, cutout])).toEqual({
+      effectPool: false,
+      linearPaintPool: false,
+      alphaMaskPools: 0,
+      subtreePools: 1,
+      surfaces: 3,
+    });
+  });
+
   it("reserves the prepared ancestor and descendant effect pools for backdrop blur under owner presentation", () => {
     const repeat = {
       ...createNode("transformGroup", 0, 0), id: "repeat-presented-container",

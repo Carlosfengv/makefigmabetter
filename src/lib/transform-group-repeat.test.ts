@@ -162,9 +162,53 @@ describe("M6 TransformGroup Repeat", () => {
       { ...boolean, opacity: .65 },
       outer,
       cutout,
-    ], parent)).toBeUndefined();
+    ], parent)).toEqual({
+      sources: [expect.objectContaining({ id: boolean.id, opacity: .65 })],
+      nodes: [expect.objectContaining({ id: boolean.id }), outer, cutout],
+      hitNodes: [expect.objectContaining({ id: boolean.id })],
+    });
+    expect(transformGroupRepeatSubtree([
+      parent,
+      { ...boolean, effectStack: [{ layerBlur: { visible: true, radius: 4 } }] },
+      outer,
+      cutout,
+    ], parent)).toBeDefined();
+    expect(transformGroupRepeatSubtree([
+      parent,
+      { ...boolean, blendMode: "multiply" },
+      outer,
+      cutout,
+    ], parent)).toBeDefined();
     expect(transformGroupRepeatSubtree([parent, boolean, outer], parent)).toBeUndefined();
     expect(transformGroupRepeatSubtree([parent, boolean, outer, { ...cutout, kind: "rectangle", vectorPath: undefined }], parent)).toBeUndefined();
+  });
+
+  it("exports a presented live Boolean once per Repeat occurrence without operand paint", () => {
+    const parent = group();
+    const boolean = {
+      ...createNode("booleanOperation", 20, 30), id: "presented-boolean", pageId, parentId: parent.id, width: 60, height: 40,
+      booleanOperation: "subtract" as const,
+      opacity: .65,
+      effectStack: [{ layerBlur: { visible: true, radius: 4 } }],
+      positionId: "10000000000000000000000000000000:00000000000000000000000000000000",
+    };
+    const operandPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [{ id: "a", x: 0, y: 0 }, { id: "b", x: 60, y: 0 }, { id: "c", x: 60, y: 40 }, { id: "d", x: 0, y: 40 }] }] };
+    const outer = { ...createNode("vector", 0, 0), id: "presented-outer", pageId, parentId: boolean.id, width: 60, height: 40, vectorPath: operandPath, positionId: "20000000000000000000000000000000:00000000000000000000000000000000" };
+    const cutout = { ...createNode("vector", 10, 10), id: "presented-cutout", pageId, parentId: boolean.id, width: 20, height: 20, vectorPath: operandPath, positionId: "30000000000000000000000000000000:00000000000000000000000000000000" };
+    const result = exportPageToSvg([parent, boolean, outer, cutout], {
+      pageId,
+      defaultPageId: pageId,
+      padding: 0,
+      booleanPaths: new Map([[boolean.id, operandPath]]),
+    });
+
+    expect(result.svg.match(/<feGaussianBlur/gu)).toHaveLength(3);
+    expect(result.svg.match(/opacity="0.65"/gu)).toHaveLength(3);
+    expect(result.svg).toContain('transform="matrix(1 0 0 1 150 0)"');
+    expect(result.svg).toContain('transform="matrix(1 0 0 1 300 0)"');
+    expect(result.compatibilityFallbacks).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: parent.id, capability: "transform-group-repeat" }),
+    ]));
   });
 
   it("admits foreground effects, solitary Background Blur and linear node blends while rejecting unsafe subtree composition", () => {

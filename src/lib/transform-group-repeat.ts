@@ -35,6 +35,7 @@ const REPEAT_PREPARED_CONTAINER_KINDS = new Set<CanvasNode["kind"]>([
   "instance",
   "slot",
   "componentSet",
+  "booleanOperation",
 ]);
 
 export type TransformGroupRepeatSubtree = Readonly<{
