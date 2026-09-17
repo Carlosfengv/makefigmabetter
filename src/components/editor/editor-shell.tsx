@@ -73,6 +73,7 @@ import { FontFaceRegistry, fontFamilyForAsset } from "@/lib/font-face-registry";
 import { canvasDesignTokens } from "@/lib/canvas-design-tokens";
 import {
   layoutTextRanges,
+  resolveTextDirection,
   segmentGraphemes,
   textAlignedLineLeft,
   textHangingPunctuationOffsets,
@@ -87,6 +88,11 @@ import {
   textParagraphWrapStyleAt,
 } from "@/lib/text-layout";
 import { styledTextSpans } from "@/lib/text-style-runs";
+import { findTopmostHit } from "@/lib/hit-test";
+import {
+  resolveTextHyperlinkNavigation,
+  textHyperlinkAtUtf16Character,
+} from "@/lib/text-hyperlink-navigation";
 import {
   canvasTextEditBox,
   canvasTextEditContainsPoint,
@@ -1190,16 +1196,17 @@ function normalizedContentEditableText(editor: HTMLElement) {
 
 /** Converts a Canvas double-click into the same insertion position the text
  * editor would select if it had received that pointer event directly. */
-function textCaretAtPoint(
+function textPointHit(
   node: CanvasTextEditableNode,
   point: { x: number; y: number },
-) {
+  transformedLocalPoint?: { x: number; y: number },
+): { caret: number; character?: number } {
   const text = node.text ?? "";
   const properties = node.textProperties;
   const primary = properties?.runs[0];
   const fontSize = primary?.fontSize ?? canvasTextEditFallbackFontSize(node);
   const letterSpacing = primary?.letterSpacing ?? 0;
-  const local = canvasTextEditLocalPoint(node, point);
+  const local = transformedLocalPoint ?? canvasTextEditLocalPoint(node, point);
   const editBox = canvasTextEditBox(node);
   const ctx =
     typeof document === "undefined"
@@ -1287,18 +1294,34 @@ function textCaretAtPoint(
         hanging,
       );
       let index = utf16IndexAtUtf8Offset(text, line.start);
-      for (const grapheme of segmentGraphemes(line.text)) {
+      const graphemes = segmentGraphemes(line.text);
+      const linksUseLogicalOrder = line.direction === "ltr"
+        && !graphemes.some((grapheme) => resolveTextDirection(grapheme) === "rtl");
+      for (const grapheme of graphemes) {
         const width = measure(grapheme);
-        if (local.x <= x + width / 2) return index;
+        if (local.x < x) return { caret: index };
+        if (local.x <= x + width) return {
+          caret: local.x <= x + width / 2 ? index : index + grapheme.length,
+          // Whole-line RTL and mixed-direction links need the Rust visual-run
+          // projection before source characters can be hit safely.
+          ...(linksUseLogicalOrder && local.y >= lineTop ? { character: index } : {}),
+        };
         x += width;
         index += grapheme.length;
       }
-      return utf16IndexAtUtf8Offset(text, line.end);
+      return { caret: utf16IndexAtUtf8Offset(text, line.end) };
     }
     lineTop = lineBottom;
     previousEnd = line.end;
   }
-  return text.length;
+  return { caret: text.length };
+}
+
+function textCaretAtPoint(
+  node: CanvasTextEditableNode,
+  point: { x: number; y: number },
+) {
+  return textPointHit(node, point).caret;
 }
 
 function requestedFixtureSnapshot(
@@ -4516,6 +4539,60 @@ export function EditorShell({
     },
     [post, safeMode],
   );
+  const activateCanvasTextHyperlink = (
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) => {
+    if (tool !== "select" || event.button !== 0 || canvasTextEditNodeId !== undefined) return false;
+    const readOnly = !writerRef.current;
+    if (!readOnly && !event.metaKey && !event.ctrlKey) return false;
+    const current = snapshotRef.current;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = {
+      x: (event.clientX - rect.left - rect.width / 2) / current.viewport.zoom - current.viewport.x,
+      y: (event.clientY - rect.top - rect.height / 2) / current.viewport.zoom - current.viewport.y,
+    };
+    const pageNodes = current.nodes.filter((node) =>
+      (node.pageId ?? defaultPageId) === current.activePageId);
+    const candidate = findTopmostHit(pageNodes, point, defaultPageId);
+    if (!candidate || !isCanvasTextEditableNode(candidate)) return false;
+    const worldTransform = worldTransformForNode(current.nodes, candidate.id);
+    const inverse = worldTransform && invertAffine(worldTransform);
+    if (!inverse) return false;
+    const character = textPointHit(
+      candidate,
+      point,
+      transformPoint(inverse, point),
+    ).character;
+    if (character === undefined) return false;
+    const hyperlink = textHyperlinkAtUtf16Character(
+      candidate.text ?? "",
+      candidate.textProperties,
+      character,
+    );
+    if (!hyperlink) return false;
+    const navigation = resolveTextHyperlinkNavigation(
+      hyperlink,
+      current.nodes,
+      defaultPageId,
+    );
+    if (!navigation) {
+      setStatus("Engine worker online · link target unavailable");
+      event.preventDefault();
+      return true;
+    }
+    event.preventDefault();
+    if (navigation.type === "URL") {
+      const opened = window.open(navigation.url, "_blank", "noopener,noreferrer");
+      if (opened) opened.opener = null;
+      setStatus("Engine worker online · link opened");
+      return true;
+    }
+    if (navigation.pageId !== current.activePageId)
+      command({ type: "select-page", id: navigation.pageId });
+    command({ type: "select", ids: [navigation.nodeId] });
+    setStatus("Engine worker online · linked layer selected");
+    return true;
+  };
   const pointer = (
     event: React.PointerEvent<HTMLCanvasElement>,
     type: "down" | "move" | "up" | "leave",
@@ -4526,6 +4603,7 @@ export function EditorShell({
       setStatus("Engine worker online · read-only tab");
       return;
     }
+    if (type === "down" && activateCanvasTextHyperlink(event)) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const packet: EditorInputEvent = {
       type: "pointer",
