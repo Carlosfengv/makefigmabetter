@@ -44,6 +44,9 @@ pub const MAX_TEXT_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PAINT_STYLE_RESOURCES: usize = 4_096;
 pub const MAX_PAINT_STYLE_RESOURCE_BYTES: usize = 256 * 1024;
 pub const MAX_PAINT_STYLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_EFFECT_STYLE_RESOURCES: usize = 4_096;
+pub const MAX_EFFECT_STYLE_RESOURCE_BYTES: usize = 64 * 1024;
+pub const MAX_EFFECT_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
 pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
 pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
@@ -1015,6 +1018,20 @@ pub struct PaintStyleResource {
     pub variable_bindings: Vec<PaintStyleVariableBinding>,
 }
 
+/// A complete, document-owned Figma EffectStyle resource. The ordered effect
+/// stack uses the same bounded canonical effect vocabulary as scene nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectStyleResource {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub description_markdown: String,
+    pub documentation_links: Vec<String>,
+    pub remote: bool,
+    pub effects: Vec<Effect>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaintStyleVariableBinding {
     pub paint_index: u32,
@@ -1321,6 +1338,9 @@ pub struct Document {
     /// Complete PaintStyle values keyed by their stable Figma-compatible ID.
     paint_styles: SharedOrdMap<String, PaintStyleResource>,
     paint_style_bytes: usize,
+    /// Complete EffectStyle values keyed by their stable Figma-compatible ID.
+    effect_styles: SharedOrdMap<String, EffectStyleResource>,
+    effect_style_bytes: usize,
     variable_collections: SharedOrdMap<String, VariableCollectionResource>,
     variables: SharedOrdMap<String, VariableResource>,
     variable_catalog_bytes: usize,
@@ -1555,6 +1575,9 @@ pub enum Command {
     RegisterPaintStyle {
         style: PaintStyleResource,
     },
+    RegisterEffectStyle {
+        style: EffectStyleResource,
+    },
     SetTextStyle {
         style: TextStyleResource,
     },
@@ -1565,6 +1588,12 @@ pub enum Command {
         style: PaintStyleResource,
     },
     DeletePaintStyle {
+        id: String,
+    },
+    SetEffectStyle {
+        style: EffectStyleResource,
+    },
+    DeleteEffectStyle {
         id: String,
     },
     RegisterVariableCollection {
@@ -1734,6 +1763,9 @@ pub enum AppliedChange {
     PaintStyleRegistered {
         style: PaintStyleResource,
     },
+    EffectStyleRegistered {
+        style: EffectStyleResource,
+    },
     TextStyleChanged {
         before: TextStyleResource,
         after: TextStyleResource,
@@ -1747,6 +1779,13 @@ pub enum AppliedChange {
     },
     PaintStyleDeleted {
         style: PaintStyleResource,
+    },
+    EffectStyleChanged {
+        before: EffectStyleResource,
+        after: EffectStyleResource,
+    },
+    EffectStyleDeleted {
+        style: EffectStyleResource,
     },
     VariableCollectionRegistered {
         collection: VariableCollectionResource,
@@ -1957,6 +1996,10 @@ pub enum CommandError {
         id: String,
     },
     InvalidPaintStyle,
+    DuplicateEffectStyle {
+        id: String,
+    },
+    InvalidEffectStyle,
     InvalidPaintStyleLinks,
     DuplicateVariableCollection {
         id: String,
@@ -2008,6 +2051,8 @@ impl Document {
             text_style_bytes: 0,
             paint_styles: SharedOrdMap::new(),
             paint_style_bytes: 0,
+            effect_styles: SharedOrdMap::new(),
+            effect_style_bytes: 0,
             variable_collections: SharedOrdMap::new(),
             variables: SharedOrdMap::new(),
             variable_catalog_bytes: 0,
@@ -2265,6 +2310,14 @@ impl Document {
         self.paint_styles.get(id)
     }
 
+    pub fn effect_styles(&self) -> impl Iterator<Item = &EffectStyleResource> {
+        self.effect_styles.values()
+    }
+
+    pub fn effect_style(&self, id: &str) -> Option<&EffectStyleResource> {
+        self.effect_styles.get(id)
+    }
+
     pub fn variable_collections(&self) -> impl Iterator<Item = &VariableCollectionResource> {
         self.variable_collections.values()
     }
@@ -2430,6 +2483,13 @@ impl Document {
             hash_len(&mut hasher, self.paint_styles.len());
             for style in self.paint_styles.values() {
                 hash_paint_style_resource(&mut hasher, style);
+            }
+        }
+        if !self.effect_styles.is_empty() {
+            hasher.update(b"makefigma/editor-core/effect-style-catalog-v1");
+            hash_len(&mut hasher, self.effect_styles.len());
+            for style in self.effect_styles.values() {
+                hash_effect_style_resource(&mut hasher, style);
             }
         }
         if !self.variable_collections.is_empty() || !self.variables.is_empty() {
@@ -2609,6 +2669,11 @@ impl Document {
     /// Installs one verified PaintStyle while hydrating a trusted snapshot.
     pub fn seed_paint_style(&mut self, style: PaintStyleResource) -> Result<(), CommandError> {
         self.insert_paint_style(style)
+    }
+
+    /// Installs one verified EffectStyle while hydrating a trusted snapshot.
+    pub fn seed_effect_style(&mut self, style: EffectStyleResource) -> Result<(), CommandError> {
+        self.insert_effect_style(style)
     }
 
     pub fn seed_variable_collection(
@@ -3068,7 +3133,7 @@ impl Document {
         if self.paint_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicatePaintStyle { id: style.id });
         }
-        if self.text_styles.contains_key(&style.id) {
+        if self.text_styles.contains_key(&style.id) || self.effect_styles.contains_key(&style.id) {
             return Err(CommandError::InvalidPaintStyle);
         }
         let bytes = style.estimated_bytes();
@@ -3142,7 +3207,7 @@ impl Document {
         if self.text_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicateTextStyle { id: style.id });
         }
-        if self.paint_styles.contains_key(&style.id) {
+        if self.paint_styles.contains_key(&style.id) || self.effect_styles.contains_key(&style.id) {
             return Err(CommandError::InvalidTextStyle);
         }
         let bytes = style.estimated_bytes();
@@ -3234,6 +3299,88 @@ impl Document {
         self.paint_styles.remove(id);
         self.paint_style_bytes = self
             .paint_style_bytes
+            .saturating_sub(style.estimated_bytes());
+        Ok(style)
+    }
+
+    fn valid_effect_style_resource(&self, style: &EffectStyleResource) -> bool {
+        !style.id.is_empty()
+            && style.id.len() <= MAX_STYLE_ID_BYTES
+            && !style.id.contains('\0')
+            && style.key.len() <= MAX_STYLE_KEY_BYTES
+            && !style.key.contains('\0')
+            && (!style.remote || !style.key.is_empty())
+            && !style.name.trim().is_empty()
+            && style.name.len() <= MAX_STYLE_NAME_BYTES
+            && !style.name.contains('\0')
+            && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description.contains('\0')
+            && style.description_markdown.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description_markdown.contains('\0')
+            && valid_style_documentation_links(&style.documentation_links)
+            && valid_effect_stack(&style.effects, first_effect_drop_shadow(&style.effects))
+    }
+
+    fn insert_effect_style(&mut self, style: EffectStyleResource) -> Result<(), CommandError> {
+        if self.effect_styles.contains_key(&style.id) {
+            return Err(CommandError::DuplicateEffectStyle { id: style.id });
+        }
+        if self.text_styles.contains_key(&style.id) || self.paint_styles.contains_key(&style.id) {
+            return Err(CommandError::InvalidEffectStyle);
+        }
+        let bytes = style.estimated_bytes();
+        if !self.valid_effect_style_resource(&style)
+            || bytes > MAX_EFFECT_STYLE_RESOURCE_BYTES
+            || self.effect_styles.len() >= MAX_EFFECT_STYLE_RESOURCES
+            || self.effect_style_bytes.saturating_add(bytes) > MAX_EFFECT_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidEffectStyle);
+        }
+        self.effect_style_bytes += bytes;
+        self.effect_styles.insert(style.id.clone(), style);
+        Ok(())
+    }
+
+    fn replace_effect_style(
+        &mut self,
+        style: EffectStyleResource,
+    ) -> Result<EffectStyleResource, CommandError> {
+        let before = self
+            .effect_styles
+            .get(&style.id)
+            .cloned()
+            .ok_or(CommandError::InvalidEffectStyle)?;
+        if before.remote || style.remote || before.key != style.key {
+            return Err(CommandError::InvalidEffectStyle);
+        }
+        let bytes = style.estimated_bytes();
+        let next_catalog_bytes = self
+            .effect_style_bytes
+            .saturating_sub(before.estimated_bytes())
+            .saturating_add(bytes);
+        if !self.valid_effect_style_resource(&style)
+            || bytes > MAX_EFFECT_STYLE_RESOURCE_BYTES
+            || next_catalog_bytes > MAX_EFFECT_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidEffectStyle);
+        }
+        self.effect_style_bytes = next_catalog_bytes;
+        self.effect_styles.insert(style.id.clone(), style);
+        Ok(before)
+    }
+
+    fn remove_effect_style(&mut self, id: &str) -> Result<EffectStyleResource, CommandError> {
+        let style = self
+            .effect_styles
+            .get(id)
+            .cloned()
+            .ok_or(CommandError::InvalidEffectStyle)?;
+        if style.remote {
+            return Err(CommandError::InvalidEffectStyle);
+        }
+        self.effect_styles.remove(id);
+        self.effect_style_bytes = self
+            .effect_style_bytes
             .saturating_sub(style.estimated_bytes());
         Ok(style)
     }
@@ -3565,6 +3712,12 @@ impl Document {
                     style: style.clone(),
                 })
             }
+            Command::RegisterEffectStyle { style } => {
+                self.insert_effect_style(style.clone())?;
+                Ok(AppliedChange::EffectStyleRegistered {
+                    style: style.clone(),
+                })
+            }
             Command::SetTextStyle { style } => {
                 let before = self.replace_text_style(style.clone())?;
                 Ok(AppliedChange::TextStyleChanged {
@@ -3586,6 +3739,17 @@ impl Document {
             Command::DeletePaintStyle { id } => {
                 let style = self.remove_paint_style(id)?;
                 Ok(AppliedChange::PaintStyleDeleted { style })
+            }
+            Command::SetEffectStyle { style } => {
+                let before = self.replace_effect_style(style.clone())?;
+                Ok(AppliedChange::EffectStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeleteEffectStyle { id } => {
+                let style = self.remove_effect_style(id)?;
+                Ok(AppliedChange::EffectStyleDeleted { style })
             }
             _ => self.apply_non_style_command(command),
         }
@@ -5162,10 +5326,13 @@ impl Document {
             }
             Command::RegisterTextStyle { .. }
             | Command::RegisterPaintStyle { .. }
+            | Command::RegisterEffectStyle { .. }
             | Command::SetTextStyle { .. }
             | Command::DeleteTextStyle { .. }
             | Command::SetPaintStyle { .. }
-            | Command::DeletePaintStyle { .. } => {
+            | Command::DeletePaintStyle { .. }
+            | Command::SetEffectStyle { .. }
+            | Command::DeleteEffectStyle { .. } => {
                 unreachable!("style commands are dispatched first")
             }
             Command::RegisterVariableCollection { collection } => {
@@ -5305,6 +5472,12 @@ impl Document {
                     .paint_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
+            AppliedChange::EffectStyleRegistered { style } => {
+                self.effect_styles.remove(&style.id);
+                self.effect_style_bytes = self
+                    .effect_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
             AppliedChange::TextStyleChanged { before, after } => {
                 self.text_styles.insert(before.id.clone(), before.clone());
                 self.text_style_bytes = self
@@ -5330,6 +5503,19 @@ impl Document {
                     .paint_style_bytes
                     .saturating_add(style.estimated_bytes());
                 self.paint_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::EffectStyleChanged { before, after } => {
+                self.effect_styles.insert(before.id.clone(), before.clone());
+                self.effect_style_bytes = self
+                    .effect_style_bytes
+                    .saturating_sub(after.estimated_bytes())
+                    .saturating_add(before.estimated_bytes());
+            }
+            AppliedChange::EffectStyleDeleted { style } => {
+                self.effect_style_bytes = self
+                    .effect_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.effect_styles.insert(style.id.clone(), style.clone());
             }
             AppliedChange::VariableCollectionRegistered { collection } => {
                 self.variable_collections.remove(&collection.id);
@@ -5456,6 +5642,12 @@ impl Document {
                     .saturating_add(style.estimated_bytes());
                 self.paint_styles.insert(style.id.clone(), style.clone());
             }
+            AppliedChange::EffectStyleRegistered { style } => {
+                self.effect_style_bytes = self
+                    .effect_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.effect_styles.insert(style.id.clone(), style.clone());
+            }
             AppliedChange::TextStyleChanged { before, after } => {
                 self.text_styles.insert(after.id.clone(), after.clone());
                 self.text_style_bytes = self
@@ -5480,6 +5672,19 @@ impl Document {
                 self.paint_styles.remove(&style.id);
                 self.paint_style_bytes = self
                     .paint_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
+            AppliedChange::EffectStyleChanged { before, after } => {
+                self.effect_styles.insert(after.id.clone(), after.clone());
+                self.effect_style_bytes = self
+                    .effect_style_bytes
+                    .saturating_sub(before.estimated_bytes())
+                    .saturating_add(after.estimated_bytes());
+            }
+            AppliedChange::EffectStyleDeleted { style } => {
+                self.effect_styles.remove(&style.id);
+                self.effect_style_bytes = self
+                    .effect_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
             AppliedChange::VariableCollectionRegistered { collection } => {
@@ -5776,10 +5981,13 @@ impl Document {
                 | Command::RegisterAsset { .. }
                 | Command::RegisterTextStyle { .. }
                 | Command::RegisterPaintStyle { .. }
+                | Command::RegisterEffectStyle { .. }
                 | Command::SetTextStyle { .. }
                 | Command::DeleteTextStyle { .. }
                 | Command::SetPaintStyle { .. }
                 | Command::DeletePaintStyle { .. }
+                | Command::SetEffectStyle { .. }
+                | Command::DeleteEffectStyle { .. }
                 | Command::RegisterVariableCollection { .. }
                 | Command::RegisterVariable { .. }
                 | Command::SetVariable { .. }
@@ -8932,10 +9140,13 @@ impl Command {
             }
             Command::RegisterTextStyle { style } => style.estimated_bytes(),
             Command::RegisterPaintStyle { style } => style.estimated_bytes(),
+            Command::RegisterEffectStyle { style } => style.estimated_bytes(),
             Command::SetTextStyle { style } => style.estimated_bytes(),
             Command::DeleteTextStyle { id } => id.len(),
             Command::SetPaintStyle { style } => style.estimated_bytes(),
             Command::DeletePaintStyle { id } => id.len(),
+            Command::SetEffectStyle { style } => style.estimated_bytes(),
+            Command::DeleteEffectStyle { id } => id.len(),
             Command::RegisterVariableCollection { collection } => collection.estimated_bytes(),
             Command::RegisterVariable { variable } => variable.estimated_bytes(),
             Command::SetVariable { variable } => variable.estimated_bytes(),
@@ -9139,6 +9350,23 @@ impl PaintStyleResource {
                 })
                 .sum::<usize>()
             + self.paints.estimated_bytes()
+    }
+}
+
+impl EffectStyleResource {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.description.len()
+            + self.description_markdown.len()
+            + self
+                .documentation_links
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+            + effect_stack_bytes(&self.effects)
     }
 }
 
@@ -9411,6 +9639,11 @@ impl AppliedChange {
                 before.estimated_bytes() + after.estimated_bytes()
             }
             AppliedChange::PaintStyleDeleted { style } => style.estimated_bytes(),
+            AppliedChange::EffectStyleRegistered { style } => style.estimated_bytes(),
+            AppliedChange::EffectStyleChanged { before, after } => {
+                before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::EffectStyleDeleted { style } => style.estimated_bytes(),
             AppliedChange::VariableCollectionRegistered { collection } => {
                 collection.estimated_bytes()
             }
@@ -10103,6 +10336,20 @@ fn hash_paint_style_resource(hasher: &mut Sha256, resource: &PaintStyleResource)
             hash_text(hasher, &binding.variable_id);
         }
     }
+    hash_style_publishable_metadata(
+        hasher,
+        &resource.description_markdown,
+        &resource.documentation_links,
+    );
+}
+
+fn hash_effect_style_resource(hasher: &mut Sha256, resource: &EffectStyleResource) {
+    hash_text(hasher, &resource.id);
+    hash_text(hasher, &resource.key);
+    hash_text(hasher, &resource.name);
+    hash_text(hasher, &resource.description);
+    hasher.update([u8::from(resource.remote)]);
+    hash_effect_stack(hasher, &resource.effects);
     hash_style_publishable_metadata(
         hasher,
         &resource.description_markdown,
@@ -11502,6 +11749,18 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(b"makefigma/editor-core/delete-paint-style-v1");
             hash_text(hasher, id);
         }
+        Command::RegisterEffectStyle { style } => {
+            hasher.update(b"makefigma/editor-core/register-effect-style-v1");
+            hash_effect_style_resource(hasher, style);
+        }
+        Command::SetEffectStyle { style } => {
+            hasher.update(b"makefigma/editor-core/set-effect-style-v1");
+            hash_effect_style_resource(hasher, style);
+        }
+        Command::DeleteEffectStyle { id } => {
+            hasher.update(b"makefigma/editor-core/delete-effect-style-v1");
+            hash_text(hasher, id);
+        }
         Command::RegisterVariableCollection { collection } => {
             hasher.update([28]);
             hash_variable_collection(hasher, collection);
@@ -12620,6 +12879,22 @@ mod tests {
             remote: false,
             paints: PaintStack::default(),
             variable_bindings: Vec::new(),
+        }
+    }
+
+    fn effect_style_resource(id: &str) -> EffectStyleResource {
+        EffectStyleResource {
+            id: id.into(),
+            key: String::new(),
+            name: "Soft shadow".into(),
+            description: "Card elevation".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
+            remote: false,
+            effects: vec![Effect::LayerBlur(LayerBlur {
+                radius: 8.0,
+                visible: true,
+            })],
         }
     }
 
@@ -16014,6 +16289,63 @@ mod tests {
             document.seed_paint_style(invalid),
             Err(CommandError::InvalidPaintStyle)
         );
+    }
+
+    #[test]
+    fn effect_style_catalog_is_hashed_bounded_and_undoable() {
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash_hex();
+        let style = effect_style_resource("S:soft-shadow");
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterEffectStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.effect_style("S:soft-shadow"), Some(&style));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert!(document.effect_style("S:soft-shadow").is_none());
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.effect_style("S:soft-shadow"), Some(&style));
+
+        let mut changed = style.clone();
+        changed.effects = vec![Effect::BackgroundBlur(BackgroundBlur {
+            radius: 12.0,
+            visible: true,
+        })];
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetEffectStyle {
+                        style: changed.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.effect_style("S:soft-shadow"), Some(&changed));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteEffectStyle {
+                        id: changed.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.effect_style("S:soft-shadow").is_none());
+        document.undo().unwrap();
+        assert_eq!(document.effect_style("S:soft-shadow"), Some(&changed));
     }
 
     #[test]

@@ -3,18 +3,18 @@
 
 use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
-    BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect, FillRule,
-    FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridChildAlignment,
-    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
-    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
-    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment,
+    BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect,
+    EffectStyleResource, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
+    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -40,6 +40,21 @@ pub fn commands_from_payload_with_semantics(
         v1::ResolvedOperationBatch::decode(payload).map_err(|_| ServiceError::InvalidEnvelope)?;
     if batch.operations.is_empty() {
         return Err(ServiceError::InvalidEnvelope);
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::RegisterEffectStyle(_))
+                    | Some(v1::resolved_operation::Kind::SetEffectStyle(_))
+                    | Some(v1::resolved_operation::Kind::DeleteEffectStyle(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        });
     }
     if engine_semantics_version < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
         && batch.operations.iter().any(|operation| matches!(operation.kind.as_ref(),
@@ -1972,6 +1987,17 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             )?,
         }),
         Kind::DeletePaintStyle(value) => Ok(Command::DeletePaintStyle { id: value.style_id }),
+        Kind::RegisterEffectStyle(value) => Ok(Command::RegisterEffectStyle {
+            style: effect_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::SetEffectStyle(value) => Ok(Command::SetEffectStyle {
+            style: effect_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::DeleteEffectStyle(value) => Ok(Command::DeleteEffectStyle { id: value.style_id }),
         Kind::RegisterVariableCollection(value) => Ok(Command::RegisterVariableCollection {
             collection: variable_collection_from_proto(
                 value.collection.ok_or(ServiceError::InvalidEnvelope)?,
@@ -2805,6 +2831,29 @@ fn paint_style_resource_from_proto(
         remote: resource.remote,
         paints: paint_stack_from_proto(resource.paints.ok_or(ServiceError::InvalidEnvelope)?)?,
         variable_bindings,
+    })
+}
+
+fn effect_style_resource_from_proto(
+    resource: v1::EffectStyleResource,
+) -> Result<EffectStyleResource, ServiceError> {
+    Ok(EffectStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .into_iter()
+            .map(effect_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -6231,6 +6280,66 @@ mod tests {
                 Command::SetPaintStyle { style: paint },
                 Command::DeletePaintStyle { id: paint_id },
             ] if text.name == "Body" && text_id == "S:body" && paint.name == "Brand" && paint_id == "S:brand"
+        ));
+    }
+
+    #[test]
+    fn effect_style_operations_require_semantics_sixty_four() {
+        let style = v1::EffectStyleResource {
+            id: "S:elevation".into(),
+            key: String::new(),
+            name: "Elevation".into(),
+            description: String::new(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
+            remote: false,
+            effects: vec![v1::Effect {
+                kind: Some(v1::effect::Kind::LayerBlur(v1::LayerBlur {
+                    radius: 8.0,
+                    visible: true,
+                })),
+            }],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::RegisterEffectStyle(
+                        v1::RegisterEffectStyle {
+                            style: Some(style.clone()),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetEffectStyle(
+                        v1::SetEffectStyle { style: Some(style) },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeleteEffectStyle(
+                        v1::DeleteEffectStyle {
+                            style_id: "S:elevation".into(),
+                        },
+                    )),
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [
+                Command::RegisterEffectStyle { style: registered },
+                Command::SetEffectStyle { style: changed },
+                Command::DeleteEffectStyle { id },
+            ] if registered.name == "Elevation" && changed.effects.len() == 1 && id == "S:elevation"
         ));
     }
 

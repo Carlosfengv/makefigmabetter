@@ -6,17 +6,18 @@
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
-    FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks, GridChildAlignment,
-    GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
-    LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind,
-    OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource, PaintStyleVariableBinding,
-    ParagraphListType, ParagraphStyle, ParagraphStyleRun, ParametricShape, PointId, PositionId,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlign, TextAutoSize, TextCase, TextDecoration,
-    TextDecorationColor, TextDecorationOffset, TextDecorationStyle, TextDecorationThickness,
-    TextListType, TextProperties, TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun,
-    TextTruncation, TextWrapStyle, VariableCollectionResource, VariableMode, VariableResolvedType,
-    VariableResource, VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath,
-    WrapTrackAlignment, can_parent_contain_child,
+    EffectStyleResource, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
+    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
+    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
+    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
+    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
+    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
+    TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
+    VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
+    VariableValue, VectorPath, VectorPoint, VectorPointType, VectorSubpath, WrapTrackAlignment,
+    can_parent_contain_child,
     color::{
         Color, ColorSpace, DocumentColorProfile, GradientPaint, GradientPaintKind, GradientStop,
         ImageFilters, ImagePaint, ImageScaleMode, LinearGradient, Paint, PaintLayer,
@@ -89,9 +90,9 @@ pub const GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION: u32 = 60;
 pub const GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION: u32 = 61;
 pub const GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION: u32 = 62;
 pub const TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION: u32 = 63;
+pub const EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 64;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
-    TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -125,6 +126,11 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.effect_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
         && (document.nodes().any(|node| {
             document
@@ -716,6 +722,10 @@ pub fn snapshot_from_document(
             .variables()
             .map(variable_resource_to_proto)
             .collect(),
+        effect_styles: document
+            .effect_styles()
+            .map(effect_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -940,6 +950,11 @@ pub fn document_from_snapshot_with_engine_semantics(
     {
         return Err(SnapshotError::Invalid);
     }
+    if declared_engine_semantics_version < EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.effect_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && snapshot
             .paint_styles
@@ -979,6 +994,11 @@ pub fn document_from_snapshot_with_engine_semantics(
     for style in snapshot.paint_styles {
         document
             .seed_paint_style(paint_style_resource_from_proto(style)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    for style in snapshot.effect_styles {
+        document
+            .seed_effect_style(effect_style_resource_from_proto(style)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
     let mut page_hashes = BTreeMap::new();
@@ -2978,6 +2998,51 @@ fn paint_style_resource_from_proto(
     })
 }
 
+fn effect_style_resource_to_proto(resource: &EffectStyleResource) -> v1::EffectStyleResource {
+    v1::EffectStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .iter()
+            .copied()
+            .map(effect_to_proto)
+            .collect(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
+    }
+}
+
+fn effect_style_resource_from_proto(
+    resource: v1::EffectStyleResource,
+) -> Result<EffectStyleResource, SnapshotError> {
+    Ok(EffectStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .into_iter()
+            .map(effect_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
 fn variable_collection_to_proto(
     value: &VariableCollectionResource,
 ) -> v1::VariableCollectionResource {
@@ -3953,9 +4018,10 @@ fn id_to_bytes(value: u128) -> Vec<u8> {
 mod tests {
     use super::*;
     use editor_core::{
-        AssetId, AssetReference, DEFAULT_PAGE_ID, DropShadow, Effect, NodeKind, Page, PageId,
-        PaintStyleResource, ParagraphStyle, TextAlign, TextAutoSize, TextProperties,
-        TextStyleResource, TextStyleRun, color::Color, geometry::AffineTransform,
+        AssetId, AssetReference, DEFAULT_PAGE_ID, DropShadow, Effect, EffectStyleResource,
+        LayerBlur, NodeKind, Page, PageId, PaintStyleResource, ParagraphStyle, TextAlign,
+        TextAutoSize, TextProperties, TextStyleResource, TextStyleRun, color::Color,
+        geometry::AffineTransform,
     };
 
     fn node(id: u128, kind: NodeKind, parent_id: Option<NodeId>) -> Node {
@@ -7290,6 +7356,53 @@ mod tests {
                 179_u128.to_be_bytes(),
                 bound_hash,
                 PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn effect_style_catalog_round_trips_and_requires_semantics_sixty_four() {
+        let mut document = Document::with_id(DocumentId(181));
+        let style = EffectStyleResource {
+            id: "S:elevation".into(),
+            key: "library-effect-key".into(),
+            name: "Elevation".into(),
+            description: "Soft elevation".into(),
+            description_markdown: "**Soft elevation**".into(),
+            documentation_links: vec!["https://example.com/elevation".into()],
+            remote: true,
+            effects: vec![Effect::LayerBlur(LayerBlur {
+                radius: 8.0,
+                visible: true,
+            })],
+        };
+        document.seed_effect_style(style.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+                .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            181_u128.to_be_bytes(),
+            hash,
+            EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.effect_style("S:elevation"), Some(&style));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                181_u128.to_be_bytes(),
+                hash,
+                EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

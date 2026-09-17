@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import type { AutoLayoutPaddingSide, BenchmarkProjectionSnapshot, CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentAutoLayout, DocumentFontReference, DocumentGradientPaint, DocumentImagePaint, DocumentPaintLayer, DocumentPaintStyleResource, DocumentTextStyleResource, DocumentVectorPath, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, Viewport, WorkerToMain } from "@/lib/editor-protocol";
+import type { AutoLayoutPaddingSide, BenchmarkProjectionSnapshot, CanvasNode, CanvasPage, CoreJournalOperation, CoreLocalSnapshot, DocumentAsset, DocumentAutoLayout, DocumentEffectStyleResource, DocumentFontReference, DocumentGradientPaint, DocumentImagePaint, DocumentPaintLayer, DocumentPaintStyleResource, DocumentTextStyleResource, DocumentVectorPath, EditorClipboard, EditorCommand, EditorSnapshot, LocalJournalEntry, MainToWorker, PendingOperationReplay, PendingRemoteOperation, PresentationNode, RendererPreference, SimulatedGpuFault, ToolKind, Viewport, WorkerToMain } from "@/lib/editor-protocol";
 import { createDiagnosticRecorder } from "@/lib/diagnostics";
 import { createCooperativeYield } from "@/lib/cooperative-yield";
 import { findTopmostCanvasSelectionCandidate, findTopmostHit, nodeContainsWorldPoint } from "@/lib/hit-test";
@@ -185,7 +185,7 @@ type PenDraft = {
   previewWorld?: { x: number; y: number };
 };
 type WasmProjectionNode = CoreProjectionNode;
-type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; canonicalHash?: string; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; textStyles?: DocumentTextStyleResource[]; paintStyles?: DocumentPaintStyleResource[]; nodes: WasmProjectionNode[]; retiredIds?: string[] };
+type WasmProjectionSnapshot = { schemaVersion: number; documentId?: string; revision: number; canUndo: boolean; canRedo: boolean; canonicalHash?: string; pages?: CanvasPage[]; resourceIndex?: DocumentAsset[]; textStyles?: DocumentTextStyleResource[]; paintStyles?: DocumentPaintStyleResource[]; effectStyles?: DocumentEffectStyleResource[]; nodes: WasmProjectionNode[]; retiredIds?: string[] };
 type WasmDocumentEngine = {
   readonly revision: bigint;
   readonly can_undo: boolean;
@@ -279,6 +279,7 @@ let penDraft: PenDraft | undefined;
 let assets: DocumentAsset[] = [];
 let textStyles: DocumentTextStyleResource[] = [];
 let paintStyles: DocumentPaintStyleResource[] = [];
+let effectStyles: DocumentEffectStyleResource[] = [];
 /** The Worker-owned copy/cut clipboard. It carries subtree projections by value
  * and image references by AssetId only (never raw bytes), so paste re-validates
  * against the target document's Resource Index (P0-1). */
@@ -1066,7 +1067,7 @@ function emitSnapshot(localJournalEntry?: LocalJournalEntry, persistable = true)
   }
   if (wasmHeap.withinBudget) wasmHeapOverBudget = false;
   const fontAvailability = Object.fromEntries(assets.filter((asset) => asset.mediaType.startsWith("font/")).map((asset) => [asset.assetId, fontFaces.statusFor(asset.assetId)]));
-  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuEffectTextureBytes, maxGpuEffectTextureBytes: MAX_GPU_EFFECT_TEXTURE_BYTES, gpuSceneWithinBudget }, benchmark: benchmarkEvidence, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, textStyles, paintStyles, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
+  emit({ type: "snapshot", snapshot: { documentId, revision, documentHash, memory, resources: { documentNodes: memory?.nodeCount ?? nodes.length, maxDocumentNodes: 100_000, documentBytes: memory?.nodeBytes ?? 0, maxDocumentBytes: memory?.maxDocumentBytes ?? 256 * 1024 * 1024, wasmHeapBytes: wasmHeap.bytes, maxWasmHeapBytes: MAX_WASM_HEAP_BYTES, renderSurfaceBytes, maxRenderSurfaceBytes: MAX_RENDER_SURFACE_BYTES, gpuSceneBytes, maxGpuSceneBytes: MAX_GPU_SCENE_RESOURCE_BYTES, gpuEffectTextureBytes, maxGpuEffectTextureBytes: MAX_GPU_EFFECT_TEXTURE_BYTES, gpuSceneWithinBudget }, benchmark: benchmarkEvidence, diagnostics: diagnostics.summary(), performance: renderPerformance.summary(), nodes, assets, textStyles, paintStyles, effectStyles, fontAvailability, pages, activePageId, selectedIds, viewport, canUndo: undoOrder.length > 0, canRedo: redoOrder.length > 0, renderer: gpuRenderer && gpuSceneWithinBudget ? "WebGPU + Canvas 2D overlay" : "Canvas 2D", gpu: { webgpu: gpuStatus, webgl2Available, recoveryAttempts: gpuRecoveryAttempts, ...(simulatedGpuLossesRequested ? { developmentSimulation: { requestedLosses: simulatedGpuLossesRequested, completedLosses: simulatedGpuLosses } } : {}) }, documentCore, localSnapshot, localJournalEntry } });
 }
 function emitRemoteBootstrap() {
   if (!wasmDocument || documentCore !== "Rust/WASM bridge ready") return;
@@ -1791,6 +1792,7 @@ function syncProjectionFromWasm(rememberExisting = true) {
   assets = snapshot.resourceIndex ?? [];
   textStyles = snapshot.textStyles ?? [];
   paintStyles = snapshot.paintStyles ?? [];
+  effectStyles = snapshot.effectStyles ?? [];
   const activeAssetIds = new Set(assets.map((asset) => asset.assetId));
   for (const [assetId, blob] of runtimeFontBlobs) {
     if (activeAssetIds.has(assetId)) continue;

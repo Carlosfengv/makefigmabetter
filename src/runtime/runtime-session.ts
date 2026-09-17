@@ -33,6 +33,7 @@ import {
   type DocumentConnectorMetadata,
   type DocumentColor,
   type DocumentEffect,
+  type DocumentEffectStyleResource,
   type DocumentEmbedMetadata,
   type DocumentFontReference,
   type DocumentInstanceMetadata,
@@ -58,6 +59,7 @@ import { sha256Hex } from "../lib/sha256";
 import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReference, runtimeFontReferenceForName, type RuntimeFontName } from "./runtime-font-name";
 import { RuntimeTextStyle, textStyleVariableValuePatch } from "./runtime-text-style";
 import { RuntimePaintStyle, materializePaintStyleVariableValues } from "./runtime-paint-style";
+import { RuntimeEffectStyle } from "./runtime-effect-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
 import type { RuntimeWorkerViewState } from "./runtime-worker-bridge";
@@ -328,6 +330,11 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.projectionStore.listPaintStyles().find((style) => style.id === styleId);
   }
 
+  effectStyleResource(styleId: string): DocumentEffectStyleResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.listEffectStyles().find((style) => style.id === styleId);
+  }
+
   variableResource(id: string): DocumentVariableResource | undefined {
     this.assertOpen();
     return this.projectionStore.listVariables().find((variable) => variable.id === id);
@@ -511,6 +518,22 @@ export class RuntimeSession implements RuntimeContainerHost {
     return new RuntimePaintStyle(style, this.paintStyleHost());
   }
 
+  createEffectStyle(): RuntimeEffectStyle {
+    this.assertOpen();
+    const style: DocumentEffectStyleResource = {
+      id: this.allocateRuntimeStyleId(),
+      key: "",
+      name: "Effect Style",
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      effects: [],
+    };
+    this.enqueueOperations([{ type: "registerEffectStyle", style }]);
+    return new RuntimeEffectStyle(style, this.effectStyleHost());
+  }
+
   setTextStyle(style: DocumentTextStyleResource): void {
     this.assertOpen();
     const current = this.textStyleResource(style.id);
@@ -559,23 +582,37 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations(operations);
   }
 
+  setEffectStyle(style: DocumentEffectStyleResource): void {
+    this.assertOpen();
+    const current = this.effectStyleResource(style.id);
+    if (!current || current.remote || style.remote || current.key !== style.key) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "setEffectStyle", style }]);
+  }
+
+  deleteEffectStyle(styleId: string): void {
+    this.assertSynchronousDocumentAccess();
+    const style = this.effectStyleResource(styleId);
+    if (!style || style.remote) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "deleteEffectStyle", id: styleId }]);
+  }
+
   private allocateRuntimeStyleId(): string {
     const id = `S:${this.createId()}`;
-    if (this.textStyleResource(id) || this.paintStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
+    if (this.textStyleResource(id) || this.paintStyleResource(id) || this.effectStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
     return id;
   }
 
-  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null {
+  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
-    return this.textStyleForId(styleId);
+    return this.styleForId(styleId);
   }
 
-  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | null> {
+  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null> {
     this.assertOpen();
     if (typeof styleId !== "string" || !styleId) throw runtimeError("INVALID_ARGUMENT");
     await Promise.resolve();
-    return this.textStyleForId(styleId);
+    return this.styleForId(styleId);
   }
 
   getLocalTextStyles(): readonly RuntimeTextStyle[] {
@@ -602,11 +639,25 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.localPaintStyles();
   }
 
-  private textStyleForId(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null {
+  getLocalEffectStyles(): readonly RuntimeEffectStyle[] {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+    return this.localEffectStyles();
+  }
+
+  async getLocalEffectStylesAsync(): Promise<readonly RuntimeEffectStyle[]> {
+    this.assertOpen();
+    await Promise.resolve();
+    return this.localEffectStyles();
+  }
+
+  private styleForId(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null {
     const resource = this.textStyleResource(styleId);
     if (resource) return new RuntimeTextStyle(resource, this.textStyleHost());
     const paintResource = this.paintStyleResource(styleId);
-    return paintResource ? new RuntimePaintStyle(paintResource, this.paintStyleHost()) : null;
+    if (paintResource) return new RuntimePaintStyle(paintResource, this.paintStyleHost());
+    const effectResource = this.effectStyleResource(styleId);
+    return effectResource ? new RuntimeEffectStyle(effectResource, this.effectStyleHost()) : null;
   }
 
   private localTextStyles(): readonly RuntimeTextStyle[] {
@@ -621,6 +672,27 @@ export class RuntimeSession implements RuntimeContainerHost {
     return Object.freeze(this.projectionStore.listPaintStyles()
       .filter((style) => !style.remote)
       .map((style) => new RuntimePaintStyle(style, host)));
+  }
+
+  private localEffectStyles(): readonly RuntimeEffectStyle[] {
+    const host = this.effectStyleHost();
+    return Object.freeze(this.projectionStore.listEffectStyles()
+      .filter((style) => !style.remote)
+      .map((style) => new RuntimeEffectStyle(style, host)));
+  }
+
+  private effectStyleHost() {
+    return {
+      effectStyleResource: (styleId: string): DocumentEffectStyleResource | undefined => this.effectStyleResource(styleId),
+      setEffectStyle: (style: DocumentEffectStyleResource): void => this.setEffectStyle(style),
+      deleteEffectStyle: (styleId: string): void => this.deleteEffectStyle(styleId),
+      getPluginData: (styleId: string, key: string): string => this.getStylePluginData("effect", styleId, key),
+      setPluginData: (styleId: string, key: string, value: string): void => this.setStylePluginData("effect", styleId, key, value),
+      getPluginDataKeys: (styleId: string): readonly string[] => this.getStylePluginDataKeys("effect", styleId),
+      getSharedPluginData: (styleId: string, namespace: string, key: string): string => this.getStyleSharedPluginData("effect", styleId, namespace, key),
+      setSharedPluginData: (styleId: string, namespace: string, key: string, value: string): void => this.setStyleSharedPluginData("effect", styleId, namespace, key, value),
+      getSharedPluginDataKeys: (styleId: string, namespace: string): readonly string[] => this.getStyleSharedPluginDataKeys("effect", styleId, namespace),
+    };
   }
 
   private paintStyleHost() {
@@ -3146,32 +3218,32 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.runtimeExtensionDataKeys(node, this.runtimeSharedPluginDataPrefix(namespace));
   }
 
-  private getStylePluginData(kind: "text" | "paint", styleId: string, key: string): string {
+  private getStylePluginData(kind: "text" | "paint" | "effect", styleId: string, key: string): string {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataValue(node, this.runtimeStylePluginDataPrefix(kind, styleId), key);
   }
 
-  private setStylePluginData(kind: "text" | "paint", styleId: string, key: string, value: string): void {
+  private setStylePluginData(kind: "text" | "paint" | "effect", styleId: string, key: string, value: string): void {
     const node = this.runtimeStyleDataNode(kind, styleId);
     this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStylePluginDataPrefix(kind, styleId), key, value);
   }
 
-  private getStylePluginDataKeys(kind: "text" | "paint", styleId: string): readonly string[] {
+  private getStylePluginDataKeys(kind: "text" | "paint" | "effect", styleId: string): readonly string[] {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataKeys(node, this.runtimeStylePluginDataPrefix(kind, styleId));
   }
 
-  private getStyleSharedPluginData(kind: "text" | "paint", styleId: string, namespace: string, key: string): string {
+  private getStyleSharedPluginData(kind: "text" | "paint" | "effect", styleId: string, namespace: string, key: string): string {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataValue(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key);
   }
 
-  private setStyleSharedPluginData(kind: "text" | "paint", styleId: string, namespace: string, key: string, value: string): void {
+  private setStyleSharedPluginData(kind: "text" | "paint" | "effect", styleId: string, namespace: string, key: string, value: string): void {
     const node = this.runtimeStyleDataNode(kind, styleId);
     this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key, value);
   }
 
-  private getStyleSharedPluginDataKeys(kind: "text" | "paint", styleId: string, namespace: string): readonly string[] {
+  private getStyleSharedPluginDataKeys(kind: "text" | "paint" | "effect", styleId: string, namespace: string): readonly string[] {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataKeys(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace));
   }
@@ -3250,19 +3322,19 @@ export class RuntimeSession implements RuntimeContainerHost {
     return `${RUNTIME_RELAUNCH_DATA_PREFIX}${this.pluginId}`;
   }
 
-  private runtimeStyleDataNode(kind: "text" | "paint", styleId: string): RuntimeProjectionNode {
+  private runtimeStyleDataNode(kind: "text" | "paint" | "effect", styleId: string): RuntimeProjectionNode {
     this.assertOpen();
-    const style = kind === "text" ? this.textStyleResource(styleId) : this.paintStyleResource(styleId);
+    const style = kind === "text" ? this.textStyleResource(styleId) : kind === "paint" ? this.paintStyleResource(styleId) : this.effectStyleResource(styleId);
     if (!style) throw runtimeError("RESOURCE_UNAVAILABLE");
     return this.runtimeDataNode(this.rootNodeId);
   }
 
-  private runtimeStylePluginDataPrefix(kind: "text" | "paint", styleId: string): string {
+  private runtimeStylePluginDataPrefix(kind: "text" | "paint" | "effect", styleId: string): string {
     if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
     return `${RUNTIME_STYLE_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${this.pluginId}/`;
   }
 
-  private runtimeStyleSharedPluginDataPrefix(kind: "text" | "paint", styleId: string, namespace: string): string {
+  private runtimeStyleSharedPluginDataPrefix(kind: "text" | "paint" | "effect", styleId: string, namespace: string): string {
     if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
     return `${RUNTIME_STYLE_SHARED_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${namespace}/`;
   }

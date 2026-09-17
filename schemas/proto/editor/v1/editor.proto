@@ -85,6 +85,8 @@ message DocumentSnapshot {
   // persisted together so aliases can be resolved without a UI-side cache.
   repeated VariableCollectionResource variable_collections = 20;
   repeated VariableResource variables = 21;
+  // Complete document-owned EffectStyle values using the bounded effect stack.
+  repeated EffectStyleResource effect_styles = 22;
 }
 
 enum NodeKind {
@@ -856,6 +858,17 @@ message PaintStyleVariableBinding {
   string variable_id = 3;
 }
 
+message EffectStyleResource {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  string description = 4;
+  bool remote = 5;
+  repeated Effect effects = 6;
+  string description_markdown = 7;
+  repeated DocumentationLink documentation_links = 8;
+}
+
 enum VariableResolvedType {
   VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0;
   VARIABLE_RESOLVED_TYPE_BOOLEAN = 1;
@@ -1164,6 +1177,18 @@ message DeletePaintStyle {
   string style_id = 1;
 }
 
+message RegisterEffectStyle {
+  EffectStyleResource style = 1;
+}
+
+message SetEffectStyle {
+  EffectStyleResource style = 1;
+}
+
+message DeleteEffectStyle {
+  string style_id = 1;
+}
+
 message RegisterVariableCollection {
   VariableCollectionResource collection = 1;
 }
@@ -1347,6 +1372,9 @@ message ResolvedOperation {
     DeleteTextStyle delete_text_style = 38;
     SetPaintStyle set_paint_style = 39;
     DeletePaintStyle delete_paint_style = 40;
+    RegisterEffectStyle register_effect_style = 41;
+    SetEffectStyle set_effect_style = 42;
+    DeleteEffectStyle delete_effect_style = 43;
   }
 }
 

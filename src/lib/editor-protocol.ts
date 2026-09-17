@@ -420,6 +420,19 @@ export interface DocumentPaintStyleVariableBinding {
   variableId: string;
 }
 
+/** Complete document-owned EffectStyle resource. Unsupported future effect
+ * kinds are rejected at the Runtime boundary instead of being discarded. */
+export interface DocumentEffectStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  descriptionMarkdown: string;
+  documentationLinks: Array<{ uri: string }>;
+  remote: boolean;
+  effects: DocumentEffect[];
+}
+
 export type DocumentVariableResolvedType = "BOOLEAN" | "COLOR" | "FLOAT" | "STRING";
 export interface DocumentVariableMode { modeId: string; name: string; }
 export interface DocumentVariableCollectionResource {
@@ -614,10 +627,13 @@ export type CoreBatchCommand =
   | { type: "registerAsset"; asset: DocumentAsset }
   | { type: "registerTextStyle"; style: DocumentTextStyleResource }
   | { type: "registerPaintStyle"; style: DocumentPaintStyleResource }
+  | { type: "registerEffectStyle"; style: DocumentEffectStyleResource }
   | { type: "setTextStyle"; style: DocumentTextStyleResource }
   | { type: "deleteTextStyle"; id: string }
   | { type: "setPaintStyle"; style: DocumentPaintStyleResource }
   | { type: "deletePaintStyle"; id: string }
+  | { type: "setEffectStyle"; style: DocumentEffectStyleResource }
+  | { type: "deleteEffectStyle"; id: string }
   | { type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }
   | { type: "registerVariable"; variable: DocumentVariableResource }
   | { type: "setVariable"; variable: DocumentVariableResource }
@@ -890,6 +906,7 @@ export interface EditorSnapshot {
   assets?: DocumentAsset[];
   textStyles?: DocumentTextStyleResource[];
   paintStyles?: DocumentPaintStyleResource[];
+  effectStyles?: DocumentEffectStyleResource[];
   variableCollections?: DocumentVariableCollectionResource[];
   variables?: DocumentVariableResource[];
   /** Runtime-only FontFace loading state. It never enters Canonical snapshots. */
@@ -922,10 +939,13 @@ export type EditorCommand =
   | { type: "create-page"; id: string; name: string; positionId?: string }
   | { type: "register-text-style"; style: DocumentTextStyleResource }
   | { type: "register-paint-style"; style: DocumentPaintStyleResource }
+  | { type: "register-effect-style"; style: DocumentEffectStyleResource }
   | { type: "set-text-style"; style: DocumentTextStyleResource }
   | { type: "delete-text-style"; id: string }
   | { type: "set-paint-style"; style: DocumentPaintStyleResource }
   | { type: "delete-paint-style"; id: string }
+  | { type: "set-effect-style"; style: DocumentEffectStyleResource }
+  | { type: "delete-effect-style"; id: string }
   | { type: "register-variable-collection"; collection: DocumentVariableCollectionResource }
   | { type: "register-variable"; variable: DocumentVariableResource }
   | { type: "set-variable"; variable: DocumentVariableResource }

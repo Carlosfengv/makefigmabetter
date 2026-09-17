@@ -6,9 +6,9 @@
 use editor_core::{
     ActorId, Appearance, AppliedChange, ArcData, AssetId, AssetReference, AutoLayout,
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
-    DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, FillRule, FontFaceMetadata,
-    FontReference, GridAutoTracks, GridChildAlignment, GridItemsPositioning, GridTrack,
-    HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
+    DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, EffectStyleResource, FillRule,
+    FontFaceMetadata, FontReference, GridAutoTracks, GridChildAlignment, GridItemsPositioning,
+    GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
     LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
     OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
     PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
@@ -306,6 +306,11 @@ impl DocumentEngine {
                         style: paint_style_resource_from_projection(&style)?,
                     });
                 }
+                BatchCommand::RegisterEffectStyle { style } => {
+                    commands.push(Command::RegisterEffectStyle {
+                        style: effect_style_resource_from_projection(&style)?,
+                    });
+                }
                 BatchCommand::SetTextStyle { style } => {
                     commands.push(Command::SetTextStyle {
                         style: text_style_resource_from_projection(&style)?,
@@ -321,6 +326,14 @@ impl DocumentEngine {
                 }
                 BatchCommand::DeletePaintStyle { id } => {
                     commands.push(Command::DeletePaintStyle { id });
+                }
+                BatchCommand::SetEffectStyle { style } => {
+                    commands.push(Command::SetEffectStyle {
+                        style: effect_style_resource_from_projection(&style)?,
+                    });
+                }
+                BatchCommand::DeleteEffectStyle { id } => {
+                    commands.push(Command::DeleteEffectStyle { id });
                 }
                 BatchCommand::RegisterVariableCollection { collection } => {
                     commands.push(Command::RegisterVariableCollection {
@@ -936,6 +949,8 @@ struct CoreSnapshot {
     #[serde(default)]
     paint_styles: Option<Vec<ProjectionPaintStyleResource>>,
     #[serde(default)]
+    effect_styles: Option<Vec<ProjectionEffectStyleResource>>,
+    #[serde(default)]
     variable_collections: Option<Vec<ProjectionVariableCollectionResource>>,
     #[serde(default)]
     variables: Option<Vec<ProjectionVariableResource>>,
@@ -945,7 +960,12 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=77).contains(&snapshot.schema_version)
+    if !(1..=78).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 78
+            && snapshot
+                .effect_styles
+                .as_ref()
+                .is_some_and(|styles| !styles.is_empty()))
         || (snapshot.schema_version < 77
             && (snapshot.nodes.iter().any(|node| {
                 node.text_properties.as_ref().is_some_and(|properties| {
@@ -1949,6 +1969,24 @@ struct ProjectionPaintStyleVariableBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionEffectStyleResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    description_markdown: String,
+    #[serde(default)]
+    documentation_links: Vec<ProjectionDocumentationLink>,
+    #[serde(default)]
+    remote: bool,
+    effects: Vec<ProjectionEffect>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionDocumentationLink {
     uri: String,
 }
@@ -2259,6 +2297,9 @@ enum BatchCommand {
     RegisterPaintStyle {
         style: ProjectionPaintStyleResource,
     },
+    RegisterEffectStyle {
+        style: ProjectionEffectStyleResource,
+    },
     SetTextStyle {
         style: ProjectionTextStyleResource,
     },
@@ -2269,6 +2310,12 @@ enum BatchCommand {
         style: ProjectionPaintStyleResource,
     },
     DeletePaintStyle {
+        id: String,
+    },
+    SetEffectStyle {
+        style: ProjectionEffectStyleResource,
+    },
+    DeleteEffectStyle {
         id: String,
     },
     RegisterVariableCollection {
@@ -2458,7 +2505,9 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.nodes().any(|node| {
+        let schema_version = if self.document.effect_styles().next().is_some() {
+            78
+        } else if self.document.nodes().any(|node| {
             self.document
                 .text_properties_for_node(node.id)
                 .is_some_and(|properties| {
@@ -2894,6 +2943,12 @@ impl DocumentEngine {
                     .map(projection_paint_style_resource)
                     .collect(),
             ),
+            effect_styles: Some(
+                self.document
+                    .effect_styles()
+                    .map(projection_effect_style_resource)
+                    .collect(),
+            ),
             variable_collections: Some(
                 self.document
                     .variable_collections()
@@ -3262,6 +3317,11 @@ impl DocumentEngine {
                 .seed_paint_style(paint_style_resource_from_projection(&style)?)
                 .map_err(core_error)?;
         }
+        for style in snapshot.effect_styles.clone().unwrap_or_default() {
+            document
+                .seed_effect_style(effect_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -3413,10 +3473,13 @@ impl DocumentEngine {
                 | BatchCommand::RegisterAsset { .. }
                 | BatchCommand::RegisterTextStyle { .. }
                 | BatchCommand::RegisterPaintStyle { .. }
+                | BatchCommand::RegisterEffectStyle { .. }
                 | BatchCommand::SetTextStyle { .. }
                 | BatchCommand::DeleteTextStyle { .. }
                 | BatchCommand::SetPaintStyle { .. }
                 | BatchCommand::DeletePaintStyle { .. }
+                | BatchCommand::SetEffectStyle { .. }
+                | BatchCommand::DeleteEffectStyle { .. }
                 | BatchCommand::RegisterVariableCollection { .. }
                 | BatchCommand::RegisterVariable { .. }
                 | BatchCommand::SetVariable { .. }
@@ -6681,6 +6744,54 @@ fn paint_style_resource_from_projection(
         remote: resource.remote,
         paints: paint_stack_from_projection(&resource.paints)?,
         variable_bindings,
+    })
+}
+
+fn projection_effect_style_resource(
+    resource: &EffectStyleResource,
+) -> ProjectionEffectStyleResource {
+    ProjectionEffectStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| ProjectionDocumentationLink { uri: uri.clone() })
+            .collect(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .iter()
+            .copied()
+            .map(projection_effect)
+            .collect(),
+    }
+}
+
+fn effect_style_resource_from_projection(
+    resource: &ProjectionEffectStyleResource,
+) -> Result<EffectStyleResource, JsValue> {
+    Ok(EffectStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|link| link.uri.clone())
+            .collect(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .iter()
+            .cloned()
+            .map(effect_from_projection)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -11773,6 +11884,49 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 59;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v78_round_trips_the_effect_style_catalog_and_v77_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([{
+            "type": "registerEffectStyle",
+            "style": {
+                "id": "S:elevation",
+                "key": "",
+                "name": "Elevation",
+                "description": "Card shadow",
+                "descriptionMarkdown": "",
+                "documentationLinks": [],
+                "remote": false,
+                "effects": [{ "layerBlur": { "radius": 8.0, "visible": true } }]
+            }
+        }]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000078",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":78"));
+        assert!(snapshot.contains("\"effectStyles\":[{\"id\":\"S:elevation\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored.document.effect_style("S:elevation").unwrap().name,
+            "Elevation"
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 77;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

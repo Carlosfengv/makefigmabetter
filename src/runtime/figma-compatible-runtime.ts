@@ -8,6 +8,7 @@ import { PrototypePlayer, type PrototypePlayerOptions } from "./prototype-player
 import type { RuntimePngExportSettings, RuntimeSvgExportSettings } from "./runtime-svg-export";
 import type { RuntimeTextStyle } from "./runtime-text-style";
 import type { RuntimePaintStyle } from "./runtime-paint-style";
+import type { RuntimeEffectStyle } from "./runtime-effect-style";
 import type { RuntimeVariablesAPI } from "./runtime-variables";
 
 /** Public M1 facade. Figma-compatible members stay here; project-specific
@@ -26,14 +27,17 @@ export class FigmaCompatibleRuntime {
     return this.session.getNodeByIdAsync(nodeId);
   }
 
-  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | null { return this.session.getStyleById(styleId); }
-  getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | null> { return this.session.getStyleByIdAsync(styleId); }
+  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null { return this.session.getStyleById(styleId); }
+  getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null> { return this.session.getStyleByIdAsync(styleId); }
   getLocalTextStyles(): readonly RuntimeTextStyle[] { return this.session.getLocalTextStyles(); }
   getLocalTextStylesAsync(): Promise<readonly RuntimeTextStyle[]> { return this.session.getLocalTextStylesAsync(); }
   getLocalPaintStyles(): readonly RuntimePaintStyle[] { return this.session.getLocalPaintStyles(); }
   getLocalPaintStylesAsync(): Promise<readonly RuntimePaintStyle[]> { return this.session.getLocalPaintStylesAsync(); }
+  getLocalEffectStyles(): readonly RuntimeEffectStyle[] { return this.session.getLocalEffectStyles(); }
+  getLocalEffectStylesAsync(): Promise<readonly RuntimeEffectStyle[]> { return this.session.getLocalEffectStylesAsync(); }
   createTextStyle(): RuntimeTextStyle { return this.session.createTextStyle(); }
   createPaintStyle(): RuntimePaintStyle { return this.session.createPaintStyle(); }
+  createEffectStyle(): RuntimeEffectStyle { return this.session.createEffectStyle(); }
 
   createFrame(): RuntimeContainerNodeProxy { return this.session.createFrame(); }
   createGroup(): RuntimeContainerNodeProxy { return this.session.createGroup(); }

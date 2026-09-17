@@ -103,6 +103,16 @@ describe("RuntimeWorkerBridge", () => {
       remote: false,
       paints: { layers: [] },
     };
+    const effectStyle = {
+      id: "S:effect",
+      key: "",
+      name: "Effect Style",
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      effects: [{ layerBlur: { radius: 8, visible: true } }],
+    };
 
     const pending = bridge.submit({
       transactionId: "tx-styles",
@@ -110,28 +120,37 @@ describe("RuntimeWorkerBridge", () => {
       operations: [
         { type: "registerTextStyle", style: textStyle },
         { type: "registerPaintStyle", style: paintStyle },
+        { type: "registerEffectStyle", style: effectStyle },
         { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
         { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
+        { type: "setEffectStyle", style: { ...effectStyle, name: "Elevation" } },
         { type: "deleteTextStyle", id: textStyle.id },
         { type: "deletePaintStyle", id: paintStyle.id },
+        { type: "deleteEffectStyle", id: effectStyle.id },
       ],
     });
     const commands = posted[0]!.transaction.commands;
     expect(commands).toEqual([
       { type: "register-text-style", style: textStyle },
       { type: "register-paint-style", style: paintStyle },
+      { type: "register-effect-style", style: effectStyle },
       { type: "set-text-style", style: { ...textStyle, name: "Body" } },
       { type: "set-paint-style", style: { ...paintStyle, name: "Brand" } },
+      { type: "set-effect-style", style: { ...effectStyle, name: "Elevation" } },
       { type: "delete-text-style", id: textStyle.id },
       { type: "delete-paint-style", id: paintStyle.id },
+      { type: "delete-effect-style", id: effectStyle.id },
     ]);
     expect(resolveCoreBatch([], commands)?.batch).toEqual([
       { type: "registerTextStyle", style: textStyle },
       { type: "registerPaintStyle", style: paintStyle },
+      { type: "registerEffectStyle", style: effectStyle },
       { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
       { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
+      { type: "setEffectStyle", style: { ...effectStyle, name: "Elevation" } },
       { type: "deleteTextStyle", id: textStyle.id },
       { type: "deletePaintStyle", id: paintStyle.id },
+      { type: "deleteEffectStyle", id: effectStyle.id },
     ]);
     bridge.close();
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));

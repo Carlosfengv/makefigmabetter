@@ -25,6 +25,7 @@ export function runtimeProjectionFromEditorSnapshot(snapshot: EditorSnapshot): R
     revision: snapshot.revision,
     textStyles: structuredClone(snapshot.textStyles ?? []),
     paintStyles: structuredClone(snapshot.paintStyles ?? []),
+    effectStyles: structuredClone(snapshot.effectStyles ?? []),
     variableCollections: structuredClone(snapshot.variableCollections ?? []),
     variables: structuredClone(snapshot.variables ?? []),
     nodes: [
@@ -393,7 +394,7 @@ function transactionToEditorCommands(
       commands.push(...toEditorCommands(operation, pageIds));
       continue;
     }
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerEffectStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "setEffectStyle" || operation.type === "deleteEffectStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") {
       remaining.push(structuredClone(operation));
       continue;
     }
@@ -459,6 +460,15 @@ function toEditorCommands(
   }
   if (operation.type === "deletePaintStyle") {
     return [{ type: "delete-paint-style", id: operation.id }];
+  }
+  if (operation.type === "registerEffectStyle") {
+    return [{ type: "register-effect-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "setEffectStyle") {
+    return [{ type: "set-effect-style", style: structuredClone(operation.style) }];
+  }
+  if (operation.type === "deleteEffectStyle") {
+    return [{ type: "delete-effect-style", id: operation.id }];
   }
   if (operation.type === "registerVariableCollection") {
     return [{ type: "register-variable-collection", collection: structuredClone(operation.collection) }];

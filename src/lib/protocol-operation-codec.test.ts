@@ -127,6 +127,28 @@ describe("protocol operation codec", () => {
     expect(batch.operations[3]?.deletePaintStyle).toEqual({ styleId: paintStyle.id });
   });
 
+  it("serializes bounded EffectStyle lifecycle operations", () => {
+    const effectStyle = {
+      id: "S:elevation",
+      key: "",
+      name: "Elevation",
+      description: "Card shadow",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      effects: [{ layerBlur: { radius: 8, visible: true } }],
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
+      { type: "registerEffectStyle", style: effectStyle },
+      { type: "setEffectStyle", style: { ...effectStyle, effects: [{ backgroundBlur: { radius: 12, visible: true } }] } },
+      { type: "deleteEffectStyle", id: effectStyle.id },
+    ]));
+
+    expect(batch.operations[0]?.registerEffectStyle?.style).toMatchObject({ id: effectStyle.id, effects: [{ layerBlur: { radius: 8, visible: true } }] });
+    expect(batch.operations[1]?.setEffectStyle?.style).toMatchObject({ id: effectStyle.id, effects: [{ backgroundBlur: { radius: 12, visible: true } }] });
+    expect(batch.operations[2]?.deleteEffectStyle).toEqual({ styleId: effectStyle.id });
+  });
+
   it("serializes variable collection and variable registrations", () => {
     const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([

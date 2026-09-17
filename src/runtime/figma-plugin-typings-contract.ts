@@ -25,15 +25,20 @@ export function assertFigmaPluginTypingsContract(
   if (false) {
     const createdTextStyle: TextStyle = figma.createTextStyle();
     const createdPaintStyle: PaintStyle = figma.createPaintStyle();
+    const createdEffectStyle: EffectStyle = figma.createEffectStyle();
     createdTextStyle.name = createdTextStyle.name;
     createdTextStyle.description = createdTextStyle.description;
     createdTextStyle.descriptionMarkdown = createdTextStyle.descriptionMarkdown;
     createdPaintStyle.name = createdPaintStyle.name;
     createdPaintStyle.description = createdPaintStyle.description;
     createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
+    createdEffectStyle.effects = createdEffectStyle.effects;
+    void figma.getLocalEffectStyles();
+    void figma.getLocalEffectStylesAsync();
     void createdPaintStyle.boundVariables?.paints;
     createdTextStyle.remove();
     createdPaintStyle.remove();
+    createdEffectStyle.remove();
     const style = figma.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

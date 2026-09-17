@@ -41,7 +41,7 @@ import {
   type PaintStack as ProtoPaintStack,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVariableCollectionResource, type DocumentVariableResource, type DocumentVariableValue, type DocumentVectorPath } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentEffectStyleResource, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVariableCollectionResource, type DocumentVariableResource, type DocumentVariableValue, type DocumentVectorPath } from "./editor-protocol";
 import { sha256Bytes } from "./sha256";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
 import { clipsChildren } from "./node-capabilities";
@@ -149,6 +149,9 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "registerPaintStyle") {
     return [{ registerPaintStyle: { style: paintStyleResourceProto(command.style) } }];
   }
+  if (command.type === "registerEffectStyle") {
+    return [{ registerEffectStyle: { style: effectStyleResourceProto(command.style) } }];
+  }
   if (command.type === "setTextStyle") {
     return [{ setTextStyle: { style: textStyleResourceProto(command.style) } }];
   }
@@ -160,6 +163,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   }
   if (command.type === "deletePaintStyle") {
     return [{ deletePaintStyle: { styleId: command.id } }];
+  }
+  if (command.type === "setEffectStyle") {
+    return [{ setEffectStyle: { style: effectStyleResourceProto(command.style) } }];
+  }
+  if (command.type === "deleteEffectStyle") {
+    return [{ deleteEffectStyle: { styleId: command.id } }];
   }
   if (command.type === "registerVariableCollection") {
     return [{ registerVariableCollection: { collection: variableCollectionResourceProto(command.collection) } }];
@@ -304,6 +313,19 @@ function paintStyleResourceProto(resource: DocumentPaintStyleResource) {
     variableBindings: [...(resource.variableBindings ?? [])]
       .sort((left, right) => left.paintIndex - right.paintIndex || (left.stopIndex ?? -1) - (right.stopIndex ?? -1))
       .map((binding) => ({ ...binding })),
+  };
+}
+
+function effectStyleResourceProto(resource: DocumentEffectStyleResource) {
+  return {
+    id: resource.id,
+    key: resource.key,
+    name: resource.name,
+    description: resource.description,
+    descriptionMarkdown: resource.descriptionMarkdown,
+    documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
+    remote: resource.remote,
+    effects: effectStackProto(resource.effects),
   };
 }
 

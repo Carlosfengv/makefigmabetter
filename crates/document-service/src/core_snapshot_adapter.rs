@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, Document, DocumentId, DropShadow,
-    Effect, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
-    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
-    PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
-    ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
-    TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
+    Effect, EffectStyleResource, FillRule, FontFaceMetadata, FontNameAlias, FontReference,
+    GridAutoTracks, GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget,
+    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim,
+    LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks,
+    PaintStyleResource, PaintStyleVariableBinding, ParagraphListType, ParagraphStyle,
+    ParagraphStyleRun, ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin,
+    TextAlign, TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
     TextDecorationStyle, TextDecorationThickness, TextListType, TextProperties,
     TextStyleLetterSpacingUnit, TextStyleResource, TextStyleRun, TextTruncation, TextWrapStyle,
     VariableCollectionResource, VariableMode, VariableResolvedType, VariableResource,
@@ -619,6 +619,12 @@ pub fn snapshot_from_document(
         return Err(ServiceError::ReducerRejected);
     }
     if engine_semantics_version
+        < makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.effect_styles().next().is_some()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if engine_semantics_version
         < makefigma_document_codec::VARIABLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && (document.variable_collections().next().is_some()
             || document.variables().next().is_some())
@@ -1098,6 +1104,10 @@ pub fn snapshot_from_document(
             .variables()
             .map(variable_resource_to_proto)
             .collect(),
+        effect_styles: document
+            .effect_styles()
+            .map(effect_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -1323,6 +1333,12 @@ pub fn document_from_snapshot(
         return Err(ServiceError::ReducerRejected);
     }
     if declared_engine_semantics_version
+        < makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.effect_styles.is_empty()
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if declared_engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && snapshot
             .paint_styles
@@ -1358,6 +1374,11 @@ pub fn document_from_snapshot(
     for style in snapshot.paint_styles {
         document
             .seed_paint_style(paint_style_resource_from_proto(style)?)
+            .map_err(|_| ServiceError::ReducerRejected)?;
+    }
+    for style in snapshot.effect_styles {
+        document
+            .seed_effect_style(effect_style_resource_from_proto(style)?)
             .map_err(|_| ServiceError::ReducerRejected)?;
     }
     let mut page_hashes = Vec::new();
@@ -3267,6 +3288,51 @@ fn paint_style_resource_from_proto(
     })
 }
 
+fn effect_style_resource_to_proto(resource: &EffectStyleResource) -> v1::EffectStyleResource {
+    v1::EffectStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .iter()
+            .copied()
+            .map(effect_to_proto)
+            .collect(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
+    }
+}
+
+fn effect_style_resource_from_proto(
+    resource: v1::EffectStyleResource,
+) -> Result<EffectStyleResource, ServiceError> {
+    Ok(EffectStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
+        remote: resource.remote,
+        effects: resource
+            .effects
+            .into_iter()
+            .map(effect_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
 fn variable_collection_to_proto(
     value: &VariableCollectionResource,
 ) -> v1::VariableCollectionResource {
@@ -4364,9 +4430,10 @@ fn document_id_to_bytes(value: DocumentId) -> Vec<u8> {
 mod tests {
     use editor_core::{
         AssetId, AssetReference, AutoLayout, BooleanOperation, ConstraintType, Constraints,
-        DEFAULT_PAGE_ID, Document, DocumentId, FontReference, LayoutAlignment, LayoutMode, Node,
-        NodeId, NodeKind, Page, PageId, ParagraphStyle, PositionId, TextAlign, TextAutoSize,
-        TextProperties, TextStyleRun, WrapTrackAlignment, color::Color, geometry::AffineTransform,
+        DEFAULT_PAGE_ID, Document, DocumentId, Effect, EffectStyleResource, FontReference,
+        LayerBlur, LayoutAlignment, LayoutMode, Node, NodeId, NodeKind, Page, PageId,
+        ParagraphStyle, PositionId, TextAlign, TextAutoSize, TextProperties, TextStyleRun,
+        WrapTrackAlignment, color::Color, geometry::AffineTransform,
     };
     use sha2::Sha256;
 
@@ -6028,6 +6095,42 @@ mod tests {
             document_from_snapshot(&snapshot, 76_u128.to_be_bytes(), document.canonical_hash())
                 .unwrap();
         assert_eq!(restored.auto_layout_for_node(NodeId(76)), layout);
+    }
+
+    #[test]
+    fn service_snapshot_adapter_round_trips_effect_styles_at_semantics_sixty_four() {
+        let mut document = Document::with_id(DocumentId(77));
+        let style = EffectStyleResource {
+            id: "S:elevation".into(),
+            key: String::new(),
+            name: "Elevation".into(),
+            description: String::new(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
+            remote: false,
+            effects: vec![Effect::LayerBlur(LayerBlur {
+                radius: 12.0,
+                visible: true,
+            })],
+        };
+        document.seed_effect_style(style.clone()).unwrap();
+        assert!(
+            snapshot_from_document(
+                &document,
+                makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1,
+            )
+            .is_err()
+        );
+        let snapshot = snapshot_from_document(
+            &document,
+            makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored =
+            document_from_snapshot(&snapshot, 77_u128.to_be_bytes(), document.canonical_hash())
+                .unwrap();
+        assert_eq!(restored.effect_style("S:elevation"), Some(&style));
+        assert_eq!(restored.canonical_hash(), document.canonical_hash());
     }
 
     #[test]

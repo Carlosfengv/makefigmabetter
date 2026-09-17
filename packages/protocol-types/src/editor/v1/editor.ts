@@ -542,6 +542,8 @@ export interface DocumentSnapshot {
    */
   variableCollections: VariableCollectionResource[];
   variables: VariableResource[];
+  /** Complete document-owned EffectStyle values using the bounded effect stack. */
+  effectStyles: EffectStyleResource[];
 }
 
 export interface DocumentSnapshot_ExtensionsEntry {
@@ -1125,6 +1127,17 @@ export interface PaintStyleVariableBinding {
   variableId: string;
 }
 
+export interface EffectStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  effects: Effect[];
+  descriptionMarkdown: string;
+  documentationLinks: DocumentationLink[];
+}
+
 export interface VariableMode {
   modeId: string;
   name: string;
@@ -1484,6 +1497,18 @@ export interface DeletePaintStyle {
   styleId: string;
 }
 
+export interface RegisterEffectStyle {
+  style?: EffectStyleResource | undefined;
+}
+
+export interface SetEffectStyle {
+  style?: EffectStyleResource | undefined;
+}
+
+export interface DeleteEffectStyle {
+  styleId: string;
+}
+
 export interface RegisterVariableCollection {
   collection?: VariableCollectionResource | undefined;
 }
@@ -1695,6 +1720,9 @@ export interface ResolvedOperation {
   deleteTextStyle?: DeleteTextStyle | undefined;
   setPaintStyle?: SetPaintStyle | undefined;
   deletePaintStyle?: DeletePaintStyle | undefined;
+  registerEffectStyle?: RegisterEffectStyle | undefined;
+  setEffectStyle?: SetEffectStyle | undefined;
+  deleteEffectStyle?: DeleteEffectStyle | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -2490,6 +2518,7 @@ function createBaseDocumentSnapshot(): DocumentSnapshot {
     paintStyles: [],
     variableCollections: [],
     variables: [],
+    effectStyles: [],
   };
 }
 
@@ -2536,6 +2565,9 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     }
     for (const v of message.variables) {
       VariableResource.encode(v!, writer.uint32(170).fork()).join();
+    }
+    for (const v of message.effectStyles) {
+      EffectStyleResource.encode(v!, writer.uint32(178).fork()).join();
     }
     return writer;
   },
@@ -2662,6 +2694,14 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
           message.variables.push(VariableResource.decode(reader, reader.uint32()));
           continue;
         }
+        case 22: {
+          if (tag !== 178) {
+            break;
+          }
+
+          message.effectStyles.push(EffectStyleResource.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2699,6 +2739,7 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     message.variableCollections = object.variableCollections?.map((e) => VariableCollectionResource.fromPartial(e)) ||
       [];
     message.variables = object.variables?.map((e) => VariableResource.fromPartial(e)) || [];
+    message.effectStyles = object.effectStyles?.map((e) => EffectStyleResource.fromPartial(e)) || [];
     return message;
   },
 };
@@ -6810,6 +6851,145 @@ export const PaintStyleVariableBinding: MessageFns<PaintStyleVariableBinding> = 
   },
 };
 
+function createBaseEffectStyleResource(): EffectStyleResource {
+  return {
+    id: "",
+    key: "",
+    name: "",
+    description: "",
+    remote: false,
+    effects: [],
+    descriptionMarkdown: "",
+    documentationLinks: [],
+  };
+}
+
+export const EffectStyleResource: MessageFns<EffectStyleResource> = {
+  encode(message: EffectStyleResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.description !== "") {
+      writer.uint32(34).string(message.description);
+    }
+    if (message.remote !== false) {
+      writer.uint32(40).bool(message.remote);
+    }
+    for (const v of message.effects) {
+      Effect.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.descriptionMarkdown !== "") {
+      writer.uint32(58).string(message.descriptionMarkdown);
+    }
+    for (const v of message.documentationLinks) {
+      DocumentationLink.encode(v!, writer.uint32(66).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): EffectStyleResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseEffectStyleResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.effects.push(Effect.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.descriptionMarkdown = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<EffectStyleResource>, I>>(base?: I): EffectStyleResource {
+    return EffectStyleResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<EffectStyleResource>, I>>(object: I): EffectStyleResource {
+    const message = createBaseEffectStyleResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.remote = object.remote ?? false;
+    message.effects = object.effects?.map((e) => Effect.fromPartial(e)) || [];
+    message.descriptionMarkdown = object.descriptionMarkdown ?? "";
+    message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseVariableMode(): VariableMode {
   return { modeId: "", name: "" };
 }
@@ -10627,6 +10807,148 @@ export const DeletePaintStyle: MessageFns<DeletePaintStyle> = {
   },
 };
 
+function createBaseRegisterEffectStyle(): RegisterEffectStyle {
+  return { style: undefined };
+}
+
+export const RegisterEffectStyle: MessageFns<RegisterEffectStyle> = {
+  encode(message: RegisterEffectStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      EffectStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterEffectStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterEffectStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = EffectStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterEffectStyle>, I>>(base?: I): RegisterEffectStyle {
+    return RegisterEffectStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterEffectStyle>, I>>(object: I): RegisterEffectStyle {
+    const message = createBaseRegisterEffectStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? EffectStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSetEffectStyle(): SetEffectStyle {
+  return { style: undefined };
+}
+
+export const SetEffectStyle: MessageFns<SetEffectStyle> = {
+  encode(message: SetEffectStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      EffectStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetEffectStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetEffectStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = EffectStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetEffectStyle>, I>>(base?: I): SetEffectStyle {
+    return SetEffectStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetEffectStyle>, I>>(object: I): SetEffectStyle {
+    const message = createBaseSetEffectStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? EffectStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeleteEffectStyle(): DeleteEffectStyle {
+  return { styleId: "" };
+}
+
+export const DeleteEffectStyle: MessageFns<DeleteEffectStyle> = {
+  encode(message: DeleteEffectStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.styleId !== "") {
+      writer.uint32(10).string(message.styleId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteEffectStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteEffectStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.styleId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteEffectStyle>, I>>(base?: I): DeleteEffectStyle {
+    return DeleteEffectStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteEffectStyle>, I>>(object: I): DeleteEffectStyle {
+    const message = createBaseDeleteEffectStyle();
+    message.styleId = object.styleId ?? "";
+    return message;
+  },
+};
+
 function createBaseRegisterVariableCollection(): RegisterVariableCollection {
   return { collection: undefined };
 }
@@ -12092,6 +12414,9 @@ function createBaseResolvedOperation(): ResolvedOperation {
     deleteTextStyle: undefined,
     setPaintStyle: undefined,
     deletePaintStyle: undefined,
+    registerEffectStyle: undefined,
+    setEffectStyle: undefined,
+    deleteEffectStyle: undefined,
   };
 }
 
@@ -12216,6 +12541,15 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.deletePaintStyle !== undefined) {
       DeletePaintStyle.encode(message.deletePaintStyle, writer.uint32(322).fork()).join();
+    }
+    if (message.registerEffectStyle !== undefined) {
+      RegisterEffectStyle.encode(message.registerEffectStyle, writer.uint32(330).fork()).join();
+    }
+    if (message.setEffectStyle !== undefined) {
+      SetEffectStyle.encode(message.setEffectStyle, writer.uint32(338).fork()).join();
+    }
+    if (message.deleteEffectStyle !== undefined) {
+      DeleteEffectStyle.encode(message.deleteEffectStyle, writer.uint32(346).fork()).join();
     }
     return writer;
   },
@@ -12547,6 +12881,30 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.deletePaintStyle = DeletePaintStyle.decode(reader, reader.uint32());
           continue;
         }
+        case 41: {
+          if (tag !== 330) {
+            break;
+          }
+
+          message.registerEffectStyle = RegisterEffectStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 42: {
+          if (tag !== 338) {
+            break;
+          }
+
+          message.setEffectStyle = SetEffectStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 43: {
+          if (tag !== 346) {
+            break;
+          }
+
+          message.deleteEffectStyle = DeleteEffectStyle.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12687,6 +13045,15 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.deletePaintStyle = (object.deletePaintStyle !== undefined && object.deletePaintStyle !== null)
       ? DeletePaintStyle.fromPartial(object.deletePaintStyle)
+      : undefined;
+    message.registerEffectStyle = (object.registerEffectStyle !== undefined && object.registerEffectStyle !== null)
+      ? RegisterEffectStyle.fromPartial(object.registerEffectStyle)
+      : undefined;
+    message.setEffectStyle = (object.setEffectStyle !== undefined && object.setEffectStyle !== null)
+      ? SetEffectStyle.fromPartial(object.setEffectStyle)
+      : undefined;
+    message.deleteEffectStyle = (object.deleteEffectStyle !== undefined && object.deleteEffectStyle !== null)
+      ? DeleteEffectStyle.fromPartial(object.deleteEffectStyle)
       : undefined;
     return message;
   },
