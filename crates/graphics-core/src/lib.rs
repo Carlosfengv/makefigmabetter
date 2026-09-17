@@ -1062,6 +1062,29 @@ pub fn layout_shaped_text_runs_with_layout_options(
     paragraph_wrap_styles: &[TextWrapStyle],
     hanging_punctuation: bool,
 ) -> Result<ShapedTextLayout, TextShapingError> {
+    layout_shaped_text_runs_with_line_options(
+        runs,
+        text,
+        max_width_px,
+        first_line_indents_px,
+        &[],
+        paragraph_wrap_styles,
+        hanging_punctuation,
+    )
+}
+
+/// Adds a per-paragraph continuation-line inset. List layout uses this to
+/// retain nesting depth after the marker-bearing first line without inserting
+/// marker characters into the Canonical source or its UTF-8 offsets.
+pub fn layout_shaped_text_runs_with_line_options(
+    runs: &[TextShapingRun<'_>],
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_px: &[f32],
+    continuation_line_indents_px: &[f32],
+    paragraph_wrap_styles: &[TextWrapStyle],
+    hanging_punctuation: bool,
+) -> Result<ShapedTextLayout, TextShapingError> {
     if !max_width_px.is_finite() || max_width_px <= 0.0 {
         return Err(TextShapingError::InvalidLineWidth);
     }
@@ -1160,11 +1183,30 @@ pub fn layout_shaped_text_runs_with_layout_options(
     {
         return Err(TextShapingError::InvalidLineWidth);
     }
+    if !continuation_line_indents_px.is_empty()
+        && (continuation_line_indents_px.len() != paragraph_count
+            || continuation_line_indents_px
+                .iter()
+                .any(|indent| !indent.is_finite() || *indent < 0.0))
+    {
+        return Err(TextShapingError::InvalidLineWidth);
+    }
     if !paragraph_wrap_styles.is_empty() && paragraph_wrap_styles.len() != paragraph_count {
         return Err(TextShapingError::InvalidLineWidth);
     }
     let first_line_max_advance = |paragraph_index: usize| {
         let indent = first_line_indents_px
+            .get(paragraph_index)
+            .copied()
+            .unwrap_or(0.0)
+            .min(max_width_px);
+        let indent_advance = (indent * units_per_em as f32 / primary_size)
+            .max(0.0)
+            .round() as i32;
+        max_advance.saturating_sub(indent_advance).max(1)
+    };
+    let continuation_line_max_advance = |paragraph_index: usize| {
+        let indent = continuation_line_indents_px
             .get(paragraph_index)
             .copied()
             .unwrap_or(0.0)
@@ -1186,7 +1228,7 @@ pub fn layout_shaped_text_runs_with_layout_options(
             &text[paragraph_start..separator_start],
             paragraph_start,
             first_line_max_advance(paragraph_index),
-            max_advance,
+            continuation_line_max_advance(paragraph_index),
             paragraph_wrap_styles
                 .get(paragraph_index)
                 .copied()
@@ -1204,7 +1246,7 @@ pub fn layout_shaped_text_runs_with_layout_options(
         &text[paragraph_start..],
         paragraph_start,
         first_line_max_advance(paragraph_count - 1),
-        max_advance,
+        continuation_line_max_advance(paragraph_count - 1),
         paragraph_wrap_styles
             .get(paragraph_count - 1)
             .copied()
@@ -3677,7 +3719,7 @@ mod tests {
         gdef_ligature_carets, gdef_logical_caret_step, glyf_contour_x_from_tables,
         layout_shaped_text, layout_shaped_text_runs,
         layout_shaped_text_runs_with_first_line_indents,
-        layout_shaped_text_runs_with_layout_options,
+        layout_shaped_text_runs_with_layout_options, layout_shaped_text_runs_with_line_options,
         layout_shaped_text_runs_with_paragraph_options, layout_shaped_text_with_variations,
         rasterize_glyph, rasterize_glyph_with_variations,
         rasterize_glyph_with_variations_and_style, replace_text_selection, shape_text,
@@ -5523,6 +5565,59 @@ mod tests {
                 .map(|line| (line.start, line.end))
                 .collect::<Vec<_>>(),
             vec![(0, 7), (7, 13), (14, paragraphs.len() as u32)]
+        );
+    }
+
+    #[test]
+    fn multi_run_layout_retains_bounded_continuation_line_indents() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "office office office office";
+        let run = |end| TextShapingRun {
+            font_bytes: font,
+            face_index: 0,
+            variations: &[],
+            features: &[],
+            start: 0,
+            end,
+            font_size: 16.0,
+            synthetic_style: super::SyntheticFontStyle::default(),
+            letter_spacing: 0.0,
+        };
+        let two_words = "office office ";
+        let measured =
+            layout_shaped_text_runs(&[run(two_words.len() as u32)], two_words, 1_000.0).unwrap();
+        let width = measured.lines[0].advance as f32 * 16.0 / measured.units_per_em as f32 + 0.5;
+        let automatic =
+            layout_shaped_text_runs(&[run(source.len() as u32)], source, width).unwrap();
+        let nested = layout_shaped_text_runs_with_line_options(
+            &[run(source.len() as u32)],
+            source,
+            width,
+            &[0.0],
+            &[width / 2.0],
+            &[TextWrapStyle::Auto],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(automatic.lines.len(), 2);
+        assert!(nested.lines.len() > automatic.lines.len());
+        assert_eq!(nested.lines[0].end, automatic.lines[0].end);
+        assert_eq!(
+            nested.carets.last().map(|caret| caret.byte_offset),
+            automatic.carets.last().map(|caret| caret.byte_offset)
+        );
+        assert_eq!(
+            layout_shaped_text_runs_with_line_options(
+                &[run(source.len() as u32)],
+                source,
+                width,
+                &[0.0],
+                &[1.0, 2.0],
+                &[],
+                false,
+            ),
+            Err(TextShapingError::InvalidLineWidth),
         );
     }
 

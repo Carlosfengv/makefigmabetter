@@ -12,6 +12,7 @@ export function projectTextHitGlyphs(input: Readonly<{
   runs: readonly GpuTextProjectionRun[];
   layout: RustTextLayout;
   lineHeight: number;
+  listMarkerGutter?: number;
 }>) {
   if (input.node.kind !== "text") return undefined;
   const metrics = shapedTextLineMetrics(
@@ -21,7 +22,7 @@ export function projectTextHitGlyphs(input: Readonly<{
     input.lineHeight,
     gpuTextFontMetrics(input.runs[0]),
   );
-  const boxes = shapedTextLineBoxes(input.node, input.layout, input.node.width);
+  const boxes = shapedTextLineBoxes(input.node, input.layout, input.node.width, input.listMarkerGutter);
   if (!metrics || !boxes) return undefined;
   return projectGpuTextGlyphs({
     nodeId: input.node.id,

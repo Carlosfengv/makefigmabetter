@@ -188,6 +188,13 @@ export function layout_shaped_text_runs_with_first_line_indents_json(font_bundle
 export function layout_shaped_text_runs_with_layout_options_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number, first_line_indents_json: string, paragraph_wrap_styles_json: string, hanging_punctuation: boolean): string;
 
 /**
+ * Shapes first and continuation line indents together. The continuation
+ * inset keeps nested list paragraphs aligned after wrapping while markers
+ * remain presentation-only and Canonical UTF-8 offsets stay unchanged.
+ */
+export function layout_shaped_text_runs_with_line_options_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number, first_line_indents_json: string, continuation_line_indents_json: string, paragraph_wrap_styles_json: string, hanging_punctuation: boolean): string;
+
+/**
  * Shapes per-paragraph first-line indents and AUTO/BALANCE/PRETTY policies
  * through one bounded transient options boundary.
  */
@@ -399,6 +406,7 @@ export interface InitOutput {
     readonly layout_shaped_text_runs_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_with_first_line_indents_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_with_layout_options_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly layout_shaped_text_runs_with_line_options_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_with_paragraph_options_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

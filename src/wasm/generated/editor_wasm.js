@@ -965,6 +965,51 @@ export function layout_shaped_text_runs_with_layout_options_json(font_bundle, ru
 }
 
 /**
+ * Shapes first and continuation line indents together. The continuation
+ * inset keeps nested list paragraphs aligned after wrapping while markers
+ * remain presentation-only and Canonical UTF-8 offsets stay unchanged.
+ * @param {Uint8Array} font_bundle
+ * @param {string} runs_json
+ * @param {string} text
+ * @param {number} max_width_px
+ * @param {string} first_line_indents_json
+ * @param {string} continuation_line_indents_json
+ * @param {string} paragraph_wrap_styles_json
+ * @param {boolean} hanging_punctuation
+ * @returns {string}
+ */
+export function layout_shaped_text_runs_with_line_options_json(font_bundle, runs_json, text, max_width_px, first_line_indents_json, continuation_line_indents_json, paragraph_wrap_styles_json, hanging_punctuation) {
+    let deferred8_0;
+    let deferred8_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bundle, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(runs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(first_line_indents_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(continuation_line_indents_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(paragraph_wrap_styles_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_shaped_text_runs_with_line_options_json(ptr0, len0, ptr1, len1, ptr2, len2, max_width_px, ptr3, len3, ptr4, len4, ptr5, len5, hanging_punctuation);
+        var ptr7 = ret[0];
+        var len7 = ret[1];
+        if (ret[3]) {
+            ptr7 = 0; len7 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred8_0 = ptr7;
+        deferred8_1 = len7;
+        return getStringFromWasm0(ptr7, len7);
+    } finally {
+        wasm.__wbindgen_free(deferred8_0, deferred8_1, 1);
+    }
+}
+
+/**
  * Shapes per-paragraph first-line indents and AUTO/BALANCE/PRETTY policies
  * through one bounded transient options boundary.
  * @param {Uint8Array} font_bundle

@@ -50,6 +50,18 @@ describe("Text interaction glyph projection", () => {
     expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12 })?.[0]?.x).toBe(55);
   });
 
+  it("places linked glyphs after the shaped list marker column", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "listed", text: "A", width: 100,
+      textProperties: {
+        runs: [],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, listType: "ordered" as const },
+        autoSize: "fixed" as const,
+      },
+    };
+    expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(20);
+  });
+
   it("rejects non-Text nodes", () => {
     expect(projectTextHitGlyphs({ node: createNode("shapeWithText", 0, 0), runs, layout, lineHeight: 12 })).toBeUndefined();
   });

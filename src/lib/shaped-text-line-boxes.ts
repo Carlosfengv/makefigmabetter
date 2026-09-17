@@ -2,6 +2,8 @@ import type { CanvasNode } from "./editor-protocol";
 import type { RustTextLayout } from "./rust-text-layout";
 import {
   textLineStartsParagraph,
+  textListIndentationOffset,
+  textListMarkerBaseIndent,
   textParagraphIndentAt,
   textParagraphRanges,
   textParagraphStartAtOffset,
@@ -21,9 +23,25 @@ export type ShapedTextLineBoxes = Readonly<{
 export function shapedTextFirstLineIndents(
   node: CanvasNode,
   source = node.text ?? "",
+  listMarkerGutter = 0,
 ): readonly number[] | undefined {
   const indents = textParagraphRanges(source).map(({ start }) =>
-    textParagraphIndentAt(node.textProperties, start));
+    textListIndentationOffset(source, node.textProperties, start, listMarkerGutter)
+    + textParagraphIndentAt(node.textProperties, start)
+    + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, start));
+  return indents.every((indent) => Number.isFinite(indent) && indent >= 0)
+    ? indents
+    : undefined;
+}
+
+/** Returns the list nesting inset retained by wrapped continuation lines. */
+export function shapedTextContinuationLineIndents(
+  node: CanvasNode,
+  source = node.text ?? "",
+  listMarkerGutter = 0,
+): readonly number[] | undefined {
+  const indents = textParagraphRanges(source).map(({ start }) =>
+    textListIndentationOffset(source, node.textProperties, start, listMarkerGutter));
   return indents.every((indent) => Number.isFinite(indent) && indent >= 0)
     ? indents
     : undefined;
@@ -43,6 +61,7 @@ export function shapedTextLineBoxes(
   node: CanvasNode,
   layout: RustTextLayout,
   width: number,
+  listMarkerGutter = 0,
 ): ShapedTextLineBoxes | undefined {
   if (!Number.isFinite(width) || width <= 0) return undefined;
   const source = node.text ?? "";
@@ -55,7 +74,11 @@ export function shapedTextLineBoxes(
     const skipped = new TextDecoder().decode(bytes.slice(previousEnd, line.start));
     const startsParagraph = textLineStartsParagraph(lineIndex, skipped);
     const paragraphStart = textParagraphStartAtOffset(source, line.start);
-    const indent = startsParagraph ? textParagraphIndentAt(node.textProperties, paragraphStart) : 0;
+    const nestingIndent = textListIndentationOffset(source, node.textProperties, paragraphStart, listMarkerGutter);
+    const indent = nestingIndent + (startsParagraph
+      ? textParagraphIndentAt(node.textProperties, paragraphStart)
+        + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
+      : 0);
     if (!Number.isFinite(indent) || indent < 0) return undefined;
     xOffsets.push(indent);
     widths.push(Math.max(0, width - indent));

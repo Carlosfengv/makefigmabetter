@@ -367,6 +367,36 @@ describe("textSvgLayoutInput", () => {
     });
   });
 
+  it("uses generated WASM continuation indents for wrapped list lines", async () => {
+    const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
+    const explicit = { assetId: "font-geist-list", faceIndex: 0 };
+    const source = "office office office office";
+    const wasm = await import("../wasm/generated/editor_wasm");
+    wasm.initSync(readFileSync(new URL("../wasm/generated/editor_wasm_bg.wasm", import.meta.url)));
+    const input = textSvgLayoutInput({
+      ...node({
+        runs: [{ start: 0, end: source.length, font: explicit, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph, autoSize: "fixed", fallbackFonts: [],
+      }),
+      text: source,
+      width: 120,
+    }, new Map([[explicit.assetId, bytes.buffer]]));
+    if (!input) throw new Error("List fixture did not produce a shaping input");
+    const shape = (continuationIndent: number) => parseRustTextLayout(
+      wasm.layout_shaped_text_runs_with_line_options_json(
+        new Uint8Array(input.fontBundle), input.runsJson, input.shapingSource,
+        120, "[0]", `[${continuationIndent}]`, "[\"auto\"]", false,
+      ),
+      input.shapingSource,
+    );
+    const automatic = shape(0);
+    const nested = shape(60);
+
+    expect(nested?.lines.length).toBeGreaterThan(automatic?.lines.length ?? Number.POSITIVE_INFINITY);
+    expect(nested?.lines[0]?.end).toBe(automatic?.lines[0]?.end);
+    expect(nested?.carets?.at(-1)?.byteOffset).toBe(source.length);
+  });
+
   it("uses generated WASM tracking for line advance and physical caret coordinates", async () => {
     const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
     const explicit = { assetId: "font-geist-tracking", faceIndex: 0 };

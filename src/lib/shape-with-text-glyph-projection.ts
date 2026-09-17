@@ -10,6 +10,7 @@ export type ShapeWithTextGlyphProjectionInput = Readonly<{
   runs: readonly GpuTextProjectionRun[];
   layout: RustTextLayout;
   lineHeight: number;
+  listMarkerGutter?: number;
 }>;
 
 /** Projects shaped glyph ink boxes into ShapeWithText's Canvas-local text box.
@@ -32,7 +33,7 @@ export function projectShapeWithTextHitGlyphs(
     lineHeight,
     gpuTextFontMetrics(input.runs[0]),
   );
-  const boxes = shapedTextLineBoxes(node, layout, width);
+  const boxes = shapedTextLineBoxes(node, layout, width, input.listMarkerGutter);
   if (!metrics || !boxes) return undefined;
   const y = inset + Math.max(0, (height - metrics.totalHeight) / 2);
   return projectGpuTextGlyphs({

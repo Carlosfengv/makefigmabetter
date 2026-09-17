@@ -95,7 +95,7 @@ import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
 import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-projection";
 import { projectTextHitGlyphs } from "@/lib/text-hit-glyph-projection";
-import { shapedTextFirstLineIndents, shapedTextParagraphWrapStyles } from "@/lib/shaped-text-line-boxes";
+import { shapedTextContinuationLineIndents, shapedTextFirstLineIndents, shapedTextParagraphWrapStyles } from "@/lib/shaped-text-line-boxes";
 import { shapedTextLineMetrics } from "@/lib/shaped-text-line-metrics";
 import { textGlyphPaintRunAtWorldPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
@@ -1903,18 +1903,21 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
  * synthetic weight/italic retain authored advances and travel with the raster
  * identity; small caps travel as derived OpenType feature overrides. */
 function rustTextLayoutRequest(node: CanvasNode) {
-  if (node.textProperties?.paragraph.listType
-    || node.textProperties?.paragraphStyleRuns?.some((run) => run.listType && run.listType !== "none")) return undefined;
   const leadingTrim = node.textProperties?.runs.map((run) => run.leadingTrim ?? null) ?? [];
   const hasLeadingTrim = leadingTrim.some((value) => value !== null)
     || node.textProperties?.baseStyle?.leadingTrim !== undefined;
   const plan = textFrozenLayoutPlan(node);
   if (!plan) return undefined;
-  const firstLineIndents = shapedTextFirstLineIndents(node, plan.source);
+  const listMarkerGutter = canonicalTextListMarkerGutter(context, node, plan.source);
+  if (listMarkerGutter === undefined) return undefined;
+  const firstLineIndents = shapedTextFirstLineIndents(node, plan.source, listMarkerGutter);
+  const continuationLineIndents = shapedTextContinuationLineIndents(node, plan.source, listMarkerGutter);
   const paragraphWrapStyles = shapedTextParagraphWrapStyles(node, plan.source);
   const hangingPunctuation = node.textProperties?.paragraph.hangingPunctuation === true;
-  if (!firstLineIndents
+  if (!firstLineIndents || !continuationLineIndents
       || node.kind === "textPath" && (firstLineIndents.some((indent) => indent !== 0)
+        || continuationLineIndents.some((indent) => indent !== 0)
+        || listMarkerGutter !== 0
         || paragraphWrapStyles.some((style) => style !== "auto")
         || hangingPunctuation
         || hasLeadingTrim)) return undefined;
@@ -1927,6 +1930,8 @@ function rustTextLayoutRequest(node: CanvasNode) {
     plan.shapingSource,
     widthPx,
     firstLineIndents,
+    continuationLineIndents,
+    listMarkerGutter,
     paragraphWrapStyles,
     hangingPunctuation,
     leadingTrim,
@@ -1938,6 +1943,8 @@ function rustTextLayoutRequest(node: CanvasNode) {
     fontSize: plan.fontSize,
     widthPx,
     firstLineIndents,
+    continuationLineIndents,
+    listMarkerGutter,
     paragraphWrapStyles,
     hangingPunctuation,
   };
@@ -2018,39 +2025,16 @@ async function deriveRustTextLayout(
   const input = textLayoutInputFromPlan(request.plan, fontBytes);
   if (!input) throw new Error("INVALID_RUST_TEXT_STYLE_RUNS");
   const wasm = await loadWasmRuntime();
-  const payload = request.hangingPunctuation
-    ? wasm.layout_shaped_text_runs_with_layout_options_json(
-        new Uint8Array(input.fontBundle),
-        input.runsJson,
-        input.shapingSource,
-        request.widthPx,
-        JSON.stringify(request.firstLineIndents),
-        JSON.stringify(request.paragraphWrapStyles),
-        true,
-      )
-    : request.paragraphWrapStyles.some((style) => style !== "auto")
-      ? wasm.layout_shaped_text_runs_with_paragraph_options_json(
-        new Uint8Array(input.fontBundle),
-        input.runsJson,
-        input.shapingSource,
-        request.widthPx,
-        JSON.stringify(request.firstLineIndents),
-        JSON.stringify(request.paragraphWrapStyles),
-      )
-    : request.firstLineIndents.some((indent) => indent !== 0)
-      ? wasm.layout_shaped_text_runs_with_first_line_indents_json(
-          new Uint8Array(input.fontBundle),
-          input.runsJson,
-          input.shapingSource,
-          request.widthPx,
-          JSON.stringify(request.firstLineIndents),
-        )
-      : wasm.layout_shaped_text_runs_json(
-          new Uint8Array(input.fontBundle),
-          input.runsJson,
-          input.shapingSource,
-          request.widthPx,
-        );
+  const payload = wasm.layout_shaped_text_runs_with_line_options_json(
+    new Uint8Array(input.fontBundle),
+    input.runsJson,
+    input.shapingSource,
+    request.widthPx,
+    JSON.stringify(request.firstLineIndents),
+    JSON.stringify(request.continuationLineIndents),
+    JSON.stringify(request.paragraphWrapStyles),
+    request.hangingPunctuation,
+  );
   const displayLayout = parseRustTextLayout(payload, input.shapingSource);
   const sourceLayout = displayLayout && remapRustTextLayoutToSource(displayLayout, input.projection);
   if (!sourceLayout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
@@ -2133,11 +2117,13 @@ function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = nod
     && (properties?.paragraph.paragraphSpacing ?? 0) === 0
     && (properties?.paragraph.paragraphIndent ?? 0) === 0
     && properties?.paragraph.hangingPunctuation !== true
+    && properties?.paragraph.listType === undefined
     && properties?.paragraph.textWrapStyle === undefined
     && !properties?.paragraphStyleRuns?.some((run) =>
       (run.paragraphSpacing ?? 0) !== 0 || (run.paragraphIndent ?? 0) !== 0
       || run.lineHeight !== undefined || run.lineHeightUnit !== undefined
-      || run.textWrapStyle !== undefined)
+      || run.textWrapStyle !== undefined || (run.listType !== undefined && run.listType !== "none")
+      || run.indentation !== undefined)
   ));
   if ((!interactionOnlyShape && node.kind !== "text" && (
       node.fillStack !== undefined
@@ -2283,10 +2269,10 @@ async function loadRustTextGlyphs(
     const canvasGlyphs = request.node.kind === "textPath"
       ? projectTextPathLocalGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout })
       : request.node.kind === "shapeWithText"
-        ? projectShapeWithTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? 14 })
+        ? projectShapeWithTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? 14, listMarkerGutter: request.listMarkerGutter })
         : undefined;
     const textHitGlyphs = request.node.kind === "text"
-      ? projectTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT })
+      ? projectTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT, listMarkerGutter: request.listMarkerGutter })
       : undefined;
     const glyphs = request.node.kind === "textPath"
       ? projectTextPathGpuGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, worldTransform: request.textPathWorldTransform })
@@ -6073,7 +6059,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     } : { fontSize: 31, fontWeight: canvasDesignTokens.typography.canvasText.weight, italic: false, letterSpacing: 0 };
     ctx.fillStyle = paint;
     applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
-    const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, (value) => ctx.measureText(value).width);
+    const listMarkerGutter = (canonicalTextListMarkerGutter(ctx, node, source) ?? 0) * viewport.zoom;
     const listMarkerGap = listMarkerGutter > 0 ? Math.max(0, ctx.measureText(" ").width) : 0;
     // CSS line boxes center the font's bounding ascent/descent inside the
     // declared line-height. Canvas' `middle` baseline uses a different em-box
@@ -6404,7 +6390,7 @@ function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, nod
 
   ctx.save();
   applyCanvasTextStyle(ctx, primaryStyle, fallbackFonts);
-  const listMarkerGutter = textListMarkerGutterForProperties(source, node.textProperties, (value) => ctx.measureText(value).width);
+  const listMarkerGutter = (canonicalTextListMarkerGutter(ctx, node, source) ?? 0) * viewport.zoom;
   const listMarkerGap = listMarkerGutter > 0 ? Math.max(0, ctx.measureText(" ").width) : 0;
   ctx.beginPath();
   const hangingMarkerClip = node.textProperties?.paragraph.hangingList && listMarkerGutter > 0
@@ -7025,12 +7011,17 @@ function renderConnectorLabel(ctx: OffscreenCanvasRenderingContext2D, node: Canv
   ctx.restore();
 }
 
-function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle, fallbackFonts?: readonly DocumentFontReference[]) {
+function applyCanvasTextStyle(
+  ctx: OffscreenCanvasRenderingContext2D,
+  style: RenderTextStyle,
+  fallbackFonts?: readonly DocumentFontReference[],
+  scale = viewport.zoom,
+) {
   const fontFamilies = documentFontFamilyChain(style.font, fallbackFonts, (assetId) => fontFaces.familyFor(assetId));
   const caps = textCaseFontVariantCaps(style.textCase);
-  ctx.font = `${style.italic ? "italic " : ""}${caps ? `${caps} ` : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
+  ctx.font = `${style.italic ? "italic " : ""}${caps ? `${caps} ` : ""}${style.fontWeight} ${style.fontSize * scale}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
   const letterSpacingTarget = ctx as unknown as { letterSpacing?: string };
-  if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * viewport.zoom}px`;
+  if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * scale}px`;
   // This Canvas property is not exposed in every lib.dom version. Reset it for
   // unvaried spans so a preceding Style Run cannot leak its axes into the next.
   const variationTarget = ctx as unknown as { fontVariationSettings?: string };
@@ -7041,6 +7032,41 @@ function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: Ren
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([tag, enabled]) => `'${tag.toLowerCase()}' ${enabled ? 1 : 0}`)
       .join(", ");
+  }
+}
+
+function canonicalTextListMarkerGutter(
+  ctx: OffscreenCanvasRenderingContext2D | null,
+  node: CanvasNode,
+  source = node.text ?? "",
+): number | undefined {
+  const properties = node.textProperties;
+  const hasList = Boolean(properties?.paragraph.listType
+    || properties?.paragraphStyleRuns?.some((run) => run.listType && run.listType !== "none"));
+  if (!hasList) return 0;
+  if (!ctx) return undefined;
+  const primary = properties?.runs[0];
+  const style: RenderTextStyle = primary ? {
+    font: primary.font,
+    fontSize: primary.fontSize,
+    fontWeight: primary.fontWeight,
+    italic: primary.italic,
+    letterSpacing: primary.letterSpacing,
+    textCase: primary.textCase,
+    openTypeFeatures: primary.openTypeFeatures,
+  } : {
+    fontSize: node.kind === "shapeWithText" ? 14 : 31,
+    fontWeight: node.kind === "shapeWithText" ? 400 : canvasDesignTokens.typography.canvasText.weight,
+    italic: false,
+    letterSpacing: 0,
+  };
+  ctx.save();
+  try {
+    applyCanvasTextStyle(ctx, style, properties?.fallbackFonts, 1);
+    const gutter = textListMarkerGutterForProperties(source, properties, (value) => ctx.measureText(value).width);
+    return Number.isFinite(gutter) && gutter >= 0 ? gutter : undefined;
+  } finally {
+    ctx.restore();
   }
 }
 
@@ -7122,11 +7148,7 @@ function withResolvedTextAutoSize(command: EditorCommand): EditorCommand {
   const sourceBytes = new TextEncoder().encode(source);
   applyCanvasTextStyle(ctx, primaryStyle, properties.fallbackFonts);
   const maxWidth = properties.autoSize === "widthAndHeight" ? Number.POSITIVE_INFINITY : Math.max(1, node.width * viewport.zoom);
-  const listMarkerGutter = textListMarkerGutterForProperties(
-    source,
-    properties,
-    (value) => ctx.measureText(value).width,
-  );
+  const listMarkerGutter = (canonicalTextListMarkerGutter(ctx, node, source) ?? 0) * viewport.zoom;
   const lines = layoutTextRanges({
     text: source,
     maxWidth,
