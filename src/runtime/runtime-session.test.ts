@@ -3050,6 +3050,71 @@ describe("M1 RuntimeSession", () => {
     )?.map((region) => region.fillStack?.layers[0]?.paint?.css)).toEqual(["#ff0000ff", "#0000ffff"]);
   });
 
+  it("remaps linear and non-linear flatten gradients into the replacement box", async () => {
+    const linear = {
+      layers: [{
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+        paint: {
+          css: "#ff0000",
+          gradient: {
+            start: [0, 0] as [number, number],
+            end: [1, 0] as [number, number],
+            stops: [
+              { position: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+              { position: 1, color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+            ],
+          },
+        },
+      }],
+    };
+    const radial = {
+      layers: [{
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+        paint: {
+          css: "#ffffff",
+          gradientPaint: {
+            kind: "radial" as const,
+            transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+            stops: [
+              { position: 0, color: { space: "srgb" as const, components: [1, 1, 1] as [number, number, number], alpha: 1 } },
+              { position: 1, color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: 1 } },
+            ],
+          },
+        },
+      }],
+    };
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "linear", type: "RECTANGLE", name: "Linear", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, relativeTransform: { a: 1, b: 0, c: .5, d: 1, e: 0, f: 0 }, fillStack: linear, strokeWidth: 0 },
+        { id: "radial", type: "RECTANGLE", name: "Radial", parentId: "page", siblingIndex: 1, x: 40, y: 0, width: 20, height: 20, fillStack: radial, strokeWidth: 0 },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-gradient-regions", projection, transport, scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("linear"))!;
+    const second = (await session.getNodeByIdAsync("radial"))!;
+
+    const flattened = session.flatten([first, second]);
+    await session.commitAsync();
+
+    const operation = transport.submitted[0]?.operations.find((candidate) => candidate.type === "flattenNodes");
+    if (!operation || operation.type !== "flattenNodes" || !operation.replacement.vectorPath) throw new Error("Expected gradient flatten operation.");
+    const plans = vectorNetworkRegionPaintPlansFromExtension(operation.replacement.extensions, operation.replacement.vectorPath);
+    expect(flattened.vectorNetwork.regions?.map((region) => region.fills?.[0]?.type)).toEqual(["GRADIENT_LINEAR", "GRADIENT_RADIAL"]);
+    const remappedLinear = plans?.[0]?.fillStack?.layers[0]?.paint?.gradient;
+    expect(remappedLinear?.start).toEqual([0, 0]);
+    expect(remappedLinear?.end[0]).toBeCloseTo(16 / 60);
+    expect(remappedLinear?.end[1]).toBeCloseTo(-.4);
+    expect(plans?.[1]?.fillStack?.layers[0]?.paint?.gradientPaint?.transform).toMatchObject({ a: 3, d: 1, e: -2, f: 0 });
+  });
+
   it("creates a same-page Boolean from Vector children of different Frames", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,

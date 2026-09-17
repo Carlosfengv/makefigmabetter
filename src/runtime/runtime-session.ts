@@ -36,6 +36,7 @@ import {
   type DocumentInstanceMetadata,
   type DocumentLinkUnfurlMetadata,
   type DocumentPaintStyleResource,
+  type DocumentPaintLayer,
   type DocumentPaintStack,
   type DocumentTextStyleResource,
   type DocumentTextProperties,
@@ -2612,7 +2613,6 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
-    const paintStacks = orderedSelected.map((node) => runtimeMultiFlattenPaintStack(node)!);
     const selectedIds = new Set(orderedSelected.map((node) => node.id));
     const remaining = this.siblingsOf(targetParent.id).filter((node) => !selectedIds.has(node.id));
     const destination = index ?? remaining.length;
@@ -2644,6 +2644,9 @@ export class RuntimeSession implements RuntimeContainerHost {
       const relative = multiplyRuntimeTransforms(wrapperInverse, sourceWorldTransforms[sourceIndex]!);
       return {
         fillRule: path.fillRule,
+        sourceWidth: finiteNodeNumber(source.width, 0),
+        sourceHeight: finiteNodeNumber(source.height, 0),
+        relative,
         subpaths: path.subpaths.map((subpath) => ({
           closed: true,
           points: subpath.points.map((point) => {
@@ -2670,6 +2673,15 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!fillRule || subpaths.length > MAX_RUNTIME_FLATTEN_SUBPATHS || pointCount > MAX_RUNTIME_FLATTEN_POINTS) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
     }
+    const paintStacks = orderedSelected.map((node, sourceIndex) => runtimeFlattenRegionPaintStack(
+      runtimeMultiFlattenPaintStack(node)!,
+      resolvedPaths[sourceIndex]!.sourceWidth,
+      resolvedPaths[sourceIndex]!.sourceHeight,
+      resolvedPaths[sourceIndex]!.relative,
+      Math.max(1, right - left),
+      Math.max(1, bottom - top),
+    ));
+    if (paintStacks.some((stack) => !stack)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
     const networkVertices: RuntimeVectorNetwork["vertices"][number][] = [];
     const networkSegments: RuntimeVectorNetwork["segments"][number][] = [];
     const networkRegions: NonNullable<RuntimeVectorNetwork["regions"]>[number][] = [];
@@ -2699,7 +2711,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     const vectorPath: DocumentVectorPath = { fillRule, subpaths };
     const regionPaints: VectorNetworkRegionPaintRecord[] = paintStacks.map((fillStack) => ({
       hasExplicitFills: true,
-      fillStack,
+      fillStack: fillStack!,
     }));
     let extensions: Record<string, number[]>;
     try {
@@ -4914,9 +4926,8 @@ function runtimeVectorSupportsBoolean(node: RuntimeProjectionNode): boolean {
   ));
 }
 
-/** Solid paint coordinates are invariant when source paths are baked into an
- * aggregate coordinate space. Gradient and image paints remain gated until
- * their source-local transforms can be rewritten into the replacement box. */
+/** Image placement depends on source bounds and decoded asset aspect ratio.
+ * Solid and gradient stacks can be remapped without accessing asset bytes. */
 function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPaintStack | undefined {
   if (
     node.visible === false ||
@@ -4931,7 +4942,7 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
   if (node.fillStack !== undefined) {
     try {
       const stack = structuredClone(node.fillStack as DocumentPaintStack);
-      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type === "SOLID") ? stack : undefined;
+      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE") ? stack : undefined;
     } catch {
       return undefined;
     }
@@ -4945,10 +4956,93 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
     paint: { css: fill },
   }] };
   try {
-    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type === "SOLID") ? stack : undefined;
+    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE") ? stack : undefined;
   } catch {
     return undefined;
   }
+}
+
+function runtimeFlattenRegionPaintStack(
+  stack: DocumentPaintStack,
+  sourceWidth: number,
+  sourceHeight: number,
+  sourceToReplacement: RuntimeTransform,
+  replacementWidth: number,
+  replacementHeight: number,
+): DocumentPaintStack | undefined {
+  if (![sourceWidth, sourceHeight].every((value) => Number.isFinite(value) && value >= 0)
+    || ![replacementWidth, replacementHeight].every((value) => Number.isFinite(value) && value > 0)) return undefined;
+  if (!stack.layers.some((layer) => Boolean(layer.paint?.gradient || layer.paint?.gradientPaint))) return structuredClone(stack);
+  if (sourceWidth <= 0 || sourceHeight <= 0) return undefined;
+  const replacementToSource = invertRuntimeTransform(sourceToReplacement);
+  if (!replacementToSource) return undefined;
+  const sourceNormalizedFromReplacementNormalized = multiplyRuntimeTransforms(
+    { a: 1 / sourceWidth, b: 0, c: 0, d: 1 / sourceHeight, e: 0, f: 0 },
+    multiplyRuntimeTransforms(replacementToSource, { a: replacementWidth, b: 0, c: 0, d: replacementHeight, e: 0, f: 0 }),
+  );
+  const remapLinearGradient = (start: readonly [number, number], end: readonly [number, number]) => {
+    const sourceStart = { x: start[0] * sourceWidth, y: start[1] * sourceHeight };
+    const sourceDirection = {
+      x: (end[0] - start[0]) * sourceWidth,
+      y: (end[1] - start[1]) * sourceHeight,
+    };
+    const directionLengthSquared = sourceDirection.x ** 2 + sourceDirection.y ** 2;
+    if (!Number.isFinite(directionLengthSquared) || directionLengthSquared <= 1e-18) return undefined;
+    // A Canvas linear gradient is a scalar field, so arbitrary affine
+    // remapping uses the inverse-transpose direction rather than simply
+    // transforming both endpoints (which is only exact for similarities).
+    const covector = {
+      x: (replacementToSource.a * sourceDirection.x + replacementToSource.b * sourceDirection.y) / directionLengthSquared,
+      y: (replacementToSource.c * sourceDirection.x + replacementToSource.d * sourceDirection.y) / directionLengthSquared,
+    };
+    const covectorLengthSquared = covector.x ** 2 + covector.y ** 2;
+    if (!Number.isFinite(covectorLengthSquared) || covectorLengthSquared <= 1e-18) return undefined;
+    const replacementStart = runtimeTransformPoint(sourceToReplacement, sourceStart.x, sourceStart.y);
+    const replacementDirection = {
+      x: covector.x / covectorLengthSquared,
+      y: covector.y / covectorLengthSquared,
+    };
+    return {
+      start: [replacementStart.x / replacementWidth, replacementStart.y / replacementHeight] as [number, number],
+      end: [
+        (replacementStart.x + replacementDirection.x) / replacementWidth,
+        (replacementStart.y + replacementDirection.y) / replacementHeight,
+      ] as [number, number],
+    };
+  };
+  const layers: Array<DocumentPaintLayer | undefined> = stack.layers.map((layer): DocumentPaintLayer | undefined => {
+    if (layer.image) return undefined;
+    const paint = layer.paint;
+    if (!paint) return undefined;
+    if (paint.gradient) {
+      const gradient = remapLinearGradient(paint.gradient.start, paint.gradient.end);
+      if (!gradient) return undefined;
+      return {
+        ...structuredClone(layer),
+        paint: {
+          ...structuredClone(paint),
+          gradient: {
+            ...structuredClone(paint.gradient),
+            ...gradient,
+          },
+        },
+      };
+    }
+    if (paint.gradientPaint) {
+      return {
+        ...structuredClone(layer),
+        paint: {
+          ...structuredClone(paint),
+          gradientPaint: {
+            ...structuredClone(paint.gradientPaint),
+            transform: multiplyRuntimeTransforms(paint.gradientPaint.transform, sourceNormalizedFromReplacementNormalized),
+          },
+        },
+      };
+    }
+    return structuredClone(layer);
+  });
+  return layers.every((layer): layer is DocumentPaintLayer => Boolean(layer)) ? { layers } : undefined;
 }
 
 function runtimeTransformPoint(
