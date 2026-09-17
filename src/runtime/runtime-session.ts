@@ -31,6 +31,7 @@ import {
   type DocumentAutoLayout,
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
+  type DocumentEffect,
   type DocumentEmbedMetadata,
   type DocumentFontReference,
   type DocumentInstanceMetadata,
@@ -76,6 +77,7 @@ import {
 } from "./runtime-variable-bindings";
 import { fontsForRuntimeTextRange, updateRuntimeText } from "./runtime-text";
 import { runtimePaintsFromDocumentStack } from "./runtime-paint";
+import { documentEffectsFromRuntime, runtimeEffectsFromDocument } from "./runtime-effect";
 import { extensionsWithRuntimeVectorNetwork, type RuntimeVectorNetwork, type VectorNetworkRegionPaintRecord } from "./runtime-vector-network";
 import { imagePaintLayoutBox, resolvedImagePaintTransform } from "../lib/image-paint-transform";
 
@@ -2701,6 +2703,21 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (strokeSignatures.some((signature) => signature === undefined) || new Set(strokeSignatures).size !== 1) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
     }
+    const effectStacks = orderedSelected.map(runtimeMultiFlattenEffects);
+    if (effectStacks.some((effects) => effects === undefined)
+      || new Set(effectStacks.map((effects) => JSON.stringify(effects))).size !== 1) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
+    const sharedEffects = effectStacks[0]!;
+    const activeEffects = sharedEffects.filter(runtimeMultiFlattenEffectChangesPixels);
+    if (activeEffects.length > 0 && resolvedPaths.some((path) => !runtimeIsTranslationTransform(path.relative))) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
+    const sharedStrokeWidth = strokeSignatures[0] === "none" ? 0 : finiteNodeNumber(orderedSelected[0]!.strokeWidth, 0);
+    if ((sharedStrokeWidth > 0 || activeEffects.length > 0)
+      && !runtimeMultiFlattenVisualBoundsAreDisjoint(bounds, sharedStrokeWidth, activeEffects)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
     const paintStacks = orderedSelected.map((node, sourceIndex) => runtimeFlattenRegionPaintStack(
       runtimeMultiFlattenPaintStack(node)!,
       resolvedPaths[sourceIndex]!.sourceWidth,
@@ -2780,6 +2797,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       booleanOperation: undefined,
       fillStack: structuredClone(paintStacks[0]!),
       fillStyleId: undefined,
+      effectStack: sharedEffects.length ? structuredClone(sharedEffects) : undefined,
+      dropShadow: structuredClone(sharedEffects.find((effect) => effect.dropShadow)?.dropShadow),
       extensions,
       radius: 0,
       cornerRadii: undefined,
@@ -5048,8 +5067,6 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
     finiteNodeNumber(node.opacity, 1) !== 1 ||
     (node.blendMode !== undefined && node.blendMode !== "normal") ||
     node.isMask === true ||
-    node.dropShadow !== undefined ||
-    (Array.isArray(node.effectStack) && node.effectStack.length > 0) ||
     ["fillColor", "fillGradient", "fills", "fillStyleId"].some((property) => node[property] !== undefined)
   ) return undefined;
   if (node.fillStack !== undefined) {
@@ -5077,7 +5094,7 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
   }
 }
 
-/** A shared solid stroke can stay node-global when every source transform is
+/** Shared solid stroke layers can stay node-global when every source transform is
  * rigid. Non-uniform scale/shear would require stroke-to-fill conversion. */
 function runtimeMultiFlattenStrokeSignature(node: RuntimeProjectionNode, sourceToReplacement: RuntimeTransform): string | undefined {
   const strokeWidth = finiteNodeNumber(node.strokeWidth, 0);
@@ -5090,9 +5107,7 @@ function runtimeMultiFlattenStrokeSignature(node: RuntimeProjectionNode, sourceT
     try {
       const stack = structuredClone(node.strokeStack as DocumentPaintStack);
       const runtimePaints = runtimePaintsFromDocumentStack(stack);
-      const paint = runtimePaints[0];
-      if (runtimePaints.length !== 1 || paint?.type !== "SOLID" || paint.visible === false
-        || (paint.opacity ?? 1) !== 1 || (paint.blendMode !== undefined && paint.blendMode !== "NORMAL")) return undefined;
+      if (runtimePaints.length === 0 || runtimePaints.some((paint) => paint.type !== "SOLID")) return undefined;
       paints = runtimePaints;
     } catch {
       return undefined;
@@ -5114,6 +5129,62 @@ function runtimeMultiFlattenStrokeSignature(node: RuntimeProjectionNode, sourceT
     strokeDashPattern: dashPattern ?? [],
     strokeAlign: node.strokeAlign ?? "inside",
   });
+}
+
+function runtimeMultiFlattenEffects(node: RuntimeProjectionNode): DocumentEffect[] | undefined {
+  const source = Array.isArray(node.effectStack) && node.effectStack.length > 0
+    ? structuredClone(node.effectStack as DocumentEffect[])
+    : node.dropShadow && typeof node.dropShadow === "object"
+      ? [{ dropShadow: structuredClone(node.dropShadow) } as DocumentEffect]
+      : [];
+  try {
+    const normalized = documentEffectsFromRuntime(runtimeEffectsFromDocument(source));
+    if (normalized.some((effect) => effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0)) return undefined;
+    return normalized;
+  } catch {
+    return undefined;
+  }
+}
+
+function runtimeMultiFlattenEffectChangesPixels(effect: DocumentEffect): boolean {
+  if (effect.layerBlur) return effect.layerBlur.visible && effect.layerBlur.radius > 0;
+  if (effect.backgroundBlur) return effect.backgroundBlur.visible && effect.backgroundBlur.radius > 0;
+  const shadow = effect.dropShadow ?? effect.innerShadow;
+  return Boolean(shadow?.visible && shadow.color.alpha > 0);
+}
+
+function runtimeMultiFlattenEffectOutset(effects: readonly DocumentEffect[]): number {
+  return effects.reduce((outset, effect) => {
+    if (effect.layerBlur?.visible) return outset + effect.layerBlur.radius * 3;
+    const shadow = effect.dropShadow ?? effect.innerShadow;
+    if (!shadow?.visible || shadow.color.alpha <= 0) return outset;
+    return outset + Math.max(Math.abs(shadow.offsetX), Math.abs(shadow.offsetY))
+      + Math.abs(shadow.spread) + shadow.blurRadius * 3;
+  }, 0);
+}
+
+function runtimeMultiFlattenVisualBoundsAreDisjoint(
+  bounds: readonly Readonly<{ left: number; top: number; right: number; bottom: number }>[],
+  strokeWidth: number,
+  effects: readonly DocumentEffect[],
+): boolean {
+  const outset = Math.max(0, strokeWidth) + runtimeMultiFlattenEffectOutset(effects);
+  const expanded = bounds.map((bound) => ({
+    left: bound.left - outset,
+    top: bound.top - outset,
+    right: bound.right + outset,
+    bottom: bound.bottom + outset,
+  }));
+  return expanded.every((bound, index) => expanded.slice(index + 1).every((other) =>
+    bound.right <= other.left || other.right <= bound.left || bound.bottom <= other.top || other.bottom <= bound.top));
+}
+
+function runtimeIsTranslationTransform(transform: RuntimeTransform): boolean {
+  const tolerance = 1e-9;
+  return Math.abs(transform.a - 1) <= tolerance
+    && Math.abs(transform.b) <= tolerance
+    && Math.abs(transform.c) <= tolerance
+    && Math.abs(transform.d - 1) <= tolerance;
 }
 
 function runtimeIsRigidTransform(transform: RuntimeTransform) {

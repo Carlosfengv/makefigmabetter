@@ -3206,13 +3206,21 @@ describe("M1 RuntimeSession", () => {
     )?.map((region) => region.fillStack?.layers[0]?.paint?.css)).toEqual(["#ff0000ff", "#0000ffff"]);
   });
 
-  it("preserves one shared solid stroke across rigidly transformed flatten sources", async () => {
-    const strokeStack = { layers: [{
-      visible: true,
-      opacity: 1,
-      blendMode: "normal" as const,
-      paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
-    }] };
+  it("preserves shared layered solid strokes across rigidly transformed flatten sources", async () => {
+    const strokeStack = { layers: [
+      {
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+        paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+      },
+      {
+        visible: true,
+        opacity: .5,
+        blendMode: "multiply" as const,
+        paint: { css: "#0000ff", color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+      },
+    ] };
     const projection: RuntimeProjection = {
       revision: 1,
       nodes: [
@@ -3236,11 +3244,10 @@ describe("M1 RuntimeSession", () => {
     expect(flattened.strokeWeight).toBe(2);
     expect(flattened.strokeJoin).toBe("ROUND");
     expect(flattened.dashPattern).toEqual([4, 2]);
-    expect(flattened.strokes).toEqual([expect.objectContaining({
-      type: "SOLID",
-      color: { r: 1, g: 0, b: 0 },
-      opacity: 1,
-    })]);
+    expect(flattened.strokes).toEqual([
+      expect.objectContaining({ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1, blendMode: "NORMAL" }),
+      expect.objectContaining({ type: "SOLID", color: { r: 0, g: 0, b: 1 }, opacity: .5, blendMode: "MULTIPLY" }),
+    ]);
 
     const shearedProjection = structuredClone(projection);
     const shearedSource = shearedProjection.nodes.find((node) => node.id === "first")!;
@@ -3254,6 +3261,109 @@ describe("M1 RuntimeSession", () => {
     const shearedFirst = (await shearedSession.getNodeByIdAsync("first"))!;
     const shearedSecond = (await shearedSession.getNodeByIdAsync("second"))!;
     expect(isRuntimeError(captureError(() => shearedSession.flatten([shearedFirst, shearedSecond])), "UNSUPPORTED_FEATURE")).toBe(true);
+
+    const interactingProjection = structuredClone(projection);
+    interactingProjection.nodes.find((node) => node.id === "second")!.x = 21;
+    const interactingSession = new RuntimeSession({
+      sessionId: "flatten-interacting-stroke",
+      projection: interactingProjection,
+      transport: new InMemoryTransport(interactingProjection),
+      scheduleMicrotask: () => {},
+    });
+    const interactingFirst = (await interactingSession.getNodeByIdAsync("first"))!;
+    const interactingSecond = (await interactingSession.getNodeByIdAsync("second"))!;
+    expect(isRuntimeError(captureError(() => interactingSession.flatten([interactingFirst, interactingSecond])), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
+  it("preserves a shared bounded foreground effect stack for separated translation-only sources", async () => {
+    const dropShadow = {
+      offsetX: 2,
+      offsetY: 1,
+      blurRadius: 4,
+      spread: 1,
+      color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 },
+      visible: true,
+    };
+    const effectStack = [
+      { dropShadow },
+      { layerBlur: { radius: 6, visible: true } },
+    ];
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "first", type: "RECTANGLE", name: "First", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, dropShadow, effectStack },
+        { id: "second", type: "ELLIPSE", name: "Second", parentId: "page", siblingIndex: 1, x: 120, y: 0, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, dropShadow: structuredClone(dropShadow), effectStack: structuredClone(effectStack) },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({
+      sessionId: "flatten-shared-effects",
+      projection,
+      transport,
+      scheduleMicrotask: () => {},
+    });
+    const first = (await session.getNodeByIdAsync("first"))!;
+    const second = (await session.getNodeByIdAsync("second"))!;
+
+    const flattened = session.flatten([first, second]);
+
+    expect(flattened.effects).toEqual([
+      expect.objectContaining({ type: "DROP_SHADOW", offset: { x: 2, y: 1 }, radius: 4, visible: true }),
+      expect.objectContaining({ type: "LAYER_BLUR", radius: 6, visible: true }),
+    ]);
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toContainEqual(expect.objectContaining({
+      type: "flattenNodes",
+      replacement: expect.objectContaining({ effectStack, dropShadow }),
+    }));
+  });
+
+  it("rejects shared flatten effects when source surfaces can interact or transform effect axes", async () => {
+    const shadow = {
+      offsetX: 2,
+      offsetY: 1,
+      blurRadius: 4,
+      spread: 1,
+      color: { space: "srgb" as const, components: [0, 0, 0] as [number, number, number], alpha: .25 },
+      visible: true,
+    };
+    const base: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "first", type: "RECTANGLE", name: "First", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, effectStack: [{ dropShadow: shadow }] },
+        { id: "second", type: "ELLIPSE", name: "Second", parentId: "page", siblingIndex: 1, x: 30, y: 0, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, effectStack: [{ dropShadow: structuredClone(shadow) }] },
+      ],
+    };
+    const rejected = async (projection: RuntimeProjection, sessionId: string) => {
+      const session = new RuntimeSession({ sessionId, projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+      const first = (await session.getNodeByIdAsync("first"))!;
+      const second = (await session.getNodeByIdAsync("second"))!;
+      return isRuntimeError(captureError(() => session.flatten([first, second])), "UNSUPPORTED_FEATURE");
+    };
+
+    expect(await rejected(base, "flatten-overlapping-effects")).toBe(true);
+
+    const rotated = structuredClone(base);
+    rotated.nodes[3]!.x = 120;
+    rotated.nodes[3]!.relativeTransform = { a: 0, b: 1, c: -1, d: 0, e: 140, f: 0 };
+    expect(await rejected(rotated, "flatten-rotated-effects")).toBe(true);
+
+    const backdrop = structuredClone(base);
+    backdrop.nodes[3]!.x = 120;
+    backdrop.nodes[2]!.effectStack = [{ backgroundBlur: { radius: 4, visible: true } }];
+    backdrop.nodes[3]!.effectStack = [{ backgroundBlur: { radius: 4, visible: true } }];
+    expect(await rejected(backdrop, "flatten-background-effects")).toBe(true);
+
+    const different = structuredClone(base);
+    different.nodes[3]!.x = 120;
+    const secondEffect = different.nodes[3]!.effectStack?.[0]?.dropShadow;
+    if (!secondEffect) throw new Error("Expected a shadow effect.");
+    secondEffect.blurRadius = 5;
+    expect(await rejected(different, "flatten-different-effects")).toBe(true);
   });
 
   it("remaps linear and non-linear flatten gradients into the replacement box", async () => {
