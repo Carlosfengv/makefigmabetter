@@ -1963,6 +1963,9 @@ export function EditorShell({
   >(undefined);
   const revisionRef = useRef(0);
   const snapshotRef = useRef<EditorSnapshot>(blankSnapshot);
+  const canvasTextHyperlinkHoverRef = useRef<
+    Extract<WorkerToMain, { type: "text-hyperlink-hover" }> | undefined
+  >(undefined);
   const confirmedSnapshotRef = useRef<EditorSnapshot>(blankSnapshot);
   const recoverySnapshotRef = useRef<CoreLocalSnapshot | undefined>(undefined);
   const recoveryFailuresRef = useRef(0);
@@ -3000,6 +3003,7 @@ export function EditorShell({
     fixtureAssetsSeededRef.current = false;
     fixtureAssetNodesCreatedRef.current = false;
     remoteBootstrapRequestedRef.current = false;
+    canvasTextHyperlinkHoverRef.current = undefined;
     const worker = new Worker(
       new URL("../../workers/editor.worker.ts", import.meta.url),
       { type: "module" },
@@ -3057,6 +3061,9 @@ export function EditorShell({
     document.addEventListener("visibilitychange", syncWorkerVisibility);
     worker.onmessage = async ({ data }: MessageEvent<WorkerToMain>) => {
       runtimeBridge.observe(data);
+      if (data.type === "text-hyperlink-hover") {
+        canvasTextHyperlinkHoverRef.current = data.target ? data : undefined;
+      }
       if (data.type === "ready") {
         setStatus("Engine worker online");
         setMainThreadLongTasks(emptyMainThreadLongTaskSummary());
@@ -4548,9 +4555,46 @@ export function EditorShell({
     if (!readOnly && !event.metaKey && !event.ctrlKey) return false;
     const current = snapshotRef.current;
     const rect = event.currentTarget.getBoundingClientRect();
+    const screenPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+    const activateHyperlink = (hyperlink: NonNullable<
+      Extract<WorkerToMain, { type: "text-hyperlink-hover" }>["target"]
+    >) => {
+      const navigation = resolveTextHyperlinkNavigation(
+        hyperlink,
+        current.nodes,
+        defaultPageId,
+      );
+      if (!navigation) {
+        setStatus("Engine worker online · link target unavailable");
+        event.preventDefault();
+        return true;
+      }
+      event.preventDefault();
+      if (navigation.type === "URL") {
+        const opened = window.open(navigation.url, "_blank", "noopener,noreferrer");
+        if (opened) opened.opener = null;
+        setStatus("Engine worker online · link opened");
+        return true;
+      }
+      if (navigation.pageId !== current.activePageId)
+        command({ type: "select-page", id: navigation.pageId });
+      command({ type: "select", ids: [navigation.nodeId] });
+      setStatus("Engine worker online · linked layer selected");
+      return true;
+    };
+    const shapedHover = canvasTextHyperlinkHoverRef.current;
+    if (shapedHover?.target
+      && shapedHover.revision === current.revision
+      && shapedHover.pageId === current.activePageId
+      && Math.hypot(shapedHover.x - screenPoint.x, shapedHover.y - screenPoint.y) <= 2) {
+      return activateHyperlink(shapedHover.target);
+    }
     const point = {
-      x: (event.clientX - rect.left - rect.width / 2) / current.viewport.zoom - current.viewport.x,
-      y: (event.clientY - rect.top - rect.height / 2) / current.viewport.zoom - current.viewport.y,
+      x: (screenPoint.x - rect.width / 2) / current.viewport.zoom - current.viewport.x,
+      y: (screenPoint.y - rect.height / 2) / current.viewport.zoom - current.viewport.y,
     };
     const pageNodes = current.nodes.filter((node) =>
       (node.pageId ?? defaultPageId) === current.activePageId);
@@ -4585,28 +4629,7 @@ export function EditorShell({
       character,
     );
     if (!hyperlink) return false;
-    const navigation = resolveTextHyperlinkNavigation(
-      hyperlink,
-      current.nodes,
-      defaultPageId,
-    );
-    if (!navigation) {
-      setStatus("Engine worker online · link target unavailable");
-      event.preventDefault();
-      return true;
-    }
-    event.preventDefault();
-    if (navigation.type === "URL") {
-      const opened = window.open(navigation.url, "_blank", "noopener,noreferrer");
-      if (opened) opened.opener = null;
-      setStatus("Engine worker online · link opened");
-      return true;
-    }
-    if (navigation.pageId !== current.activePageId)
-      command({ type: "select-page", id: navigation.pageId });
-    command({ type: "select", ids: [navigation.nodeId] });
-    setStatus("Engine worker online · linked layer selected");
-    return true;
+    return activateHyperlink(hyperlink);
   };
   const pointer = (
     event: React.PointerEvent<HTMLCanvasElement>,

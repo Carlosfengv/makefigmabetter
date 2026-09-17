@@ -64,6 +64,7 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
         width: raster.width * rasterScale,
         height: raster.height * rasterScale,
         rotation: input.rotation,
+        paintRunIndex: glyph.runIndex,
         fill: input.fill,
         opacity: input.opacity,
         maskWidth: raster.width,

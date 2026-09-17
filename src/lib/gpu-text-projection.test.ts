@@ -58,6 +58,7 @@ describe("GPU text projection", () => {
       { textureKey: "font-a:0:[]:400:normal:7:16", x: 1, y: 4, width: 4, height: 5, maskWidth: 4, maskHeight: 5 },
       { textureKey: "font-b:2:[]:400:normal:7:32", x: 9.5, y: 2, width: 6, height: 7.5, maskWidth: 8, maskHeight: 10 },
     ]);
+    expect(glyphs?.map((glyph) => glyph.paintRunIndex)).toEqual([0, 1]);
   });
 
   it("right-anchors a physical left-to-right RTL glyph stream inside the text box", () => {

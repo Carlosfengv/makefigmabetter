@@ -1105,6 +1105,10 @@ export type WorkerToMain =
   | { type: "remote-reconciled"; removeOperationIds: string[]; replacements: PendingRemoteOperation[]; discardedOperationIds: string[]; coreRejectedOperationIds: string[]; blockedOperationIds: string[]; rejectionDiagnostics: string[] }
   | { type: "remote-reconciliation-progress"; completed: number; total: number }
   | { type: "text-caret-layout"; requestId: string; nodeId: string; text: string; layout?: RustTextCaretLayout }
+  /** Transient shaped-glyph hyperlink under the latest pointer position. The
+   * main thread keeps only this compact answer so a browser navigation can be
+   * started synchronously from the following trusted pointer event. */
+  | { type: "text-hyperlink-hover"; revision: number; pageId: string; x: number; y: number; nodeId?: string; target?: DocumentHyperlinkTarget }
   | { type: "runtime-export-boolean-paths-result"; requestId: string; revision: number; paths?: Record<string, DocumentVectorPath>; errorCode?: "REVISION_CONFLICT" | "INVALID_REQUEST" | "RESOURCE_LIMIT" }
   /** Lightweight high-frequency projection update; never contains durable document data. */
   | { type: "view-state"; viewport: Viewport; selectedIds: string[]; activePageId: string; performance: RenderPerformanceSummary; viewportChanged: boolean }

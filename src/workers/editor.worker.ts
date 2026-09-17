@@ -93,6 +93,7 @@ import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
+import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { constraintGuidesForNode } from "@/lib/constraint-guides";
@@ -308,6 +309,7 @@ const MAX_RUNTIME_FONT_BYTES = 32 * 1024 * 1024;
 const RUNTIME_FONT_WAIT_MS = 1_000;
 let runtimeFontBytes = 0;
 let nodeById = new Map(nodes.map((node) => [node.id, node]));
+let canonicalNodeById = new Map(nodes.map((node) => [node.id, node]));
 let nodeBoundsById = new Map(nodes.map((node) => [node.id, boundsForNode(node)]));
 let worldTransformById = worldTransformsForNodes(nodes);
 let repeatSourceIdsByGroupId = new Map<string, readonly string[]>();
@@ -972,6 +974,7 @@ function rebuildNodeIndex() {
   // projection rebuild instead of recreating the full id/ancestry map for
   // every node and every clipping ancestor.
   worldTransformById = worldTransformsForNodes(nodes);
+  canonicalNodeById = new Map(nodes.map((node) => [node.id, node]));
   activeNodesCache = undefined;
   activeNodeOrderByIdCache = undefined;
   activePageRenderFactsCache = undefined;
@@ -982,7 +985,7 @@ function rebuildNodeIndex() {
   repeatSourceIdsByGroupId = new Map();
   const visibleCanonical = visibleNodesOnPage(nodes, activePageId, defaultPageId);
   const visibleProjected = visibleCanonical.map((node) => nodeById.get(node.id) ?? node);
-  const canonicalNodeById = new Map(visibleCanonical.map((node) => [node.id, node]));
+  const visibleCanonicalById = new Map(visibleCanonical.map((node) => [node.id, node]));
   const visibleChildrenByParentId = indexTransformGroupRepeatChildren(visibleProjected);
   visibleCanonical.filter((node) => node.kind === "transformGroup").forEach((group) => {
     const subtree = transformGroupRepeatSubtree(visibleProjected, group, visibleChildrenByParentId);
@@ -998,7 +1001,7 @@ function rebuildNodeIndex() {
       },
       groupWorld: worldTransformById.get(group.id),
       worldTransformByNodeId: worldTransformById,
-      canonicalNodeById,
+      canonicalNodeById: visibleCanonicalById,
       paintNodes: visibleProjected,
       childrenByParentId: visibleChildrenByParentId,
     });
@@ -3069,6 +3072,31 @@ function hoverHit(worldX: number, worldY: number) {
   if (paintedNode) return paintedNode;
   const screen = toScreen(worldX, worldY);
   return hitFrameName(screen.x, screen.y);
+}
+
+function shapedTextHyperlinkAtWorldPoint(node: CanvasNode | undefined, point: Readonly<{ x: number; y: number }>) {
+  if (!node || (node.kind !== "text" && node.kind !== "textPath")) return undefined;
+  const canonical = canonicalNodeById.get(node.id);
+  if (!canonical || (canonical.kind !== "text" && canonical.kind !== "textPath")) return undefined;
+  const properties = canonical.textProperties;
+  if (!properties?.runs.some((run) => run.hyperlink)) return undefined;
+  const projectionNode = canonical.kind === "textPath" ? canonical : (nodeById.get(canonical.id) ?? canonical);
+  const request = rustTextGlyphRequest(projectionNode);
+  const cached = rustTextGlyphs.get(canonical.id);
+  if (!request || cached?.revision !== revision || cached.key !== request.key) return undefined;
+
+  let glyphs = cached.glyphs;
+  let hitPoint = point;
+  if (canonical.kind === "textPath") {
+    const transform = worldTransformForNode(nodes, canonical.id);
+    const inverse = transform && invertAffine(transform);
+    if (!inverse || !cached.canvasGlyphs) return undefined;
+    glyphs = cached.canvasGlyphs;
+    hitPoint = transformPoint(inverse, point);
+  }
+  const runIndex = textGlyphPaintRunAtPoint(glyphs, hitPoint);
+  const target = runIndex === undefined ? undefined : properties.runs[runIndex]?.hyperlink;
+  return target ? { nodeId: canonical.id, target } : undefined;
 }
 function renderGrid(ctx: OffscreenCanvasRenderingContext2D) {
   if (!shouldRenderCanvasGrid(viewport.zoom)) return;
@@ -9830,6 +9858,7 @@ function deleteSelectedVectorPoints(): boolean {
 function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
   const world = toWorld(event.x, event.y);
   if (event.event === "leave") {
+    emit({ type: "text-hyperlink-hover", revision, pageId: activePageId, x: event.x, y: event.y });
     if (penDraft?.previewWorld) {
       penDraft.previewWorld = undefined;
       render();
@@ -9988,7 +10017,19 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         }
         return;
       }
-      const nextHoveredId = hoverHit(world.x, world.y)?.id;
+      const hoveredNode = hoverHit(world.x, world.y);
+      const nextHoveredId = hoveredNode?.id;
+      const hyperlink = tool === "select"
+        ? shapedTextHyperlinkAtWorldPoint(hoveredNode, world)
+        : undefined;
+      emit({
+        type: "text-hyperlink-hover",
+        revision,
+        pageId: activePageId,
+        x: event.x,
+        y: event.y,
+        ...(hyperlink ?? {}),
+      });
       const nextPaddingHover = tool === "select"
         ? autoLayoutPaddingSideAtWorldPoint(nodes, selectedIds, world, viewport.zoom, worldTransformById)
         : undefined;
