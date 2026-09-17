@@ -12,6 +12,7 @@ import { connectorDecorationContains, connectorLabelContains } from "./connector
 import { shapeWithTextContains } from "./shape-with-text-path";
 import { invertAffine, transformPoint, worldTransformsForNodes, type AffineMatrix } from "./scene-transform";
 import { hangingListLocalBounds } from "./world-visual-bounds";
+import { clipsChildren } from "./node-capabilities";
 
 export type WorldPoint = Readonly<{ x: number; y: number }>;
 
@@ -125,8 +126,37 @@ export function strokeDashContains(distance: number, pattern: readonly number[] 
 export function findTopmostHit(nodes: readonly CanvasNode[], point: WorldPoint, defaultPageId?: string): CanvasNode | undefined {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const worldTransformByNodeId = worldTransformsForNodes(nodes);
-  const hits = [...nodes].reverse().filter((node) => node.visible !== false && !isEffectivelyLocked(nodesById, node.id) && nodeContainsWorldPoint(node, point, nodes, worldTransformByNodeId, nodesById, defaultPageId));
+  const hits = [...nodes].reverse().filter((node) => node.visible !== false
+    && !isEffectivelyLocked(nodesById, node.id)
+    && isVisibleThroughAncestorsAtPoint(node, point, nodes, nodesById, worldTransformByNodeId, defaultPageId)
+    && nodeContainsWorldPoint(node, point, nodes, worldTransformByNodeId, nodesById, defaultPageId));
   return findTopmostCanvasSelectionCandidate(hits);
+}
+
+/** Shared main-thread hit tests must honor the same inherited visibility and
+ * exact ancestor clip contours as the Worker renderer. Alpha-mask sampling is
+ * intentionally left to the Worker because it requires prepared pixel data. */
+function isVisibleThroughAncestorsAtPoint(
+  node: CanvasNode,
+  point: WorldPoint,
+  nodes: readonly CanvasNode[],
+  nodesById: ReadonlyMap<string, CanvasNode>,
+  worldTransformByNodeId: ReadonlyMap<string, AffineMatrix>,
+  defaultPageId?: string,
+) {
+  const visited = new Set<string>([node.id]);
+  let parentId = node.parentId;
+  while (parentId) {
+    if (visited.has(parentId)) return false;
+    visited.add(parentId);
+    const parent = nodesById.get(parentId);
+    if (!parent || parent.visible === false
+      || (parent.kind === "section" && parent.contentsHidden)) return false;
+    if (clipsChildren(parent.kind) && parent.clipsContent !== false
+      && !nodeContainsWorldPoint(parent, point, nodes, worldTransformByNodeId, nodesById, defaultPageId)) return false;
+    parentId = parent.parentId;
+  }
+  return true;
 }
 
 /**

@@ -168,6 +168,19 @@ describe("Canvas primitive hit testing", () => {
     expect(findTopmostHit([back, { ...top, visible: false }], { x: 20, y: 20 })?.id).toBe("back");
   });
 
+  it("rejects descendants hidden by an ancestor or outside its exact clip", () => {
+    const back = { ...createNode("rectangle", 0, 0), id: "back", width: 240, height: 120, radius: 0 };
+    const hiddenFrame = { ...createNode("frame", 0, 0), id: "hidden-frame", width: 100, height: 100, visible: false };
+    const hiddenChild = { ...createNode("text", 10, 10), id: "hidden-child", parentId: hiddenFrame.id, width: 40, height: 20 };
+    expect(findTopmostHit([back, hiddenFrame, hiddenChild], { x: 20, y: 20 })?.id).toBe("back");
+
+    const clippedFrame = { ...createNode("frame", 0, 0), id: "clip", width: 100, height: 100, radius: 40, clipsContent: true };
+    const clippedChild = { ...createNode("text", 0, 0), id: "clipped-child", parentId: clippedFrame.id, width: 30, height: 30 };
+    // The child's rectangle covers the point, while the rounded Frame corner
+    // does not. Main-thread link hits must therefore pass through to `back`.
+    expect(findTopmostHit([back, clippedFrame, clippedChild], { x: 2, y: 2 })?.id).toBe("back");
+  });
+
   it("passes canvas clicks through non-painted Slice export regions", () => {
     const painted = { ...createNode("rectangle", 0, 0), id: "painted", width: 100, height: 100 };
     const slice = { ...createNode("slice", 0, 0), id: "slice", width: 100, height: 100 };
