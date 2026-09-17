@@ -258,8 +258,8 @@ export function canonicalVectorPathFromRuntimeNetwork(
   if (new Set(startCaps).size > 1 || new Set(endCaps).size > 1) {
     return { reason: "Canonical VectorPath requires one shared start cap and one shared end cap across open subpaths." };
   }
-  if (hasMixedActiveJoins && (startCaps.some((cap) => cap !== "none") || endCaps.some((cap) => cap !== "none"))) {
-    return { reason: "Mixed per-vertex stroke joins currently require NONE endpoint caps." };
+  if (hasMixedActiveJoins && [...startCaps, ...endCaps].some((cap) => cap !== "none" && cap !== "round" && cap !== "square")) {
+    return { reason: "Mixed per-vertex stroke joins support only NONE, ROUND or SQUARE endpoint caps." };
   }
 
   const subpaths: DocumentVectorPath["subpaths"] = [];
@@ -528,14 +528,15 @@ export function vectorNetworkMixedStrokeMesh(
   if (!validNetworkShape(network)
     || !Number.isFinite(options.strokeWidth) || options.strokeWidth <= 0
     || !Number.isFinite(options.strokeMiterLimit) || options.strokeMiterLimit < 1
-    || options.strokeCapStart && options.strokeCapStart !== "none"
-    || options.strokeCapEnd && options.strokeCapEnd !== "none"
     || options.strokeDashPattern?.length
     || network.segments.some((segment) => segment.tangentStart !== undefined || segment.tangentEnd !== undefined)
     || network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)
   ) return undefined;
   const components = independentNetworkComponents(network);
   if (!components || !runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
+  const hasOpenComponent = components.some((component) => !component.closed && component.segmentIndexes.length > 0);
+  if (hasOpenComponent && (!["none", "round", "square"].includes(options.strokeCapStart ?? "none")
+    || !["none", "round", "square"].includes(options.strokeCapEnd ?? "none"))) return undefined;
 
   const triangles: VectorNetworkStrokeTriangle[] = [];
   const half = options.strokeWidth / 2;
@@ -570,6 +571,10 @@ export function vectorNetworkMixedStrokeMesh(
         effectiveNetworkJoin(points[vertexIndex]!, options.strokeJoin),
         options.strokeMiterLimit,
       );
+    }
+    if (!component.closed) {
+      addNetworkStrokeCap(triangles, resolvedSegments[0]!, true, half, options.strokeCapStart ?? "none");
+      addNetworkStrokeCap(triangles, resolvedSegments.at(-1)!, false, half, options.strokeCapEnd ?? "none");
     }
   }
   if (!triangles.length || triangles.length > 200_000) return undefined;
@@ -725,6 +730,35 @@ function addNetworkStrokeJoin(
     }
   }
   pushNetworkStrokeTriangle(triangles, previousOuter, vertex, nextOuter);
+}
+
+function addNetworkStrokeCap(
+  triangles: VectorNetworkStrokeTriangle[],
+  segment: NetworkStrokeSegment,
+  atStart: boolean,
+  half: number,
+  cap: StrokeCap,
+): void {
+  if (cap === "none") return;
+  const center = atStart ? segment.from : segment.to;
+  if (cap === "round") {
+    for (let index = 0; index < 16; index += 1) {
+      const start = index * Math.PI * 2 / 16;
+      const end = (index + 1) * Math.PI * 2 / 16;
+      pushNetworkStrokeTriangle(triangles, center,
+        { x: center.x + Math.cos(start) * half, y: center.y + Math.sin(start) * half },
+        { x: center.x + Math.cos(end) * half, y: center.y + Math.sin(end) * half });
+    }
+    return;
+  }
+  if (cap !== "square") return;
+  const direction = atStart ? -half : half;
+  const extended = offsetNetworkStrokePoint(center, segment.tangent, direction);
+  addNetworkStrokeQuad(triangles,
+    offsetNetworkStrokePoint(center, segment.normal, half),
+    offsetNetworkStrokePoint(extended, segment.normal, half),
+    offsetNetworkStrokePoint(extended, segment.normal, -half),
+    offsetNetworkStrokePoint(center, segment.normal, -half));
 }
 
 function networkStrokeLineIntersection(

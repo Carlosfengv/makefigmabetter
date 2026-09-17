@@ -2882,7 +2882,9 @@ describe("M1 RuntimeSession", () => {
       }),
     }));
     expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
-    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
+    vector.strokeCap = "ROUND";
+    expect(vector.strokeCap).toBe("ROUND");
+    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ARROW_EQUILATERAL"; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => { vector.vectorNetwork = {
       ...mixed,
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2, tangentStart: { x: 2, y: 0 } }, { start: 2, end: 3 }],

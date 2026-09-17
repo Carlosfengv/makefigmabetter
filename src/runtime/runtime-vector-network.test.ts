@@ -290,15 +290,15 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
-  it("materializes mixed active joins as one shared straight-network stroke mesh", () => {
+  it("materializes mixed active joins and standard endpoint caps as one shared straight-network stroke mesh", () => {
     let sequence = 0;
     const network = {
       vertices: [
-        { x: 0, y: 0 },
+        { x: 0, y: 0, strokeCap: "ROUND" as const },
         { x: 20, y: 0, strokeJoin: "ROUND" as const },
         { x: 20, y: 20, strokeJoin: "BEVEL" as const },
         { x: 40, y: 20 },
-        { x: 40, y: 40 },
+        { x: 40, y: 40, strokeCap: "SQUARE" as const },
       ],
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 }],
     };
@@ -311,17 +311,27 @@ describe("Runtime VectorNetwork adapter", () => {
     const extensions = extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path);
     const mesh = vectorNetworkMixedStrokeMeshFromExtension(extensions, converted.path, {
       strokeWidth: 4,
-      strokeCapStart: "none",
-      strokeCapEnd: "none",
+      strokeCapStart: converted.strokeCapStart,
+      strokeCapEnd: converted.strokeCapEnd,
       strokeJoin: "miter",
       strokeMiterLimit: 10,
     });
 
-    expect(mesh?.bounds).toEqual({ min: { x: 0, y: -2 }, max: { x: 42, y: 40 } });
+    expect(mesh?.bounds).toEqual({ min: { x: -2, y: -2 }, max: { x: 42, y: 42 } });
     expect(mesh?.triangles.length).toBeGreaterThan(20);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21, y: -1 })).toBe(true);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.25, y: 21.75 })).toBe(false);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 41.5, y: 18.5 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: -1.5, y: 0 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 40, y: 41.5 })).toBe(true);
+
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      ...network,
+      vertices: network.vertices.map((vertex, index) => index === network.vertices.length - 1
+        ? { ...vertex, strokeCap: "ARROW_EQUILATERAL" as const }
+        : vertex),
+    }, () => "decorative", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
+      .toMatchObject({ reason: expect.stringContaining("NONE, ROUND or SQUARE") });
 
     expect(canonicalVectorPathFromRuntimeNetwork({
       ...network,

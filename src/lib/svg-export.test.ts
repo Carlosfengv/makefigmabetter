@@ -535,10 +535,10 @@ describe("SVG export", () => {
     let sequence = 0;
     const network = {
       vertices: [
-        { x: 0, y: 0 },
+        { x: 0, y: 0, strokeCap: "ROUND" as const },
         { x: 20, y: 0, strokeJoin: "ROUND" as const },
         { x: 20, y: 20, strokeJoin: "BEVEL" as const },
-        { x: 40, y: 20 },
+        { x: 40, y: 20, strokeCap: "SQUARE" as const },
       ],
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }],
     };
@@ -553,8 +553,8 @@ describe("SVG export", () => {
       width: 40,
       height: 20,
       strokeWidth: 4,
-      strokeCapStart: "none" as const,
-      strokeCapEnd: "none" as const,
+      strokeCapStart: converted.strokeCapStart,
+      strokeCapEnd: converted.strokeCapEnd,
       strokeJoin: "miter" as const,
       fillStack: { layers: [] },
       strokeStack: { layers: [{
@@ -569,7 +569,7 @@ describe("SVG export", () => {
 
     const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
 
-    expect(result.svg).toContain('viewBox="0 -2 40 24"');
+    expect(result.svg).toContain('viewBox="-2 -2 44 24"');
     expect(result.svg).toContain('M 0 2 L 20 -2 L 20 2 Z');
     expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);
     expect(result.svg).not.toContain("stroke-linejoin=");
