@@ -2,6 +2,7 @@ import type { CanvasNode } from "./editor-protocol";
 import { projectGpuTextGlyphs, type GpuTextProjectionRun } from "./gpu-text-projection";
 import type { RustTextLayout } from "./rust-text-layout";
 import type { WebGpuTextGlyph } from "./webgpu-scene";
+import { shapedTextLineBoxes } from "./shaped-text-line-boxes";
 import { shapedTextLineMetrics } from "./shaped-text-line-metrics";
 
 export type ShapeWithTextGlyphProjectionInput = Readonly<{
@@ -25,7 +26,8 @@ export function projectShapeWithTextHitGlyphs(
   const width = Math.max(1, node.width - inset * 2);
   const height = Math.max(1, node.height - inset * 2);
   const metrics = shapedTextLineMetrics(node, layout, 14, lineHeight);
-  if (!metrics) return undefined;
+  const boxes = shapedTextLineBoxes(node, layout, width);
+  if (!metrics || !boxes) return undefined;
   const y = inset + Math.max(0, (height - metrics.totalHeight) / 2);
   return projectGpuTextGlyphs({
     nodeId: node.id,
@@ -38,6 +40,8 @@ export function projectShapeWithTextHitGlyphs(
     fill: node.fill,
     opacity: node.opacity,
     lineHeight,
+    lineXOffsets: boxes.xOffsets,
+    lineWidths: boxes.widths,
     lineYOffsets: metrics.tops,
     layout,
   });

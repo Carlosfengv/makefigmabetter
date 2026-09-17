@@ -984,6 +984,18 @@ pub fn layout_shaped_text_runs(
     text: &str,
     max_width_px: f32,
 ) -> Result<ShapedTextLayout, TextShapingError> {
+    layout_shaped_text_runs_with_first_line_indents(runs, text, max_width_px, &[])
+}
+
+/// Shapes the same bounded Style Run stream while reducing the first visual
+/// line of each hard-break paragraph by the matching document-pixel inset.
+/// An empty inset slice preserves the legacy uniform-width contract.
+pub fn layout_shaped_text_runs_with_first_line_indents(
+    runs: &[TextShapingRun<'_>],
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_px: &[f32],
+) -> Result<ShapedTextLayout, TextShapingError> {
     if !max_width_px.is_finite() || max_width_px <= 0.0 {
         return Err(TextShapingError::InvalidLineWidth);
     }
@@ -1072,15 +1084,39 @@ pub fn layout_shaped_text_runs(
     let max_advance = (max_width_px * units_per_em as f32 / primary_size)
         .max(1.0)
         .round() as i32;
+    let paragraph_boundaries = paragraph_boundaries(text);
+    let paragraph_count = paragraph_boundaries.len() + 1;
+    if !first_line_indents_px.is_empty()
+        && (first_line_indents_px.len() != paragraph_count
+            || first_line_indents_px
+                .iter()
+                .any(|indent| !indent.is_finite() || *indent < 0.0))
+    {
+        return Err(TextShapingError::InvalidLineWidth);
+    }
+    let first_line_max_advance = |paragraph_index: usize| {
+        let indent = first_line_indents_px
+            .get(paragraph_index)
+            .copied()
+            .unwrap_or(0.0)
+            .min(max_width_px);
+        let indent_advance = (indent * units_per_em as f32 / primary_size)
+            .max(0.0)
+            .round() as i32;
+        max_advance.saturating_sub(indent_advance).max(1)
+    };
     let segmenter = LineSegmenter::new_auto(Default::default());
     let mut lines = Vec::new();
     let mut carets = Vec::new();
     let mut paragraph_start = 0;
-    for (separator_start, separator_len) in paragraph_boundaries(text) {
+    for (paragraph_index, (separator_start, separator_len)) in
+        paragraph_boundaries.into_iter().enumerate()
+    {
         append_shaped_run_paragraph(
             &prepared,
             &text[paragraph_start..separator_start],
             paragraph_start,
+            first_line_max_advance(paragraph_index),
             max_advance,
             segmenter,
             units_per_em,
@@ -1093,6 +1129,7 @@ pub fn layout_shaped_text_runs(
         &prepared,
         &text[paragraph_start..],
         paragraph_start,
+        first_line_max_advance(paragraph_count - 1),
         max_advance,
         segmenter,
         units_per_em,
@@ -1388,6 +1425,7 @@ fn append_shaped_run_paragraph(
     runs: &[PreparedTextShapingRun<'_>],
     paragraph: &str,
     paragraph_start: usize,
+    first_line_max_advance: i32,
     max_advance: i32,
     segmenter: icu_segmenter::LineSegmenterBorrowed<'static>,
     units_per_em: i32,
@@ -1423,6 +1461,11 @@ fn append_shaped_run_paragraph(
     }
     let mut start = 0;
     while start < paragraph.len() {
+        let line_max_advance = if start == 0 {
+            first_line_max_advance
+        } else {
+            max_advance
+        };
         let mut fitted = None;
         let mut first_overflow = None;
         for end in breakpoints.iter().copied().filter(|end| *end > start) {
@@ -1432,7 +1475,7 @@ fn append_shaped_run_paragraph(
                 paragraph_start + start,
                 units_per_em,
             )?;
-            if candidate.2 <= max_advance {
+            if candidate.2 <= line_max_advance {
                 fitted = Some((end, candidate));
             } else {
                 first_overflow = Some((end, candidate));
@@ -3341,7 +3384,8 @@ mod tests {
         SyntheticFontStyle, TextDirection, TextLine, TextSelection, TextShapingError,
         TextShapingRun, bidi_visual_runs, fallback_text_layout, font_contour_x,
         gdef_ligature_carets, gdef_logical_caret_step, glyf_contour_x_from_tables,
-        layout_shaped_text, layout_shaped_text_runs, layout_shaped_text_with_variations,
+        layout_shaped_text, layout_shaped_text_runs,
+        layout_shaped_text_runs_with_first_line_indents, layout_shaped_text_with_variations,
         rasterize_glyph, rasterize_glyph_with_variations,
         rasterize_glyph_with_variations_and_style, replace_text_selection, shape_text,
         shape_text_with_variations,
@@ -5094,6 +5138,95 @@ mod tests {
                     .last()
                     .is_some_and(|caret| caret.x_advance == line.advance)
         }));
+    }
+
+    #[test]
+    fn multi_run_layout_applies_bounded_first_line_indent_before_breaking() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let text = "office office";
+        let run = |end| TextShapingRun {
+            font_bytes: font,
+            face_index: 0,
+            variations: &[],
+            features: &[],
+            start: 0,
+            end,
+            font_size: 16.0,
+            synthetic_style: super::SyntheticFontStyle::default(),
+            letter_spacing: 0.0,
+        };
+        let full = layout_shaped_text_runs(&[run(text.len() as u32)], text, 1_000.0).unwrap();
+        let prefix = "office ";
+        let prefix_layout =
+            layout_shaped_text_runs(&[run(prefix.len() as u32)], prefix, 1_000.0).unwrap();
+        let scale = 16.0 / full.units_per_em as f32;
+        let width = full.lines[0].advance as f32 * scale + 1.0;
+        let prefix_width = prefix_layout.lines[0].advance as f32 * scale;
+        let indent = width - prefix_width - 0.5;
+
+        assert_eq!(
+            layout_shaped_text_runs(&[run(text.len() as u32)], text, width)
+                .unwrap()
+                .lines
+                .len(),
+            1
+        );
+        let indented = layout_shaped_text_runs_with_first_line_indents(
+            &[run(text.len() as u32)],
+            text,
+            width,
+            &[indent],
+        )
+        .unwrap();
+        assert_eq!(indented.lines.len(), 2);
+        assert_eq!((indented.lines[0].start, indented.lines[0].end), (0, 7));
+        assert_eq!(
+            (indented.lines[1].start, indented.lines[1].end),
+            (7, text.len() as u32)
+        );
+        assert_eq!(
+            layout_shaped_text_runs_with_first_line_indents(
+                &[run(text.len() as u32)],
+                text,
+                width,
+                &[]
+            ),
+            layout_shaped_text_runs(&[run(text.len() as u32)], text, width),
+        );
+        assert_eq!(
+            layout_shaped_text_runs_with_first_line_indents(
+                &[run(text.len() as u32)],
+                text,
+                width,
+                &[1.0, 2.0]
+            ),
+            Err(TextShapingError::InvalidLineWidth),
+        );
+        assert_eq!(
+            layout_shaped_text_runs_with_first_line_indents(
+                &[run(text.len() as u32)],
+                text,
+                width,
+                &[-1.0]
+            ),
+            Err(TextShapingError::InvalidLineWidth),
+        );
+        let paragraphs = "office office\noffice office";
+        let paragraph_layout = layout_shaped_text_runs_with_first_line_indents(
+            &[run(paragraphs.len() as u32)],
+            paragraphs,
+            width,
+            &[indent, 0.0],
+        )
+        .unwrap();
+        assert_eq!(
+            paragraph_layout
+                .lines
+                .iter()
+                .map(|line| (line.start, line.end))
+                .collect::<Vec<_>>(),
+            vec![(0, 7), (7, 13), (14, paragraphs.len() as u32)]
+        );
     }
 
     #[test]

@@ -51,6 +51,24 @@ describe("GPU text projection", () => {
     expect(glyphs?.map((glyph) => glyph.y)).toEqual([14, 54]);
   });
 
+  it("aligns glyphs inside per-line horizontal boxes", () => {
+    const layout = { unitsPerEm: 1000, lines: [{
+      start: 0, end: 1, direction: "ltr" as const, advance: 500, visualRuns: [],
+      glyphs: [{ glyphId: 7, runIndex: 0, cluster: 0, xAdvance: 500, yAdvance: 0, xOffset: 0, yOffset: 0 }],
+    }] };
+    const projected = projectGpuTextGlyphs({
+      nodeId: "text", runs: [run()], x: 0, y: 0, width: 100, rotation: 0,
+      alignment: "center", fill: "#000", opacity: 1, lineHeight: 12,
+      lineXOffsets: [20], lineWidths: [80], layout,
+    });
+    expect(projected?.[0]?.x).toBe(56);
+    expect(projectGpuTextGlyphs({
+      nodeId: "text", runs: [run()], x: 0, y: 0, width: 100, rotation: 0,
+      fill: "#000", opacity: 1, lineHeight: 12,
+      lineXOffsets: [20], layout,
+    })).toBeUndefined();
+  });
+
   it("selects each glyph's font resource and preserves a primary-run baseline", () => {
     const largeRaster = { ...raster, width: 8, height: 10, bearingX: 2, bearingY: 8, ascent: 16, alphaMask: Uint8Array.from(Array(80).fill(255)) };
     const glyphs = projectGpuTextGlyphs({

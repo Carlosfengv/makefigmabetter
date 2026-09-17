@@ -25,6 +25,18 @@ describe("Text interaction glyph projection", () => {
     expect(projectTextHitGlyphs({ node: text, runs, layout: rtl, lineHeight: 12 })?.[0]?.x).toBe(45);
   });
 
+  it("centers the first line inside its indented line box", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "indented", text: "A", width: 100,
+      textProperties: {
+        runs: [],
+        paragraph: { alignment: "center" as const, lineHeight: 12, paragraphSpacing: 0, paragraphIndent: 20 },
+        autoSize: "fixed" as const,
+      },
+    };
+    expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12 })?.[0]?.x).toBe(55);
+  });
+
   it("rejects non-Text nodes", () => {
     expect(projectTextHitGlyphs({ node: createNode("shapeWithText", 0, 0), runs, layout, lineHeight: 12 })).toBeUndefined();
   });

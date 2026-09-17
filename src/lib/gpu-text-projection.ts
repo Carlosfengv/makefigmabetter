@@ -28,6 +28,8 @@ export type GpuTextProjectionInput = {
   fill: string;
   opacity: number;
   lineHeight: number;
+  lineXOffsets?: readonly number[];
+  lineWidths?: readonly number[];
   lineYOffsets?: readonly number[];
   layout: RustTextLayout;
 };
@@ -41,6 +43,9 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
     || input.runs.some((run) => !validRun(run))
     || !Number.isFinite(input.width) || input.width <= 0
     || !Number.isFinite(input.lineHeight) || input.lineHeight <= 0
+    || Boolean(input.lineXOffsets) !== Boolean(input.lineWidths)
+    || input.lineXOffsets && (input.lineXOffsets.length !== input.layout.lines.length || input.lineXOffsets.some((offset) => !Number.isFinite(offset)))
+    || input.lineWidths && (input.lineWidths.length !== input.layout.lines.length || input.lineWidths.some((width) => !Number.isFinite(width) || width < 0))
     || input.lineYOffsets && (input.lineYOffsets.length !== input.layout.lines.length || input.lineYOffsets.some((offset) => !Number.isFinite(offset)))
     || input.layout.unitsPerEm <= 0) return undefined;
   const primaryRaster = firstRaster(primary.rasters);
@@ -52,11 +57,13 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
   for (const [lineIndex, line] of input.layout.lines.entries()) {
     if (input.lineYOffsets) lineY = input.lineYOffsets[lineIndex]!;
     const advance = line.advance * metricScale;
+    const lineX = input.lineXOffsets?.[lineIndex] ?? 0;
+    const lineWidth = input.lineWidths?.[lineIndex] ?? input.width;
     let penX = input.alignment === "center"
-      ? (input.width - advance) / 2
+      ? lineX + (lineWidth - advance) / 2
       : input.alignment === "right" || line.direction === "rtl"
-        ? input.width - advance
-        : 0;
+        ? lineX + lineWidth - advance
+        : lineX;
     for (const glyph of line.glyphs) {
       if (glyph.glyphId === 0 || !Number.isInteger(glyph.runIndex)) return undefined;
       const run = input.runs[glyph.runIndex];

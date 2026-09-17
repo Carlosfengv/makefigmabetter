@@ -341,6 +341,7 @@ import {
   TEXT_PATH_SINGLE_LINE_WIDTH,
   textSvgLayoutInput,
 } from "@/lib/text-svg-layout-input";
+import { shapedTextFirstLineIndents } from "@/lib/shaped-text-line-boxes";
 import { FigmaCompatibleRuntime } from "@/runtime/figma-compatible-runtime";
 import { RuntimeSession } from "@/runtime/runtime-session";
 import {
@@ -727,12 +728,24 @@ async function deriveTextSvgLayouts(
     const input = textSvgLayoutInput(node, fontBytes);
     if (!input) continue;
     try {
-      const payload = wasm.layout_shaped_text_runs_json(
-        new Uint8Array(input.fontBundle),
-        input.runsJson,
-        input.shapingSource,
-        node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width,
-      );
+      const firstLineIndents = shapedTextFirstLineIndents(node, input.source);
+      if (!firstLineIndents
+          || node.kind === "textPath" && firstLineIndents.some((indent) => indent !== 0)) continue;
+      const width = node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width;
+      const payload = firstLineIndents.some((indent) => indent !== 0)
+        ? wasm.layout_shaped_text_runs_with_first_line_indents_json(
+            new Uint8Array(input.fontBundle),
+            input.runsJson,
+            input.shapingSource,
+            width,
+            JSON.stringify(firstLineIndents),
+          )
+        : wasm.layout_shaped_text_runs_json(
+            new Uint8Array(input.fontBundle),
+            input.runsJson,
+            input.shapingSource,
+            width,
+          );
       const layout = node.kind === "textPath"
         ? parseTextPathSvgLayoutProjection(payload, input)
         : parseTextSvgLayoutProjection(payload, input);

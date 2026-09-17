@@ -176,6 +176,12 @@ export function layout_shaped_text_json(font_bytes: Uint8Array, face_index: numb
 export function layout_shaped_text_runs_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number): string;
 
 /**
+ * Variant of `layout_shaped_text_runs_json` whose JSON array supplies one
+ * non-negative document-pixel first-line inset per hard-break paragraph.
+ */
+export function layout_shaped_text_runs_with_first_line_indents_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number, first_line_indents_json: string): string;
+
+/**
  * Produces ICU4X line ranges at the same Variable Font coordinates used by
  * the shaping and glyph-raster stages.
  */
@@ -379,6 +385,7 @@ export interface InitOutput {
     readonly gpu_scene_instances_from_snapshot_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly layout_shaped_text_runs_with_first_line_indents_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];

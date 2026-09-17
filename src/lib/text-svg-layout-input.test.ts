@@ -247,6 +247,44 @@ describe("textSvgLayoutInput", () => {
     ]);
   });
 
+  it("uses generated WASM first-line indents during shaped line fitting", async () => {
+    const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
+    const explicit = { assetId: "font-geist-indent", faceIndex: 0 };
+    const source = "office office";
+    const wasm = await import("../wasm/generated/editor_wasm");
+    wasm.initSync(readFileSync(new URL("../wasm/generated/editor_wasm_bg.wasm", import.meta.url)));
+    const shape = (text: string) => {
+      const input = textSvgLayoutInput({
+        ...node({
+          runs: [{ start: 0, end: text.length, font: explicit, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+          paragraph, autoSize: "fixed", fallbackFonts: [],
+        }),
+        text,
+        width: 1_000,
+      }, new Map([[explicit.assetId, bytes.buffer]]));
+      if (!input) throw new Error("Indent fixture did not produce a shaping input");
+      const layout = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+        new Uint8Array(input.fontBundle), input.runsJson, input.shapingSource, 1_000,
+      ), input.shapingSource);
+      if (!layout) throw new Error("Indent fixture did not produce a shaped layout");
+      return { input, layout };
+    };
+    const full = shape(source);
+    const prefix = shape("office ");
+    const scale = 16 / full.layout.unitsPerEm;
+    const width = full.layout.lines[0]!.advance * scale + 1;
+    const indent = width - prefix.layout.lines[0]!.advance * scale - .5;
+    const unindented = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+      new Uint8Array(full.input.fontBundle), full.input.runsJson, full.input.shapingSource, width,
+    ), full.input.shapingSource);
+    const indented = parseRustTextLayout(wasm.layout_shaped_text_runs_with_first_line_indents_json(
+      new Uint8Array(full.input.fontBundle), full.input.runsJson, full.input.shapingSource, width, JSON.stringify([indent]),
+    ), full.input.shapingSource);
+
+    expect(unindented?.lines).toHaveLength(1);
+    expect(indented?.lines.map(({ start, end }) => [start, end])).toEqual([[0, 7], [7, source.length]]);
+  });
+
   it("uses generated WASM tracking for line advance and physical caret coordinates", async () => {
     const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
     const explicit = { assetId: "font-geist-tracking", faceIndex: 0 };

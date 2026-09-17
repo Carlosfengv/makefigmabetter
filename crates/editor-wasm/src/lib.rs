@@ -5154,6 +5154,37 @@ pub fn layout_shaped_text_runs_json(
     text: &str,
     max_width_px: f32,
 ) -> Result<String, JsValue> {
+    layout_shaped_text_runs_impl(font_bundle, runs_json, text, max_width_px, &[])
+}
+
+/// Variant of `layout_shaped_text_runs_json` whose JSON array supplies one
+/// non-negative document-pixel first-line inset per hard-break paragraph.
+#[wasm_bindgen]
+pub fn layout_shaped_text_runs_with_first_line_indents_json(
+    font_bundle: &[u8],
+    runs_json: &str,
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_json: &str,
+) -> Result<String, JsValue> {
+    let first_line_indents = serde_json::from_str::<Vec<f32>>(first_line_indents_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_FIRST_LINE_INDENTS"))?;
+    layout_shaped_text_runs_impl(
+        font_bundle,
+        runs_json,
+        text,
+        max_width_px,
+        &first_line_indents,
+    )
+}
+
+fn layout_shaped_text_runs_impl(
+    font_bundle: &[u8],
+    runs_json: &str,
+    text: &str,
+    max_width_px: f32,
+    first_line_indents: &[f32],
+) -> Result<String, JsValue> {
     let inputs = serde_json::from_str::<Vec<TextShapingRunInput>>(runs_json)
         .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_RUNS"))?;
     let variations = inputs
@@ -5193,8 +5224,13 @@ pub fn layout_shaped_text_runs_json(
             })
         })
         .collect::<Result<Vec<_>, JsValue>>()?;
-    let layout = makefigma_graphics_core::layout_shaped_text_runs(&runs, text, max_width_px)
-        .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_LAYOUT_INPUT"))?;
+    let layout = makefigma_graphics_core::layout_shaped_text_runs_with_first_line_indents(
+        &runs,
+        text,
+        max_width_px,
+        first_line_indents,
+    )
+    .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_LAYOUT_INPUT"))?;
     Ok(serde_json::json!({
         "unitsPerEm": layout.units_per_em,
         "lines": layout.lines.into_iter().map(|line| serde_json::json!({
@@ -8607,6 +8643,39 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|glyph| glyph["runIndex"] == 1)
+        );
+    }
+
+    #[test]
+    fn exposes_first_line_indents_through_the_wasm_boundary() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "office office";
+        let runs = serde_json::json!([{
+            "start": 0,
+            "end": source.len(),
+            "fontOffset": 0,
+            "fontLength": font.len(),
+            "faceIndex": 0,
+            "variationAxes": [],
+            "fontSize": 16.0,
+            "letterSpacing": 0.0
+        }]);
+        let result = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_with_first_line_indents_json(
+                font,
+                &runs.to_string(),
+                source,
+                200.0,
+                "[180]",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            result["lines"]
+                .as_array()
+                .is_some_and(|lines| lines.len() > 1)
         );
     }
 

@@ -95,6 +95,7 @@ import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
 import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-projection";
 import { projectTextHitGlyphs } from "@/lib/text-hit-glyph-projection";
+import { shapedTextFirstLineIndents } from "@/lib/shaped-text-line-boxes";
 import { shapedTextLineMetrics } from "@/lib/shaped-text-line-metrics";
 import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
@@ -1902,8 +1903,6 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
  * synthetic weight/italic retain authored advances and travel with the raster
  * identity; small caps travel as derived OpenType feature overrides. */
 function rustTextLayoutRequest(node: CanvasNode) {
-  if ((node.textProperties?.paragraph.paragraphIndent ?? 0) !== 0
-      || node.textProperties?.paragraphStyleRuns?.some((run) => (run.paragraphIndent ?? 0) !== 0)) return undefined;
   if (node.textProperties?.paragraph.textWrapStyle
       || node.textProperties?.paragraphStyleRuns?.some((run) => run.textWrapStyle !== undefined)) return undefined;
   if (node.textProperties?.paragraph.hangingPunctuation) return undefined;
@@ -1913,20 +1912,26 @@ function rustTextLayoutRequest(node: CanvasNode) {
     || node.textProperties?.baseStyle?.leadingTrim !== undefined) return undefined;
   const plan = textFrozenLayoutPlan(node);
   if (!plan) return undefined;
+  const firstLineIndents = shapedTextFirstLineIndents(node, plan.source);
+  if (!firstLineIndents
+      || node.kind === "textPath" && firstLineIndents.some((indent) => indent !== 0)) return undefined;
+  const widthPx = node.kind === "textPath"
+    ? TEXT_PATH_SINGLE_LINE_WIDTH
+    : node.kind === "shapeWithText" ? Math.max(1, node.width - 20) : node.width;
   const key = JSON.stringify([
     node.id,
     plan.source,
     plan.shapingSource,
-    node.width,
+    widthPx,
+    firstLineIndents,
     plan.runs.map((run) => [run.start, run.end, run.font.assetId, run.font.faceIndex, run.axes, run.fontSize, run.fontWeight, run.italic, run.letterSpacing, run.openTypeFeatures]),
   ]);
   return {
     key,
     plan,
     fontSize: plan.fontSize,
-    widthPx: node.kind === "textPath"
-      ? TEXT_PATH_SINGLE_LINE_WIDTH
-      : node.kind === "shapeWithText" ? Math.max(1, node.width - 20) : node.width,
+    widthPx,
+    firstLineIndents,
   };
 }
 
@@ -2005,12 +2010,20 @@ async function deriveRustTextLayout(
   const input = textLayoutInputFromPlan(request.plan, fontBytes);
   if (!input) throw new Error("INVALID_RUST_TEXT_STYLE_RUNS");
   const wasm = await loadWasmRuntime();
-  const payload = wasm.layout_shaped_text_runs_json(
-    new Uint8Array(input.fontBundle),
-    input.runsJson,
-    input.shapingSource,
-    request.widthPx,
-  );
+  const payload = request.firstLineIndents.some((indent) => indent !== 0)
+    ? wasm.layout_shaped_text_runs_with_first_line_indents_json(
+        new Uint8Array(input.fontBundle),
+        input.runsJson,
+        input.shapingSource,
+        request.widthPx,
+        JSON.stringify(request.firstLineIndents),
+      )
+    : wasm.layout_shaped_text_runs_json(
+        new Uint8Array(input.fontBundle),
+        input.runsJson,
+        input.shapingSource,
+        request.widthPx,
+      );
   const displayLayout = parseRustTextLayout(payload, input.shapingSource);
   const sourceLayout = displayLayout && remapRustTextLayoutToSource(displayLayout, input.projection);
   if (!sourceLayout) throw new Error("INVALID_RUST_TEXT_LAYOUT");
@@ -2091,8 +2104,10 @@ function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = nod
     && properties?.paragraph.alignment === "left"
     && !properties?.runs.some((candidate) => candidate.color)
     && (properties?.paragraph.paragraphSpacing ?? 0) === 0
+    && (properties?.paragraph.paragraphIndent ?? 0) === 0
     && !properties?.paragraphStyleRuns?.some((run) =>
-      (run.paragraphSpacing ?? 0) !== 0 || run.lineHeight !== undefined || run.lineHeightUnit !== undefined)
+      (run.paragraphSpacing ?? 0) !== 0 || (run.paragraphIndent ?? 0) !== 0
+      || run.lineHeight !== undefined || run.lineHeightUnit !== undefined)
   ));
   if ((!interactionOnlyShape && node.kind !== "text" && (
       node.fillStack !== undefined

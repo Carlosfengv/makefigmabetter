@@ -1,6 +1,7 @@
 import type { CanvasNode } from "./editor-protocol";
 import { projectGpuTextGlyphs, type GpuTextProjectionRun } from "./gpu-text-projection";
 import type { RustTextLayout } from "./rust-text-layout";
+import { shapedTextLineBoxes } from "./shaped-text-line-boxes";
 import { shapedTextLineMetrics } from "./shaped-text-line-metrics";
 
 /** Builds node-local shaped ink boxes for interaction. Authored/world transforms
@@ -14,7 +15,8 @@ export function projectTextHitGlyphs(input: Readonly<{
 }>) {
   if (input.node.kind !== "text") return undefined;
   const metrics = shapedTextLineMetrics(input.node, input.layout, 31, input.lineHeight);
-  if (!metrics) return undefined;
+  const boxes = shapedTextLineBoxes(input.node, input.layout, input.node.width);
+  if (!metrics || !boxes) return undefined;
   return projectGpuTextGlyphs({
     nodeId: input.node.id,
     runs: input.runs,
@@ -26,6 +28,8 @@ export function projectTextHitGlyphs(input: Readonly<{
     fill: input.node.fill,
     opacity: input.node.opacity,
     lineHeight: input.lineHeight,
+    lineXOffsets: boxes.xOffsets,
+    lineWidths: boxes.widths,
     lineYOffsets: metrics.tops,
     layout: input.layout,
   });
