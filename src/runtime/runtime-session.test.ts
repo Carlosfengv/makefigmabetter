@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { RuntimeSession } from "./runtime-session";
 import { M1_NODE_TYPES, RUNTIME_MIXED } from "./node-proxy";
 import { RuntimeContainerNodeProxy } from "./container-node-proxy";
-import type { PendingProjectionTransaction, RuntimeProjection } from "./runtime-projection-store";
+import type { PendingProjectionTransaction, RuntimeProjection, RuntimeProjectionNode } from "./runtime-projection-store";
 import type { RuntimeTransactionResult, RuntimeTransactionTransport } from "./runtime-transaction-client";
 import { isRuntimeError } from "./runtime-errors";
 import { vi } from "vitest";
@@ -3048,7 +3048,8 @@ describe("M1 RuntimeSession", () => {
       nodes: [
         { id: "document", type: "DOCUMENT", name: "Document" },
         { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
-        { id: "group", type: "GROUP", name: "Group", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "outer", type: "GROUP", name: "Outer", parentId: "page", siblingIndex: 0, x: 80, y: 40, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "group", type: "GROUP", name: "Group", parentId: "outer", siblingIndex: 0, x: 20, y: 10, width: 80, height: 40, opacity: 1, visible: true },
         { id: "rect", type: "RECTANGLE", name: "Rectangle", parentId: "group", siblingIndex: 0, x: 10, y: 5, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
         { id: "ellipse", type: "ELLIPSE", name: "Ellipse", parentId: "group", siblingIndex: 1, x: 40, y: 5, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
         { id: "after", type: "VECTOR", name: "After", parentId: "page", siblingIndex: 1, x: 240, y: 50, width: 10, height: 10, vectorPath: { fillRule: "nonZero", subpaths: [] } },
@@ -3057,6 +3058,7 @@ describe("M1 RuntimeSession", () => {
     let sequence = 0;
     const transport = new InMemoryTransport(projection);
     const session = new RuntimeSession({ sessionId: "flatten-group", projection, transport, createId: () => `flatten-group-${++sequence}`, scheduleMicrotask: () => {} });
+    const outer = (await session.getNodeByIdAsync("outer")) as RuntimeContainerNodeProxy;
     const group = (await session.getNodeByIdAsync("group")) as RuntimeContainerNodeProxy;
     const first = (await session.getNodeByIdAsync("rect"))!;
     const second = (await session.getNodeByIdAsync("ellipse"))!;
@@ -3069,10 +3071,12 @@ describe("M1 RuntimeSession", () => {
     expect(first.removed).toBe(true);
     expect(second.removed).toBe(true);
     expect(group.removed).toBe(true);
+    expect(outer.removed).toBe(true);
     expect(session.currentPage.children.map((node) => node.id)).toEqual([flattened.id, "after"]);
 
     await session.commitAsync();
     expect(await session.getNodeByIdAsync("group")).toBeNull();
+    expect(await session.getNodeByIdAsync("outer")).toBeNull();
     expect(await session.getNodeByIdAsync(flattened.id)).toBe(flattened);
   });
 
@@ -3405,7 +3409,8 @@ describe("M1 RuntimeSession", () => {
       nodes: [
         { id: "document", type: "DOCUMENT", name: "Document" },
         { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
-        { id: "group", type: "GROUP", name: "Group", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "outer", type: "GROUP", name: "Outer", parentId: "page", siblingIndex: 0, x: 80, y: 40, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "group", type: "GROUP", name: "Group", parentId: "outer", siblingIndex: 0, x: 20, y: 10, width: 80, height: 40, opacity: 1, visible: true },
         { id: "a", type: "VECTOR", name: "A", parentId: "group", siblingIndex: 0, x: 10, y: 5, width: 20, height: 20, vectorPath: closedPath },
         { id: "b", type: "VECTOR", name: "B", parentId: "group", siblingIndex: 1, x: 40, y: 5, width: 20, height: 20, vectorPath: closedPath },
         { id: "after", type: "VECTOR", name: "After", parentId: "page", siblingIndex: 1, x: 240, y: 50, width: 10, height: 10, vectorPath: closedPath },
@@ -3414,6 +3419,7 @@ describe("M1 RuntimeSession", () => {
     let sequence = 0;
     const transport = new InMemoryTransport(projection);
     const session = new RuntimeSession({ sessionId: "boolean-group", projection, transport, createId: () => `boolean-group-${++sequence}`, scheduleMicrotask: () => {} });
+    const outer = (await session.getNodeByIdAsync("outer")) as RuntimeContainerNodeProxy;
     const group = (await session.getNodeByIdAsync("group")) as RuntimeContainerNodeProxy;
     const first = (await session.getNodeByIdAsync("a"))!;
     const second = (await session.getNodeByIdAsync("b"))!;
@@ -3423,10 +3429,12 @@ describe("M1 RuntimeSession", () => {
     expect(boolean.parent?.id).toBe("page");
     expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
     expect(group.removed).toBe(true);
+    expect(outer.removed).toBe(true);
     expect(session.currentPage.children.map((node) => node.id)).toEqual([boolean.id, "after"]);
 
     await session.commitAsync();
     expect(await session.getNodeByIdAsync("group")).toBeNull();
+    expect(await session.getNodeByIdAsync("outer")).toBeNull();
     expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
   });
 
@@ -5041,9 +5049,7 @@ class InMemoryTransport implements RuntimeTransactionTransport {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
         });
-        sourceParentIds.forEach((parentId) => {
-          if (nodes.get(parentId)?.type === "GROUP" && ![...nodes.values()].some((node) => node.parentId === parentId)) nodes.delete(parentId);
-        });
+        dissolveEmptyRuntimeGroups(nodes, sourceParentIds);
       }
       else if (operation.type === "transformGroup") {
         nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
@@ -5077,9 +5083,7 @@ class InMemoryTransport implements RuntimeTransactionTransport {
         nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
         const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
         operation.sourceIds.forEach((nodeId) => nodes.delete(nodeId));
-        sourceParentIds.forEach((parentId) => {
-          if (nodes.get(parentId)?.type === "GROUP" && ![...nodes.values()].some((node) => node.parentId === parentId)) nodes.delete(parentId);
-        });
+        dissolveEmptyRuntimeGroups(nodes, sourceParentIds);
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
@@ -5110,6 +5114,20 @@ class InMemoryTransport implements RuntimeTransactionTransport {
     }
     this.projection = { revision: this.projection.revision + 1, nodes: [...nodes.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
+  }
+}
+
+function dissolveEmptyRuntimeGroups(nodes: Map<string, RuntimeProjectionNode>, initialParentIds: ReadonlySet<string>): void {
+  const pending = [...initialParentIds];
+  const visited = new Set<string>();
+  while (pending.length) {
+    const parentId = pending.shift()!;
+    if (visited.has(parentId)) continue;
+    visited.add(parentId);
+    const parent = nodes.get(parentId);
+    if (parent?.type !== "GROUP" || [...nodes.values()].some((node) => node.parentId === parentId)) continue;
+    nodes.delete(parentId);
+    if (typeof parent.parentId === "string") pending.push(parent.parentId);
   }
 }
 

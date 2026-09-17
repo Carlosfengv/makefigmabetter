@@ -1025,17 +1025,8 @@ function validateBooleanOperation(
   }
   const operandIds = new Set(operation.operandIds);
   const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
-  for (const parentId of sourceParentIds) {
-    const parent = read(parentId);
-    if (!parent || parent.type !== "GROUP" || operation.node.parentId === parentId) continue;
-    const children = [...nodeIds()]
-      .map((nodeId) => read(nodeId))
-      .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === parentId));
-    if (!children.length || children.some((child) => !operandIds.has(child.id))) continue;
-    const grandparent = typeof parent.parentId === "string" ? read(parent.parentId) : undefined;
-    if (!runtimeProjectionCanDissolveNeutralGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
-      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: parent.id });
-    }
+  if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId)) {
+    throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
   }
   if (new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
@@ -1242,17 +1233,8 @@ function validateFlattenNodesOperation(
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   const sourceIds = new Set(operation.sourceIds);
   const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
-  for (const parentId of sourceParentIds) {
-    const parent = read(parentId);
-    if (!parent || parent.type !== "GROUP" || operation.replacement.parentId === parentId) continue;
-    const children = [...nodeIds()]
-      .map((nodeId) => read(nodeId))
-      .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === parentId));
-    if (!children.length || children.some((child) => !sourceIds.has(child.id))) continue;
-    const grandparent = typeof parent.parentId === "string" ? read(parent.parentId) : undefined;
-    if (!runtimeProjectionCanDissolveNeutralGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
-      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: parent.id });
-    }
+  if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId)) {
+    throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   }
   const occupiedSiblingSlots = new Set<string>();
   for (const { nodeId, siblingIndex } of operation.siblingIndexes) {
@@ -1268,7 +1250,7 @@ function validateFlattenNodesOperation(
 function runtimeProjectionCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {
   return node.type === "GROUP"
     && node.visible !== false
-    && (typeof node.opacity !== "number" || node.opacity === 1)
+    && (node.opacity === undefined || node.opacity === 1)
     && (node.blendMode === undefined || node.blendMode === "normal")
     && node.isMask !== true
     && node.dropShadow == null
@@ -1276,6 +1258,55 @@ function runtimeProjectionCanDissolveNeutralGroup(node: RuntimeProjectionNode): 
     && node.contentsHidden !== true
     && node.clipsContent !== true
     && !projectionOwnsAutoLayout(node);
+}
+
+function runtimeProjectionDissolvableNeutralGroups(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string>,
+  targetParentId: unknown,
+): RuntimeProjectionNode[] | undefined {
+  const nodes = [...nodeIds()]
+    .map((nodeId) => read(nodeId))
+    .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, RuntimeProjectionNode[]>();
+  nodes.forEach((node) => {
+    if (typeof node.parentId !== "string") return;
+    const children = childrenByParent.get(node.parentId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentId, children);
+  });
+  const consumedIds = new Set(selectedIds);
+  const dissolved = new Map<string, RuntimeProjectionNode>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (node.id === targetParentId || dissolved.has(node.id) || !runtimeProjectionCanDissolveNeutralGroup(node)) continue;
+      const children = childrenByParent.get(node.id) ?? [];
+      if (!children.length || children.some((child) => !consumedIds.has(child.id))) continue;
+      dissolved.set(node.id, node);
+      consumedIds.add(node.id);
+      changed = true;
+    }
+  }
+  for (const sourceParentId of sourceParentIds) {
+    if (sourceParentId === targetParentId) continue;
+    const sourceParent = byId.get(sourceParentId);
+    if (sourceParent?.type === "GROUP" && !dissolved.has(sourceParent.id)) return undefined;
+  }
+  for (const group of dissolved.values()) {
+    if (group.parentId === targetParentId) continue;
+    const parent = typeof group.parentId === "string" ? byId.get(group.parentId) : undefined;
+    if (
+      (!parent && group.parentId !== undefined) ||
+      (parent?.type === "GROUP" && !dissolved.has(parent.id)) ||
+      (parent && (["BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(parent.type) || projectionOwnsAutoLayout(parent)))
+    ) return undefined;
+  }
+  return [...dissolved.values()];
 }
 
 function projectionOwnsAutoLayout(node: RuntimeProjectionNode): boolean {

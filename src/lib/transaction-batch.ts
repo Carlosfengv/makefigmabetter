@@ -316,15 +316,13 @@ export function resolveFlattenNodesBatch(
   if (targetPageId !== sourcePageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
   const sourceIdSet = new Set(sourceIds);
   if (targetParentId && (sourceIdSet.has(targetParentId) || sourceIds.some((sourceId) => hasAncestor(nodes, targetParentId, sourceId)))) return undefined;
-  const dissolvedGroups = [...new Set(concreteSources.map((source) => source.parentId))]
-    .filter((parentId): parentId is string => typeof parentId === "string" && parentId !== targetParentId)
-    .map((parentId) => nodes.find((node) => node.id === parentId))
-    .filter((parent): parent is CanvasNode => Boolean(parent?.kind === "group"))
-    .filter((group) => {
-      const children = nodes.filter((candidate) => candidate.parentId === group.id);
-      return children.length > 0 && children.every((child) => sourceIdSet.has(child.id));
-    });
-  if (dissolvedGroups.some((group) => !canDissolveNeutralGroup(nodes, group))) return undefined;
+  const dissolvedGroups = dissolvableNeutralGroups(
+    nodes,
+    sourceIdSet,
+    new Set(concreteSources.map((source) => source.parentId)),
+    targetParentId,
+  );
+  if (!dissolvedGroups) return undefined;
   const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
   const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
@@ -388,7 +386,7 @@ export function resolveFlattenNodesBatch(
   return { replacement, batch };
 }
 
-function canDissolveNeutralGroup(nodes: readonly CanvasNode[], group: CanvasNode): boolean {
+function canDissolveNeutralGroup(group: CanvasNode): boolean {
   if (
     group.kind !== "group" ||
     group.visible === false ||
@@ -401,13 +399,52 @@ function canDissolveNeutralGroup(nodes: readonly CanvasNode[], group: CanvasNode
     group.clipsContent === true ||
     group.autoLayout !== undefined
   ) return false;
-  if (!group.parentId) return true;
-  const parent = nodes.find((node) => node.id === group.parentId);
-  return Boolean(
-    parent &&
-    !["group", "booleanOperation", "transformGroup"].includes(parent.kind) &&
-    parent.autoLayout === undefined,
-  );
+  return true;
+}
+
+function dissolvableNeutralGroups(
+  nodes: readonly CanvasNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string | undefined,
+): CanvasNode[] | undefined {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, CanvasNode[]>();
+  nodes.forEach((node) => {
+    if (!node.parentId) return;
+    const children = childrenByParent.get(node.parentId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentId, children);
+  });
+  const consumedIds = new Set(selectedIds);
+  const dissolved = new Map<string, CanvasNode>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (node.id === targetParentId || dissolved.has(node.id) || !canDissolveNeutralGroup(node)) continue;
+      const children = childrenByParent.get(node.id) ?? [];
+      if (!children.length || children.some((child) => !consumedIds.has(child.id))) continue;
+      dissolved.set(node.id, node);
+      consumedIds.add(node.id);
+      changed = true;
+    }
+  }
+  for (const sourceParentId of sourceParentIds) {
+    if (sourceParentId === targetParentId) continue;
+    const sourceParent = sourceParentId ? byId.get(sourceParentId) : undefined;
+    if (sourceParent?.kind === "group" && !dissolved.has(sourceParent.id)) return undefined;
+  }
+  for (const group of dissolved.values()) {
+    if (group.parentId === targetParentId) continue;
+    const parent = group.parentId ? byId.get(group.parentId) : undefined;
+    if (
+      (!parent && group.parentId !== undefined) ||
+      (parent?.kind === "group" && !dissolved.has(parent.id)) ||
+      (parent && (["booleanOperation", "transformGroup"].includes(parent.kind) || parent.autoLayout !== undefined))
+    ) return undefined;
+  }
+  return [...dissolved.values()];
 }
 
 /** Replaces a Vector's paint stroke with the closed fill contours derived by
@@ -971,15 +1008,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         }
         if (command.index !== undefined && (!Number.isSafeInteger(command.index) || command.index < 0)) return undefined;
         if (command.type === "boolean") {
-          dissolvedGroups = [...new Set(roots.map((node) => node.parentId))]
-            .filter((sourceParentId): sourceParentId is string => typeof sourceParentId === "string" && sourceParentId !== parentId)
-            .map((sourceParentId) => nextNodes.find((node) => node.id === sourceParentId))
-            .filter((sourceParent): sourceParent is CanvasNode => Boolean(sourceParent?.kind === "group"))
-            .filter((group) => {
-              const children = nextNodes.filter((candidate) => candidate.parentId === group.id);
-              return children.length > 0 && children.every((child) => selectedIds.has(child.id));
-            });
-          if (dissolvedGroups.some((group) => !canDissolveNeutralGroup(nextNodes, group))) return undefined;
+          const resolvedGroups = dissolvableNeutralGroups(
+            nextNodes,
+            selectedIds,
+            new Set(roots.map((node) => node.parentId)),
+            parentId,
+          );
+          if (!resolvedGroups) return undefined;
+          dissolvedGroups = resolvedGroups;
         }
         const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
         const crossParentRoots = roots.filter((node) => node.parentId !== parentId);

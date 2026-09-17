@@ -554,20 +554,22 @@ describe("Core transaction batch resolution", () => {
 
   it("dissolves a neutral Group when Boolean creation consumes every child", () => {
     const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000109", pageId: "page", positionId: "10000000000000000000000000000000:00000000000040008000000000000109" };
-    const group = { ...createNode("group", 20, 30), id: "00000000-0000-4000-8000-00000000010a", pageId: "page", parentId: frame.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010a" };
+    const outer = { ...createNode("group", 5, 10), id: "00000000-0000-4000-8000-00000000010f", pageId: "page", parentId: frame.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010f" };
+    const group = { ...createNode("group", 15, 20), id: "00000000-0000-4000-8000-00000000010a", pageId: "page", parentId: outer.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010a" };
     const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000010b", pageId: "page", parentId: group.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010b" };
     const second = { ...createNode("vector", 40, 0), id: "00000000-0000-4000-8000-00000000010c", pageId: "page", parentId: group.id, positionId: "20000000000000000000000000000000:0000000000004000800000000000010c" };
     const sibling = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000010d", pageId: "page", parentId: frame.id, positionId: "f0000000000000000000000000000000:0000000000004000800000000000010d" };
     const id = "00000000-0000-4000-8000-00000000010e";
 
-    const resolved = resolveCoreBatch([frame, group, first, second, sibling], [{
+    const resolved = resolveCoreBatch([frame, outer, group, first, second, sibling], [{
       type: "boolean", ids: [first.id, second.id], operation: "union", id, parentId: frame.id, index: 0,
     }]);
 
     expect(resolved?.nextNodes.some((node) => node.id === group.id)).toBe(false);
+    expect(resolved?.nextNodes.some((node) => node.id === outer.id)).toBe(false);
     expect(resolved?.nextNodes.find((node) => node.id === id)).toMatchObject({ kind: "booleanOperation", parentId: frame.id });
     expect(resolved?.nextNodes.filter((node) => node.parentId === frame.id).sort((left, right) => left.positionId!.localeCompare(right.positionId))[0]?.id).toBe(id);
-    expect(resolveCoreBatch([frame, { ...group, opacity: .5 }, first, second, sibling], [{
+    expect(resolveCoreBatch([frame, outer, { ...group, opacity: .5 }, first, second, sibling], [{
       type: "boolean", ids: [first.id, second.id], operation: "union", id, parentId: frame.id, index: 0,
     }])).toBeUndefined();
   });
@@ -742,7 +744,8 @@ describe("Core transaction batch resolution", () => {
 
   it("removes a fully consumed neutral Group from the flatten projection", () => {
     const target = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000146", width: 400, height: 200 };
-    const group = { ...createNode("group", 20, 30), id: "00000000-0000-4000-8000-000000000147", parentId: target.id, positionId: "10000000000000000000000000000000:00000000000000000000000000000000" };
+    const outer = { ...createNode("group", 5, 10), id: "00000000-0000-4000-8000-00000000014c", parentId: target.id, positionId: "10000000000000000000000000000000:00000000000000000000000000000000" };
+    const group = { ...createNode("group", 15, 20), id: "00000000-0000-4000-8000-000000000147", parentId: outer.id, positionId: "10000000000000000000000000000000:00000000000000000000000000000001" };
     const first = { ...createNode("rectangle", 10, 10), id: "00000000-0000-4000-8000-000000000148", parentId: group.id, width: 20, height: 20, strokeWidth: 0 };
     const second = { ...createNode("ellipse", 40, 10), id: "00000000-0000-4000-8000-000000000149", parentId: group.id, width: 20, height: 20, strokeWidth: 0 };
     const sibling = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000014a", parentId: target.id, positionId: "f0000000000000000000000000000000:00000000000000000000000000000000" };
@@ -754,7 +757,7 @@ describe("Core transaction batch resolution", () => {
     ] }] };
 
     const resolved = resolveFlattenNodesBatch(
-      [target, group, first, second, sibling],
+      [target, outer, group, first, second, sibling],
       [first.id, second.id],
       vectorPath,
       () => replacementId,
@@ -768,7 +771,16 @@ describe("Core transaction batch resolution", () => {
       { type: "reposition", positionIds: [{ id: replacementId, positionId: expect.any(String) }] },
     ]);
     expect(resolveFlattenNodesBatch(
-      [target, { ...group, opacity: .5 }, first, second, sibling],
+      [target, outer, { ...group, opacity: .5 }, first, second, sibling],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: target.id, index: 0 },
+    )).toBeUndefined();
+    const retainedOuterChild = { ...createNode("vector", 80, 10), id: "00000000-0000-4000-8000-00000000014d", parentId: outer.id };
+    expect(resolveFlattenNodesBatch(
+      [target, outer, group, first, second, retainedOuterChild, sibling],
       [first.id, second.id],
       vectorPath,
       () => replacementId,

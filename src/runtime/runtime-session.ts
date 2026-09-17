@@ -2596,32 +2596,25 @@ export class RuntimeSession implements RuntimeContainerHost {
       return node;
     });
     const selectedIds = new Set(selected.map((node) => node.id));
-    const dissolvedGroups: RuntimeProjectionNode[] = [];
+    const sourceParentIds = new Set(selected.map((node) => node.parentId));
+    const dissolvedGroups = runtimeDissolvableNeutralGroups(
+      this.projectionStore.listLiveNodes(),
+      selectedIds,
+      sourceParentIds,
+      targetParent.id,
+    );
+    if (!dissolvedGroups) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]?.parentId });
+    const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
     if (crossesParents && runtimeOwnsAutoLayout(targetParentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
-    for (const sourceParentId of new Set(selected.map((node) => node.parentId))) {
+    for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === targetParent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
-      if (sourceParent?.type === "GROUP") {
-        const directChildren = this.siblingsOf(sourceParent.id);
-        const sourceGrandparent = typeof sourceParent.parentId === "string" ? this.projectionStore.getNode(sourceParent.parentId) : undefined;
-        if (
-          directChildren.length > 0 &&
-          directChildren.every((child) => selectedIds.has(child.id)) &&
-          runtimeCanDissolveNeutralGroup(sourceParent) &&
-          sourceGrandparent &&
-          !["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(sourceGrandparent.type) &&
-          !runtimeOwnsAutoLayout(sourceGrandparent)
-        ) {
-          dissolvedGroups.push(sourceParent);
-          continue;
-        }
-      }
+      if (sourceParent?.type === "GROUP" && dissolvedGroupIds.has(sourceParent.id)) continue;
       if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
       }
     }
-    const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     for (const structuralParentId of new Set([...selected.map((node) => node.parentId), targetParent.id])) {
       if (typeof structuralParentId !== "string") continue;
       const structuralParent = this.projectionStore.getNode(structuralParentId);
@@ -2880,32 +2873,25 @@ export class RuntimeSession implements RuntimeContainerHost {
       return node;
     });
     const selectedIds = new Set(selected.map((node) => node.id));
-    const dissolvedGroups: RuntimeProjectionNode[] = [];
+    const sourceParentIds = new Set(selected.map((node) => node.parentId));
+    const dissolvedGroups = runtimeDissolvableNeutralGroups(
+      this.projectionStore.listLiveNodes(),
+      selectedIds,
+      sourceParentIds,
+      parent.id,
+    );
+    if (!dissolvedGroups) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]?.parentId });
+    const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== parent.id);
     if (crossesParents && runtimeOwnsAutoLayout(parentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
-    for (const sourceParentId of new Set(selected.map((node) => node.parentId))) {
+    for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === parent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
-      if (sourceParent?.type === "GROUP") {
-        const directChildren = this.siblingsOf(sourceParent.id);
-        const sourceGrandparent = typeof sourceParent.parentId === "string" ? this.projectionStore.getNode(sourceParent.parentId) : undefined;
-        if (
-          directChildren.length > 0 &&
-          directChildren.every((child) => selectedIds.has(child.id)) &&
-          runtimeCanDissolveNeutralGroup(sourceParent) &&
-          sourceGrandparent &&
-          !["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(sourceGrandparent.type) &&
-          !runtimeOwnsAutoLayout(sourceGrandparent)
-        ) {
-          dissolvedGroups.push(sourceParent);
-          continue;
-        }
-      }
+      if (sourceParent?.type === "GROUP" && dissolvedGroupIds.has(sourceParent.id)) continue;
       if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
       }
     }
-    const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     for (const structuralParentId of new Set([...selected.map((node) => node.parentId), parent.id])) {
       if (typeof structuralParentId !== "string") continue;
       const structuralParent = this.projectionStore.getNode(structuralParentId);
@@ -4781,6 +4767,49 @@ function runtimeCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {
     && node.contentsHidden !== true
     && node.clipsContent !== true
     && !runtimeOwnsAutoLayout(node);
+}
+
+function runtimeDissolvableNeutralGroups(
+  nodes: readonly RuntimeProjectionNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string,
+): RuntimeProjectionNode[] | undefined {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, RuntimeProjectionNode[]>();
+  nodes.forEach((node) => {
+    if (node.removed === true || typeof node.parentId !== "string") return;
+    const children = childrenByParent.get(node.parentId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentId, children);
+  });
+  const consumedIds = new Set(selectedIds);
+  const dissolved = new Map<string, RuntimeProjectionNode>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (node.id === targetParentId || dissolved.has(node.id) || !runtimeCanDissolveNeutralGroup(node)) continue;
+      const children = childrenByParent.get(node.id) ?? [];
+      if (!children.length || children.some((child) => !consumedIds.has(child.id))) continue;
+      dissolved.set(node.id, node);
+      consumedIds.add(node.id);
+      changed = true;
+    }
+  }
+  for (const sourceParentId of sourceParentIds) {
+    if (sourceParentId === targetParentId) continue;
+    const sourceParent = typeof sourceParentId === "string" ? byId.get(sourceParentId) : undefined;
+    if (sourceParent?.type === "GROUP" && !dissolved.has(sourceParent.id)) return undefined;
+  }
+  for (const group of dissolved.values()) {
+    if (group.parentId === targetParentId) continue;
+    const parent = typeof group.parentId === "string" ? byId.get(group.parentId) : undefined;
+    if (!parent || (parent.type === "GROUP" && !dissolved.has(parent.id)) || ["BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(parent.type) || runtimeOwnsAutoLayout(parent)) {
+      return undefined;
+    }
+  }
+  return [...dissolved.values()];
 }
 
 function runtimeBooleanHasImmutableAncestor(

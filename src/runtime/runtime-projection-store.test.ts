@@ -73,7 +73,8 @@ describe("RuntimeProjectionStore", () => {
       revision: 7,
       nodes: [
         { id: "page", type: "PAGE" },
-        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "outer", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "group", type: "GROUP", parentId: "outer", siblingIndex: 0, opacity: 1, visible: true },
         { id: "a", type: "VECTOR", parentId: "group", siblingIndex: 0 },
         { id: "b", type: "VECTOR", parentId: "group", siblingIndex: 1 },
       ],
@@ -94,6 +95,7 @@ describe("RuntimeProjectionStore", () => {
     });
 
     expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(store.getNode("outer")).toMatchObject({ removed: true });
     expect(store.getNode("a")).toMatchObject({ parentId: "boolean", siblingIndex: 0 });
     expect(store.getNode("b")).toMatchObject({ parentId: "boolean", siblingIndex: 1 });
   });
@@ -252,7 +254,8 @@ describe("RuntimeProjectionStore", () => {
       revision: 7,
       nodes: [
         { id: "page", type: "PAGE" },
-        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "outer", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "group", type: "GROUP", parentId: "outer", siblingIndex: 0, opacity: 1, visible: true },
         { id: "rect", type: "RECTANGLE", parentId: "group", siblingIndex: 0, width: 40, height: 30 },
         { id: "ellipse", type: "ELLIPSE", parentId: "group", siblingIndex: 1, width: 40, height: 30 },
         { id: "sibling", type: "VECTOR", parentId: "page", siblingIndex: 1 },
@@ -273,6 +276,7 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("rect")).toMatchObject({ removed: true });
     expect(store.getNode("ellipse")).toMatchObject({ removed: true });
     expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(store.getNode("outer")).toMatchObject({ removed: true });
     expect(store.getNode("flat")).toMatchObject({ parentId: "page", siblingIndex: 0, removed: false });
   });
 
