@@ -88,8 +88,10 @@ pub const GRID_MANUAL_PLACEMENT_ENGINE_SEMANTICS_VERSION: u32 = 59;
 pub const GRID_AUTO_ROWS_ENGINE_SEMANTICS_VERSION: u32 = 60;
 pub const GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION: u32 = 61;
 pub const GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION: u32 = 62;
+pub const TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION: u32 = 63;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 =
+    TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -123,6 +125,21 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        && (document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_color_variable)
+        }) || document.text_styles().any(|style| {
+            style
+                .style
+                .text_decoration_color
+                .as_ref()
+                .is_some_and(|color| color.variable_id.is_some())
+        }))
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
             let layout = document.auto_layout_for_node(node.id);
@@ -907,6 +924,17 @@ pub fn document_from_snapshot_with_engine_semantics(
     {
         return Err(SnapshotError::Invalid);
     }
+    if declared_engine_semantics_version < TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        && snapshot.text_styles.iter().any(|style| {
+            style
+                .style
+                .as_ref()
+                .and_then(|run| run.text_decoration_color.as_ref())
+                .is_some_and(|color| color.variable_id.is_some())
+        })
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
     {
@@ -1229,6 +1257,14 @@ pub fn document_from_snapshot_with_engine_semantics(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_text_decoration_color)
+            {
+                return Err(SnapshotError::Invalid);
+            }
+            if declared_engine_semantics_version
+                < TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_color_variable)
             {
                 return Err(SnapshotError::Invalid);
             }
@@ -2477,6 +2513,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 variable_bindings: style_variable_bindings_to_proto(&run.variable_bindings),
                 text_decoration_color: run
                     .text_decoration_color
+                    .as_deref()
                     .map(text_decoration_color_to_proto),
             })
             .collect(),
@@ -2549,6 +2586,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 variable_bindings: style_variable_bindings_to_proto(&style.variable_bindings),
                 text_decoration_color: style
                     .text_decoration_color
+                    .as_deref()
                     .map(text_decoration_color_to_proto),
             }),
         paragraph_style_runs: properties
@@ -2642,7 +2680,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .collect::<Result<_, SnapshotError>>()?,
@@ -2765,7 +2804,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .transpose()?,
@@ -3220,6 +3260,19 @@ fn text_properties_has_text_decoration_color(properties: &TextProperties) -> boo
             .is_some_and(|style| style.text_decoration_color.is_some())
 }
 
+fn text_properties_has_text_decoration_color_variable(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| {
+        run.text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    }) || properties.base_style.as_ref().is_some_and(|style| {
+        style
+            .text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    })
+}
+
 fn text_properties_has_text_decoration_skip_ink(properties: &TextProperties) -> bool {
     properties
         .runs
@@ -3404,12 +3457,13 @@ fn text_decoration_thickness_from_proto(
     }
 }
 
-fn text_decoration_color_to_proto(value: TextDecorationColor) -> v1::TextDecorationColor {
+fn text_decoration_color_to_proto(value: &TextDecorationColor) -> v1::TextDecorationColor {
     v1::TextDecorationColor {
         color: Some(color_to_proto(value.color)),
         visible: value.visible,
         opacity: value.opacity,
         blend_mode: blend_mode_to_proto(value.blend_mode) as i32,
+        variable_id: value.variable_id.as_deref().map(str::to_owned),
     }
 }
 
@@ -3425,6 +3479,7 @@ fn text_decoration_color_from_proto(
         visible: value.visible,
         opacity: value.opacity,
         blend_mode,
+        variable_id: value.variable_id.map(String::into_boxed_str),
     })
 }
 
@@ -6423,7 +6478,7 @@ mod tests {
                 text_style_id: None,
                 paint_style_id: None,
                 variable_bindings: Default::default(),
-                text_decoration_color: Some(TextDecorationColor {
+                text_decoration_color: Some(Box::new(TextDecorationColor {
                     color: Color {
                         space: ColorSpace::Srgb,
                         components: [1.0, 0.25, 0.5],
@@ -6432,7 +6487,8 @@ mod tests {
                     visible: true,
                     opacity: 0.75,
                     blend_mode: BlendMode::Multiply,
-                }),
+                    variable_id: None,
+                })),
             }],
             ..TextProperties::default()
         };
@@ -6470,6 +6526,119 @@ mod tests {
                 67_u128.to_be_bytes(),
                 hash,
                 TEXT_DECORATION_COLOR_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn text_decoration_color_variable_round_trips_and_requires_semantics_sixty_three() {
+        let mut document = Document::with_id(DocumentId(167));
+        let collection = VariableCollectionResource {
+            id: "VC:decoration".into(),
+            key: String::new(),
+            name: "Decoration".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:decoration".into(),
+            key: String::new(),
+            name: "Decoration".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Color,
+            values_by_mode: [(
+                "default".into(),
+                VariableValue::Color(Color::from_srgb_u8([255, 64, 128], 255)),
+            )]
+            .into(),
+            scopes: vec!["ALL_FILLS".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        document.seed_variable_collection(collection).unwrap();
+        document.seed_variable(variable.clone()).unwrap();
+        let mut text = node(167, NodeKind::Text, None);
+        text.text = "Color".into();
+        document.seed_node_on_page(DEFAULT_PAGE_ID, text).unwrap();
+        let style = TextStyleRun {
+            start: 0,
+            end: 5,
+            font: None,
+            font_size: 16.0,
+            font_weight: 400,
+            italic: false,
+            letter_spacing: 0.0,
+            color: None,
+            fill_stack: None,
+            text_case: None,
+            hyperlink: None,
+            text_decoration: Some(TextDecoration::Underline),
+            text_decoration_style: None,
+            text_decoration_offset: None,
+            text_decoration_thickness: None,
+            text_decoration_skip_ink: None,
+            leading_trim: None,
+            open_type_features: Vec::new(),
+            text_style_id: None,
+            paint_style_id: None,
+            variable_bindings: Default::default(),
+            text_decoration_color: Some(Box::new(TextDecorationColor {
+                color: Color::from_srgb_u8([255, 64, 128], 255),
+                visible: true,
+                opacity: 0.75,
+                blend_mode: BlendMode::Normal,
+                variable_id: Some(variable.id.into()),
+            })),
+        };
+        let properties = TextProperties {
+            runs: vec![style],
+            ..TextProperties::default()
+        };
+        document
+            .seed_text_properties(NodeId(167), properties.clone())
+            .unwrap();
+        assert_eq!(
+            snapshot_from_document(
+                &document,
+                TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot = snapshot_from_document(
+            &document,
+            TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            167_u128.to_be_bytes(),
+            hash,
+            TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.text_properties_for_node(NodeId(167)),
+            Some(&properties)
+        );
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version =
+            TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                167_u128.to_be_bytes(),
+                hash,
+                TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

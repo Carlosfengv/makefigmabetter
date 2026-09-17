@@ -945,7 +945,30 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=76).contains(&snapshot.schema_version)
+    if !(1..=77).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 77
+            && (snapshot.nodes.iter().any(|node| {
+                node.text_properties.as_ref().is_some_and(|properties| {
+                    properties.runs.iter().any(|run| {
+                        run.text_decoration_color
+                            .as_ref()
+                            .is_some_and(|color| color.variable_id.is_some())
+                    }) || properties.base_style.as_ref().is_some_and(|style| {
+                        style
+                            .text_decoration_color
+                            .as_ref()
+                            .is_some_and(|color| color.variable_id.is_some())
+                    })
+                })
+            }) || snapshot.text_styles.as_ref().is_some_and(|styles| {
+                styles.iter().any(|style| {
+                    style
+                        .style
+                        .text_decoration_color
+                        .as_ref()
+                        .is_some_and(|color| color.variable_id.is_some())
+                })
+            })))
         || (snapshot.schema_version < 76
             && snapshot.nodes.iter().any(|node| {
                 node.auto_layout.as_ref().is_some_and(|layout| {
@@ -2012,6 +2035,8 @@ struct ProjectionTextDecorationColor {
     visible: bool,
     opacity: f32,
     blend_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2434,6 +2459,29 @@ impl DocumentEngine {
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let schema_version = if self.document.nodes().any(|node| {
+            self.document
+                .text_properties_for_node(node.id)
+                .is_some_and(|properties| {
+                    properties.runs.iter().any(|run| {
+                        run.text_decoration_color
+                            .as_ref()
+                            .is_some_and(|color| color.variable_id.is_some())
+                    }) || properties.base_style.as_ref().is_some_and(|style| {
+                        style
+                            .text_decoration_color
+                            .as_ref()
+                            .is_some_and(|color| color.variable_id.is_some())
+                    })
+                })
+        }) || self.document.text_styles().any(|style| {
+            style
+                .style
+                .text_decoration_color
+                .as_ref()
+                .is_some_and(|color| color.variable_id.is_some())
+        }) {
+            77
+        } else if self.document.nodes().any(|node| {
             let layout = self.document.auto_layout_for_node(node.id);
             layout.mode == LayoutMode::Grid
                 && (layout.primary_sizing == LayoutSizing::Hug
@@ -6368,6 +6416,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .map(projection_text_decoration_thickness),
                 text_decoration_color: run
                     .text_decoration_color
+                    .as_deref()
                     .map(projection_text_decoration_color),
                 text_decoration_skip_ink: run.text_decoration_skip_ink,
                 leading_trim: run.leading_trim.map(|value| match value {
@@ -6488,6 +6537,7 @@ fn projection_text_properties(properties: &TextProperties) -> ProjectionTextProp
                     .map(projection_text_decoration_thickness),
                 text_decoration_color: style
                     .text_decoration_color
+                    .as_deref()
                     .map(projection_text_decoration_color),
                 text_decoration_skip_ink: style.text_decoration_skip_ink,
                 leading_trim: style.leading_trim.map(|value| match value {
@@ -6837,7 +6887,8 @@ fn text_properties_from_projection(
                                 .text_decoration_color
                                 .as_ref()
                                 .map(text_decoration_color_from_projection)
-                                .transpose()?,
+                                .transpose()?
+                                .map(Box::new),
                             text_decoration_skip_ink: run
                                 .text_decoration_skip_ink
                                 .filter(|value| *value),
@@ -7010,7 +7061,8 @@ fn text_properties_from_projection(
                                 .text_decoration_color
                                 .as_ref()
                                 .map(text_decoration_color_from_projection)
-                                .transpose()?,
+                                .transpose()?
+                                .map(Box::new),
                             text_decoration_skip_ink: style
                                 .text_decoration_skip_ink
                                 .filter(|value| *value),
@@ -7153,12 +7205,13 @@ fn text_decoration_thickness_from_projection(
     }
 }
 
-fn projection_text_decoration_color(value: TextDecorationColor) -> ProjectionTextDecorationColor {
+fn projection_text_decoration_color(value: &TextDecorationColor) -> ProjectionTextDecorationColor {
     ProjectionTextDecorationColor {
         color: projection_color(value.color),
         visible: value.visible,
         opacity: value.opacity,
         blend_mode: format_blend_mode(value.blend_mode).into(),
+        variable_id: value.variable_id.as_deref().map(str::to_owned),
     }
 }
 
@@ -7174,6 +7227,7 @@ fn text_decoration_color_from_projection(
         visible: value.visible,
         opacity: value.opacity,
         blend_mode,
+        variable_id: value.variable_id.clone().map(String::into_boxed_str),
     })
 }
 
@@ -12337,6 +12391,105 @@ mod tests {
         assert_eq!(restored.document.auto_layout_for_node(frame.id), layout);
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 75;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v77_round_trips_text_decoration_color_variable_and_v76_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let collection = VariableCollectionResource {
+            id: "VC:decoration".into(),
+            key: String::new(),
+            name: "Decoration".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let variable = VariableResource {
+            id: "V:decoration".into(),
+            key: String::new(),
+            name: "Decoration".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Color,
+            values_by_mode: [(
+                "default".into(),
+                VariableValue::Color(Color::from_srgb_u8([255, 64, 128], 255)),
+            )]
+            .into(),
+            scopes: vec!["ALL_FILLS".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        engine
+            .document
+            .seed_variable_collection(collection)
+            .unwrap();
+        engine.document.seed_variable(variable.clone()).unwrap();
+        let mut text = existing_rect(NodeId(0x77));
+        text.kind = NodeKind::Text;
+        text.text = "A".into();
+        engine
+            .document
+            .seed_node_on_page(DEFAULT_PAGE_ID, text)
+            .unwrap();
+        let properties = TextProperties {
+            runs: vec![TextStyleRun {
+                start: 0,
+                end: 1,
+                font: None,
+                font_size: 16.0,
+                font_weight: 400,
+                italic: false,
+                letter_spacing: 0.0,
+                color: None,
+                fill_stack: None,
+                text_case: None,
+                hyperlink: None,
+                text_decoration: Some(TextDecoration::Underline),
+                text_decoration_style: None,
+                text_decoration_offset: None,
+                text_decoration_thickness: None,
+                text_decoration_color: Some(Box::new(TextDecorationColor {
+                    color: Color::from_srgb_u8([255, 64, 128], 255),
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Normal,
+                    variable_id: Some(variable.id.into()),
+                })),
+                text_decoration_skip_ink: None,
+                leading_trim: None,
+                open_type_features: Vec::new(),
+                text_style_id: None,
+                paint_style_id: None,
+                variable_bindings: BTreeMap::new(),
+            }],
+            ..TextProperties::default()
+        };
+        engine
+            .document
+            .seed_text_properties(NodeId(0x77), properties.clone())
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":77"));
+        assert!(snapshot.contains("\"variableId\":\"V:decoration\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(
+            restored.document.text_properties_for_node(NodeId(0x77)),
+            Some(&properties)
+        );
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 76;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")

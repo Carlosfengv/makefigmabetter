@@ -283,6 +283,7 @@ export type DocumentTextDecorationColor = Readonly<{
   visible: boolean;
   opacity: number;
   blendMode: Exclude<BlendMode, "pass-through">;
+  variableId?: string;
 }>;
 export interface DocumentHyperlinkTarget {
   type: "URL" | "NODE";

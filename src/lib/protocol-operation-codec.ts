@@ -738,6 +738,7 @@ function textDecorationColorProto(value: DocumentTextProperties["runs"][number][
     visible: value.visible,
     opacity: value.opacity,
     blendMode: blendMode(value.blendMode),
+    variableId: value.variableId,
   };
 }
 function textCaseProto(value: DocumentTextProperties["runs"][number]["textCase"]): ProtoTextCase | undefined {

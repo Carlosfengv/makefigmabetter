@@ -772,12 +772,15 @@ pub enum TextDecorationThickness {
 
 /// Figma TextDecorationColor's explicit SolidPaint value. AUTO is represented
 /// by absence on TextStyleRun so pre-existing documents retain their hashes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextDecorationColor {
     pub color: Color,
     pub visible: bool,
     pub opacity: f32,
     pub blend_mode: BlendMode,
+    /// Optional Figma SolidPaint color Variable identity. `color` remains the
+    /// resolved value for deterministic rendering and offline snapshots.
+    pub variable_id: Option<Box<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,7 +839,7 @@ pub struct TextStyleRun {
     pub text_decoration_thickness: Option<TextDecorationThickness>,
     /// Omission is Figma AUTO. Explicit values retain the admitted SolidPaint
     /// color, visibility, opacity and paint blend fields.
-    pub text_decoration_color: Option<TextDecorationColor>,
+    pub text_decoration_color: Option<Box<TextDecorationColor>>,
     /// Omission preserves the legacy continuous underline. `Some(true)` opts
     /// into Figma's descender-aware skip-ink behavior.
     pub text_decoration_skip_ink: Option<bool>,
@@ -2777,11 +2780,15 @@ impl Document {
         }) {
             return Err(CommandError::InvalidVariable);
         }
-        if self
-            .text_styles
-            .values()
-            .any(|style| style.variable_bindings.values().any(|value| value == id))
-        {
+        if self.text_styles.values().any(|style| {
+            style.variable_bindings.values().any(|value| value == id)
+                || style
+                    .style
+                    .text_decoration_color
+                    .as_ref()
+                    .and_then(|color| color.variable_id.as_deref())
+                    == Some(id)
+        }) {
             return Err(CommandError::InvalidVariable);
         }
         if self.paint_styles.values().any(|style| {
@@ -2797,11 +2804,21 @@ impl Document {
                 run.variable_bindings
                     .values()
                     .any(|variable_id| variable_id == id)
+                    || run
+                        .text_decoration_color
+                        .as_ref()
+                        .and_then(|color| color.variable_id.as_deref())
+                        == Some(id)
             }) || properties.base_style.as_ref().is_some_and(|style| {
                 style
                     .variable_bindings
                     .values()
                     .any(|variable_id| variable_id == id)
+                    || style
+                        .text_decoration_color
+                        .as_ref()
+                        .and_then(|color| color.variable_id.as_deref())
+                        == Some(id)
             })
         }) {
             return Err(CommandError::InvalidVariable);
@@ -2908,6 +2925,12 @@ impl Document {
                 .variable_bindings
                 .values()
                 .any(|value| removed_ids.contains(value.as_str()))
+                || style
+                    .style
+                    .text_decoration_color
+                    .as_ref()
+                    .and_then(|color| color.variable_id.as_deref())
+                    .is_some_and(|variable_id| removed_ids.contains(variable_id))
         }) {
             return Err(CommandError::InvalidVariableCollection);
         }
@@ -2924,11 +2947,21 @@ impl Document {
                 run.variable_bindings
                     .values()
                     .any(|variable_id| removed_ids.contains(variable_id.as_str()))
+                    || run
+                        .text_decoration_color
+                        .as_ref()
+                        .and_then(|color| color.variable_id.as_deref())
+                        .is_some_and(|variable_id| removed_ids.contains(variable_id))
             }) || properties.base_style.as_ref().is_some_and(|style| {
                 style
                     .variable_bindings
                     .values()
                     .any(|variable_id| removed_ids.contains(variable_id.as_str()))
+                    || style
+                        .text_decoration_color
+                        .as_ref()
+                        .and_then(|color| color.variable_id.as_deref())
+                        .is_some_and(|variable_id| removed_ids.contains(variable_id))
             })
         }) {
             return Err(CommandError::InvalidVariableCollection);
@@ -8078,13 +8111,24 @@ impl Document {
                 };
                 value.is_finite() && (0.0..=10_000.0).contains(&value)
             })
-            && style.text_decoration_color.is_none_or(|decoration| {
-                decoration.color.is_valid()
-                    && decoration.color.alpha == 1.0
-                    && decoration.opacity.is_finite()
-                    && (0.0..=1.0).contains(&decoration.opacity)
-                    && !matches!(decoration.blend_mode, BlendMode::PassThrough)
-            })
+            && style
+                .text_decoration_color
+                .as_ref()
+                .is_none_or(|decoration| {
+                    decoration.color.is_valid()
+                        && (decoration.color.alpha == 1.0 || decoration.variable_id.is_some())
+                        && decoration.opacity.is_finite()
+                        && (0.0..=1.0).contains(&decoration.opacity)
+                        && !matches!(decoration.blend_mode, BlendMode::PassThrough)
+                        && decoration.variable_id.as_ref().is_none_or(|id| {
+                            !id.is_empty()
+                                && id.len() <= MAX_STYLE_ID_BYTES
+                                && !id.contains('\0')
+                                && self.variables.get(id.as_ref()).is_some_and(|variable| {
+                                    variable.resolved_type == VariableResolvedType::Color
+                                })
+                        })
+                })
             && style.text_decoration_skip_ink != Some(false)
             && style.open_type_features.len() <= MAX_OPEN_TYPE_FEATURES
             && style.open_type_features.iter().all(|feature| {
@@ -8981,6 +9025,10 @@ impl TextProperties {
                             .map(PaintStack::estimated_bytes)
                             .unwrap_or(0)
                         + run.hyperlink.as_ref().map_or(0, |value| value.value.len())
+                        + run.text_decoration_color.as_ref().map_or(0, |value| {
+                            std::mem::size_of::<TextDecorationColor>()
+                                + value.variable_id.as_ref().map_or(0, |id| id.len())
+                        })
                         + run
                             .open_type_features
                             .iter()
@@ -9017,6 +9065,10 @@ impl TextProperties {
                             .hyperlink
                             .as_ref()
                             .map_or(0, |value| value.value.len())
+                        + style.text_decoration_color.as_ref().map_or(0, |value| {
+                            std::mem::size_of::<TextDecorationColor>()
+                                + value.variable_id.as_ref().map_or(0, |id| id.len())
+                        })
                         + style
                             .open_type_features
                             .iter()
@@ -10640,14 +10692,42 @@ fn hash_text_properties(hasher: &mut Sha256, properties: &TextProperties) {
     {
         hasher.update(b"makefigma/editor-core/text-decoration-color-v1");
         for run in &properties.runs {
-            hash_optional_text_decoration_color(hasher, run.text_decoration_color);
+            hash_optional_text_decoration_color(hasher, run.text_decoration_color.as_deref());
         }
         hash_optional_text_decoration_color(
             hasher,
             properties
                 .base_style
                 .as_ref()
-                .and_then(|style| style.text_decoration_color),
+                .and_then(|style| style.text_decoration_color.as_deref()),
+        );
+    }
+    if properties.runs.iter().any(|run| {
+        run.text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    }) || properties.base_style.as_ref().is_some_and(|style| {
+        style
+            .text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    }) {
+        hasher.update(b"makefigma/editor-core/text-decoration-color-variable-v1");
+        for run in &properties.runs {
+            hash_optional_style_id(
+                hasher,
+                run.text_decoration_color
+                    .as_ref()
+                    .and_then(|color| color.variable_id.as_deref()),
+            );
+        }
+        hash_optional_style_id(
+            hasher,
+            properties
+                .base_style
+                .as_ref()
+                .and_then(|style| style.text_decoration_color.as_ref())
+                .and_then(|color| color.variable_id.as_deref()),
         );
     }
     if properties
@@ -10740,7 +10820,7 @@ fn hash_optional_text_decoration_thickness(
     }
 }
 
-fn hash_optional_text_decoration_color(hasher: &mut Sha256, value: Option<TextDecorationColor>) {
+fn hash_optional_text_decoration_color(hasher: &mut Sha256, value: Option<&TextDecorationColor>) {
     match value {
         None => hasher.update([0]),
         Some(value) => {
@@ -22638,7 +22718,7 @@ mod tests {
             .cloned()
             .unwrap();
         decoration_color.runs[0].text_decoration = Some(TextDecoration::Underline);
-        decoration_color.runs[0].text_decoration_color = Some(TextDecorationColor {
+        decoration_color.runs[0].text_decoration_color = Some(Box::new(TextDecorationColor {
             color: Color {
                 space: ColorSpace::Srgb,
                 components: [1.0, 0.25, 0.5],
@@ -22647,7 +22727,8 @@ mod tests {
             visible: true,
             opacity: 0.75,
             blend_mode: BlendMode::Multiply,
-        });
+            variable_id: None,
+        }));
         document
             .submit(
                 transaction(
@@ -22670,25 +22751,35 @@ mod tests {
         for invalid in [
             TextDecorationColor {
                 opacity: f32::NAN,
-                ..decoration_color.runs[0].text_decoration_color.unwrap()
+                ..*decoration_color.runs[0]
+                    .text_decoration_color
+                    .clone()
+                    .unwrap()
             },
             TextDecorationColor {
                 color: Color {
                     alpha: 0.5,
                     ..decoration_color.runs[0]
                         .text_decoration_color
+                        .clone()
                         .unwrap()
                         .color
                 },
-                ..decoration_color.runs[0].text_decoration_color.unwrap()
+                ..*decoration_color.runs[0]
+                    .text_decoration_color
+                    .clone()
+                    .unwrap()
             },
             TextDecorationColor {
                 blend_mode: BlendMode::PassThrough,
-                ..decoration_color.runs[0].text_decoration_color.unwrap()
+                ..*decoration_color.runs[0]
+                    .text_decoration_color
+                    .clone()
+                    .unwrap()
             },
         ] {
             let mut properties = decoration_color.clone();
-            properties.runs[0].text_decoration_color = Some(invalid);
+            properties.runs[0].text_decoration_color = Some(Box::new(invalid));
             let before_revision = document.revision;
             let before_hash = document.canonical_hash_hex();
             assert_eq!(
@@ -25137,6 +25228,114 @@ mod tests {
         assert_eq!(
             document.seed_text_properties(
                 NodeId(923),
+                TextProperties {
+                    runs: vec![run],
+                    ..TextProperties::default()
+                },
+            ),
+            Err(CommandError::InvalidTextProperties)
+        );
+    }
+
+    #[test]
+    fn text_decoration_color_variables_are_typed_hashed_and_protect_variables() {
+        let mut document = Document::with_id(DocumentId(924));
+        let collection = VariableCollectionResource {
+            id: "VC:decoration-colors".into(),
+            key: String::new(),
+            name: "Decoration colors".into(),
+            remote: false,
+            hidden_from_publishing: false,
+            modes: vec![VariableMode {
+                id: "default".into(),
+                name: "Default".into(),
+            }],
+            default_mode_id: "default".into(),
+        };
+        let color = VariableResource {
+            id: "V:decoration-accent".into(),
+            key: String::new(),
+            name: "Decoration accent".into(),
+            description: String::new(),
+            remote: false,
+            hidden_from_publishing: false,
+            collection_id: collection.id.clone(),
+            resolved_type: VariableResolvedType::Color,
+            values_by_mode: [(
+                "default".into(),
+                VariableValue::Color(Color::from_srgb_u8([255, 64, 128], 255)),
+            )]
+            .into(),
+            scopes: vec!["ALL_FILLS".into()],
+            code_syntax: BTreeMap::new(),
+        };
+        let float = VariableResource {
+            id: "V:wrong-decoration-type".into(),
+            name: "Wrong type".into(),
+            resolved_type: VariableResolvedType::Float,
+            values_by_mode: [("default".into(), VariableValue::Float(1.0))].into(),
+            ..color.clone()
+        };
+        document
+            .seed_variable_collection(collection.clone())
+            .unwrap();
+        document.seed_variable(color.clone()).unwrap();
+        document.seed_variable(float.clone()).unwrap();
+        let mut text = node(924);
+        text.kind = NodeKind::Text;
+        text.text = "A".into();
+        document.seed_node(text).unwrap();
+        let baseline = document.canonical_hash();
+        let mut run = text_style_resource("S:decoration-template").style;
+        run.start = 0;
+        run.end = 1;
+        run.text_decoration = Some(TextDecoration::Underline);
+        run.text_decoration_color = Some(Box::new(TextDecorationColor {
+            color: Color::from_srgb_u8([255, 64, 128], 255),
+            visible: true,
+            opacity: 0.75,
+            blend_mode: BlendMode::Normal,
+            variable_id: Some(color.id.clone().into()),
+        }));
+        document
+            .seed_text_properties(
+                NodeId(924),
+                TextProperties {
+                    runs: vec![run.clone()],
+                    ..TextProperties::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(document.canonical_hash(), baseline);
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariable {
+                        id: color.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariable)
+        );
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteVariableCollection {
+                        id: collection.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidVariableCollection)
+        );
+
+        run.text_decoration_color.as_mut().unwrap().variable_id = Some(float.id.into());
+        assert_eq!(
+            document.seed_text_properties(
+                NodeId(924),
                 TextProperties {
                     runs: vec![run],
                     ..TextProperties::default()

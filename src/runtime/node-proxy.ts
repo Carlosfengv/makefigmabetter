@@ -574,6 +574,21 @@ export function materializeRuntimeTextVariableBindings(
   for (const source of sources) {
     const start = utf16IndexAtUtf8Offset(text, source.start);
     const end = utf16IndexAtUtf8Offset(text, source.end);
+    const decoration = source.style.textDecorationColor;
+    if (decoration?.variableId) {
+      const resolved = resolver(decoration.variableId);
+      if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId });
+      }
+      next = patchRuntimeTextRange(
+        text,
+        next,
+        start,
+        end,
+        { textDecorationColor: { ...decoration, color: structuredClone(resolved.value) } },
+        defaults,
+      );
+    }
     for (const [field, variableId] of Object.entries(source.style.variableBindings ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
       if (!isRuntimeVariableBindableTextField(field)) throw runtimeError("INVALID_ARGUMENT", { nodeId });
       next = materializeRuntimeTextVariableBinding(host, nodeId, text, next, start, end, field, variableId, defaults, resolver(variableId));
@@ -827,6 +842,24 @@ function runtimeTextDecorationColorForRange(
   return colors.some((value) => JSON.stringify(value) !== JSON.stringify(first))
     ? RUNTIME_MIXED
     : first ? structuredClone(first) : null;
+}
+
+function documentTextDecorationColorForNode(
+  host: RuntimeNodeHost,
+  nodeId: string,
+  value: RuntimeTextDecorationColor,
+) {
+  return documentTextDecorationColorFromRuntime(value, (variableId) => {
+    const resource = host.variableResource(variableId);
+    if (!resource || resource.resolvedType !== "COLOR") {
+      throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId });
+    }
+    const resolved = host.resolveVariableValue(variableId, nodeId);
+    if (resolved.resolvedType !== "COLOR" || !isDocumentVariableColor(resolved.value)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    }
+    return structuredClone(resolved.value);
+  });
 }
 
 function runtimeTextDecorationSkipInkForRange(
@@ -1440,7 +1473,7 @@ export class RuntimeTextSublayerProxy {
   }
 
   setRangeTextDecorationColor(start: number, end: number, value: RuntimeTextDecorationColor): void {
-    this.setTextRange(start, end, { textDecorationColor: documentTextDecorationColorFromRuntime(value) });
+    this.setTextRange(start, end, { textDecorationColor: documentTextDecorationColorForNode(this.host, this.handle.nodeId, value) });
   }
 
   getRangeTextDecorationSkipInk(start: number, end: number): boolean | null | typeof RUNTIME_MIXED {
@@ -3110,7 +3143,7 @@ export class RuntimeNodeProxy {
 
   setRangeTextDecorationColor(start: number, end: number, value: RuntimeTextDecorationColor): void {
     this.assertText();
-    this.setTextRange(start, end, { textDecorationColor: documentTextDecorationColorFromRuntime(value) });
+    this.setTextRange(start, end, { textDecorationColor: documentTextDecorationColorForNode(this.host, this.id, value) });
   }
 
   getRangeTextDecorationSkipInk(start: number, end: number): boolean | null | typeof RUNTIME_MIXED {

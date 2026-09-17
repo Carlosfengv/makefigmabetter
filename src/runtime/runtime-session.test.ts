@@ -972,6 +972,70 @@ describe("M1 RuntimeSession", () => {
     expect(session.variableIsBound("text-size")).toBe(false);
   });
 
+  it("binds color Variables to text decoration SolidPaint and refreshes modes", () => {
+    const projection: RuntimeProjection = {
+      ...initial,
+      variableCollections: [{
+        id: "decoration-colors",
+        key: "",
+        name: "Decoration colors",
+        remote: false,
+        hiddenFromPublishing: false,
+        modes: [{ modeId: "light", name: "Light" }, { modeId: "dark", name: "Dark" }],
+        defaultModeId: "light",
+      }],
+      variables: [{
+        id: "decoration-accent",
+        key: "",
+        name: "Decoration accent",
+        description: "",
+        remote: false,
+        hiddenFromPublishing: false,
+        collectionId: "decoration-colors",
+        resolvedType: "COLOR",
+        valuesByMode: {
+          light: { space: "srgb", components: [1, .25, .5], alpha: 1 },
+          dark: { space: "srgb", components: [.1, .2, .3], alpha: 1 },
+        },
+        scopes: ["ALL_SCOPES"],
+      }],
+    };
+    const session = new RuntimeSession({ sessionId: "text-decoration-color-variable", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const text = session.createText();
+    text.characters = "AB";
+    text.textDecoration = "UNDERLINE";
+    const boundColor = {
+      value: {
+        type: "SOLID" as const,
+        color: { r: 0, g: 0, b: 0 },
+        opacity: .75,
+        boundVariables: { color: { type: "VARIABLE_ALIAS" as const, id: "decoration-accent" } },
+      },
+    };
+
+    text.setRangeTextDecorationColor(0, 2, boundColor);
+    expect(text.textDecorationColor).toEqual({
+      value: {
+        type: "SOLID",
+        color: { r: 1, g: .25, b: .5 },
+        visible: true,
+        opacity: .75,
+        blendMode: "NORMAL",
+        boundVariables: { color: { type: "VARIABLE_ALIAS", id: "decoration-accent" } },
+      },
+    });
+    expect(session.variableIsBound("decoration-accent")).toBe(true);
+    expect(isRuntimeError(captureError(() => session.deleteVariable("decoration-accent")), "INVALID_ARGUMENT")).toBe(true);
+
+    text.setExplicitVariableModeForCollection(session.variables.getVariableCollectionById("decoration-colors")!, "dark");
+    expect(text.textDecorationColor).toMatchObject({ value: { color: { r: .1, g: .2, b: .3 }, boundVariables: { color: { id: "decoration-accent" } } } });
+
+    text.textDecorationColor = { value: { type: "SOLID", color: { r: .4, g: .5, b: .6 } } };
+    expect(text.textDecorationColor).toMatchObject({ value: { color: { r: .4, g: .5, b: .6 } } });
+    expect((text.textDecorationColor as { value: { boundVariables?: unknown } }).value).not.toHaveProperty("boundVariables");
+    expect(session.variableIsBound("decoration-accent")).toBe(false);
+  });
+
   it("binds VariableAlias values to Instance properties and recomputes referenced layers", async () => {
     const projection: RuntimeProjection = {
       ...initial,

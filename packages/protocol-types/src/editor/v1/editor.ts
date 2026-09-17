@@ -938,6 +938,11 @@ export interface TextDecorationColor {
   visible: boolean;
   opacity: number;
   blendMode: BlendMode;
+  /**
+   * Figma SolidPaint.boundVariables.color. The resolved color remains
+   * materialized above so rendering does not depend on variable lookup.
+   */
+  variableId?: string | undefined;
 }
 
 export interface HyperlinkTarget {
@@ -5684,7 +5689,7 @@ export const TextDecorationThickness: MessageFns<TextDecorationThickness> = {
 };
 
 function createBaseTextDecorationColor(): TextDecorationColor {
-  return { color: undefined, visible: false, opacity: 0, blendMode: 0 };
+  return { color: undefined, visible: false, opacity: 0, blendMode: 0, variableId: undefined };
 }
 
 export const TextDecorationColor: MessageFns<TextDecorationColor> = {
@@ -5700,6 +5705,9 @@ export const TextDecorationColor: MessageFns<TextDecorationColor> = {
     }
     if (message.blendMode !== 0) {
       writer.uint32(32).int32(message.blendMode);
+    }
+    if (message.variableId !== undefined) {
+      writer.uint32(42).string(message.variableId);
     }
     return writer;
   },
@@ -5743,6 +5751,14 @@ export const TextDecorationColor: MessageFns<TextDecorationColor> = {
           message.blendMode = reader.int32() as any;
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.variableId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5761,6 +5777,7 @@ export const TextDecorationColor: MessageFns<TextDecorationColor> = {
     message.visible = object.visible ?? false;
     message.opacity = object.opacity ?? 0;
     message.blendMode = object.blendMode ?? 0;
+    message.variableId = object.variableId ?? undefined;
     return message;
   },
 };

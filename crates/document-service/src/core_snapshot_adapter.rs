@@ -280,6 +280,17 @@ impl CanonicalReducer for CoreOperationReducer {
             });
         }
         if self.engine_semantics_version
+            < makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+            && commands
+                .iter()
+                .any(command_has_text_decoration_color_variable)
+        {
+            return Err(ServiceError::EngineSemanticsUnsupported {
+                minimum:
+                    makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
+            });
+        }
+        if self.engine_semantics_version
             < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
             && commands.iter().any(command_has_text_decoration_skip_ink)
         {
@@ -478,6 +489,22 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, ServiceError> {
+    if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        && (document.nodes().any(|node| {
+            document
+                .text_properties_for_node(node.id)
+                .is_some_and(text_properties_has_text_decoration_color_variable)
+        }) || document.text_styles().any(|style| {
+            style
+                .style
+                .text_decoration_color
+                .as_ref()
+                .is_some_and(|color| color.variable_id.is_some())
+        }))
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
     if engine_semantics_version
         < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
         && document.nodes().any(|node| {
@@ -1278,6 +1305,18 @@ pub fn document_from_snapshot(
         return Err(ServiceError::ReducerRejected);
     }
     if declared_engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        && snapshot.text_styles.iter().any(|style| {
+            style
+                .style
+                .as_ref()
+                .and_then(|run| run.text_decoration_color.as_ref())
+                .is_some_and(|color| color.variable_id.is_some())
+        })
+    {
+        return Err(ServiceError::ReducerRejected);
+    }
+    if declared_engine_semantics_version
         < makefigma_document_codec::PAINT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && !snapshot.paint_styles.is_empty()
     {
@@ -1533,6 +1572,14 @@ pub fn document_from_snapshot(
                 && text_properties
                     .as_ref()
                     .is_some_and(text_properties_has_text_decoration_color)
+            {
+                return Err(ServiceError::ReducerRejected);
+            }
+            if declared_engine_semantics_version
+                < makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+                && text_properties
+                    .as_ref()
+                    .is_some_and(text_properties_has_text_decoration_color_variable)
             {
                 return Err(ServiceError::ReducerRejected);
             }
@@ -2747,6 +2794,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 variable_bindings: style_variable_bindings_to_proto(&run.variable_bindings),
                 text_decoration_color: run
                     .text_decoration_color
+                    .as_deref()
                     .map(text_decoration_color_to_proto),
             })
             .collect(),
@@ -2819,6 +2867,7 @@ fn text_properties_to_proto(properties: &TextProperties) -> v1::TextProperties {
                 variable_bindings: style_variable_bindings_to_proto(&style.variable_bindings),
                 text_decoration_color: style
                     .text_decoration_color
+                    .as_deref()
                     .map(text_decoration_color_to_proto),
             }),
         paragraph_style_runs: properties
@@ -2913,7 +2962,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .collect::<Result<_, ServiceError>>()?,
@@ -3033,7 +3083,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .transpose()?,
@@ -3499,6 +3550,19 @@ fn text_properties_has_text_decoration_color(properties: &TextProperties) -> boo
             .is_some_and(|style| style.text_decoration_color.is_some())
 }
 
+fn text_properties_has_text_decoration_color_variable(properties: &TextProperties) -> bool {
+    properties.runs.iter().any(|run| {
+        run.text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    }) || properties.base_style.as_ref().is_some_and(|style| {
+        style
+            .text_decoration_color
+            .as_ref()
+            .is_some_and(|color| color.variable_id.is_some())
+    })
+}
+
 fn text_properties_has_text_decoration_skip_ink(properties: &TextProperties) -> bool {
     properties
         .runs
@@ -3648,12 +3712,13 @@ fn text_decoration_thickness_from_proto(
     }
 }
 
-fn text_decoration_color_to_proto(value: TextDecorationColor) -> v1::TextDecorationColor {
+fn text_decoration_color_to_proto(value: &TextDecorationColor) -> v1::TextDecorationColor {
     v1::TextDecorationColor {
         color: Some(color_to_proto(value.color)),
         visible: value.visible,
         opacity: value.opacity,
         blend_mode: blend_mode_to_proto(value.blend_mode) as i32,
+        variable_id: value.variable_id.as_deref().map(str::to_owned),
     }
 }
 
@@ -3669,6 +3734,7 @@ fn text_decoration_color_from_proto(
         visible: value.visible,
         opacity: value.opacity,
         blend_mode,
+        variable_id: value.variable_id.map(String::into_boxed_str),
     })
 }
 
@@ -3950,6 +4016,13 @@ fn command_has_text_decoration_thickness(command: &Command) -> bool {
 fn command_has_text_decoration_color(command: &Command) -> bool {
     matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_color(properties))
         || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_color(properties))
+}
+
+fn command_has_text_decoration_color_variable(command: &Command) -> bool {
+    matches!(command, Command::SetTextProperties { properties, .. } if text_properties_has_text_decoration_color_variable(properties))
+        || matches!(command, Command::RestoreNode { text_properties: Some(properties), .. } if text_properties_has_text_decoration_color_variable(properties))
+        || matches!(command, Command::RegisterTextStyle { style } | Command::SetTextStyle { style }
+            if style.style.text_decoration_color.as_ref().is_some_and(|color| color.variable_id.is_some()))
 }
 
 fn command_has_text_decoration_skip_ink(command: &Command) -> bool {
@@ -6397,7 +6470,7 @@ mod tests {
                         text_style_id: None,
                         paint_style_id: None,
                         variable_bindings: Default::default(),
-                        text_decoration_color: Some(TextDecorationColor {
+                        text_decoration_color: Some(Box::new(TextDecorationColor {
                             color: Color {
                                 space: ColorSpace::Srgb,
                                 components: [1.0, 0.25, 0.5],
@@ -6406,7 +6479,8 @@ mod tests {
                             visible: true,
                             opacity: 0.75,
                             blend_mode: BlendMode::Multiply,
-                        }),
+                            variable_id: None,
+                        })),
                     }],
                     ..TextProperties::default()
                 },

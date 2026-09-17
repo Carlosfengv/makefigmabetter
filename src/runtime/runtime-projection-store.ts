@@ -415,7 +415,7 @@ function validateResourceOperations(
       validateVariableAliases(variables, transactionId);
     } else if (operation.type === "deleteVariable") {
       if (variables.get(operation.id)?.remote !== false
-        || [...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).includes(operation.id))
+        || [...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).includes(operation.id) || style.style.textDecorationColor?.variableId === operation.id)
         || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => binding.variableId === operation.id))
         || bindingNodes.some((node) => textPropertiesBindVariable(node.textProperties as DocumentTextProperties | undefined, operation.id))
         || [...variables.values()].some((value) => value.id !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && candidate.id === operation.id))) {
@@ -436,7 +436,7 @@ function validateResourceOperations(
       const collection = collections.get(operation.id);
       if (!collection || collection.remote) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       const removed = new Set([...variables.values()].filter((value) => value.collectionId === operation.id).map((value) => value.id));
-      if ([...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).some((id) => removed.has(id)))
+      if ([...textStyles.values()].some((style) => Object.values(style.variableBindings ?? {}).some((id) => removed.has(id)) || (style.style.textDecorationColor?.variableId ? removed.has(style.style.textDecorationColor.variableId) : false))
         || [...paintStyles.values()].some((style) => style.variableBindings?.some((binding) => removed.has(binding.variableId)))
         || bindingNodes.some((node) => textPropertiesBindAnyVariable(node.textProperties as DocumentTextProperties | undefined, removed))
         || [...variables.values()].some((value) => value.collectionId !== operation.id && Object.values(value.valuesByMode).some((candidate) => typeof candidate === "object" && candidate !== null && "type" in candidate && candidate.type === "VARIABLE_ALIAS" && removed.has(candidate.id)))) throw runtimeError("INVALID_ARGUMENT", { transactionId });
@@ -448,7 +448,9 @@ function validateResourceOperations(
 
 function textPropertiesBindVariable(properties: DocumentTextProperties | undefined, variableId: string): boolean {
   return properties?.runs.some((run) => Object.values(run.variableBindings ?? {}).includes(variableId)) === true
-    || Object.values(properties?.baseStyle?.variableBindings ?? {}).includes(variableId);
+    || Object.values(properties?.baseStyle?.variableBindings ?? {}).includes(variableId)
+    || properties?.runs.some((run) => run.textDecorationColor?.variableId === variableId) === true
+    || properties?.baseStyle?.textDecorationColor?.variableId === variableId;
 }
 
 function effectiveVariableBindingNodes(
@@ -469,7 +471,9 @@ function effectiveVariableBindingNodes(
 
 function textPropertiesBindAnyVariable(properties: DocumentTextProperties | undefined, variableIds: ReadonlySet<string>): boolean {
   return properties?.runs.some((run) => Object.values(run.variableBindings ?? {}).some((id) => variableIds.has(id))) === true
-    || Object.values(properties?.baseStyle?.variableBindings ?? {}).some((id) => variableIds.has(id));
+    || Object.values(properties?.baseStyle?.variableBindings ?? {}).some((id) => variableIds.has(id))
+    || properties?.runs.some((run) => Boolean(run.textDecorationColor?.variableId && variableIds.has(run.textDecorationColor.variableId))) === true
+    || Boolean(properties?.baseStyle?.textDecorationColor?.variableId && variableIds.has(properties.baseStyle.textDecorationColor.variableId));
 }
 
 function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource): boolean {
@@ -503,7 +507,8 @@ function validTextStyleVariableBindings(
         ? "FLOAT"
         : undefined;
     return expected !== undefined && variables.get(id)?.resolvedType === expected;
-  });
+  }) && (!value.style.textDecorationColor?.variableId
+    || variables.get(value.style.textDecorationColor.variableId)?.resolvedType === "COLOR");
 }
 
 function validPaintStyleVariableBindings(

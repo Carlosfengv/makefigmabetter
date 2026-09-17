@@ -566,6 +566,18 @@ pub fn commands_from_payload_with_semantics(
         });
     }
     if engine_semantics_version
+        < makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        && batch
+            .operations
+            .iter()
+            .any(operation_has_text_decoration_color_variable)
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum:
+                makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
         < makefigma_document_codec::TEXT_DECORATION_SKIP_INK_ENGINE_SEMANTICS_VERSION
         && batch
             .operations
@@ -1063,6 +1075,40 @@ fn operation_has_text_decoration_color(operation: &v1::ResolvedOperation) -> boo
                 .base_style
                 .as_ref()
                 .is_some_and(|style| style.text_decoration_color.is_some())
+    })
+}
+
+fn operation_has_text_decoration_color_variable(operation: &v1::ResolvedOperation) -> bool {
+    use v1::resolved_operation::Kind;
+    let properties = match operation.kind.as_ref() {
+        Some(Kind::CreateNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::RestoreNode(value)) => value
+            .node
+            .as_ref()
+            .and_then(|node| node.text_properties.as_ref()),
+        Some(Kind::SetTextProperties(value)) => value.properties.as_ref(),
+        _ => None,
+    };
+    properties.is_some_and(|properties| {
+        properties.runs.iter().any(|run| {
+            run.text_decoration_color
+                .as_ref()
+                .is_some_and(|color| color.variable_id.is_some())
+        }) || properties.base_style.as_ref().is_some_and(|style| {
+            style
+                .text_decoration_color
+                .as_ref()
+                .is_some_and(|color| color.variable_id.is_some())
+        })
+    }) || operation_text_style(operation).is_some_and(|style| {
+        style
+            .style
+            .as_ref()
+            .and_then(|run| run.text_decoration_color.as_ref())
+            .is_some_and(|color| color.variable_id.is_some())
     })
 }
 
@@ -2528,7 +2574,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: run
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .collect::<Result<_, ServiceError>>()?,
@@ -2648,7 +2695,8 @@ fn text_properties_from_proto(value: v1::TextProperties) -> Result<TextPropertie
                     text_decoration_color: style
                         .text_decoration_color
                         .map(text_decoration_color_from_proto)
-                        .transpose()?,
+                        .transpose()?
+                        .map(Box::new),
                 })
             })
             .transpose()?,
@@ -2956,6 +3004,7 @@ fn text_decoration_color_from_proto(
         visible: value.visible,
         opacity: value.opacity,
         blend_mode,
+        variable_id: value.variable_id.map(String::into_boxed_str),
     })
 }
 
@@ -5457,6 +5506,7 @@ mod tests {
                     visible: true,
                     opacity: 0.75,
                     blend_mode: v1::BlendMode::Multiply as i32,
+                    variable_id: None,
                 }),
             }],
             paragraph: Some(v1::ParagraphStyle {
@@ -5505,7 +5555,7 @@ mod tests {
             .unwrap()
             .as_slice(),
             [Command::SetTextProperties { properties, .. }]
-                if properties.runs[0].text_decoration_color == Some(TextDecorationColor {
+                if properties.runs[0].text_decoration_color == Some(Box::new(TextDecorationColor {
                     color: editor_core::color::Color {
                         space: editor_core::color::ColorSpace::Srgb,
                         components: [0.2, 0.4, 0.6],
@@ -5514,7 +5564,43 @@ mod tests {
                     visible: true,
                     opacity: 0.75,
                     blend_mode: editor_core::BlendMode::Multiply,
-                })
+                    variable_id: None,
+                }))
+        ));
+
+        let mut variable_batch = v1::ResolvedOperationBatch::decode(payload.as_slice()).unwrap();
+        let Some(v1::resolved_operation::Kind::SetTextProperties(update)) =
+            variable_batch.operations[0].kind.as_mut()
+        else {
+            panic!("set text properties");
+        };
+        update.properties.as_mut().unwrap().runs[0]
+            .text_decoration_color
+            .as_mut()
+            .unwrap()
+            .variable_id = Some("V:decoration".into());
+        let variable_payload = variable_batch.encode_to_vec();
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &variable_payload,
+                makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION - 1,
+            ),
+            Err(ServiceError::EngineSemanticsUnsupported { minimum })
+                if minimum == makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION
+        ));
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &variable_payload,
+                makefigma_document_codec::TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [Command::SetTextProperties { properties, .. }]
+                if properties.runs[0]
+                    .text_decoration_color
+                    .as_deref()
+                    .and_then(|color| color.variable_id.as_deref())
+                    == Some("V:decoration")
         ));
     }
 

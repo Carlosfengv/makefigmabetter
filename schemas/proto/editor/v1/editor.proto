@@ -692,6 +692,9 @@ message TextDecorationColor {
   bool visible = 2;
   float opacity = 3;
   BlendMode blend_mode = 4;
+  // Figma SolidPaint.boundVariables.color. The resolved color remains
+  // materialized above so rendering does not depend on variable lookup.
+  optional string variable_id = 5;
 }
 
 enum TextDecorationThicknessUnit {

@@ -31,6 +31,7 @@ import {
   type DocumentAutoLayout,
   type DocumentVectorPath,
   type DocumentConnectorMetadata,
+  type DocumentColor,
   type DocumentEffect,
   type DocumentEmbedMetadata,
   type DocumentFontReference,
@@ -438,7 +439,7 @@ export class RuntimeSession implements RuntimeContainerHost {
   }
 
   variableIsBound(id: string): boolean {
-    return this.projectionStore.listTextStyles().some((style) => Object.values(style.variableBindings ?? {}).includes(id))
+    return this.projectionStore.listTextStyles().some((style) => Object.values(style.variableBindings ?? {}).includes(id) || style.style.textDecorationColor?.variableId === id)
       || this.projectionStore.listPaintStyles().some((style) => style.variableBindings?.some((binding) => binding.variableId === id))
       || this.projectionStore.listLiveNodes().some((node) => {
       const definitions = node.type === "COMPONENT"
@@ -453,7 +454,9 @@ export class RuntimeSession implements RuntimeContainerHost {
         variableComponentPropertyBindingsFromExtensions(node.extensions),
       ].some((bindings) => Object.values(bindings).includes(id))
         || (node.textProperties as DocumentTextProperties | undefined)?.runs.some((run) => Object.values(run.variableBindings ?? {}).includes(id)) === true
-        || Object.values((node.textProperties as DocumentTextProperties | undefined)?.baseStyle?.variableBindings ?? {}).includes(id);
+        || Object.values((node.textProperties as DocumentTextProperties | undefined)?.baseStyle?.variableBindings ?? {}).includes(id)
+        || (node.textProperties as DocumentTextProperties | undefined)?.runs.some((run) => run.textDecorationColor?.variableId === id) === true
+        || (node.textProperties as DocumentTextProperties | undefined)?.baseStyle?.textDecorationColor?.variableId === id;
     });
   }
 
@@ -4161,7 +4164,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     const nodes = this.projectionStore.listLiveNodes().filter((node) => {
       const properties = node.textProperties as DocumentTextProperties | undefined;
       return properties?.runs.some((run) => Object.keys(run.variableBindings ?? {}).length > 0)
-        || Boolean(properties?.baseStyle && Object.keys(properties.baseStyle.variableBindings ?? {}).length > 0);
+        || Boolean(properties?.baseStyle && Object.keys(properties.baseStyle.variableBindings ?? {}).length > 0)
+        || properties?.runs.some((run) => Boolean(run.textDecorationColor?.variableId))
+        || Boolean(properties?.baseStyle?.textDecorationColor?.variableId);
     });
     if (nodes.length > this.maxSynchronousQueryNodes) throw runtimeError("RESOURCE_LIMIT");
     return nodes.flatMap((node) => {
@@ -4196,7 +4201,7 @@ export class RuntimeSession implements RuntimeContainerHost {
   ): PendingProjectionOperation[] {
     const styles = this.projectionStore
       .listTextStyles()
-      .filter((style) => Object.keys(style.variableBindings ?? {}).length > 0);
+      .filter((style) => Object.keys(style.variableBindings ?? {}).length > 0 || Boolean(style.style.textDecorationColor?.variableId));
     const paintStyles = this.projectionStore
       .listPaintStyles()
       .filter((style) => (style.variableBindings?.length ?? 0) > 0);
@@ -4222,6 +4227,26 @@ export class RuntimeSession implements RuntimeContainerHost {
               : DEFAULT_RUNTIME_FONT_NAME,
             (fontName) => this.resolveFontName(fontName),
           ),
+        };
+      }
+      const decoration = next.style.textDecorationColor;
+      if (decoration?.variableId) {
+        const resolved = this.resolveVariableValueFromResources(
+          decoration.variableId,
+          undefined,
+          undefined,
+          variableOverrides,
+          collectionOverrides,
+        );
+        if (resolved.resolvedType !== "COLOR" || !isRuntimeDocumentColor(resolved.value)) {
+          throw runtimeError("INVALID_ARGUMENT");
+        }
+        next = {
+          ...next,
+          style: {
+            ...next.style,
+            textDecorationColor: { ...decoration, color: structuredClone(resolved.value) },
+          },
         };
       }
       return JSON.stringify(next) === JSON.stringify(style)
@@ -4467,6 +4492,22 @@ export class RuntimeSession implements RuntimeContainerHost {
     }
     return undefined;
   }
+}
+
+function isRuntimeDocumentColor(value: DocumentVariableValue): value is DocumentColor {
+  return typeof value === "object"
+    && value !== null
+    && "space" in value
+    && (value.space === "srgb" || value.space === "display-p3" || value.space === "linear-srgb")
+    && "components" in value
+    && Array.isArray(value.components)
+    && value.components.length === 3
+    && value.components.every((component) => typeof component === "number" && Number.isFinite(component) && component >= 0 && component <= 1)
+    && "alpha" in value
+    && typeof value.alpha === "number"
+    && Number.isFinite(value.alpha)
+    && value.alpha >= 0
+    && value.alpha <= 1;
 }
 
 function validateRuntimeComponentPropertyBaseName(name: string, nodeId: string): void {

@@ -144,28 +144,43 @@ export function runtimeTextDecorationColorFromDocument(
       visible: value.visible,
       opacity: value.opacity,
       blendMode: runtimeBlendMode(value.blendMode),
+      ...(value.variableId ? {
+        boundVariables: Object.freeze({
+          color: Object.freeze({ type: "VARIABLE_ALIAS" as const, id: value.variableId }),
+        }),
+      } : {}),
     },
   };
 }
 
 export function documentTextDecorationColorFromRuntime(
   value: RuntimeTextDecorationColor,
+  resolveVariableColor?: (variableId: string) => DocumentColor,
 ): DocumentTextDecorationColor | undefined {
   if (!value || typeof value !== "object") throw runtimeError("INVALID_ARGUMENT");
   if (value.value === "AUTO") return undefined;
   const paint = value.value;
   if (!paint || typeof paint !== "object") throw runtimeError("INVALID_ARGUMENT");
-  if ("boundVariables" in paint) throw runtimeError("UNSUPPORTED_FEATURE");
   if (paint.type !== "SOLID") throw runtimeError("UNSUPPORTED_FEATURE");
-  const layer = documentPaintStackFromRuntime([paint], () => false).layers[0];
+  const alias = paint.boundVariables?.color;
+  if (paint.boundVariables && Object.keys(paint.boundVariables).some((field) => field !== "color")) {
+    throw runtimeError("INVALID_ARGUMENT");
+  }
+  if (paint.boundVariables && !alias) throw runtimeError("UNSUPPORTED_FEATURE");
+  if (alias && (alias.type !== "VARIABLE_ALIAS" || !alias.id)) throw runtimeError("INVALID_ARGUMENT");
+  if (alias && !resolveVariableColor) throw runtimeError("UNSUPPORTED_FEATURE");
+  const { boundVariables: _boundVariables, ...unboundPaint } = paint;
+  void _boundVariables;
+  const layer = documentPaintStackFromRuntime([unboundPaint], () => false).layers[0];
   if (!layer?.paint?.color || layer.paint.gradient || layer.paint.gradientPaint || layer.image || layer.blendMode === "pass-through") {
     throw runtimeError("UNSUPPORTED_FEATURE");
   }
   return {
-    color: layer.paint.color,
+    color: alias ? resolveVariableColor!(alias.id) : layer.paint.color,
     visible: layer.visible,
     opacity: layer.opacity,
     blendMode: layer.blendMode,
+    ...(alias ? { variableId: alias.id } : {}),
   };
 }
 
