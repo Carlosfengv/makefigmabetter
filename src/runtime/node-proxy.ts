@@ -2157,7 +2157,7 @@ export class RuntimeNodeProxy {
     this.write({ booleanOperation: canonical });
   }
   set innerRadius(value: number) {
-    if (this.type !== "STAR" || !Number.isFinite(value) || value < .05 || value > .95) {
+    if (this.type !== "STAR" || !Number.isFinite(value) || value < 0 || value > 1) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     this.write({ parametricShape: { kind: "star", pointCount: this.pointCount, innerRatio: value } });

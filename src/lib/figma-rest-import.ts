@@ -2676,9 +2676,9 @@ function parametricShape(kind: NodeKind, node: JsonRecord, sourceId: string, iss
   }
   if (kind === "polygon") return { kind, pointCount } as const;
   const innerRatio = finite(node.innerRadius) ?? finite(node.innerRatio) ?? 0.5;
-  if (innerRatio <= 0 || innerRatio >= 1) {
+  if (innerRatio < 0 || innerRatio > 1) {
     extensions["figma.rest.parametric-shape.v1"] = jsonBytes({ pointCount, innerRadius: node.innerRadius });
-    issues.push({ sourceId, capability: "parametric-shape", outcome: "preserved-extension", reason: "Figma Star inner radius is outside the open 0–1 range." });
+    issues.push({ sourceId, capability: "parametric-shape", outcome: "preserved-extension", reason: "Figma Star inner radius is outside the inclusive 0–1 range." });
     return undefined;
   }
   return { kind, pointCount, innerRatio } as const;

@@ -14,6 +14,18 @@ describe("parametric regular shapes", () => {
     expect(parametricShapePath(polygon)).toContain("Z");
   });
 
+  it("preserves the inclusive Figma Star inner-radius boundaries", () => {
+    const collapsed = parametricShapePoints(100, 80, { kind: "star", pointCount: 5, innerRatio: 0 });
+    const polygon = parametricShapePoints(100, 80, { kind: "star", pointCount: 5, innerRatio: 1 });
+    expect(collapsed.filter((_point, index) => index % 2 === 1)).toEqual(Array.from({ length: 5 }, () => ({ x: 50, y: 40 })));
+    expect(polygon).toHaveLength(10);
+    expect(polygon.every((point) => {
+      const x = (point.x - 50) / 50;
+      const y = (point.y - 40) / 40;
+      return Math.abs(x * x + y * y - 1) < 1e-12;
+    })).toBe(true);
+  });
+
   it("uses the same outline for hit testing and SVG export", () => {
     const node = { ...createNode("star", 0, 0), id: "00000000-0000-0000-0000-000000000002", pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };
     expect(nodeContainsWorldPoint(node, { x: 80, y: 80 })).toBe(true);

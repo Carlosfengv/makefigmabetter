@@ -1080,6 +1080,18 @@ describe("protocol operation codec", () => {
     expect(batch.operations[1].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_STAR, starParameters: { pointCount: 5, innerRatio: .5 } });
   });
 
+  it("serializes both inclusive Figma Star inner-radius boundaries", () => {
+    const collapsed = { ...createNode("star", 10, 20), id, parametricShape: { kind: "star" as const, pointCount: 5, innerRatio: 0 } };
+    const polygon = { ...createNode("star", 10, 20), id: "00000000-0000-0000-0000-000000000003", parametricShape: { kind: "star" as const, pointCount: 5, innerRatio: 1 } };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
+      { type: "create", node: { ...collapsed, cornerRadius: collapsed.radius, text: "" } },
+      { type: "create", node: { ...polygon, cornerRadius: polygon.radius, text: "" } },
+    ]));
+
+    expect(batch.operations[0].createNode?.node?.starParameters).toEqual({ pointCount: 5, innerRatio: 0 });
+    expect(batch.operations[1].createNode?.node?.starParameters).toEqual({ pointCount: 5, innerRatio: 1 });
+  });
+
   it("serializes a VectorPath on create and as an atomic update operation", () => {
     const vector = { ...createNode("vector", 10, 20), id };
     const created = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node: vector }])!.batch));

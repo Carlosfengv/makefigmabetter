@@ -1950,6 +1950,10 @@ describe("M1 RuntimeSession", () => {
     expect(polygon.pointCount).toBe(5);
     polygon.pointCount = 8;
     star.pointCount = 7;
+    star.innerRadius = 0;
+    expect(star.innerRadius).toBe(0);
+    star.innerRadius = 1;
+    expect(star.innerRadius).toBe(1);
     star.innerRadius = .35;
     vector.vectorPaths = [{ windingRule: "EVENODD", data: "M 0 0 L 100 100 L 0 100 L 100 0 Z" }];
     vector.strokeWeight = 3;
@@ -1973,7 +1977,7 @@ describe("M1 RuntimeSession", () => {
     expect(openVector.vectorPaths[0]).toMatchObject({ windingRule: "NONE", data: expect.stringContaining("C") });
     expect(line.strokeCap).toBe("ARROW_LINES");
     expect(isRuntimeError(captureError(() => { polygon.pointCount = 2; }), "INVALID_ARGUMENT")).toBe(true);
-    expect(isRuntimeError(captureError(() => { star.innerRadius = 1; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { star.innerRadius = 1.01; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => vector.pointCount), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => { line.dashPattern = [0, 0]; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => { vector.vectorPaths = [{ windingRule: "NONZERO", data: "M 0 0 L" }]; }), "INVALID_ARGUMENT")).toBe(true);

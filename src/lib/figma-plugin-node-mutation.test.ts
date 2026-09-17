@@ -307,7 +307,9 @@ describe("Figma Plugin API node mutation adapter", () => {
 
   it("preserves explicit no-loss limits instead of pretending to support unavailable values", () => {
     const star = { ...createNode("star", 0, 0), id: "star" };
-    expect(writeFigmaPluginNode(star, { innerRadius: 0 })).toEqual({ ok: false, reason: "STAR innerRadius is currently supported from 0.05 through 0.95." });
+    expect(writeFigmaPluginNode(star, { innerRadius: 0 })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { parametricShape: { kind: "star", pointCount: 5, innerRatio: 0 } } }] });
+    expect(writeFigmaPluginNode(star, { innerRadius: 1 })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { parametricShape: { kind: "star", pointCount: 5, innerRatio: 1 } } }] });
+    expect(writeFigmaPluginNode(star, { innerRadius: 1.01 })).toEqual({ ok: false, reason: "STAR innerRadius must be from 0 through 1." });
     expect(writeFigmaPluginNode(star, { blendMode: "COLOR" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "color" } }] });
     expect(writeFigmaPluginNode(star, { blendMode: "PASS_THROUGH" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "pass-through" } }] });
     expect(writeFigmaPluginNode(star, { blendMode: "LINEAR_BURN" })).toEqual({ ok: true, commands: [{ type: "update", id: star.id, patch: { blendMode: "linear-burn" } }] });

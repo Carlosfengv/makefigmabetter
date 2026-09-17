@@ -11346,8 +11346,8 @@ function ParametricShapeInspector({
     if (
       shape.kind === "star" &&
       Number.isFinite(value) &&
-      value >= 0.05 &&
-      value <= 0.95
+      value >= 0 &&
+      value <= 1
     )
       onUpdate({ parametricShape: { ...shape, innerRatio: value } });
   };

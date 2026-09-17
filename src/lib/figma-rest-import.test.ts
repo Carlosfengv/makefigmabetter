@@ -398,6 +398,21 @@ describe("Figma REST import planning", () => {
     ]));
   });
 
+  it("imports both inclusive Figma Star inner-radius boundaries as editable geometry", () => {
+    const plan = planFigmaRestImport({
+      document: { children: [{ id: "0:1", type: "CANVAS", children: [
+        { id: "1:1", type: "STAR", pointCount: 5, innerRadius: 0, relativeTransform: [[1, 0, 0], [0, 1, 0]], absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 } },
+        { id: "1:2", type: "STAR", pointCount: 5, innerRadius: 1, relativeTransform: [[1, 0, 120], [0, 1, 0]], absoluteBoundingBox: { x: 120, y: 0, width: 100, height: 80 } },
+      ] }] },
+    }, ids());
+
+    expect(plan.nodes.map((node) => node.parametricShape)).toEqual([
+      { kind: "star", pointCount: 5, innerRatio: 0 },
+      { kind: "star", pointCount: 5, innerRatio: 1 },
+    ]);
+    expect(plan.nodes.every((node) => node.extensions?.["figma.rest.parametric-shape.v1"] === undefined)).toBe(true);
+  });
+
   it("retains Component, Instance and ComponentSet subtrees and resolves local main-component identity", () => {
     const plan = planFigmaRestImport({
       version: "component-fixture",

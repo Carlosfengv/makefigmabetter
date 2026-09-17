@@ -238,7 +238,7 @@ export function writeFigmaPluginNode(node: CanvasNode, write: FigmaPluginNodeWri
     // Core's documented parametric-star range is intentionally narrower than
     // Figma's broad numeric input because zero-area inner tips are not safely
     // editable by the current deterministic path engine.
-    if (!finite(write.innerRadius) || write.innerRadius! < .05 || write.innerRadius! > .95) return rejected("STAR innerRadius is currently supported from 0.05 through 0.95.");
+    if (!finite(write.innerRadius) || write.innerRadius! < 0 || write.innerRadius! > 1) return rejected("STAR innerRadius must be from 0 through 1.");
     patch.parametricShape = { kind: "star", pointCount: node.parametricShape?.kind === "star" ? node.parametricShape.pointCount : 5, innerRatio: write.innerRadius! };
   }
   if (has("booleanOperation")) {

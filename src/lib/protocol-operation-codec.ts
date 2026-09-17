@@ -812,7 +812,7 @@ function parametricShapeProto(kind: CoreProjectionNode["kind"], shape: DocumentP
     return { polygonParameters: { pointCount: shape.pointCount }, starParameters: undefined };
   }
   if (kind === "star") {
-    if (!shape || shape.kind !== "star" || !Number.isInteger(shape.pointCount) || shape.pointCount < 3 || shape.pointCount > 100 || !Number.isFinite(shape.innerRatio) || shape.innerRatio < 0.05 || shape.innerRatio > 0.95) throw new TypeError("Star requires 3–100 points and an inner ratio from 0.05 to 0.95.");
+    if (!shape || shape.kind !== "star" || !Number.isInteger(shape.pointCount) || shape.pointCount < 3 || shape.pointCount > 100 || !Number.isFinite(shape.innerRatio) || shape.innerRatio < 0 || shape.innerRatio > 1) throw new TypeError("Star requires 3–100 points and an inner ratio from 0 to 1.");
     return { polygonParameters: undefined, starParameters: { pointCount: shape.pointCount, innerRatio: shape.innerRatio } };
   }
   if (shape) throw new TypeError("Parametric shape data is only supported by Polygon and Star.");

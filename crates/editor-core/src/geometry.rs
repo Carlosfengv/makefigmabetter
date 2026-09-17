@@ -184,7 +184,7 @@ pub fn parametric_shape_outline(
             inner_ratio,
         } if (3..=100).contains(&point_count)
             && inner_ratio.is_finite()
-            && (0.05..=0.95).contains(&inner_ratio) =>
+            && (0.0..=1.0).contains(&inner_ratio) =>
         {
             (Some(inner_ratio), point_count * 2)
         }
@@ -2433,11 +2433,44 @@ mod tests {
                 80.0,
                 ParametricShape::Star {
                     point_count: 5,
-                    inner_ratio: 0.01
+                    inner_ratio: -0.01
                 }
             ),
             Err(GeometryError::InvalidBounds),
         );
+    }
+
+    #[test]
+    fn parametric_star_preserves_figmas_inclusive_inner_ratio_boundaries() {
+        let collapsed = parametric_shape_outline(
+            100.0,
+            80.0,
+            ParametricShape::Star {
+                point_count: 5,
+                inner_ratio: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(collapsed.len(), 10);
+        for point in collapsed.iter().skip(1).step_by(2) {
+            assert_point_near(*point, p(50.0, 40.0));
+        }
+
+        let polygon = parametric_shape_outline(
+            100.0,
+            80.0,
+            ParametricShape::Star {
+                point_count: 5,
+                inner_ratio: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(polygon.len(), 10);
+        assert!(polygon.iter().all(|point| {
+            let normalized_x = (point.x - 50.0) / 50.0;
+            let normalized_y = (point.y - 40.0) / 40.0;
+            (normalized_x * normalized_x + normalized_y * normalized_y - 1.0).abs() < 1e-12
+        }));
     }
 
     #[test]

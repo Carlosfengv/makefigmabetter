@@ -12212,7 +12212,7 @@ fn valid_parametric_shape_value(shape: ParametricShape) -> bool {
         } => {
             (MIN_PARAMETRIC_POINTS..=MAX_PARAMETRIC_POINTS).contains(&point_count)
                 && inner_ratio.is_finite()
-                && (0.05..=0.95).contains(&inner_ratio)
+                && (0.0..=1.0).contains(&inner_ratio)
         }
     }
 }
