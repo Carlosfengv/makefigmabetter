@@ -285,6 +285,45 @@ describe("textSvgLayoutInput", () => {
     expect(indented?.lines.map(({ start, end }) => [start, end])).toEqual([[0, 7], [7, source.length]]);
   });
 
+  it("uses generated WASM paragraph wrap styles with the AUTO line count", async () => {
+    const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
+    const explicit = { assetId: "font-geist-balanced", faceIndex: 0 };
+    const source = "aa bb cc dd";
+    const wasm = await import("../wasm/generated/editor_wasm");
+    wasm.initSync(readFileSync(new URL("../wasm/generated/editor_wasm_bg.wasm", import.meta.url)));
+    const inputFor = (text: string, textWrapStyle?: "balance" | "pretty") => {
+      const input = textSvgLayoutInput({
+        ...node({
+          runs: [{ start: 0, end: text.length, font: explicit, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+          paragraph: { ...paragraph, ...(textWrapStyle ? { textWrapStyle } : {}) },
+          autoSize: "fixed", fallbackFonts: [],
+        }),
+        text,
+        width: 1_000,
+      }, new Map([[explicit.assetId, bytes.buffer]]));
+      if (!input) throw new Error("Balanced fixture did not produce a shaping input");
+      return input;
+    };
+    const prefix = inputFor("aa bb cc ");
+    const prefixLayout = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+      new Uint8Array(prefix.fontBundle), prefix.runsJson, prefix.shapingSource, 1_000,
+    ), prefix.shapingSource);
+    if (!prefixLayout) throw new Error("Balanced prefix did not produce a shaped layout");
+    const width = prefixLayout.lines[0]!.advance * 16 / prefixLayout.unitsPerEm + .5;
+    const input = inputFor(source, "balance");
+    const automatic = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+      new Uint8Array(input.fontBundle), input.runsJson, input.shapingSource, width,
+    ), input.shapingSource);
+    const balanced = parseRustTextLayout(wasm.layout_shaped_text_runs_with_paragraph_options_json(
+      new Uint8Array(input.fontBundle), input.runsJson, input.shapingSource, width, "[0]", "[\"balance\"]",
+    ), input.shapingSource);
+
+    expect(automatic?.lines).toHaveLength(2);
+    expect(balanced?.lines).toHaveLength(automatic!.lines.length);
+    expect(balanced?.lines.map(({ start, end }) => [start, end]))
+      .not.toEqual(automatic?.lines.map(({ start, end }) => [start, end]));
+  });
+
   it("uses generated WASM tracking for line advance and physical caret coordinates", async () => {
     const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
     const explicit = { assetId: "font-geist-tracking", faceIndex: 0 };

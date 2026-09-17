@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import type { RustTextLayout } from "./rust-text-layout";
-import { shapedTextFirstLineIndents, shapedTextLineBoxes } from "./shaped-text-line-boxes";
+import { shapedTextFirstLineIndents, shapedTextLineBoxes, shapedTextParagraphWrapStyles } from "./shaped-text-line-boxes";
 
 const layout: RustTextLayout = { unitsPerEm: 1_000, lines: [
   { start: 0, end: 1, direction: "ltr", advance: 500, visualRuns: [], glyphs: [] },
@@ -16,11 +16,18 @@ describe("shaped text line boxes", () => {
       textProperties: {
         runs: [{ start: 0, end: 5, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
         paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, paragraphIndent: 10 },
-        paragraphStyleRuns: [{ start: 4, paragraphIndent: 20 }],
+        paragraphStyleRuns: [{ start: 4, paragraphIndent: 20, textWrapStyle: "auto" as const }],
         autoSize: "fixed" as const,
       },
     };
     expect(shapedTextFirstLineIndents(node)).toEqual([10, 20]);
+    expect(shapedTextParagraphWrapStyles({
+      ...node,
+      textProperties: {
+        ...node.textProperties,
+        paragraph: { ...node.textProperties.paragraph, textWrapStyle: "balance" as const },
+      },
+    })).toEqual(["balance", "auto"]);
     expect(shapedTextLineBoxes(node, layout, 100)).toEqual({
       xOffsets: [10, 0, 20],
       widths: [90, 100, 80],

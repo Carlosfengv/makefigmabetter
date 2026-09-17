@@ -5154,7 +5154,7 @@ pub fn layout_shaped_text_runs_json(
     text: &str,
     max_width_px: f32,
 ) -> Result<String, JsValue> {
-    layout_shaped_text_runs_impl(font_bundle, runs_json, text, max_width_px, &[])
+    layout_shaped_text_runs_impl(font_bundle, runs_json, text, max_width_px, &[], &[])
 }
 
 /// Variant of `layout_shaped_text_runs_json` whose JSON array supplies one
@@ -5175,6 +5175,40 @@ pub fn layout_shaped_text_runs_with_first_line_indents_json(
         text,
         max_width_px,
         &first_line_indents,
+        &[],
+    )
+}
+
+/// Shapes per-paragraph first-line indents and AUTO/BALANCE/PRETTY policies
+/// through one bounded transient options boundary.
+#[wasm_bindgen]
+pub fn layout_shaped_text_runs_with_paragraph_options_json(
+    font_bundle: &[u8],
+    runs_json: &str,
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_json: &str,
+    paragraph_wrap_styles_json: &str,
+) -> Result<String, JsValue> {
+    let first_line_indents = serde_json::from_str::<Vec<f32>>(first_line_indents_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_FIRST_LINE_INDENTS"))?;
+    let paragraph_wrap_styles = serde_json::from_str::<Vec<String>>(paragraph_wrap_styles_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_WRAP_STYLES"))?
+        .into_iter()
+        .map(|style| match style.as_str() {
+            "auto" => Ok(makefigma_graphics_core::TextWrapStyle::Auto),
+            "balance" => Ok(makefigma_graphics_core::TextWrapStyle::Balance),
+            "pretty" => Ok(makefigma_graphics_core::TextWrapStyle::Pretty),
+            _ => Err(JsValue::from_str("INVALID_TEXT_WRAP_STYLES")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    layout_shaped_text_runs_impl(
+        font_bundle,
+        runs_json,
+        text,
+        max_width_px,
+        &first_line_indents,
+        &paragraph_wrap_styles,
     )
 }
 
@@ -5184,6 +5218,7 @@ fn layout_shaped_text_runs_impl(
     text: &str,
     max_width_px: f32,
     first_line_indents: &[f32],
+    paragraph_wrap_styles: &[makefigma_graphics_core::TextWrapStyle],
 ) -> Result<String, JsValue> {
     let inputs = serde_json::from_str::<Vec<TextShapingRunInput>>(runs_json)
         .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_RUNS"))?;
@@ -5224,11 +5259,12 @@ fn layout_shaped_text_runs_impl(
             })
         })
         .collect::<Result<Vec<_>, JsValue>>()?;
-    let layout = makefigma_graphics_core::layout_shaped_text_runs_with_first_line_indents(
+    let layout = makefigma_graphics_core::layout_shaped_text_runs_with_paragraph_options(
         &runs,
         text,
         max_width_px,
         first_line_indents,
+        paragraph_wrap_styles,
     )
     .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_LAYOUT_INPUT"))?;
     Ok(serde_json::json!({
@@ -8677,6 +8713,59 @@ mod tests {
                 .as_array()
                 .is_some_and(|lines| lines.len() > 1)
         );
+    }
+
+    #[test]
+    fn exposes_paragraph_wrap_styles_through_the_wasm_boundary() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "aa bb cc dd";
+        let request = |end: usize| {
+            serde_json::json!([{
+                "start": 0,
+                "end": end,
+                "fontOffset": 0,
+                "fontLength": font.len(),
+                "faceIndex": 0,
+                "variationAxes": [],
+                "fontSize": 16.0,
+                "letterSpacing": 0.0
+            }])
+        };
+        let three = "aa bb cc ";
+        let prefix = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_json(font, &request(three.len()).to_string(), three, 1_000.0)
+                .unwrap(),
+        )
+        .unwrap();
+        let width = prefix["lines"][0]["advance"].as_f64().unwrap() * 16.0
+            / prefix["unitsPerEm"].as_f64().unwrap()
+            + 0.5;
+        let automatic = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_json(
+                font,
+                &request(source.len()).to_string(),
+                source,
+                width as f32,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let balanced = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_with_paragraph_options_json(
+                font,
+                &request(source.len()).to_string(),
+                source,
+                width as f32,
+                "[0]",
+                "[\"balance\"]",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(automatic["lines"].as_array().map(Vec::len), Some(2));
+        assert_eq!(balanced["lines"].as_array().map(Vec::len), Some(2));
+        assert_ne!(automatic["lines"], balanced["lines"]);
     }
 
     #[test]

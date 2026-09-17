@@ -924,6 +924,46 @@ export function layout_shaped_text_runs_with_first_line_indents_json(font_bundle
 }
 
 /**
+ * Shapes per-paragraph first-line indents and AUTO/BALANCE/PRETTY policies
+ * through one bounded transient options boundary.
+ * @param {Uint8Array} font_bundle
+ * @param {string} runs_json
+ * @param {string} text
+ * @param {number} max_width_px
+ * @param {string} first_line_indents_json
+ * @param {string} paragraph_wrap_styles_json
+ * @returns {string}
+ */
+export function layout_shaped_text_runs_with_paragraph_options_json(font_bundle, runs_json, text, max_width_px, first_line_indents_json, paragraph_wrap_styles_json) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const ptr0 = passArray8ToWasm0(font_bundle, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(runs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(first_line_indents_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(paragraph_wrap_styles_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_shaped_text_runs_with_paragraph_options_json(ptr0, len0, ptr1, len1, ptr2, len2, max_width_px, ptr3, len3, ptr4, len4);
+        var ptr6 = ret[0];
+        var len6 = ret[1];
+        if (ret[3]) {
+            ptr6 = 0; len6 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred7_0 = ptr6;
+        deferred7_1 = len6;
+        return getStringFromWasm0(ptr6, len6);
+    } finally {
+        wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
  * Produces ICU4X line ranges at the same Variable Font coordinates used by
  * the shaping and glyph-raster stages.
  * @param {Uint8Array} font_bytes

@@ -182,6 +182,12 @@ export function layout_shaped_text_runs_json(font_bundle: Uint8Array, runs_json:
 export function layout_shaped_text_runs_with_first_line_indents_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number, first_line_indents_json: string): string;
 
 /**
+ * Shapes per-paragraph first-line indents and AUTO/BALANCE/PRETTY policies
+ * through one bounded transient options boundary.
+ */
+export function layout_shaped_text_runs_with_paragraph_options_json(font_bundle: Uint8Array, runs_json: string, text: string, max_width_px: number, first_line_indents_json: string, paragraph_wrap_styles_json: string): string;
+
+/**
  * Produces ICU4X line ranges at the same Variable Font coordinates used by
  * the shaping and glyph-raster stages.
  */
@@ -386,6 +392,7 @@ export interface InitOutput {
     readonly layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly layout_shaped_text_runs_with_first_line_indents_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly layout_shaped_text_runs_with_paragraph_options_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];

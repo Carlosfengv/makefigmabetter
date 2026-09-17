@@ -5,7 +5,10 @@ import {
   textParagraphIndentAt,
   textParagraphRanges,
   textParagraphStartAtOffset,
+  textParagraphWrapStyleAt,
 } from "./text-layout";
+
+export type ShapedTextParagraphWrapStyle = "auto" | "balance" | "pretty";
 
 export type ShapedTextLineBoxes = Readonly<{
   xOffsets: readonly number[];
@@ -24,6 +27,14 @@ export function shapedTextFirstLineIndents(
   return indents.every((indent) => Number.isFinite(indent) && indent >= 0)
     ? indents
     : undefined;
+}
+
+export function shapedTextParagraphWrapStyles(
+  node: CanvasNode,
+  source = node.text ?? "",
+): readonly ShapedTextParagraphWrapStyle[] {
+  return textParagraphRanges(source).map(({ start }) =>
+    textParagraphWrapStyleAt(node.textProperties, start));
 }
 
 /** Replays the horizontal line box used by Canvas after Rust has frozen the

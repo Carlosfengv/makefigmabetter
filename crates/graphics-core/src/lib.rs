@@ -146,6 +146,13 @@ pub struct TextShapingRun<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextWrapStyle {
+    Auto,
+    Balance,
+    Pretty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenTypeFeature {
     pub tag: [u8; 4],
     pub enabled: bool,
@@ -996,6 +1003,24 @@ pub fn layout_shaped_text_runs_with_first_line_indents(
     max_width_px: f32,
     first_line_indents_px: &[f32],
 ) -> Result<ShapedTextLayout, TextShapingError> {
+    layout_shaped_text_runs_with_paragraph_options(
+        runs,
+        text,
+        max_width_px,
+        first_line_indents_px,
+        &[],
+    )
+}
+
+/// Adds one AUTO/BALANCE/PRETTY policy per hard-break paragraph to the same
+/// bounded shaping contract. Empty option slices preserve legacy behavior.
+pub fn layout_shaped_text_runs_with_paragraph_options(
+    runs: &[TextShapingRun<'_>],
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_px: &[f32],
+    paragraph_wrap_styles: &[TextWrapStyle],
+) -> Result<ShapedTextLayout, TextShapingError> {
     if !max_width_px.is_finite() || max_width_px <= 0.0 {
         return Err(TextShapingError::InvalidLineWidth);
     }
@@ -1094,6 +1119,9 @@ pub fn layout_shaped_text_runs_with_first_line_indents(
     {
         return Err(TextShapingError::InvalidLineWidth);
     }
+    if !paragraph_wrap_styles.is_empty() && paragraph_wrap_styles.len() != paragraph_count {
+        return Err(TextShapingError::InvalidLineWidth);
+    }
     let first_line_max_advance = |paragraph_index: usize| {
         let indent = first_line_indents_px
             .get(paragraph_index)
@@ -1118,6 +1146,10 @@ pub fn layout_shaped_text_runs_with_first_line_indents(
             paragraph_start,
             first_line_max_advance(paragraph_index),
             max_advance,
+            paragraph_wrap_styles
+                .get(paragraph_index)
+                .copied()
+                .unwrap_or(TextWrapStyle::Auto),
             segmenter,
             units_per_em,
             &mut lines,
@@ -1131,6 +1163,10 @@ pub fn layout_shaped_text_runs_with_first_line_indents(
         paragraph_start,
         first_line_max_advance(paragraph_count - 1),
         max_advance,
+        paragraph_wrap_styles
+            .get(paragraph_count - 1)
+            .copied()
+            .unwrap_or(TextWrapStyle::Auto),
         segmenter,
         units_per_em,
         &mut lines,
@@ -1427,14 +1463,90 @@ fn append_shaped_run_paragraph(
     paragraph_start: usize,
     first_line_max_advance: i32,
     max_advance: i32,
+    wrap_style: TextWrapStyle,
     segmenter: icu_segmenter::LineSegmenterBorrowed<'static>,
     units_per_em: i32,
     lines: &mut Vec<ShapedTextLine>,
     carets: &mut Vec<CaretStop>,
 ) -> Result<(), TextShapingError> {
+    let automatic = shaped_run_paragraph_lines(
+        runs,
+        paragraph,
+        paragraph_start,
+        first_line_max_advance,
+        max_advance,
+        segmenter,
+        units_per_em,
+    )?;
+    let should_rebalance = wrap_style != TextWrapStyle::Auto
+        && automatic.len() > 1
+        && automatic.len() <= 32
+        && paragraph.graphemes(true).count() <= 512
+        && (wrap_style != TextWrapStyle::Pretty
+            || shaped_lines_have_orphaned_last_word(paragraph, paragraph_start, &automatic));
+    let final_lines = if should_rebalance {
+        let indent_advance = max_advance.saturating_sub(first_line_max_advance);
+        let mut lower = f64::from(indent_advance.clamp(0, max_advance));
+        let mut upper = f64::from(max_advance);
+        let mut balanced = automatic.clone();
+        for _ in 0..24 {
+            let candidate_width = (lower + upper) / 2.0;
+            let candidate_max = candidate_width.max(1.0).round() as i32;
+            let candidate_indent =
+                f64::from(indent_advance).min((candidate_width - f64::EPSILON).max(0.0));
+            let candidate_first = (candidate_width - candidate_indent).max(1.0).round() as i32;
+            let candidate = shaped_run_paragraph_lines(
+                runs,
+                paragraph,
+                paragraph_start,
+                candidate_first,
+                candidate_max,
+                segmenter,
+                units_per_em,
+            )?;
+            if candidate.len() <= automatic.len() {
+                upper = candidate_width;
+                balanced = candidate;
+            } else {
+                lower = candidate_width;
+            }
+        }
+        balanced
+    } else {
+        automatic
+    };
+    for line in final_lines {
+        let relative_start = line.start as usize - paragraph_start;
+        let relative_end = line.end as usize - paragraph_start;
+        lines.push(line);
+        let line_index = (lines.len() - 1) as u32;
+        carets.push(CaretStop {
+            byte_offset: (paragraph_start + relative_start) as u32,
+            line_index,
+        });
+        for (offset, grapheme) in paragraph[relative_start..relative_end].grapheme_indices(true) {
+            carets.push(CaretStop {
+                byte_offset: (paragraph_start + relative_start + offset + grapheme.len()) as u32,
+                line_index,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shaped_run_paragraph_lines(
+    runs: &[PreparedTextShapingRun<'_>],
+    paragraph: &str,
+    paragraph_start: usize,
+    first_line_max_advance: i32,
+    max_advance: i32,
+    segmenter: icu_segmenter::LineSegmenterBorrowed<'static>,
+    units_per_em: i32,
+) -> Result<Vec<ShapedTextLine>, TextShapingError> {
     let direction = paragraph_direction(paragraph);
     if paragraph.is_empty() {
-        lines.push(ShapedTextLine {
+        return Ok(vec![ShapedTextLine {
             start: paragraph_start as u32,
             end: paragraph_start as u32,
             direction,
@@ -1445,12 +1557,7 @@ fn append_shaped_run_paragraph(
                 x_advance: 0,
             }],
             glyphs: Vec::new(),
-        });
-        carets.push(CaretStop {
-            byte_offset: paragraph_start as u32,
-            line_index: (lines.len() - 1) as u32,
-        });
-        return Ok(());
+        }]);
     }
     let mut breakpoints = segmenter
         .segment_str(paragraph)
@@ -1459,6 +1566,7 @@ fn append_shaped_run_paragraph(
     if breakpoints.last().copied() != Some(paragraph.len()) {
         breakpoints.push(paragraph.len());
     }
+    let mut lines = Vec::new();
     let mut start = 0;
     while start < paragraph.len() {
         let line_max_advance = if start == 0 {
@@ -1515,20 +1623,25 @@ fn append_shaped_run_paragraph(
             visual_carets,
             glyphs: shaped.glyphs,
         });
-        let line_index = (lines.len() - 1) as u32;
-        carets.push(CaretStop {
-            byte_offset: absolute_start,
-            line_index,
-        });
-        for (offset, grapheme) in paragraph[start..end].grapheme_indices(true) {
-            carets.push(CaretStop {
-                byte_offset: (paragraph_start + start + offset + grapheme.len()) as u32,
-                line_index,
-            });
-        }
         start = end;
     }
-    Ok(())
+    Ok(lines)
+}
+
+fn shaped_lines_have_orphaned_last_word(
+    paragraph: &str,
+    paragraph_start: usize,
+    lines: &[ShapedTextLine],
+) -> bool {
+    if lines.len() < 2 {
+        return false;
+    }
+    let word_count = |line: &ShapedTextLine| {
+        let start = line.start as usize - paragraph_start;
+        let end = line.end as usize - paragraph_start;
+        paragraph[start..end].split_whitespace().count()
+    };
+    word_count(&lines[lines.len() - 1]) == 1 && word_count(&lines[lines.len() - 2]) > 1
 }
 
 fn scale_font_metric(value: i32, scale: f64) -> i32 {
@@ -3382,10 +3495,11 @@ mod tests {
     use super::{
         CaretStop, FontVariation, GlyphAtlas, GlyphAtlasError, GlyphKey, GlyphRasterError,
         SyntheticFontStyle, TextDirection, TextLine, TextSelection, TextShapingError,
-        TextShapingRun, bidi_visual_runs, fallback_text_layout, font_contour_x,
+        TextShapingRun, TextWrapStyle, bidi_visual_runs, fallback_text_layout, font_contour_x,
         gdef_ligature_carets, gdef_logical_caret_step, glyf_contour_x_from_tables,
         layout_shaped_text, layout_shaped_text_runs,
-        layout_shaped_text_runs_with_first_line_indents, layout_shaped_text_with_variations,
+        layout_shaped_text_runs_with_first_line_indents,
+        layout_shaped_text_runs_with_paragraph_options, layout_shaped_text_with_variations,
         rasterize_glyph, rasterize_glyph_with_variations,
         rasterize_glyph_with_variations_and_style, replace_text_selection, shape_text,
         shape_text_with_variations,
@@ -5227,6 +5341,95 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 7), (7, 13), (14, paragraphs.len() as u32)]
         );
+    }
+
+    #[test]
+    fn multi_run_layout_balances_bounded_paragraphs_and_pretty_orphans() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "aa bb cc dd";
+        let run = |end| TextShapingRun {
+            font_bytes: font,
+            face_index: 0,
+            variations: &[],
+            features: &[],
+            start: 0,
+            end,
+            font_size: 16.0,
+            synthetic_style: super::SyntheticFontStyle::default(),
+            letter_spacing: 0.0,
+        };
+        let three = "aa bb cc ";
+        let three_layout =
+            layout_shaped_text_runs(&[run(three.len() as u32)], three, 1_000.0).unwrap();
+        let width =
+            three_layout.lines[0].advance as f32 * 16.0 / three_layout.units_per_em as f32 + 0.5;
+        let automatic =
+            layout_shaped_text_runs(&[run(source.len() as u32)], source, width).unwrap();
+        let balanced = layout_shaped_text_runs_with_paragraph_options(
+            &[run(source.len() as u32)],
+            source,
+            width,
+            &[0.0],
+            &[TextWrapStyle::Balance],
+        )
+        .unwrap();
+        let pretty = layout_shaped_text_runs_with_paragraph_options(
+            &[run(source.len() as u32)],
+            source,
+            width,
+            &[0.0],
+            &[TextWrapStyle::Pretty],
+        )
+        .unwrap();
+
+        assert_eq!(automatic.lines.len(), 2);
+        assert_eq!(balanced.lines.len(), automatic.lines.len());
+        assert_ne!(balanced.lines, automatic.lines);
+        assert_eq!(pretty.lines, balanced.lines);
+        assert_eq!(pretty.carets, balanced.carets);
+
+        let paragraphs = format!("{source}\n{source}");
+        let mixed = layout_shaped_text_runs_with_paragraph_options(
+            &[run(paragraphs.len() as u32)],
+            &paragraphs,
+            width,
+            &[0.0, 0.0],
+            &[TextWrapStyle::Balance, TextWrapStyle::Auto],
+        )
+        .unwrap();
+        let second_start = source.len() as u32 + 1;
+        let expected = balanced
+            .lines
+            .iter()
+            .map(|line| (line.start, line.end))
+            .chain(
+                automatic
+                    .lines
+                    .iter()
+                    .map(|line| (line.start + second_start, line.end + second_start)),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mixed
+                .lines
+                .iter()
+                .map(|line| (line.start, line.end))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let over_budget = "a".repeat(513);
+        let automatic =
+            layout_shaped_text_runs(&[run(over_budget.len() as u32)], &over_budget, 100.0).unwrap();
+        let balanced = layout_shaped_text_runs_with_paragraph_options(
+            &[run(over_budget.len() as u32)],
+            &over_budget,
+            100.0,
+            &[0.0],
+            &[TextWrapStyle::Balance],
+        )
+        .unwrap();
+        assert_eq!(balanced, automatic);
     }
 
     #[test]

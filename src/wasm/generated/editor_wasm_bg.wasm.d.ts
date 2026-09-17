@@ -42,6 +42,7 @@ export const gpu_scene_instances_from_snapshot_json: (a: number, b: number, c: n
 export const layout_shaped_text_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const layout_shaped_text_runs_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const layout_shaped_text_runs_with_first_line_indents_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const layout_shaped_text_runs_with_paragraph_options_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const layout_shaped_text_with_variations_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const line_outline_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const parametric_shape_contains_point_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
