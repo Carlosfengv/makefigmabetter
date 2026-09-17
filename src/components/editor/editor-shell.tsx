@@ -95,6 +95,7 @@ import {
 } from "@/lib/text-hyperlink-navigation";
 import { freshTextHyperlinkHoverTarget } from "@/lib/text-hyperlink-hover";
 import { textPathCharacterAtLocalPoint } from "@/lib/text-path-layout";
+import { endingEllipsis, textDisplayLines } from "@/lib/text-truncation";
 import {
   canvasTextEditBox,
   canvasTextEditContainsPoint,
@@ -1270,58 +1271,48 @@ function textPointHit(
     hangingPunctuation: properties?.paragraph.hangingPunctuation ?? false,
     measure,
   });
-  const bytes = new TextEncoder().encode(text);
-  let totalHeight = 0;
-  let totalPreviousEnd = 0;
-  let totalPreviousParagraphStart = 0;
-  for (const [lineIndex, line] of lines.entries()) {
-    const skipped = new TextDecoder().decode(
-      bytes.slice(totalPreviousEnd, line.start),
-    );
-    const first = textLineStartsParagraph(lineIndex, skipped);
-    const paragraphStart = textParagraphStartAtOffset(text, line.start);
-    if (lineIndex > 0 && first) {
-      totalHeight += textParagraphGap(
-        properties,
-        totalPreviousParagraphStart,
-        paragraphStart,
-      );
-      totalPreviousParagraphStart = paragraphStart;
-    }
-    totalHeight += resolvedTextLineHeightAt(
-      properties,
-      paragraphStart,
-      fontSize,
-    );
-    totalPreviousEnd = line.end;
-  }
-  let lineTop = editBox.y +
+  const displayLines = textDisplayLines(
+    text,
+    lines,
+    node.kind === "text" ? properties : undefined,
+    editBox.height,
+    (paragraphStart) => resolvedTextLineHeightAt(properties, paragraphStart, fontSize),
+    (previousStart, nextStart) => textParagraphGap(properties, previousStart, nextStart),
+  );
+  const totalHeight = displayLines.length
+    ? displayLines[displayLines.length - 1]!.lineTop + displayLines[displayLines.length - 1]!.lineHeight
+    : 0;
+  const blockTop = editBox.y +
     (editBox.verticallyCentered
       ? Math.max(0, (editBox.height - totalHeight) / 2)
       : 0);
+  const bytes = new TextEncoder().encode(text);
   let previousEnd = 0;
-  let previousParagraphStart = 0;
-  for (const [lineIndex, line] of lines.entries()) {
+  for (const [lineIndex, line] of displayLines.entries()) {
     const skipped = new TextDecoder().decode(
       bytes.slice(previousEnd, line.start),
     );
     const first = textLineStartsParagraph(lineIndex, skipped);
     const paragraphStart = textParagraphStartAtOffset(text, line.start);
-    if (lineIndex > 0 && first) {
-      lineTop += textParagraphGap(properties, previousParagraphStart, paragraphStart);
-      previousParagraphStart = paragraphStart;
-    }
-    const lineBottom = lineTop + resolvedTextLineHeightAt(properties, paragraphStart, fontSize);
+    const lineTop = blockTop + line.lineTop;
+    const lineBottom = lineTop + line.lineHeight;
     if (local.y <= lineBottom) {
-      const lineWidth = measure(line.text);
       const indent = textListIndentationOffset(text, properties, line.start, listMarkerGutter)
         + (first ? textParagraphIndentAt(properties, paragraphStart) + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0);
       const lineBoxWidth = Math.max(0, editBox.width - indent);
+      const truncated = line.truncateEnding
+        ? endingEllipsis(line.text, lineBoxWidth, measure)
+        : undefined;
+      const displayText = truncated?.text ?? line.text;
+      const retainedText = truncated
+        ? new TextDecoder().decode(new TextEncoder().encode(line.text).slice(0, truncated.retainedUtf8Bytes))
+        : line.text;
+      const lineWidth = measure(displayText);
       const alignment =
         properties?.paragraph.alignment ??
         (node.kind === "shapeWithText" ? "center" : "left");
       const hanging = properties?.paragraph.hangingPunctuation
-        ? textHangingPunctuationOffsets(line.text, line.direction, measure)
+        ? textHangingPunctuationOffsets(displayText, line.direction, measure)
         : { left: 0, right: 0 };
       let x = textAlignedLineLeft(
         editBox.x + indent,
@@ -1332,7 +1323,7 @@ function textPointHit(
         hanging,
       );
       let index = utf16IndexAtUtf8Offset(text, line.start);
-      const graphemes = segmentGraphemes(line.text);
+      const graphemes = segmentGraphemes(retainedText);
       const linksUseLogicalOrder = line.direction === "ltr"
         && !graphemes.some((grapheme) => resolveTextDirection(grapheme) === "rtl");
       for (const grapheme of graphemes) {
@@ -1342,14 +1333,17 @@ function textPointHit(
           caret: local.x <= x + width / 2 ? index : index + grapheme.length,
           // Whole-line RTL and mixed-direction links need the Rust visual-run
           // projection before source characters can be hit safely.
-          ...(linksUseLogicalOrder && local.y >= lineTop ? { character: index } : {}),
+          ...(linksUseLogicalOrder && !line.truncateEnding && local.y >= lineTop ? { character: index } : {}),
         };
         x += width;
         index += grapheme.length;
       }
-      return { caret: utf16IndexAtUtf8Offset(text, line.end) };
+      return {
+        caret: line.truncateEnding
+          ? utf16IndexAtUtf8Offset(text, line.start + (truncated?.retainedUtf8Bytes ?? 0))
+          : utf16IndexAtUtf8Offset(text, line.end),
+      };
     }
-    lineTop = lineBottom;
     previousEnd = line.end;
   }
   return { caret: text.length };
@@ -4657,6 +4651,7 @@ export function EditorShell({
         }
       }
     } else if (isCanvasTextEditableNode(candidate)) {
+      if (candidate.textProperties?.runs.some((run) => run.font)) return false;
       character = textPointHit(candidate, point, localPoint).character;
     }
     if (character === undefined) return false;

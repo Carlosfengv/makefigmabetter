@@ -2119,6 +2119,8 @@ function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = nod
     && properties?.paragraph.hangingPunctuation !== true
     && properties?.paragraph.listType === undefined
     && properties?.paragraph.textWrapStyle === undefined
+    && properties?.textTruncation !== "ending"
+    && properties?.maxLines === undefined
     && !properties?.paragraphStyleRuns?.some((run) =>
       (run.paragraphSpacing ?? 0) !== 0 || (run.paragraphIndent ?? 0) !== 0
       || run.lineHeight !== undefined || run.lineHeightUnit !== undefined

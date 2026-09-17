@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import type { GpuTextProjectionRun } from "./gpu-text-projection";
 import type { RustTextLayout } from "./rust-text-layout";
-import { projectTextHitGlyphs } from "./text-hit-glyph-projection";
+import { projectTextHitGlyphs, visibleTextHitLayout } from "./text-hit-glyph-projection";
 
 const raster = { width: 4, height: 8, bearingX: 0, bearingY: 8, ascent: 8, advanceX: 10, alphaMask: new Uint8Array(32) };
 const runs: GpuTextProjectionRun[] = [{ fontAssetId: "font", faceIndex: 0, variationAxesKey: "[]", syntheticStyleKey: "400:normal", fontSize: 10, pixelSize: 10, rasters: new Map([[7, raster]]) }];
@@ -60,6 +60,33 @@ describe("Text interaction glyph projection", () => {
       },
     };
     expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(20);
+  });
+
+  it("excludes hidden and ellipsis-bearing lines from hyperlink hits", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "truncated", text: "A\nB\nC", width: 100, height: 100,
+      textProperties: {
+        runs: [],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+        textTruncation: "ending" as const,
+        maxLines: 2,
+      },
+    };
+    const threeLines: RustTextLayout = { ...layout, lines: [0, 2, 4].map((start) => ({
+      ...layout.lines[0]!, start, end: start + 1, glyphs: [{ ...layout.lines[0]!.glyphs[0]!, cluster: start }],
+    })) };
+    expect(visibleTextHitLayout(text, threeLines, 12).lines).toHaveLength(1);
+    expect(projectTextHitGlyphs({ node: text, runs, layout: threeLines, lineHeight: 12 })).toHaveLength(1);
+    expect(visibleTextHitLayout({
+      ...text,
+      textProperties: { ...text.textProperties, textTruncation: "disabled" as const, maxLines: undefined },
+    }, threeLines, 12).lines).toHaveLength(3);
+    expect(visibleTextHitLayout({
+      ...text,
+      height: 20,
+      textProperties: { ...text.textProperties, maxLines: undefined },
+    }, threeLines, 12).lines).toHaveLength(1);
   });
 
   it("rejects non-Text nodes", () => {
