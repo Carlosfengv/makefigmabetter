@@ -552,6 +552,26 @@ describe("Core transaction batch resolution", () => {
     expect(resolveCoreBatch([frame, before, first, second], [{ type: "boolean", ids: [first.id, second.id], operation: "union", id, pageId: "other-page" }])).toBeUndefined();
   });
 
+  it("dissolves a neutral Group when Boolean creation consumes every child", () => {
+    const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000109", pageId: "page", positionId: "10000000000000000000000000000000:00000000000040008000000000000109" };
+    const group = { ...createNode("group", 20, 30), id: "00000000-0000-4000-8000-00000000010a", pageId: "page", parentId: frame.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010a" };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000010b", pageId: "page", parentId: group.id, positionId: "10000000000000000000000000000000:0000000000004000800000000000010b" };
+    const second = { ...createNode("vector", 40, 0), id: "00000000-0000-4000-8000-00000000010c", pageId: "page", parentId: group.id, positionId: "20000000000000000000000000000000:0000000000004000800000000000010c" };
+    const sibling = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000010d", pageId: "page", parentId: frame.id, positionId: "f0000000000000000000000000000000:0000000000004000800000000000010d" };
+    const id = "00000000-0000-4000-8000-00000000010e";
+
+    const resolved = resolveCoreBatch([frame, group, first, second, sibling], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id, parentId: frame.id, index: 0,
+    }]);
+
+    expect(resolved?.nextNodes.some((node) => node.id === group.id)).toBe(false);
+    expect(resolved?.nextNodes.find((node) => node.id === id)).toMatchObject({ kind: "booleanOperation", parentId: frame.id });
+    expect(resolved?.nextNodes.filter((node) => node.parentId === frame.id).sort((left, right) => left.positionId!.localeCompare(right.positionId))[0]?.id).toBe(id);
+    expect(resolveCoreBatch([frame, { ...group, opacity: .5 }, first, second, sibling], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+  });
+
   it("rejects wrapping every operand inside the same Boolean parent", () => {
     const outer = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000106", pageId: "page", booleanOperation: "union" as const };
     const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000107", pageId: "page", parentId: outer.id };

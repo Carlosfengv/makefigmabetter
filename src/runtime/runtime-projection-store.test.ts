@@ -68,6 +68,36 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", removed: false });
   });
 
+  it("dissolves a neutral Group when Boolean creation adopts every child", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "a", type: "VECTOR", parentId: "group", siblingIndex: 0 },
+        { id: "b", type: "VECTOR", parentId: "group", siblingIndex: 1 },
+      ],
+    });
+
+    store.stage({
+      transactionId: "tx-boolean-group",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 0, booleanOperation: "union" },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 10 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    });
+
+    expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(store.getNode("a")).toMatchObject({ parentId: "boolean", siblingIndex: 0 });
+    expect(store.getNode("b")).toMatchObject({ parentId: "boolean", siblingIndex: 1 });
+  });
+
   it("projects ComponentSet creation and Component adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

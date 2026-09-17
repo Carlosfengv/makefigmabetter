@@ -324,7 +324,7 @@ export function resolveFlattenNodesBatch(
       const children = nodes.filter((candidate) => candidate.parentId === group.id);
       return children.length > 0 && children.every((child) => sourceIdSet.has(child.id));
     });
-  if (dissolvedGroups.some((group) => !canDissolveFlattenGroup(nodes, group))) return undefined;
+  if (dissolvedGroups.some((group) => !canDissolveNeutralGroup(nodes, group))) return undefined;
   const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
   const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
@@ -388,7 +388,7 @@ export function resolveFlattenNodesBatch(
   return { replacement, batch };
 }
 
-function canDissolveFlattenGroup(nodes: readonly CanvasNode[], group: CanvasNode): boolean {
+function canDissolveNeutralGroup(nodes: readonly CanvasNode[], group: CanvasNode): boolean {
   if (
     group.kind !== "group" ||
     group.visible === false ||
@@ -958,6 +958,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (roots.some((node) => node.pageId !== pageId)) return undefined;
       const commonParentId = nearestCommonParentId(nextNodes, roots);
       let parentId = commonParentId;
+      let dissolvedGroups: CanvasNode[] = [];
       if (command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") {
         if (command.parentId !== undefined && command.pageId !== undefined) return undefined;
         if (command.parentId !== undefined) {
@@ -969,15 +970,28 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
           parentId = undefined;
         }
         if (command.index !== undefined && (!Number.isSafeInteger(command.index) || command.index < 0)) return undefined;
+        if (command.type === "boolean") {
+          dissolvedGroups = [...new Set(roots.map((node) => node.parentId))]
+            .filter((sourceParentId): sourceParentId is string => typeof sourceParentId === "string" && sourceParentId !== parentId)
+            .map((sourceParentId) => nextNodes.find((node) => node.id === sourceParentId))
+            .filter((sourceParent): sourceParent is CanvasNode => Boolean(sourceParent?.kind === "group"))
+            .filter((group) => {
+              const children = nextNodes.filter((candidate) => candidate.parentId === group.id);
+              return children.length > 0 && children.every((child) => selectedIds.has(child.id));
+            });
+          if (dissolvedGroups.some((group) => !canDissolveNeutralGroup(nextNodes, group))) return undefined;
+        }
+        const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
         const crossParentRoots = roots.filter((node) => node.parentId !== parentId);
         if (crossParentRoots.some((node) => {
           const sourceParent = node.parentId ? nextNodes.find((candidate) => candidate.id === node.parentId) : undefined;
-          return sourceParent && (sourceParent.kind === "group" || sourceParent.kind === "booleanOperation" || isAutoLayoutFrame(sourceParent));
+          return sourceParent && ((sourceParent.kind === "group" && !dissolvedGroupIds.has(sourceParent.id)) || sourceParent.kind === "booleanOperation" || isAutoLayoutFrame(sourceParent));
         })) return undefined;
         for (const structuralParentId of new Set([...roots.map((node) => node.parentId), parentId])) {
           if (!structuralParentId) continue;
           const structuralParent = nextNodes.find((node) => node.id === structuralParentId);
           if (!structuralParent || (structuralParent.kind !== "group" && structuralParent.kind !== "booleanOperation")) continue;
+          if (dissolvedGroupIds.has(structuralParentId)) continue;
           const selectedChildCount = roots.filter((node) => node.parentId === structuralParentId).length;
           const currentChildCount = nextNodes.filter((node) => node.parentId === structuralParentId).length;
           const childCountAfter = currentChildCount - selectedChildCount + (structuralParentId === parentId ? 1 : 0);
@@ -1006,7 +1020,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // it its own unique Core fallback key for that short-lived shared-parent
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
-      const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id));
+      const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
+      const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id) && !dissolvedGroupIds.has(node.id));
       const requestedIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet" ? command.index : undefined;
       if (requestedIndex !== undefined && requestedIndex > remainingSiblings.length) return undefined;
       const groupPositionId = requestedIndex === undefined
@@ -1087,6 +1102,9 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // The child matrices above are local to the newly created Group. Their
       // geometry must therefore be updated only after that parent link exists.
       reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
+      if (dissolvedGroupIds.size) {
+        nextNodes.splice(0, nextNodes.length, ...nextNodes.filter((node) => !dissolvedGroupIds.has(node.id)));
+      }
       if (command.type === "group" && command.autoLayout) {
         batch.push({ type: "update", node: coreProjectionNode(group) });
       }
@@ -1097,6 +1115,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       selectionIds = [id];
       affectedGroupIds.add(id);
       roots.forEach((root) => groupAncestorIds(nextNodes, root.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId)));
+      dissolvedGroups.forEach((group) => groupAncestorIds(nextNodes, group.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId)));
       groupAncestorIds(nextNodes, parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId));
       continue;
     }

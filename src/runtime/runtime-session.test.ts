@@ -3391,6 +3391,45 @@ describe("M1 RuntimeSession", () => {
     expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
   });
 
+  it("creates a Boolean from every child of a neutral Group and dissolves the wrapper", async () => {
+    const closedPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{ closed: true, points: [
+        { id: "p1", x: 0, y: 0, pointType: "corner" as const },
+        { id: "p2", x: 20, y: 0, pointType: "corner" as const },
+        { id: "p3", x: 0, y: 20, pointType: "corner" as const },
+      ] }],
+    };
+    const projection: RuntimeProjection = {
+      revision: 0,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "group", type: "GROUP", name: "Group", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "a", type: "VECTOR", name: "A", parentId: "group", siblingIndex: 0, x: 10, y: 5, width: 20, height: 20, vectorPath: closedPath },
+        { id: "b", type: "VECTOR", name: "B", parentId: "group", siblingIndex: 1, x: 40, y: 5, width: 20, height: 20, vectorPath: closedPath },
+        { id: "after", type: "VECTOR", name: "After", parentId: "page", siblingIndex: 1, x: 240, y: 50, width: 10, height: 10, vectorPath: closedPath },
+      ],
+    };
+    let sequence = 0;
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "boolean-group", projection, transport, createId: () => `boolean-group-${++sequence}`, scheduleMicrotask: () => {} });
+    const group = (await session.getNodeByIdAsync("group")) as RuntimeContainerNodeProxy;
+    const first = (await session.getNodeByIdAsync("a"))!;
+    const second = (await session.getNodeByIdAsync("b"))!;
+
+    const boolean = session.union([first, second], session.currentPage);
+
+    expect(boolean.parent?.id).toBe("page");
+    expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
+    expect(group.removed).toBe(true);
+    expect(session.currentPage.children.map((node) => node.id)).toEqual([boolean.id, "after"]);
+
+    await session.commitAsync();
+    expect(await session.getNodeByIdAsync("group")).toBeNull();
+    expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
+  });
+
   it("flattens a confirmed Boolean into an alternate same-page parent and index", async () => {
     const path = {
       fillRule: "nonZero" as const,
@@ -4993,6 +5032,7 @@ class InMemoryTransport implements RuntimeTransactionTransport {
       }
       else if (operation.type === "boolean") {
         nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
+        const sourceParentIds = new Set(operation.operandIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
         operation.operandIds.forEach((nodeId, index) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, ...structuredClone(operation.operandPatches[index]), parentId: operation.node.id, siblingIndex: index });
@@ -5000,6 +5040,9 @@ class InMemoryTransport implements RuntimeTransactionTransport {
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
+        });
+        sourceParentIds.forEach((parentId) => {
+          if (nodes.get(parentId)?.type === "GROUP" && ![...nodes.values()].some((node) => node.parentId === parentId)) nodes.delete(parentId);
         });
       }
       else if (operation.type === "transformGroup") {

@@ -598,7 +598,7 @@ function validateOperations(
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
       }
       if (operation.type === "boolean") {
-        validateBooleanOperation(read, operation, transactionId);
+        validateBooleanOperation(read, () => new Set([...base.keys(), ...overlay.keys()]), operation, transactionId);
       }
       if (operation.type === "transformGroup") {
         validateTransformGroupOperation(read, operation, transactionId);
@@ -608,6 +608,7 @@ function validateOperations(
       }
       overlay.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
+        const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
         operation.operandIds.forEach((nodeId, siblingIndex) => {
           const node = read(nodeId)!;
           overlay.set(nodeId, cloneNode({ ...node, ...operation.operandPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
@@ -615,6 +616,7 @@ function validateOperations(
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex }));
         });
+        sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       }
       if (operation.type === "transformGroup") {
         operation.childIds.forEach((nodeId, siblingIndex) => {
@@ -734,17 +736,19 @@ function applyOperations(
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.node.id });
       }
-      if (operation.type === "boolean") validateBooleanOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      if (operation.type === "boolean") validateBooleanOperation((nodeId) => nodes.get(nodeId), () => nodes.keys(), operation, transactionId);
       if (operation.type === "transformGroup") validateTransformGroupOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
       if (operation.type === "componentSet") validateComponentSetOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
       nodes.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
+        const sourceParentIds = new Set(operation.operandIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
         operation.operandIds.forEach((nodeId, siblingIndex) => {
           nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, ...operation.operandPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
         });
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex }));
         });
+        sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       }
       if (operation.type === "transformGroup") {
         operation.childIds.forEach((nodeId, siblingIndex) => {
@@ -1000,6 +1004,7 @@ function validateDetachInstanceOperation(
 
 function validateBooleanOperation(
   read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
   operation: Extract<PendingProjectionOperation, { type: "boolean" }>,
   transactionId: string,
 ): void {
@@ -1016,6 +1021,20 @@ function validateBooleanOperation(
     if (node.removed === true) throw runtimeError("NODE_REMOVED", { transactionId, nodeId });
     if (node.type !== "VECTOR" || projectionPageId(read, node) !== projectionPageId(read, operation.node)) {
       throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId });
+    }
+  }
+  const operandIds = new Set(operation.operandIds);
+  const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+  for (const parentId of sourceParentIds) {
+    const parent = read(parentId);
+    if (!parent || parent.type !== "GROUP" || operation.node.parentId === parentId) continue;
+    const children = [...nodeIds()]
+      .map((nodeId) => read(nodeId))
+      .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === parentId));
+    if (!children.length || children.some((child) => !operandIds.has(child.id))) continue;
+    const grandparent = typeof parent.parentId === "string" ? read(parent.parentId) : undefined;
+    if (!runtimeProjectionCanDissolveNeutralGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: parent.id });
     }
   }
   if (new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length) {
@@ -1231,7 +1250,7 @@ function validateFlattenNodesOperation(
       .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === parentId));
     if (!children.length || children.some((child) => !sourceIds.has(child.id))) continue;
     const grandparent = typeof parent.parentId === "string" ? read(parent.parentId) : undefined;
-    if (!runtimeProjectionCanDissolveFlattenGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
+    if (!runtimeProjectionCanDissolveNeutralGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
       throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: parent.id });
     }
   }
@@ -1246,7 +1265,7 @@ function validateFlattenNodesOperation(
   }
 }
 
-function runtimeProjectionCanDissolveFlattenGroup(node: RuntimeProjectionNode): boolean {
+function runtimeProjectionCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {
   return node.type === "GROUP"
     && node.visible !== false
     && (typeof node.opacity !== "number" || node.opacity === 1)
