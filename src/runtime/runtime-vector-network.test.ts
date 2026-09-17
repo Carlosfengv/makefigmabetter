@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentPaintStack, DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkRegionPaintPlansFromExtension } from "./runtime-vector-network";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -290,6 +290,46 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
+  it("materializes mixed active joins as one shared straight-network stroke mesh", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 20, strokeJoin: "BEVEL" as const },
+        { x: 40, y: 20 },
+        { x: 40, y: 40 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 }],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `mixed-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    expect(converted.network).toEqual(network);
+    expect(converted.strokeJoin).toBeUndefined();
+    const extensions = extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path);
+    const mesh = vectorNetworkMixedStrokeMeshFromExtension(extensions, converted.path, {
+      strokeWidth: 4,
+      strokeCapStart: "none",
+      strokeCapEnd: "none",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+    });
+
+    expect(mesh?.bounds).toEqual({ min: { x: 0, y: -2 }, max: { x: 42, y: 40 } });
+    expect(mesh?.triangles.length).toBeGreaterThan(20);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21, y: -1 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.25, y: 21.75 })).toBe(false);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 41.5, y: 18.5 })).toBe(true);
+
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      ...network,
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2, tangentStart: { x: 1, y: 0 } }, { start: 2, end: 3 }, { start: 3, end: 4 }],
+    }, () => "curve", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
+      .toMatchObject({ reason: expect.stringContaining("straight") });
+  });
+
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
@@ -313,6 +353,6 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0, strokeJoin: "ROUND" }, { x: 10, y: 0 }],
       segments: [{ start: 0, end: 1 }],
-    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("mixed per-vertex") });
+    }, allocate, defaults)).toMatchObject({ network: expect.any(Object) });
   });
 });

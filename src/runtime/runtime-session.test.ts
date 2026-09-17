@@ -2854,6 +2854,41 @@ describe("M1 RuntimeSession", () => {
     });
   });
 
+  it("preserves mixed joins for bounded straight VectorNetworks and gates incompatible stroke state", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const vector = session.createVector();
+    await session.commitAsync();
+    const mixed = {
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 20, strokeJoin: "BEVEL" as const },
+        { x: 40, y: 20 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }],
+    };
+
+    await vector.setVectorNetworkAsync(mixed);
+
+    expect(vector.vectorNetwork).toEqual(mixed);
+    expect(vector.strokeJoin).toBe("MITER");
+    expect(transport.submitted[1]?.operations).toContainEqual(expect.objectContaining({
+      type: "update",
+      nodeId: vector.id,
+      patch: expect.objectContaining({
+        vectorPath: expect.any(Object),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    }));
+    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { vector.vectorNetwork = {
+      ...mixed,
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2, tangentStart: { x: 2, y: 0 } }, { start: 2, end: 3 }],
+    }; }), "INVALID_ARGUMENT")).toBe(true);
+  });
+
   it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);

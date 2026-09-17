@@ -136,7 +136,7 @@ import { joinCrossVectorEndpoints } from "@/lib/vector-cross-connect";
 import { compileScene, findTopmostSceneHit, sceneNodesInPaintOrder } from "@/runtime/scene-compiler";
 import { planDirtyRegionReplay, type DirtyRegionReplayPlan } from "@/runtime/dirty-region-replay";
 import { sceneClipGeometryByNodeId, sceneMaskSourceByNodeId, type ClipGeometryRef, type OrderedRenderScene } from "@/runtime/ordered-render-ir";
-import { vectorNetworkRegionPaintPlansFromExtension } from "@/runtime/runtime-vector-network";
+import { vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "@/runtime/runtime-vector-network";
 import { specialNodeFallback } from "@/lib/special-node-fallback";
 import { clipsChildren } from "@/lib/node-capabilities";
 import { connectorPathForNode, traceConnectorPath } from "@/lib/connector-path";
@@ -651,6 +651,9 @@ function boundsForNode(node: CanvasNode) {
     if (visual) return { x: visual.left, y: visual.top, width: visual.right - visual.left, height: visual.bottom - visual.top };
   }
   if (node.kind === "vector") {
+    const mixedStroke = mixedVectorNetworkStrokeMesh(node);
+    const mixedBounds = mixedStroke ? strokeMeshBounds(mixedStroke) : undefined;
+    if (mixedBounds) return worldVectorBounds(node, mixedBounds);
     const vectorBounds = canonicalVectorPath(node)?.bounds;
     if (vectorBounds) return worldVectorBounds(node, vectorBounds);
   }
@@ -691,7 +694,7 @@ function applyNativeAffine(ctx: OffscreenCanvasRenderingContext2D, node: CanvasN
   return true;
 }
 function canonicalVectorContainsWorldPoint(node: CanvasNode, point: { x: number; y: number }): boolean | undefined {
-  if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath) return undefined;
+  if (node.kind !== "vector" || !node.vectorPath) return undefined;
   const affine = nativeAffineForNode(node);
   let local: { x: number; y: number };
   if (affine) {
@@ -707,9 +710,14 @@ function canonicalVectorContainsWorldPoint(node: CanvasNode, point: { x: number;
   }
   try {
     const pathJson = JSON.stringify(node.vectorPath);
-    if (wasmRuntime.vector_path_contains_json(pathJson, local.x, local.y, .25)) return true;
+    if (wasmRuntime?.vector_path_contains_json(pathJson, local.x, local.y, .25)) return true;
+    const mixedStroke = mixedVectorNetworkStrokeMesh(node);
+    if (mixedStroke) {
+      const bounds = strokeMeshBounds(mixedStroke);
+      return hasVisibleStroke(node) && vectorNetworkStrokeMeshContains({ triangles: mixedStroke, ...(bounds ? { bounds } : {}) }, local);
+    }
     const cap = canvasStrokeCap(node.strokeCapStart);
-    if (hasVisibleStroke(node) && cap && node.strokeCapEnd === node.strokeCapStart) {
+    if (wasmRuntime && hasVisibleStroke(node) && cap && node.strokeCapEnd === node.strokeCapStart) {
       return wasmRuntime.vector_path_stroke_contains_json(pathJson, local.x, local.y, .25, node.strokeWidth, cap, node.strokeJoin ?? "miter", node.strokeMiterLimit ?? 10);
     }
     return false;
@@ -3877,7 +3885,42 @@ function traceFlattenedVectorPath(ctx: Pick<OffscreenCanvasRenderingContext2D, "
     if (subpath.closed) ctx.closePath();
   });
 }
+function mixedVectorNetworkStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
+  if (node.kind !== "vector" || !node.vectorPath || node.strokeWidth <= 0) return undefined;
+  const extensionKey = JSON.stringify(node.extensions ?? {});
+  const key = `${node.id}:mixed-vector-stroke:${extensionKey}:${node.strokeWidth}:${node.strokeCapStart ?? "none"}:${node.strokeCapEnd ?? "none"}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}:${node.strokeDashPattern?.join(",") ?? ""}`;
+  const cached = canonicalStrokeMeshes.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  const mesh = vectorNetworkMixedStrokeMeshFromExtension(node.extensions, node.vectorPath, {
+    strokeWidth: node.strokeWidth,
+    strokeCapStart: node.strokeCapStart,
+    strokeCapEnd: node.strokeCapEnd,
+    strokeJoin: node.strokeJoin ?? "miter",
+    strokeMiterLimit: node.strokeMiterLimit ?? 10,
+    strokeDashPattern: node.strokeDashPattern,
+  });
+  const resolved = mesh?.triangles.length ? mesh.triangles : null;
+  if (canonicalStrokeMeshes.size >= 2_048) canonicalStrokeMeshes.clear();
+  canonicalStrokeMeshes.set(key, resolved);
+  return resolved ?? undefined;
+}
+function strokeMeshBounds(mesh: StrokeMesh): { min: StrokeMeshPoint; max: StrokeMeshPoint } | undefined {
+  if (!mesh.length) return undefined;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  mesh.forEach((triangle) => triangle.forEach((point) => {
+    minX = Math.min(minX, point.x); minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);
+  }));
+  return [minX, minY, maxX, maxY].every(Number.isFinite)
+    ? { min: { x: minX, y: minY }, max: { x: maxX, y: maxY } }
+    : undefined;
+}
 function canonicalVectorStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
+  const mixed = mixedVectorNetworkStrokeMesh(node);
+  if (mixed) return mixed;
   const cap = canvasStrokeCap(node.strokeCapStart);
   if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath || !cap || node.strokeCapEnd !== node.strokeCapStart || node.strokeWidth <= 0) return undefined;
   const pathJson = JSON.stringify(node.vectorPath);
@@ -3907,6 +3950,7 @@ function canonicalVectorStrokeMesh(node: CanvasNode): StrokeMesh | undefined {
   }
 }
 function canonicalVectorStrokeOutline(node: CanvasNode): FlattenedVectorPath | undefined {
+  if (mixedVectorNetworkStrokeMesh(node)) return undefined;
   const cap = canvasStrokeCap(node.strokeCapStart);
   if (!wasmRuntime || node.kind !== "vector" || !node.vectorPath || !cap || node.strokeCapEnd !== node.strokeCapStart || node.strokeWidth <= 0) return undefined;
   try {

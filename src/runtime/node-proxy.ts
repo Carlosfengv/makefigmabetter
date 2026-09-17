@@ -76,6 +76,7 @@ import type { RuntimeExportSettings, RuntimePngExportSettings, RuntimeSvgExportS
 import {
   canonicalVectorPathFromRuntimeNetwork,
   extensionsWithRuntimeVectorNetwork,
+  runtimeVectorNetworkHasMixedActiveJoins,
   runtimeVectorNetworkFromCanonical,
   runtimeVectorNetworkFromExtension,
   type RuntimeHandleMirroring,
@@ -2221,6 +2222,7 @@ export class RuntimeNodeProxy {
     this.assertGeometry();
     const canonical = canonicalStrokeCap(value);
     if (!canonical) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (canonical !== "none" && this.hasMixedVectorNetworkJoins()) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.write({ strokeCapStart: canonical, strokeCapEnd: canonical });
   }
 
@@ -2232,6 +2234,11 @@ export class RuntimeNodeProxy {
     this.assertGeometry();
     const canonical = canonicalStrokeJoin(value);
     if (!canonical) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const node = this.read();
+    if (this.hasMixedVectorNetworkJoins(canonical)
+      && ((node.strokeCapStart ?? "none") !== "none" || (node.strokeCapEnd ?? "none") !== "none" || Array.isArray(node.strokeDashPattern) && node.strokeDashPattern.length > 0)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
     this.write({ strokeJoin: canonical });
   }
 
@@ -2258,6 +2265,7 @@ export class RuntimeNodeProxy {
     }
     const canonical = value.length % 2 === 1 ? [...value, ...value] : [...value];
     if (canonical.length > 32) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    if (canonical.length && this.hasMixedVectorNetworkJoins()) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     this.write({ strokeDashPattern: canonical });
   }
 
@@ -2334,10 +2342,15 @@ export class RuntimeNodeProxy {
   private writeVectorNetwork(value: RuntimeVectorNetwork, extraPatch: Readonly<Record<string, unknown>> = {}): void {
     if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const node = this.read();
+    const defaultJoin = canonicalStrokeJoinValue(node.strokeJoin);
+    const hasMixedJoins = runtimeVectorNetworkHasMixedActiveJoins(value, defaultJoin);
+    if (hasMixedJoins && (this.type !== "VECTOR" || Array.isArray(node.strokeDashPattern) && node.strokeDashPattern.length > 0)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    }
     const converted = canonicalVectorPathFromRuntimeNetwork(value, () => this.host.allocateRuntimeId(), {
       strokeCapStart: canonicalStrokeCapValue(node.strokeCapStart),
       strokeCapEnd: canonicalStrokeCapValue(node.strokeCapEnd),
-      strokeJoin: canonicalStrokeJoinValue(node.strokeJoin),
+      strokeJoin: defaultJoin,
     });
     if ("reason" in converted) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const regions = value.regions ?? [];
@@ -2376,6 +2389,14 @@ export class RuntimeNodeProxy {
         regionPaints,
       ),
     });
+  }
+
+  private hasMixedVectorNetworkJoins(defaultJoin = canonicalStrokeJoinValue(this.read().strokeJoin)): boolean {
+    if (this.type !== "VECTOR") return false;
+    const node = this.read();
+    const path = node.vectorPath as DocumentVectorPath | undefined;
+    const network = path ? runtimeVectorNetworkFromExtension(node.extensions, path) : undefined;
+    return Boolean(network && runtimeVectorNetworkHasMixedActiveJoins(network, defaultJoin));
   }
 
   async getMainComponentAsync(): Promise<RuntimeNodeProxy | null> {

@@ -20,7 +20,7 @@ import { fontVariationCss } from "./font-variation-axes";
 import { layoutTextRanges, textAlignedLineLeft, textHangingPunctuationOffsets, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "./text-layout";
 import { sceneNodesInPaintOrder } from "../runtime/scene-compiler";
 import type { OrderedRenderScene } from "../runtime/ordered-render-ir";
-import { vectorNetworkRegionPaintPlansFromExtension } from "../runtime/runtime-vector-network";
+import { vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, type VectorNetworkMixedStrokeMesh } from "../runtime/runtime-vector-network";
 import { specialNodeFallback } from "./special-node-fallback";
 import { connectorPathForNode, connectorPathSvgD } from "./connector-path";
 import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "./connector-presentation";
@@ -261,6 +261,23 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     : undefined;
   const byId = new Map(pageNodes.map((node) => [node.id, node]));
   const worldTransformByNodeId = worldTransformsForNodes(nodes);
+  const mixedVectorStrokeMeshes = new Map<string, VectorNetworkMixedStrokeMesh | null>();
+  const mixedVectorStrokeMesh = (node: CanvasNode): VectorNetworkMixedStrokeMesh | undefined => {
+    if (node.kind !== "vector" || !node.vectorPath || node.strokeWidth <= 0) return undefined;
+    const key = `${node.id}:${JSON.stringify(node.extensions ?? {})}:${node.strokeWidth}:${node.strokeCapStart ?? "none"}:${node.strokeCapEnd ?? "none"}:${node.strokeJoin ?? "miter"}:${node.strokeMiterLimit ?? 10}:${node.strokeDashPattern?.join(",") ?? ""}`;
+    const cached = mixedVectorStrokeMeshes.get(key);
+    if (cached !== undefined) return cached ?? undefined;
+    const mesh = vectorNetworkMixedStrokeMeshFromExtension(node.extensions, node.vectorPath, {
+      strokeWidth: node.strokeWidth,
+      strokeCapStart: node.strokeCapStart,
+      strokeCapEnd: node.strokeCapEnd,
+      strokeJoin: node.strokeJoin ?? "miter",
+      strokeMiterLimit: node.strokeMiterLimit ?? 10,
+      strokeDashPattern: node.strokeDashPattern,
+    });
+    mixedVectorStrokeMeshes.set(key, mesh ?? null);
+    return mesh;
+  };
   // A live BooleanOperation is rendered from Rust-derived path geometry in the
   // editor worker. The synchronous base exporter only receives a Boolean path
   // when its caller has derived one from this exact frozen snapshot.
@@ -281,13 +298,30 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     .filter((node) => node.kind !== "group" && node.kind !== "slice")
     .map((node) => {
       const transform = worldTransformByNodeId.get(node.id);
-      return transform ? worldVisualBoundsForNode(nodes, node, {
+      if (!transform) return undefined;
+      const base = worldVisualBoundsForNode(nodes, node, {
         transform,
         bounds: worldBoundsForTransform(node, transform),
         defaultPageId: options.defaultPageId,
         nodeById: byId,
         worldTransformByNodeId,
-      }) : undefined;
+      });
+      const mixedBounds = mixedVectorStrokeMesh(node)?.bounds;
+      if (!mixedBounds) return base;
+      const corners = [
+        mixedBounds.min,
+        { x: mixedBounds.max.x, y: mixedBounds.min.y },
+        mixedBounds.max,
+        { x: mixedBounds.min.x, y: mixedBounds.max.y },
+      ].map((point) => transformPoint(transform, point));
+      const strokeBounds = {
+        left: Math.min(...corners.map((point) => point.x)), top: Math.min(...corners.map((point) => point.y)),
+        right: Math.max(...corners.map((point) => point.x)), bottom: Math.max(...corners.map((point) => point.y)),
+      };
+      return base ? {
+        left: Math.min(base.left, strokeBounds.left), top: Math.min(base.top, strokeBounds.top),
+        right: Math.max(base.right, strokeBounds.right), bottom: Math.max(base.bottom, strokeBounds.bottom),
+      } : strokeBounds;
     })
     .filter((value): value is NonNullable<typeof value> => Boolean(value));
   const sliceTransform = requestedSlice ? worldTransformByNodeId.get(requestedSlice.id) : undefined;
@@ -589,6 +623,12 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     }
     if (node.kind === "vector" && node.vectorPath) {
       const vectorPath = options.vectorPaths?.get(node.id) ?? node.vectorPath;
+      const mixedStroke = stroke.value !== "none" ? mixedVectorStrokeMesh(node) : undefined;
+      if (mixedStroke) {
+        const fillMarkup = fill.value === "none" ? "" : `<path d="${vectorPathSvgD(vectorPath, number)}" fill="${attribute(fill.value)}"${paintOpacity("fill", fill)} stroke="none" fill-rule="${vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero"}"/>`;
+        const strokePath = mixedStroke.triangles.map(([a, b, c]) => `M ${number(a.x)} ${number(a.y)} L ${number(b.x)} ${number(b.y)} L ${number(c.x)} ${number(c.y)} Z`).join(" ");
+        return `${fillMarkup}<path d="${strokePath}" fill="${attribute(stroke.value)}"${paintOpacity("fill", stroke)} stroke="none" fill-rule="nonzero"/>`;
+      }
       return `<path d="${vectorPathSvgD(vectorPath, number)}" ${common.replace(`fill-rule="${fillRule}"`, `fill-rule="${vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero"}"`)}/>`;
     }
     const parametricShape = nodeParametricShape(node);

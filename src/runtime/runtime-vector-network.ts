@@ -54,6 +54,13 @@ export type VectorNetworkRegionPaintPlan = Readonly<{
   fillStack?: DocumentPaintStack;
 }>;
 
+export type VectorNetworkStrokePoint = Readonly<{ x: number; y: number }>;
+export type VectorNetworkStrokeTriangle = readonly [VectorNetworkStrokePoint, VectorNetworkStrokePoint, VectorNetworkStrokePoint];
+export type VectorNetworkMixedStrokeMesh = Readonly<{
+  triangles: readonly VectorNetworkStrokeTriangle[];
+  bounds?: Readonly<{ min: VectorNetworkStrokePoint; max: VectorNetworkStrokePoint }>;
+}>;
+
 const MAX_VECTOR_SUBPATHS = 64;
 const MAX_VECTOR_POINTS = 8_192;
 const MAX_VECTOR_NETWORK_EXTENSION_BYTES = 256 * 1024;
@@ -122,7 +129,8 @@ export function runtimeVectorNetworkFromCanonical(
  * branches with region-local fill rules. Region render data is persisted
  * separately from the derived fallback path. Bounded straight-chain corner
  * radii materialize into cubic fillets while the authored vertices survive in
- * the path-bound extension; mixed joins remain rejected before staging.
+ * the path-bound extension. Mixed joins are admitted only for the exact
+ * straight, independent topology consumed by the shared derived stroke mesh.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -214,11 +222,19 @@ export function canonicalVectorPathFromRuntimeNetwork(
   }
 
   const hasExplicitJoin = input.vertices.some((vertex) => vertex.strokeJoin !== undefined);
-  const resolvedJoins = input.vertices.map((vertex) => vertex.strokeJoin === undefined ? defaults.strokeJoin : canonicalStrokeJoin(vertex.strokeJoin));
-  if (resolvedJoins.some((join) => !join) || new Set(resolvedJoins).size > 1) {
-    return { reason: "Canonical VectorPath cannot represent mixed per-vertex stroke joins." };
-  }
+  const resolvedVertexJoins = input.vertices.map((vertex) => vertex.strokeJoin === undefined ? defaults.strokeJoin : canonicalStrokeJoin(vertex.strokeJoin));
+  if (resolvedVertexJoins.some((join) => !join)) return { reason: "VectorNetwork contains an unsupported stroke join." };
+  const activeJoinVertexIndexes = components.flatMap((component) => component.closed
+    ? component.vertexIndexes
+    : component.vertexIndexes.slice(1, -1));
+  const hasMixedActiveJoins = new Set(activeJoinVertexIndexes.map((vertexIndex) => resolvedVertexJoins[vertexIndex])).size > 1;
   const hasPerVertexCorners = input.vertices.some((vertex) => vertex.cornerRadius !== undefined);
+  if (hasMixedActiveJoins && input.segments.some((segment) => segment.tangentStart !== undefined || segment.tangentEnd !== undefined)) {
+    return { reason: "Mixed per-vertex stroke joins currently require straight VectorNetwork segments." };
+  }
+  if (hasMixedActiveJoins && input.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) {
+    return { reason: "Mixed per-vertex stroke joins cannot be combined with corner radii." };
+  }
 
   const startCaps: StrokeCap[] = [];
   const endCaps: StrokeCap[] = [];
@@ -241,6 +257,9 @@ export function canonicalVectorPathFromRuntimeNetwork(
   }
   if (new Set(startCaps).size > 1 || new Set(endCaps).size > 1) {
     return { reason: "Canonical VectorPath requires one shared start cap and one shared end cap across open subpaths." };
+  }
+  if (hasMixedActiveJoins && (startCaps.some((cap) => cap !== "none") || endCaps.some((cap) => cap !== "none"))) {
+    return { reason: "Mixed per-vertex stroke joins currently require NONE endpoint caps." };
   }
 
   const subpaths: DocumentVectorPath["subpaths"] = [];
@@ -289,7 +308,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
     } : {}),
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
-    ...(hasExplicitJoin && resolvedJoins[0] ? { strokeJoin: resolvedJoins[0] } : {}),
+    ...(hasExplicitJoin && new Set(resolvedVertexJoins).size === 1 && resolvedVertexJoins[0] ? { strokeJoin: resolvedVertexJoins[0] } : {}),
     ...(hasPerVertexCorners || hasExplicitJoin ? { network: structuredClone(input) } : {}),
   };
 }
@@ -456,6 +475,275 @@ export function vectorNetworkRegionPaintPlansFromExtension(
     path: regionPath,
     ...(record.regionPaints![index]!.fillStack ? { fillStack: structuredClone(record.regionPaints![index]!.fillStack) } : {}),
   }));
+}
+
+type IndependentNetworkComponent = Readonly<{
+  vertexIndexes: readonly number[];
+  segmentIndexes: readonly number[];
+  closed: boolean;
+}>;
+
+type MixedStrokeOptions = Readonly<{
+  strokeWidth: number;
+  strokeJoin: StrokeJoin;
+  strokeMiterLimit: number;
+  strokeCapStart?: StrokeCap;
+  strokeCapEnd?: StrokeCap;
+  strokeDashPattern?: readonly number[];
+}>;
+
+/** True only when two or more rendered joins in an independent network have
+ * different effective values. Open-path endpoints are excluded because they
+ * have caps rather than joins. */
+export function runtimeVectorNetworkHasMixedActiveJoins(
+  network: RuntimeVectorNetwork,
+  defaultJoin: StrokeJoin,
+): boolean {
+  if (!validNetworkShape(network)) return false;
+  const components = independentNetworkComponents(network);
+  if (!components) return false;
+  const joins = components.flatMap((component) => (component.closed
+    ? component.vertexIndexes
+    : component.vertexIndexes.slice(1, -1))
+    .map((vertexIndex) => effectiveNetworkJoin(network.vertices[vertexIndex]!, defaultJoin)));
+  return new Set(joins).size > 1;
+}
+
+/** Builds the exact solid-stroke union used for the bounded mixed-join
+ * VectorNetwork slice. The path-bound extension remains authoritative; this
+ * triangle mesh is derived for Canvas paint, hit testing and SVG export. */
+export function vectorNetworkMixedStrokeMeshFromExtension(
+  extensions: unknown,
+  path: DocumentVectorPath,
+  options: MixedStrokeOptions,
+): VectorNetworkMixedStrokeMesh | undefined {
+  const record = vectorNetworkExtensionRecord(extensions, path);
+  return record ? vectorNetworkMixedStrokeMesh(record.network, options) : undefined;
+}
+
+export function vectorNetworkMixedStrokeMesh(
+  network: RuntimeVectorNetwork,
+  options: MixedStrokeOptions,
+): VectorNetworkMixedStrokeMesh | undefined {
+  if (!validNetworkShape(network)
+    || !Number.isFinite(options.strokeWidth) || options.strokeWidth <= 0
+    || !Number.isFinite(options.strokeMiterLimit) || options.strokeMiterLimit < 1
+    || options.strokeCapStart && options.strokeCapStart !== "none"
+    || options.strokeCapEnd && options.strokeCapEnd !== "none"
+    || options.strokeDashPattern?.length
+    || network.segments.some((segment) => segment.tangentStart !== undefined || segment.tangentEnd !== undefined)
+    || network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)
+  ) return undefined;
+  const components = independentNetworkComponents(network);
+  if (!components || !runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
+
+  const triangles: VectorNetworkStrokeTriangle[] = [];
+  const half = options.strokeWidth / 2;
+  for (const component of components) {
+    if (component.vertexIndexes.length < 2) continue;
+    const points = component.vertexIndexes.map((vertexIndex) => network.vertices[vertexIndex]!);
+    const segments = component.segmentIndexes.map((segmentIndex) => {
+      const segment = network.segments[segmentIndex]!;
+      return networkStrokeSegment(network.vertices[segment.start]!, network.vertices[segment.end]!);
+    });
+    if (segments.some((segment) => !segment)) return undefined;
+    const resolvedSegments = segments as NetworkStrokeSegment[];
+    for (const segment of resolvedSegments) {
+      addNetworkStrokeQuad(triangles,
+        offsetNetworkStrokePoint(segment.from, segment.normal, half),
+        offsetNetworkStrokePoint(segment.to, segment.normal, half),
+        offsetNetworkStrokePoint(segment.to, segment.normal, -half),
+        offsetNetworkStrokePoint(segment.from, segment.normal, -half));
+    }
+    const joinStart = component.closed ? 0 : 1;
+    const joinEnd = component.closed ? points.length : points.length - 1;
+    for (let index = joinStart; index < joinEnd; index += 1) {
+      const vertexIndex = index % points.length;
+      const previous = resolvedSegments[(index + resolvedSegments.length - 1) % resolvedSegments.length]!;
+      const next = resolvedSegments[index % resolvedSegments.length]!;
+      addNetworkStrokeJoin(
+        triangles,
+        points[vertexIndex]!,
+        previous,
+        next,
+        half,
+        effectiveNetworkJoin(points[vertexIndex]!, options.strokeJoin),
+        options.strokeMiterLimit,
+      );
+    }
+  }
+  if (!triangles.length || triangles.length > 200_000) return undefined;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  triangles.forEach((triangle) => triangle.forEach((point) => {
+    minX = Math.min(minX, point.x); minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);
+  }));
+  return {
+    triangles,
+    bounds: {
+      min: { x: minX, y: minY },
+      max: { x: maxX, y: maxY },
+    },
+  };
+}
+
+export function vectorNetworkStrokeMeshContains(
+  mesh: VectorNetworkMixedStrokeMesh,
+  point: VectorNetworkStrokePoint,
+): boolean {
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+  if (mesh.bounds && (point.x < mesh.bounds.min.x || point.x > mesh.bounds.max.x || point.y < mesh.bounds.min.y || point.y > mesh.bounds.max.y)) return false;
+  return mesh.triangles.some(([a, b, c]) => {
+    const ab = networkStrokeCross(a, b, point);
+    const bc = networkStrokeCross(b, c, point);
+    const ca = networkStrokeCross(c, a, point);
+    return ab >= -1e-9 && bc >= -1e-9 && ca >= -1e-9;
+  });
+}
+
+function independentNetworkComponents(network: RuntimeVectorNetwork): readonly IndependentNetworkComponent[] | undefined {
+  const incoming = Array.from({ length: network.vertices.length }, () => [] as number[]);
+  const outgoing = Array.from({ length: network.vertices.length }, () => [] as number[]);
+  network.segments.forEach((segment, segmentIndex) => {
+    if (!incoming[segment.end] || !outgoing[segment.start]) return;
+    incoming[segment.end]!.push(segmentIndex);
+    outgoing[segment.start]!.push(segmentIndex);
+  });
+  if (incoming.some((segments, vertexIndex) => segments.length > 1 || outgoing[vertexIndex]!.length > 1
+    || segments.length + outgoing[vertexIndex]!.length > 1 && (segments.length !== 1 || outgoing[vertexIndex]!.length !== 1))) return undefined;
+  const visitedSegments = new Set<number>();
+  const visitedVertices = new Set<number>();
+  const components: IndependentNetworkComponent[] = [];
+  const walk = (start: number, closed: boolean) => {
+    const vertexIndexes: number[] = [];
+    const segmentIndexes: number[] = [];
+    let current = start;
+    while (!visitedVertices.has(current)) {
+      visitedVertices.add(current);
+      vertexIndexes.push(current);
+      const nextSegment = outgoing[current]![0];
+      if (nextSegment === undefined || visitedSegments.has(nextSegment)) break;
+      visitedSegments.add(nextSegment);
+      segmentIndexes.push(nextSegment);
+      current = network.segments[nextSegment]!.end;
+    }
+    if ((closed && current !== start) || (!closed && outgoing[current]?.length)) return false;
+    components.push({ vertexIndexes, segmentIndexes, closed });
+    return true;
+  };
+  const starts = network.vertices.map((_, index) => index).filter((index) => incoming[index]!.length === 0 && outgoing[index]!.length === 1);
+  const isolated = network.vertices.map((_, index) => index).filter((index) => incoming[index]!.length === 0 && outgoing[index]!.length === 0);
+  for (const start of starts) if (!walk(start, false)) return undefined;
+  isolated.forEach((vertexIndex) => {
+    visitedVertices.add(vertexIndex);
+    components.push({ vertexIndexes: [vertexIndex], segmentIndexes: [], closed: false });
+  });
+  for (let vertexIndex = 0; vertexIndex < network.vertices.length; vertexIndex += 1) {
+    if (!visitedVertices.has(vertexIndex) && !walk(vertexIndex, true)) return undefined;
+  }
+  return visitedSegments.size === network.segments.length && visitedVertices.size === network.vertices.length ? components : undefined;
+}
+
+type NetworkStrokeSegment = Readonly<{
+  from: VectorNetworkStrokePoint;
+  to: VectorNetworkStrokePoint;
+  tangent: VectorNetworkStrokePoint;
+  normal: VectorNetworkStrokePoint;
+}>;
+
+function networkStrokeSegment(from: VectorNetworkStrokePoint, to: VectorNetworkStrokePoint): NetworkStrokeSegment | undefined {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (!Number.isFinite(length) || length <= 1e-12) return undefined;
+  const tangent = { x: dx / length, y: dy / length };
+  return { from, to, tangent, normal: { x: -tangent.y, y: tangent.x } };
+}
+
+function effectiveNetworkJoin(vertex: RuntimeVectorVertex, fallback: StrokeJoin): StrokeJoin {
+  return vertex.strokeJoin ? canonicalStrokeJoin(vertex.strokeJoin) ?? fallback : fallback;
+}
+
+function offsetNetworkStrokePoint(point: VectorNetworkStrokePoint, vector: VectorNetworkStrokePoint, scale: number): VectorNetworkStrokePoint {
+  return { x: point.x + vector.x * scale, y: point.y + vector.y * scale };
+}
+
+function addNetworkStrokeQuad(
+  triangles: VectorNetworkStrokeTriangle[],
+  a: VectorNetworkStrokePoint,
+  b: VectorNetworkStrokePoint,
+  c: VectorNetworkStrokePoint,
+  d: VectorNetworkStrokePoint,
+): void {
+  pushNetworkStrokeTriangle(triangles, a, b, c);
+  pushNetworkStrokeTriangle(triangles, a, c, d);
+}
+
+function pushNetworkStrokeTriangle(
+  triangles: VectorNetworkStrokeTriangle[],
+  a: VectorNetworkStrokePoint,
+  b: VectorNetworkStrokePoint,
+  c: VectorNetworkStrokePoint,
+): void {
+  const area = networkStrokeCross(a, b, c);
+  if (!Number.isFinite(area) || Math.abs(area) <= 1e-12) return;
+  triangles.push(area > 0 ? [a, b, c] : [a, c, b]);
+}
+
+function addNetworkStrokeJoin(
+  triangles: VectorNetworkStrokeTriangle[],
+  vertex: VectorNetworkStrokePoint,
+  previous: NetworkStrokeSegment,
+  next: NetworkStrokeSegment,
+  half: number,
+  join: StrokeJoin,
+  miterLimit: number,
+): void {
+  const turn = previous.tangent.x * next.tangent.y - previous.tangent.y * next.tangent.x;
+  if (Math.abs(turn) <= 1e-12) return;
+  if (join === "round") {
+    for (let index = 0; index < 16; index += 1) {
+      const start = index * Math.PI * 2 / 16;
+      const end = (index + 1) * Math.PI * 2 / 16;
+      pushNetworkStrokeTriangle(triangles, vertex,
+        { x: vertex.x + Math.cos(start) * half, y: vertex.y + Math.sin(start) * half },
+        { x: vertex.x + Math.cos(end) * half, y: vertex.y + Math.sin(end) * half });
+    }
+    return;
+  }
+  const side = turn > 0 ? -1 : 1;
+  const previousOuter = offsetNetworkStrokePoint(vertex, previous.normal, side * half);
+  const nextOuter = offsetNetworkStrokePoint(vertex, next.normal, side * half);
+  if (join === "miter") {
+    const miter = networkStrokeLineIntersection(previousOuter, previous.tangent, nextOuter, next.tangent);
+    if (miter && Math.hypot(miter.x - vertex.x, miter.y - vertex.y) <= miterLimit * half + 1e-12) {
+      pushNetworkStrokeTriangle(triangles, previousOuter, miter, nextOuter);
+      return;
+    }
+  }
+  pushNetworkStrokeTriangle(triangles, previousOuter, vertex, nextOuter);
+}
+
+function networkStrokeLineIntersection(
+  left: VectorNetworkStrokePoint,
+  leftDirection: VectorNetworkStrokePoint,
+  right: VectorNetworkStrokePoint,
+  rightDirection: VectorNetworkStrokePoint,
+): VectorNetworkStrokePoint | undefined {
+  const denominator = leftDirection.x * rightDirection.y - leftDirection.y * rightDirection.x;
+  if (Math.abs(denominator) <= 1e-12) return undefined;
+  const dx = right.x - left.x;
+  const dy = right.y - left.y;
+  const amount = (dx * rightDirection.y - dy * rightDirection.x) / denominator;
+  const point = { x: left.x + leftDirection.x * amount, y: left.y + leftDirection.y * amount };
+  return Number.isFinite(point.x) && Number.isFinite(point.y) ? point : undefined;
+}
+
+function networkStrokeCross(a: VectorNetworkStrokePoint, b: VectorNetworkStrokePoint, c: VectorNetworkStrokePoint): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
 function canonicalBranchedNetwork(
