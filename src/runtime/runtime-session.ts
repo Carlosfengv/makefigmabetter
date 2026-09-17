@@ -100,8 +100,8 @@ const INSTANCE_CLONE_TYPES = new Set<M1SceneNodeType>([
 ]);
 const RUNTIME_CLONE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
-  "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
-  "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET",
+  "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "INTERACTIVE_SLIDE_ELEMENT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
+  "SLIDE", "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET",
 ]);
 const RUNTIME_CLONE_DESCENDANT_TYPES = new Set<M1SceneNodeType>([...RUNTIME_CLONE_TYPES, "TABLE_CELL"]);
 const RUNTIME_STRUCTURAL_OVERRIDE_FIELDS = new Set([
@@ -3332,15 +3332,22 @@ export class RuntimeSession implements RuntimeContainerHost {
     };
     visit(source);
 
-    const currentPage = this.projectionStore.getNode(this.currentPageId)!;
+    const hierarchyBound = source.type === "SLIDE" || source.type === "INTERACTIVE_SLIDE_ELEMENT";
+    const destinationParentId = hierarchyBound ? source.parentId : this.currentPageId;
+    const destinationParent = destinationParentId ? this.projectionStore.getNode(destinationParentId) : undefined;
+    if (!destinationParent) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
     const sourceWorld = runtimeWorldTransformForNode((id) => this.projectionStore.getNode(id), source);
-    const pageWorld = runtimeWorldTransformForNode((id) => this.projectionStore.getNode(id), currentPage);
-    const pageInverse = pageWorld && invertRuntimeTransform(pageWorld);
-    if (!sourceWorld || !pageInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
-    const rootTransform = multiplyRuntimeTransforms(pageInverse, sourceWorld);
-    const pageSiblings = this.siblingsOf(this.currentPageId);
-    const rootPositionId = positionIdForLayerInsertion(pageSiblings, pageSiblings.length);
+    const parentWorld = runtimeWorldTransformForNode((id) => this.projectionStore.getNode(id), destinationParent);
+    const parentInverse = parentWorld && invertRuntimeTransform(parentWorld);
+    if (!sourceWorld || !parentInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId });
+    const rootTransform = multiplyRuntimeTransforms(parentInverse, sourceWorld);
+    const destinationSiblings = this.siblingsOf(destinationParent.id);
+    const sourceIndex = hierarchyBound ? destinationSiblings.findIndex((candidate) => candidate.id === source.id) : -1;
+    if (hierarchyBound && sourceIndex < 0) throw runtimeError("INVALID_ARGUMENT", { nodeId });
+    const rootInsertionIndex = hierarchyBound ? sourceIndex + 1 : destinationSiblings.length;
+    const rootPositionId = positionIdForLayerInsertion(destinationSiblings, rootInsertionIndex);
     if (!rootPositionId) throw runtimeError("RESOURCE_LIMIT", { nodeId });
+    const destinationPageId = this.pageIdFor(destinationParent) ?? this.currentPageId;
 
     const ids = new Map(subtree.map((node) => [node.id, this.createId()]));
     const clonedComponentIds = new Set(subtree
@@ -3364,9 +3371,9 @@ export class RuntimeSession implements RuntimeContainerHost {
         ...structuredClone(original),
         id,
         type,
-        parentId: isRoot ? this.currentPageId : ids.get(original.parentId!),
-        pageId: this.currentPageId,
-        siblingIndex: isRoot ? pageSiblings.length : original.siblingIndex,
+        parentId: isRoot ? destinationParent.id : ids.get(original.parentId!),
+        pageId: destinationPageId,
+        siblingIndex: isRoot ? rootInsertionIndex : original.siblingIndex,
         positionId: isRoot ? rootPositionId : original.positionId,
         x: isRoot ? rootTransform.e : original.x,
         y: isRoot ? rootTransform.f : original.y,

@@ -79,13 +79,13 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
   },
   {
     id: "node.clone-runtime",
-    editorTypes: ["figma", "figjam"],
+    editorTypes: ["figma", "figjam", "slides"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
-    nodeTypes: ["FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE", "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT", "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET"],
+    nodeTypes: ["FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE", "CODE_BLOCK", "COMPONENT", "INSTANCE", "SLOT", "COMPONENT_SET", "CONNECTOR", "EMBED", "HIGHLIGHT", "INTERACTIVE_SLIDE_ELEMENT", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT", "SLIDE", "STAMP", "STICKY", "TABLE", "TEXT_PATH", "TRANSFORM_GROUP", "WASHI_TAPE", "WIDGET"],
     property: "clone",
     surface: "write",
     status: "partial",
-    limitation: "Runtime clone performs one bounded deep copy into currentPage, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame; TableCell descendants are copied only as part of a Table. Page, Slide hierarchy, root TableCell and interactive-only nodes remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
+    limitation: "Runtime clone performs one bounded deep copy, assigns fresh node and vector-point identities, preserves local subtree geometry and resource links, and remaps internal connector/prototype/component/slot references. Ordinary supported roots clone into currentPage. Slides clone beside the source under the same SlideRow, preserving the fixed 1920×1080 contract, transition metadata and complete supported child subtree; InteractiveSlideElement clones beside the source inside its Slide so the SlideGrid→SlideRow→Slide hierarchy is never flattened. Cloned Components and ComponentSets receive fresh local publication keys, ComponentSet variants remain new Components, and Components nested under ordinary containers become Instances of their originals. A root Slot follows Figma and becomes a Frame; TableCell descendants are copied only as part of a Table. Page, SlideGrid, SlideRow and root TableCell remain explicitly unsupported; cross-subtree prototype targets continue pointing to their original nodes.",
   },
   {
     id: "node.plugin-data-runtime",

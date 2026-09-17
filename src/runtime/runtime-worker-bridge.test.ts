@@ -381,6 +381,50 @@ describe("RuntimeWorkerBridge", () => {
     await commit;
   });
 
+  it("lowers a cloned Slide subtree through Core hierarchy validation", async () => {
+    const gridId = "00000000-0000-4000-8000-000000000061";
+    const rowId = "00000000-0000-4000-8000-000000000062";
+    const slideId = "00000000-0000-4000-8000-000000000063";
+    const pollId = "00000000-0000-4000-8000-000000000064";
+    const base = snapshotAt(4);
+    const snapshot: EditorSnapshot = {
+      ...base,
+      nodes: [
+        ...base.nodes,
+        { id: gridId, pageId: "page", kind: "slideGrid", name: "Slide grid", x: 0, y: 0, width: 1920, height: 1080, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: rowId, pageId: "page", parentId: gridId, kind: "slideRow", name: "Slide row", x: 0, y: 0, width: 1920, height: 1080, rotation: 0, fill: "transparent", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1 },
+        { id: slideId, pageId: "page", parentId: rowId, kind: "slide", name: "Slide", x: 0, y: 0, width: 1920, height: 1080, rotation: 0, fill: "#fff", stroke: "transparent", radius: 0, strokeWidth: 0, opacity: 1, slideMetadata: { isSkippedSlide: false, transition: { style: "NONE", duration: .3, curve: "EASE_IN", timing: { type: "ON_CLICK" } } } },
+        { id: pollId, pageId: "page", parentId: slideId, kind: "interactiveSlideElement", name: "Poll", x: 100, y: 100, width: 360, height: 180, rotation: 0, fill: "#fff", stroke: "#ddd", radius: 8, strokeWidth: 1, opacity: 1, interactiveSlideElementType: "POLL" },
+      ],
+    };
+    const posted: Extract<MainToWorker, { type: "transaction" }>[] = [];
+    const bridge = new RuntimeWorkerBridge((message) => posted.push(message));
+    bridge.observe({ type: "snapshot", snapshot });
+    let sequence = 0x70;
+    const session = new RuntimeSession({
+      sessionId: "slide-clone-core-lowering",
+      projection: runtimeProjectionFromEditorSnapshot(snapshot),
+      transport: bridge,
+      createId: () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+      scheduleMicrotask: () => {},
+    });
+    const source = await session.getNodeByIdAsync(slideId);
+    const clone = source!.clone();
+    const commit = session.commitAsync().catch(() => undefined);
+
+    expect(posted[0]!.transaction.commands).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: clone.id, parentId: rowId, kind: "slide", width: 1920, height: 1080 }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ parentId: clone.id, kind: "interactiveSlideElement" }) }),
+    ]);
+    expect(resolveCoreBatch(snapshot.nodes, posted[0]!.transaction.commands)?.nextNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: clone.id, parentId: rowId, kind: "slide" }),
+      expect.objectContaining({ parentId: clone.id, kind: "interactiveSlideElement" }),
+    ]));
+
+    bridge.close();
+    await commit;
+  });
+
   it("lowers a cloned ComponentSet with new Component identities through Core", async () => {
     const setId = "00000000-0000-4000-8000-000000000071";
     const variantId = "00000000-0000-4000-8000-000000000072";

@@ -641,6 +641,59 @@ describe("M1 RuntimeSession", () => {
     expect(session.projectionStore.pendingTransactionIds()).toHaveLength(transactionCount);
   });
 
+  it("clones Slides and interactive slide elements inside their required hierarchy", () => {
+    const projection: RuntimeProjection = {
+      revision: 0,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "grid", type: "SLIDE_GRID", name: "Slide grid", parentId: "page", pageId: "page", siblingIndex: 0 },
+        { id: "row", type: "SLIDE_ROW", name: "Slide row", parentId: "grid", pageId: "page", siblingIndex: 0 },
+        {
+          id: "slide",
+          type: "SLIDE",
+          name: "Slide",
+          parentId: "row",
+          pageId: "page",
+          siblingIndex: 0,
+          width: 1920,
+          height: 1080,
+          slideMetadata: { isSkippedSlide: true, transition: { style: "DISSOLVE", duration: .4, curve: "GENTLE", timing: { type: "AFTER_DELAY", delay: 1 } } },
+        },
+        { id: "poll", type: "INTERACTIVE_SLIDE_ELEMENT", name: "Poll", parentId: "slide", pageId: "page", siblingIndex: 0, x: 120, y: 80, width: 360, height: 180, interactiveSlideElementType: "POLL" },
+        { id: "surface", type: "RECTANGLE", name: "Surface", parentId: "slide", pageId: "page", siblingIndex: 1, x: 40, y: 40, width: 100, height: 60 },
+      ],
+    };
+    let sequence = 0;
+    const session = new RuntimeSession({
+      sessionId: "slide-clone",
+      projection,
+      transport: new InMemoryTransport(projection),
+      createId: () => `slide-clone-${++sequence}`,
+      scheduleMicrotask: () => {},
+    });
+    const slide = session.projectionStore.getNode("slide")!;
+    const slideClone = session.proxyFor(slide.id).clone() as RuntimeContainerNodeProxy;
+
+    expect(slideClone.parent?.id).toBe("row");
+    expect(slideClone).toMatchObject({ type: "SLIDE", width: 1920, height: 1080 });
+    expect(session.projectionStore.getNode(slideClone.id)?.slideMetadata).toEqual(slide.slideMetadata);
+    expect(slideClone.children.map((node) => node.type)).toEqual(["INTERACTIVE_SLIDE_ELEMENT", "RECTANGLE"]);
+    expect(session.projectionStore.getNode(slideClone.children[0]!.id)).toMatchObject({ interactiveSlideElementType: "POLL", parentId: slideClone.id, pageId: "page" });
+    expect((session.proxyFor("row") as RuntimeContainerNodeProxy).children.map((node) => node.id)).toEqual(["slide", slideClone.id]);
+
+    const pollClone = session.proxyFor("poll").clone();
+    expect(pollClone).toMatchObject({ type: "INTERACTIVE_SLIDE_ELEMENT", parent: session.proxyFor("slide") });
+    expect(session.projectionStore.getNode(pollClone.id)).toMatchObject({ interactiveSlideElementType: "POLL", parentId: "slide", pageId: "page" });
+    expect((session.proxyFor("slide") as RuntimeContainerNodeProxy).children.map((node) => node.id)).toEqual(["poll", pollClone.id, "surface"]);
+
+    const operations = session.projectionStore.transaction(session.projectionStore.pendingTransactionIds()[0]!)?.operations ?? [];
+    expect(operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: slideClone.id, type: "SLIDE", parentId: "row", pageId: "page" }) }),
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: pollClone.id, type: "INTERACTIVE_SLIDE_ELEMENT", parentId: "slide", pageId: "page" }) }),
+    ]));
+  });
+
   it("creates a Slot and its component property atomically", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
