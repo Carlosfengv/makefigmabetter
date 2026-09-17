@@ -68,7 +68,10 @@ export function projectTextPathLocalGlyphs(input: TextPathGpuProjectionInput): W
       height,
       rotation: pose.angle * 180 / Math.PI,
       fill: run.fill,
-      opacity: node.opacity * run.opacity,
+      // Canvas consumes local glyphs below renderNodePaint(), whose saved
+      // context already carries the node opacity. Keep only run opacity here
+      // so the Canvas fallback does not square a translucent TextPath.
+      opacity: run.opacity,
       maskWidth: raster.width,
       maskHeight: raster.height,
       alphaMask: raster.alphaMask,
@@ -106,6 +109,9 @@ export function projectTextPathGpuGlyphs(input: TextPathGpuProjectionInput): Web
       x: center.x - glyph.width / 2,
       y: center.y - glyph.height / 2,
       rotation: glyph.rotation + input.node.rotation,
+      // WebGPU paints the glyph quad directly and does not pass through the
+      // Canvas node wrapper, so it owns the complete node × run opacity.
+      opacity: input.node.opacity * glyph.opacity,
       quadTransform,
     };
   });

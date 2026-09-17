@@ -89,6 +89,12 @@ describe("TextPath GPU projection", () => {
     ]);
   });
 
+  it("applies node opacity once in WebGPU and leaves Canvas-local glyphs for the node wrapper", () => {
+    const translucent = { ...node(), opacity: .4 };
+    expect(projectTextPathLocalGlyphs({ node: translucent, runs, layout })?.map((glyph) => glyph.opacity)).toEqual([.5, .5]);
+    expect(projectTextPathGpuGlyphs({ node: translucent, runs, layout })?.map((glyph) => glyph.opacity)).toEqual([.2, .2]);
+  });
+
   it("uses the resolved world transform for nested Relative-v1 ancestry", () => {
     const child = { ...node(), parentId: "group-a", relativeTransform: { a: 1, b: 0, c: .25, d: 1, e: 10, f: 20 } };
     const worldTransform = { a: 0, b: 2, c: -3, d: 0, e: 400, f: 50 };
