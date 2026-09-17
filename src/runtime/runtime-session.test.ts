@@ -3165,6 +3165,35 @@ describe("M1 RuntimeSession", () => {
     expect(await session.getNodeByIdAsync(flattened.id)).toBe(flattened);
   });
 
+  it("transfers a fully consumed direct Group presentation to a flattened Vector", async () => {
+    const projection: RuntimeProjection = {
+      revision: 2,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "group", type: "GROUP", name: "Presented", parentId: "page", siblingIndex: 0, x: 20, y: 30, width: 80, height: 40, opacity: .4, blendMode: "screen", visible: false },
+        { id: "rect", type: "RECTANGLE", name: "Rectangle", parentId: "group", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
+        { id: "ellipse", type: "ELLIPSE", name: "Ellipse", parentId: "group", siblingIndex: 1, x: 40, y: 0, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-presented-group", projection, transport, scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("rect"))!;
+    const second = (await session.getNodeByIdAsync("ellipse"))!;
+
+    const flattened = session.flatten([first, second]);
+
+    expect(flattened.opacity).toBe(.4);
+    expect(flattened.blendMode).toBe("SCREEN");
+    expect(flattened.visible).toBe(false);
+    expect(await session.getNodeByIdAsync("group")).toBeNull();
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "flattenNodes",
+      replacement: expect.objectContaining({ opacity: .4, blendMode: "screen", visible: false }),
+    })]);
+  });
+
   it("preserves distinct solid paints as independent flatten regions", async () => {
     const projection: RuntimeProjection = {
       revision: 1,
@@ -3631,6 +3660,42 @@ describe("M1 RuntimeSession", () => {
     expect(await session.getNodeByIdAsync("group")).toBeNull();
     expect(await session.getNodeByIdAsync("outer")).toBeNull();
     expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
+  });
+
+  it("transfers a fully consumed direct Group presentation to a Boolean wrapper", async () => {
+    const closedPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{ closed: true, points: [
+        { id: "presented-a", x: 0, y: 0, pointType: "corner" as const },
+        { id: "presented-b", x: 20, y: 0, pointType: "corner" as const },
+        { id: "presented-c", x: 0, y: 20, pointType: "corner" as const },
+      ] }],
+    };
+    const projection: RuntimeProjection = {
+      revision: 3,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "group", type: "GROUP", name: "Presented", parentId: "page", siblingIndex: 0, x: 20, y: 30, width: 80, height: 40, opacity: .55, blendMode: "multiply" },
+        { id: "a", type: "VECTOR", name: "A", parentId: "group", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, vectorPath: closedPath },
+        { id: "b", type: "VECTOR", name: "B", parentId: "group", siblingIndex: 1, x: 40, y: 0, width: 20, height: 20, vectorPath: closedPath },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "boolean-presented-group", projection, transport, scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("a"))!;
+    const second = (await session.getNodeByIdAsync("b"))!;
+
+    const boolean = session.union([first, second], session.currentPage);
+
+    expect(boolean.opacity).toBe(.55);
+    expect(boolean.blendMode).toBe("MULTIPLY");
+    expect(await session.getNodeByIdAsync("group")).toBeNull();
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "boolean",
+      node: expect.objectContaining({ opacity: .55, blendMode: "multiply" }),
+    })]);
   });
 
   it("keeps bounded structural replacements absolute inside Auto Layout", async () => {

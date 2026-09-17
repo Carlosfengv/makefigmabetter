@@ -574,6 +574,44 @@ describe("Core transaction batch resolution", () => {
     }])).toBeUndefined();
   });
 
+  it("transfers a fully consumed direct Group presentation to the Boolean wrapper", () => {
+    const frame = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000180", pageId: "page", width: 320, height: 180 };
+    const group = {
+      ...createNode("group", 20, 30),
+      id: "00000000-0000-4000-8000-000000000181",
+      pageId: "page",
+      parentId: frame.id,
+      positionId: "10000000000000000000000000000000:00000000000040008000000000000181",
+      opacity: .55,
+      blendMode: "multiply" as const,
+    };
+    const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000182", pageId: "page", parentId: group.id };
+    const second = { ...createNode("vector", 40, 0), id: "00000000-0000-4000-8000-000000000183", pageId: "page", parentId: group.id };
+    const booleanId = "00000000-0000-4000-8000-000000000184";
+
+    const resolved = resolveCoreBatch([frame, group, first, second], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }]);
+
+    expect(resolved?.nextNodes.some((node) => node.id === group.id)).toBe(false);
+    expect(resolved?.nextNodes.find((node) => node.id === booleanId)).toMatchObject({
+      kind: "booleanOperation",
+      parentId: frame.id,
+      opacity: .55,
+      blendMode: "multiply",
+    });
+    expect(resolveCoreBatch([frame, { ...group, effectStack: [{ layerBlur: { radius: 4, visible: true } }] }, first, second], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+    expect(resolveCoreBatch([frame, { ...group, locked: true }, first, second], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+    const retained = { ...createNode("vector", 80, 0), id: "00000000-0000-4000-8000-000000000185", pageId: "page", parentId: group.id };
+    expect(resolveCoreBatch([frame, group, first, second, retained], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+  });
+
   it("wraps only absolute siblings inside an active Auto Layout parent", () => {
     const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
     const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
@@ -866,6 +904,44 @@ describe("Core transaction batch resolution", () => {
       replacementId,
       { parentId: target.id, index: 0 },
     )).toBeUndefined();
+  });
+
+  it("transfers a fully consumed direct Group presentation to a flatten replacement", () => {
+    const target = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000190", width: 320, height: 180 };
+    const group = {
+      ...createNode("group", 20, 30),
+      id: "00000000-0000-4000-8000-000000000191",
+      parentId: target.id,
+      positionId: "10000000000000000000000000000000:00000000000040008000000000000191",
+      opacity: .4,
+      blendMode: "screen" as const,
+      visible: false,
+    };
+    const first = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000192", parentId: group.id, strokeWidth: 0 };
+    const second = { ...createNode("ellipse", 40, 0), id: "00000000-0000-4000-8000-000000000193", parentId: group.id, strokeWidth: 0 };
+    const replacementId = "00000000-0000-4000-8000-000000000194";
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [
+      { id: "presentation-p1", x: 0, y: 0, pointType: "corner" as const },
+      { id: "presentation-p2", x: 40, y: 0, pointType: "corner" as const },
+      { id: "presentation-p3", x: 0, y: 40, pointType: "corner" as const },
+    ] }] };
+
+    const resolved = resolveFlattenNodesBatch(
+      [target, group, first, second],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: target.id, index: 0 },
+    );
+
+    expect(resolved?.replacement).toMatchObject({
+      parentId: target.id,
+      opacity: .4,
+      blendMode: "screen",
+      visible: false,
+    });
+    expect(resolved?.batch).toContainEqual({ type: "delete", ids: [first.id, second.id] });
   });
 
   it("outlines a Vector Stroke as one same-ID Vector update", () => {

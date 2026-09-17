@@ -2599,8 +2599,16 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
     const selectedIds = new Set(selected.map((node) => node.id));
     const sourceParentIds = new Set(selected.map((node) => node.parentId));
-    const dissolvedGroups = runtimeDissolvableNeutralGroups(
-      this.projectionStore.listLiveNodes(),
+    const liveNodes = this.projectionStore.listLiveNodes();
+    const directPresentationGroup = runtimeFullyConsumedDirectGroup(liveNodes, selectedIds, sourceParentIds, targetParent.id);
+    const consumedPresentationGroup = directPresentationGroup && !runtimeCanDissolveNeutralGroup(directPresentationGroup)
+      ? directPresentationGroup
+      : undefined;
+    if (consumedPresentationGroup && !runtimeCanConsumePresentationGroup(consumedPresentationGroup)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedPresentationGroup.id });
+    }
+    const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
+      liveNodes,
       selectedIds,
       sourceParentIds,
       targetParent.id,
@@ -2805,6 +2813,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       effectStack: sharedEffects.length ? structuredClone(sharedEffects) : undefined,
       dropShadow: structuredClone(sharedEffects.find((effect) => effect.dropShadow)?.dropShadow),
       extensions,
+      ...(consumedPresentationGroup ? runtimePresentationGroupPatch(consumedPresentationGroup) : {}),
       radius: 0,
       cornerRadii: undefined,
       cornerSmoothing: 0,
@@ -2898,8 +2907,16 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
     const selectedIds = new Set(selected.map((node) => node.id));
     const sourceParentIds = new Set(selected.map((node) => node.parentId));
-    const dissolvedGroups = runtimeDissolvableNeutralGroups(
-      this.projectionStore.listLiveNodes(),
+    const liveNodes = this.projectionStore.listLiveNodes();
+    const directPresentationGroup = runtimeFullyConsumedDirectGroup(liveNodes, selectedIds, sourceParentIds, parent.id);
+    const consumedPresentationGroup = directPresentationGroup && !runtimeCanDissolveNeutralGroup(directPresentationGroup)
+      ? directPresentationGroup
+      : undefined;
+    if (consumedPresentationGroup && !runtimeCanConsumePresentationGroup(consumedPresentationGroup)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedPresentationGroup.id });
+    }
+    const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
+      liveNodes,
       selectedIds,
       sourceParentIds,
       parent.id,
@@ -2972,6 +2989,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       siblingIndex: destination,
       booleanOperation: operation,
       autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : undefined,
+      ...(consumedPresentationGroup ? runtimePresentationGroupPatch(consumedPresentationGroup) : {}),
     };
     const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
     const operandPatches = operandWorldTransforms.map((transform) => runtimeBooleanOperandPatch(multiplyRuntimeTransforms(wrapperInverse, transform!)));
@@ -4790,16 +4808,70 @@ function runtimeIsAbsoluteAutoLayoutChild(node: RuntimeProjectionNode): boolean 
 }
 
 function runtimeCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
   return node.type === "GROUP"
     && node.visible !== false
     && finiteNodeNumber(node.opacity, 1) === 1
     && (node.blendMode === undefined || node.blendMode === "normal")
     && node.isMask !== true
+    && node.locked !== true
+    && node.constraints == null
     && node.dropShadow == null
     && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
     && node.contentsHidden !== true
     && node.clipsContent !== true
-    && !runtimeOwnsAutoLayout(node);
+    && !runtimeOwnsAutoLayout(node)
+    && node.constraints == null
+    && (extensions.length === 0 || (node.isMask === true && extensions.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
+function runtimeCanConsumePresentationGroup(node: RuntimeProjectionNode): boolean {
+  const opacity = node.opacity ?? 1;
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
+  return node.type === "GROUP"
+    && typeof opacity === "number"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.clipsContent !== true
+    && node.locked !== true
+    && node.contentsHidden !== true
+    && !runtimeOwnsAutoLayout(node)
+    && extensions.length === 0
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
+function runtimeFullyConsumedDirectGroup(
+  nodes: readonly RuntimeProjectionNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string,
+): RuntimeProjectionNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [groupId] = sourceParentIds;
+  if (typeof groupId !== "string") return undefined;
+  const group = nodes.find((node) => node.id === groupId && node.removed !== true);
+  if (!group || group.type !== "GROUP" || group.parentId !== targetParentId) return undefined;
+  const children = nodes.filter((node) => node.removed !== true && node.parentId === group.id);
+  return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
+}
+
+function runtimePresentationGroupPatch(group: RuntimeProjectionNode): Readonly<Record<string, unknown>> {
+  return {
+    opacity: finiteNodeNumber(group.opacity, 1),
+    blendMode: group.blendMode ?? "normal",
+    visible: group.visible !== false,
+    isMask: Boolean(group.isMask),
+  };
 }
 
 function runtimeDissolvableNeutralGroups(

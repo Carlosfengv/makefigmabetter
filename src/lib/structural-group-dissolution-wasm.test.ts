@@ -22,6 +22,7 @@ const innerId = "00000000-0000-4000-8000-000000000702";
 const firstId = "00000000-0000-4000-8000-000000000703";
 const secondId = "00000000-0000-4000-8000-000000000704";
 const siblingId = "00000000-0000-4000-8000-000000000705";
+const presentedFrameId = "00000000-0000-4000-8000-000000000706";
 
 function nestedNodes(): CanvasNode[] {
   const outer = { ...createNode("group", 80, 40), id: outerId, pageId: DEFAULT_PAGE_ID, positionId: "10000000000000000000000000000000:00000000000040008000000000000701" };
@@ -61,6 +62,24 @@ function autoLayoutNodes(): CanvasNode[] {
   const first = { ...createNode("vector", 20, 30), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 40, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 }, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
   const second = { ...createNode("vector", 90, 50), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 30, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 90, f: 50 }, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
   return [frame, first, second];
+}
+
+function presentedGroupNodes(): CanvasNode[] {
+  const frame = { ...createNode("frame", 40, 20), id: presentedFrameId, pageId: DEFAULT_PAGE_ID, width: 360, height: 200, positionId: "08000000000000000000000000000000:00000000000040008000000000000706" };
+  const group = {
+    ...createNode("group", 80, 40),
+    id: outerId,
+    pageId: DEFAULT_PAGE_ID,
+    parentId: frame.id,
+    positionId: "10000000000000000000000000000000:00000000000040008000000000000701",
+    opacity: .55,
+    blendMode: "multiply" as const,
+    isMask: true,
+  };
+  const first = { ...createNode("vector", 10, 5), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: group.id, width: 20, height: 20, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
+  const second = { ...createNode("vector", 40, 5), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: group.id, width: 20, height: 20, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
+  const sibling = { ...createNode("vector", 240, 50), id: siblingId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, positionId: "f0000000000000000000000000000000:00000000000040008000000000000705" };
+  return [frame, group, first, second, sibling];
 }
 
 describe("nested neutral Group Core dissolution", () => {
@@ -159,5 +178,60 @@ describe("nested neutral Group Core dissolution", () => {
     });
     expect(flattenSeed.engine.undo()).toBe(3n);
     expect(flattenSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
+  });
+
+  it("commits consumed Group presentation to Boolean and flatten replacements", async () => {
+    const booleanId = "00000000-0000-4000-8000-000000000751";
+    const booleanSeed = await seededEngineWith(presentedGroupNodes(), "00000000-0000-4000-8000-000000000750");
+    const boolean = resolveCoreBatch(booleanSeed.projection(), [{
+      type: "boolean",
+      ids: [firstId, secondId],
+      operation: "union",
+      id: booleanId,
+      parentId: presentedFrameId,
+      index: 0,
+    }])!;
+
+    expect(booleanSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000752", 1n, JSON.stringify(boolean.batch))).toBe(2n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)).toMatchObject({
+      kind: "booleanOperation",
+      opacity: .55,
+      blendMode: "multiply",
+      isMask: true,
+    });
+    expect(booleanSeed.projection().some((node) => node.id === outerId)).toBe(false);
+    expect(booleanSeed.engine.undo()).toBe(3n);
+    expect(booleanSeed.projection().find((node) => node.id === outerId)).toMatchObject({ isMask: true, opacity: .55, blendMode: "multiply" });
+    expect(booleanSeed.engine.redo()).toBe(4n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)).toMatchObject({ isMask: true, opacity: .55 });
+
+    const replacementId = "00000000-0000-4000-8000-000000000753";
+    const flattenSeed = await seededEngineWith(presentedGroupNodes(), "00000000-0000-4000-8000-000000000754");
+    const vectorPath: DocumentVectorPath = {
+      fillRule: "nonZero",
+      subpaths: [{ closed: true, points: [
+        { id: "00000000-0000-4000-8000-000000000761", x: 0, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000762", x: 50, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000763", x: 0, y: 20, pointType: "corner" },
+      ] }],
+    };
+    const flattened = resolveFlattenNodesBatch(
+      flattenSeed.projection(),
+      [firstId, secondId],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: presentedFrameId, index: 0 },
+    )!;
+
+    expect(flattenSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000755", 1n, JSON.stringify(flattened.batch))).toBe(2n);
+    expect(flattenSeed.projection().find((node) => node.id === replacementId)).toMatchObject({
+      kind: "vector",
+      opacity: .55,
+      blendMode: "multiply",
+      isMask: true,
+    });
+    expect(flattenSeed.engine.undo()).toBe(3n);
+    expect(flattenSeed.projection().find((node) => node.id === outerId)).toMatchObject({ isMask: true, opacity: .55 });
   });
 });

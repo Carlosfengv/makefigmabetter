@@ -317,10 +317,16 @@ export function resolveFlattenNodesBatch(
   if (targetPageId !== sourcePageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
   const sourceIdSet = new Set(sourceIds);
   if (targetParentId && (sourceIdSet.has(targetParentId) || sourceIds.some((sourceId) => hasAncestor(nodes, targetParentId, sourceId)))) return undefined;
-  const dissolvedGroups = dissolvableNeutralGroups(
+  const sourceParentIds = new Set(concreteSources.map((source) => source.parentId));
+  const directPresentationGroup = fullyConsumedDirectGroup(nodes, sourceIdSet, sourceParentIds, targetParentId);
+  const consumedPresentationGroup = directPresentationGroup && !canDissolveNeutralGroup(directPresentationGroup)
+    ? directPresentationGroup
+    : undefined;
+  if (consumedPresentationGroup && !canConsumePresentationGroup(consumedPresentationGroup)) return undefined;
+  const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
     nodes,
     sourceIdSet,
-    new Set(concreteSources.map((source) => source.parentId)),
+    sourceParentIds,
     targetParentId,
   );
   if (!dissolvedGroups) return undefined;
@@ -388,6 +394,7 @@ export function resolveFlattenNodesBatch(
     extensions: patch?.extensions,
     contentsHidden: false,
     clipsContent: undefined,
+    ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
   };
   const batch: CoreBatchCommand[] = [
     { type: "create", node: coreProjectionNode(replacement) },
@@ -406,13 +413,61 @@ function canDissolveNeutralGroup(group: CanvasNode): boolean {
     (group.opacity ?? 1) !== 1 ||
     (group.blendMode ?? "normal") !== "normal" ||
     group.isMask === true ||
+    group.locked === true ||
+    group.constraints != null ||
     group.dropShadow != null ||
     (group.effectStack?.length ?? 0) > 0 ||
     group.contentsHidden === true ||
     group.clipsContent === true ||
-    group.autoLayout !== undefined
+    group.autoLayout !== undefined ||
+    Object.keys(group.extensions ?? {}).length > 0 ||
+    (group.reactions?.length ?? 0) > 0 ||
+    group.prototypeMetadata !== undefined
   ) return false;
   return true;
+}
+
+function canConsumePresentationGroup(group: CanvasNode): boolean {
+  const opacity = group.opacity ?? 1;
+  const extensionKeys = Object.keys(group.extensions ?? {});
+  return group.kind === "group"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && group.dropShadow == null
+    && (group.effectStack?.length ?? 0) === 0
+    && group.clipsContent !== true
+    && group.locked !== true
+    && group.contentsHidden !== true
+    && !ownsAutoLayout(group)
+    && group.constraints == null
+    && (extensionKeys.length === 0 || (group.isMask === true && extensionKeys.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (group.reactions?.length ?? 0) === 0
+    && group.prototypeMetadata === undefined;
+}
+
+function fullyConsumedDirectGroup(
+  nodes: readonly CanvasNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string | undefined,
+): CanvasNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [groupId] = sourceParentIds;
+  if (!groupId) return undefined;
+  const group = nodes.find((node) => node.id === groupId);
+  if (!group || group.kind !== "group" || group.parentId !== targetParentId) return undefined;
+  const children = nodes.filter((node) => node.parentId === group.id);
+  return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
+}
+
+function presentationGroupPatch(group: CanvasNode): Partial<CanvasNode> {
+  return {
+    opacity: group.opacity ?? 1,
+    blendMode: group.blendMode ?? "normal",
+    visible: group.visible !== false,
+    isMask: Boolean(group.isMask),
+  };
 }
 
 function dissolvableNeutralGroups(
@@ -1009,6 +1064,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const commonParentId = nearestCommonParentId(nextNodes, roots);
       let parentId = commonParentId;
       let dissolvedGroups: CanvasNode[] = [];
+      let consumedPresentationGroup: CanvasNode | undefined;
       if (command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") {
         if (command.parentId !== undefined && command.pageId !== undefined) return undefined;
         if (command.parentId !== undefined) {
@@ -1021,10 +1077,16 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         }
         if (command.index !== undefined && (!Number.isSafeInteger(command.index) || command.index < 0)) return undefined;
         if (command.type === "boolean") {
-          const resolvedGroups = dissolvableNeutralGroups(
+          const sourceParentIds = new Set(roots.map((node) => node.parentId));
+          const directPresentationGroup = fullyConsumedDirectGroup(nextNodes, selectedIds, sourceParentIds, parentId);
+          consumedPresentationGroup = directPresentationGroup && !canDissolveNeutralGroup(directPresentationGroup)
+            ? directPresentationGroup
+            : undefined;
+          if (consumedPresentationGroup && !canConsumePresentationGroup(consumedPresentationGroup)) return undefined;
+          const resolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
             nextNodes,
             selectedIds,
-            new Set(roots.map((node) => node.parentId)),
+            sourceParentIds,
             parentId,
           );
           if (!resolvedGroups) return undefined;
@@ -1110,6 +1172,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
         ...(targetOwnsAutoLayout ? { autoLayout: absoluteStructuralChildAutoLayout() } : {}),
         ...booleanPatch,
+        ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
         ...transformGroupPatch,
         ...componentSetPatch,
         ...(command.type === "transformGroup" ? { transformModifiers: structuredClone(command.modifiers) } : {}),

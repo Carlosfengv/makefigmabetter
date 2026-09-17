@@ -1029,7 +1029,13 @@ function validateBooleanOperation(
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
   }
   const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
-  if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId)) {
+  const directPresentationGroup = runtimeProjectionFullyConsumedDirectGroup(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId);
+  const consumedPresentationGroup = directPresentationGroup && !runtimeProjectionCanDissolveNeutralGroup(directPresentationGroup)
+    ? directPresentationGroup
+    : undefined;
+  if (consumedPresentationGroup
+    ? !runtimeProjectionCanConsumePresentationGroup(consumedPresentationGroup) || !runtimeProjectionMatchesPresentation(operation.node, consumedPresentationGroup)
+    : !runtimeProjectionDissolvableNeutralGroups(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
   }
   if (new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length) {
@@ -1240,7 +1246,13 @@ function validateFlattenNodesOperation(
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   }
   const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
-  if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId)) {
+  const directPresentationGroup = runtimeProjectionFullyConsumedDirectGroup(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId);
+  const consumedPresentationGroup = directPresentationGroup && !runtimeProjectionCanDissolveNeutralGroup(directPresentationGroup)
+    ? directPresentationGroup
+    : undefined;
+  if (consumedPresentationGroup
+    ? !runtimeProjectionCanConsumePresentationGroup(consumedPresentationGroup) || !runtimeProjectionMatchesPresentation(operation.replacement, consumedPresentationGroup)
+    : !runtimeProjectionDissolvableNeutralGroups(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   }
   const occupiedSiblingSlots = new Set<string>();
@@ -1255,16 +1267,73 @@ function validateFlattenNodesOperation(
 }
 
 function runtimeProjectionCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
   return node.type === "GROUP"
     && node.visible !== false
     && (node.opacity === undefined || node.opacity === 1)
     && (node.blendMode === undefined || node.blendMode === "normal")
     && node.isMask !== true
+    && node.locked !== true
+    && node.constraints == null
     && node.dropShadow == null
     && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
     && node.contentsHidden !== true
     && node.clipsContent !== true
-    && !projectionOwnsAutoLayout(node);
+    && !projectionOwnsAutoLayout(node)
+    && node.constraints == null
+    && (extensions.length === 0 || (node.isMask === true && extensions.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
+function runtimeProjectionCanConsumePresentationGroup(node: RuntimeProjectionNode): boolean {
+  const opacity = node.opacity ?? 1;
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
+  return node.type === "GROUP"
+    && typeof opacity === "number"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.clipsContent !== true
+    && node.locked !== true
+    && node.contentsHidden !== true
+    && !projectionOwnsAutoLayout(node)
+    && extensions.length === 0
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
+function runtimeProjectionFullyConsumedDirectGroup(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string>,
+  targetParentId: unknown,
+): RuntimeProjectionNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [groupId] = sourceParentIds;
+  const group = read(groupId!);
+  if (!group || group.removed === true || group.type !== "GROUP" || group.parentId !== targetParentId) return undefined;
+  const children = [...nodeIds()]
+    .map((nodeId) => read(nodeId))
+    .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === group.id));
+  return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
+}
+
+function runtimeProjectionMatchesPresentation(replacement: RuntimeProjectionNode, group: RuntimeProjectionNode): boolean {
+  return (replacement.opacity ?? 1) === (group.opacity ?? 1)
+    && (replacement.blendMode ?? "normal") === (group.blendMode ?? "normal")
+    && (replacement.visible !== false) === (group.visible !== false)
+    && replacement.locked !== true
+    && replacement.contentsHidden !== true
+    && Boolean(replacement.isMask) === Boolean(group.isMask)
+    && replacement.constraints == null;
 }
 
 function runtimeProjectionDissolvableNeutralGroups(

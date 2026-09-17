@@ -100,6 +100,52 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("b")).toMatchObject({ parentId: "boolean", siblingIndex: 1 });
   });
 
+  it("requires consumed Group presentation on Boolean and flatten replacements", () => {
+    const projection = {
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: .6, blendMode: "multiply" },
+        { id: "a", type: "VECTOR", parentId: "group", siblingIndex: 0 },
+        { id: "b", type: "VECTOR", parentId: "group", siblingIndex: 1 },
+      ],
+    } as const;
+    const operation = {
+      type: "boolean" as const,
+      node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "page", siblingIndex: 0, booleanOperation: "union", opacity: .6, blendMode: "multiply", isMask: false, visible: true },
+      operandIds: ["a", "b"],
+      operandPatches: [{ x: 0 }, { x: 10 }],
+      siblingIndexes: [],
+      wrapperPatch: {},
+      operation: "union" as const,
+    };
+    const store = new RuntimeProjectionStore(projection);
+    store.stage({ transactionId: "tx-presented-boolean", baseRevision: 7, operations: [operation] });
+    expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(store.getNode("boolean")).toMatchObject({ opacity: .6, blendMode: "multiply" });
+
+    const mismatchStore = new RuntimeProjectionStore(projection);
+    expect(isRuntimeError(captureError(() => mismatchStore.stage({
+      transactionId: "tx-missing-presentation",
+      baseRevision: 7,
+      operations: [{ ...operation, node: { ...operation.node, opacity: 1 } }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+
+    const flattenStore = new RuntimeProjectionStore(projection);
+    flattenStore.stage({
+      transactionId: "tx-presented-flatten",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["a", "b"],
+        replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 0, opacity: .6, blendMode: "multiply", isMask: false, visible: true, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [],
+      }],
+    });
+    expect(flattenStore.getNode("group")).toMatchObject({ removed: true });
+    expect(flattenStore.getNode("flat")).toMatchObject({ opacity: .6, blendMode: "multiply" });
+  });
+
   it("projects ComponentSet creation and Component adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,
