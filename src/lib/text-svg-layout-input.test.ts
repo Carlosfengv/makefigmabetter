@@ -92,17 +92,27 @@ describe("textSvgLayoutInput", () => {
     expect(textFrozenLayoutFace(node({ runs: [run(0, 6, { letterSpacing: .25 })], paragraph, autoSize: "fixed", fallbackFonts: [] }))).toBeUndefined();
   });
 
-  it("projects case-only runs for shaping while keeping small caps on Canvas", () => {
+  it("projects all TextCase modes into shaping and derives small-cap OpenType features", () => {
     for (const textCase of ["upper", "lower", "title"] as const) {
       expect(textFrozenLayoutFace(node({
         runs: [run(0, 6, { textCase })], paragraph, autoSize: "fixed", fallbackFonts: [],
       }))).toMatchObject({ source: "Design" });
     }
-    for (const textCase of ["smallCaps", "smallCapsForced"] as const) {
-      expect(textFrozenLayoutFace(node({
-        runs: [run(0, 6, { textCase })], paragraph, autoSize: "fixed", fallbackFonts: [],
-      }))).toBeUndefined();
-    }
+    const smallCaps = textSvgLayoutInput(node({
+      runs: [run(0, 6, { textCase: "smallCaps", openTypeFeatures: { SMCP: false, LIGA: false } })], paragraph, autoSize: "fixed", fallbackFonts: [],
+    }), fontBytes);
+    const forced = textSvgLayoutInput(node({
+      runs: [run(0, 6, { textCase: "smallCapsForced", openTypeFeatures: { C2SC: false } })], paragraph, autoSize: "fixed", fallbackFonts: [],
+    }), fontBytes);
+    expect(JSON.parse(smallCaps!.runsJson)[0].openTypeFeatures).toEqual([
+      { tag: "LIGA", enabled: false },
+      { tag: "SMCP", enabled: true },
+    ]);
+    expect(JSON.parse(forced!.runsJson)[0].openTypeFeatures).toEqual([
+      { tag: "C2SC", enabled: true },
+      { tag: "SMCP", enabled: true },
+    ]);
+    expect(forced).toMatchObject({ source: "Design", shapingSource: "Design" });
   });
 
   it("keeps a browser fallback for an otherwise default-style document-font node", () => {

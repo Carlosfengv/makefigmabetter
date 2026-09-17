@@ -25,7 +25,7 @@ import { colorToLinearSrgbComponents, colorToSrgbCss, sampleLinearGradientForCan
 import { layoutTextRanges, resolveTextRenderMetrics, textAlignedLineLeft, textHangingPunctuationOffsets, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "@/lib/text-layout";
 import { styledTextSpans, styledTextVisualSpans, type RenderTextStyle } from "@/lib/text-style-runs";
 import { basicTextDecorationPattern, basicTextDecorationRect, textDecorationPaintLayers, textDecorationVisibleSegments, type BasicTextDecorationPattern, type BasicTextDecorationRect } from "@/lib/text-decoration";
-import { usesSmallCaps } from "@/lib/text-case";
+import { effectiveTextOpenTypeFeatures, textCaseFontVariantCaps } from "@/lib/text-case";
 import { admitWebGpuSceneResources, classifyWebGpuRendererFailure, GpuSceneResourceLimitError, MAX_GPU_EFFECT_TEXTURE_BYTES, MAX_GPU_SCENE_RESOURCE_BYTES, WebGpuSceneRenderer, type WebGpuTextGlyph } from "@/lib/webgpu-scene";
 import { decodeInputBatch } from "@/lib/input-transfer";
 import { autoLayoutProjectionNormalizationPatches, captureClipboard, coalesceAdjacentNodeUpdates, coreProjectionNode, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveFlattenNodeBatch, resolveFlattenNodesBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch, type CoreBatchCommand, type CoreProjectionNode } from "@/lib/transaction-batch";
@@ -1877,7 +1877,7 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
 /** Derives one source-addressed layout from contiguous explicit font/size runs.
  * PIXELS tracking participates in Rust line fitting and caret geometry;
  * synthetic weight/italic retain authored advances and travel with the raster
- * identity, while small caps remain on the documented Canvas transition. */
+ * identity; small caps travel as derived OpenType feature overrides. */
 function rustTextLayoutRequest(node: CanvasNode) {
   if ((node.textProperties?.paragraph.paragraphIndent ?? 0) !== 0
       || node.textProperties?.paragraphStyleRuns?.some((run) => (run.paragraphIndent ?? 0) !== 0)) return undefined;
@@ -1897,7 +1897,7 @@ function rustTextLayoutRequest(node: CanvasNode) {
     plan.source,
     plan.shapingSource,
     node.width,
-    plan.runs.map((run) => [run.start, run.end, run.font.assetId, run.font.faceIndex, run.axes, run.fontSize, run.fontWeight, run.italic, run.letterSpacing]),
+    plan.runs.map((run) => [run.start, run.end, run.font.assetId, run.font.faceIndex, run.axes, run.fontSize, run.fontWeight, run.italic, run.letterSpacing, run.openTypeFeatures]),
   ]);
   return {
     key,
@@ -6754,7 +6754,8 @@ function renderConnectorLabel(ctx: OffscreenCanvasRenderingContext2D, node: Canv
 
 function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: RenderTextStyle, fallbackFonts?: readonly DocumentFontReference[]) {
   const fontFamilies = documentFontFamilyChain(style.font, fallbackFonts, (assetId) => fontFaces.familyFor(assetId));
-  ctx.font = `${style.italic ? "italic " : ""}${usesSmallCaps(style.textCase) ? "small-caps " : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
+  const caps = textCaseFontVariantCaps(style.textCase);
+  ctx.font = `${style.italic ? "italic " : ""}${caps ? `${caps} ` : ""}${style.fontWeight} ${style.fontSize * viewport.zoom}px ${fontFamilies ? `${fontFamilies}, ` : ""}${canvasDesignTokens.typography.canvasText.family}`;
   const letterSpacingTarget = ctx as unknown as { letterSpacing?: string };
   if ("letterSpacing" in letterSpacingTarget) letterSpacingTarget.letterSpacing = `${style.letterSpacing * viewport.zoom}px`;
   // This Canvas property is not exposed in every lib.dom version. Reset it for
@@ -6763,7 +6764,7 @@ function applyCanvasTextStyle(ctx: OffscreenCanvasRenderingContext2D, style: Ren
   if ("fontVariationSettings" in variationTarget) variationTarget.fontVariationSettings = fontVariationCss(style.font?.variationAxes);
   const featureTarget = ctx as unknown as { fontFeatureSettings?: string };
   if ("fontFeatureSettings" in featureTarget) {
-    featureTarget.fontFeatureSettings = Object.entries(style.openTypeFeatures ?? {})
+    featureTarget.fontFeatureSettings = Object.entries(effectiveTextOpenTypeFeatures(style.textCase, style.openTypeFeatures))
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([tag, enabled]) => `'${tag.toLowerCase()}' ${enabled ? 1 : 0}`)
       .join(", ");

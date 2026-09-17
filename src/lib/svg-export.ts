@@ -9,7 +9,7 @@ import { solidLineStrokeOutlinePath } from "./line-stroke-outline";
 import { decorativeCapMeshPath, isDecorativeCap } from "./decorative-cap-mesh";
 import { perSideStrokeCenters } from "./per-side-stroke";
 import { styledTextSpans, type RenderTextStyle } from "./text-style-runs";
-import { usesSmallCaps } from "./text-case";
+import { effectiveTextOpenTypeFeatures, textCaseFontVariantCaps } from "./text-case";
 import { endingEllipsis, textDisplayLines } from "./text-truncation";
 import { transformPoint, worldBoundsForTransform, worldTransformsForNodes, type AffineMatrix } from "./scene-transform";
 import { worldVisualBoundsForNode } from "./world-visual-bounds";
@@ -1394,8 +1394,9 @@ function svgTextStyleAttributes(style: RenderTextStyle, fontDataUris?: ReadonlyM
     ? [svgFontFamily(style.font.assetId), ...fallbackFamilies, "sans-serif"]
     : fallbackFamilies.length ? [...fallbackFamilies, "sans-serif"] : undefined;
   const variations = style.font?.variationAxes?.length ? ` font-variation-settings="${attribute(fontVariationCss(style.font.variationAxes))}"` : "";
-  const caps = usesSmallCaps(style.textCase) ? ` font-variant-caps="small-caps"` : "";
-  const features = Object.entries(style.openTypeFeatures ?? {})
+  const capsValue = textCaseFontVariantCaps(style.textCase);
+  const caps = capsValue ? ` font-variant-caps="${capsValue}"` : "";
+  const features = Object.entries(effectiveTextOpenTypeFeatures(style.textCase, style.openTypeFeatures))
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
     .map(([tag, enabled]) => `'${tag.toLowerCase()}' ${enabled ? 1 : 0}`)
     .join(", ");

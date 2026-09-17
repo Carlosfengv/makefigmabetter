@@ -5,9 +5,9 @@ import {
   remapRustTextLayoutToSource,
 } from "./rust-text-layout";
 import {
+  effectiveTextOpenTypeFeatures,
   projectDocumentTextCaseRanges,
   sourceBoundaryToDisplay,
-  usesSmallCaps,
   type TextCaseProjection,
 } from "./text-case";
 
@@ -54,6 +54,7 @@ export type TextFrozenLayoutFace = Readonly<{
   fontSize: number;
   fontWeight: number;
   italic: boolean;
+  openTypeFeatures: Readonly<Record<string, boolean>>;
 }>;
 
 export type TextSvgLayoutProjection = Readonly<{
@@ -91,8 +92,8 @@ function canonicalVariationAxes(font: DocumentFontReference) {
 /** Builds the complete metric-bearing shaping plan. Every source byte must be
  * owned by exactly one explicit or document-fallback font run. Synthetic
  * weight/italic are presentation-only raster styles with authored advances;
- * small caps remain outside Rust. PIXELS tracking is metric bearing and
- * therefore travels with each admitted run. */
+ * small caps enter Rust as derived smcp/c2sc feature overrides. PIXELS
+ * tracking is metric bearing and therefore travels with each admitted run. */
 export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | undefined {
   if ((node.kind !== "text" && node.kind !== "textPath") || !Number.isFinite(node.width) || node.width <= 0) return undefined;
   const source = node.text ?? "Text";
@@ -107,8 +108,7 @@ export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | u
       || !Number.isFinite(run.fontSize) || run.fontSize <= 0
       || !Number.isInteger(run.fontWeight) || run.fontWeight < 1 || run.fontWeight > 1_000
       || typeof run.italic !== "boolean"
-      || !Number.isFinite(run.letterSpacing) || run.letterSpacing < -10_000 || run.letterSpacing > 10_000
-      || usesSmallCaps(run.textCase)) return undefined;
+      || !Number.isFinite(run.letterSpacing) || run.letterSpacing < -10_000 || run.letterSpacing > 10_000) return undefined;
     cursor = run.end;
   }
   if (cursor !== sourceLength) return undefined;
@@ -135,7 +135,7 @@ export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | u
           fontWeight: run.fontWeight,
           italic: run.italic,
           letterSpacing: run.letterSpacing,
-          openTypeFeatures: run.openTypeFeatures ?? {},
+          openTypeFeatures: effectiveTextOpenTypeFeatures(run.textCase, run.openTypeFeatures),
         };
   });
   if (shapingRuns.some((run) => !run)) return undefined;
@@ -161,6 +161,7 @@ export function textFrozenLayoutFace(node: CanvasNode): TextFrozenLayoutFace | u
       || run.fontSize !== primary.fontSize
       || run.fontWeight !== primary.fontWeight
       || run.italic !== primary.italic
+      || JSON.stringify(run.openTypeFeatures) !== JSON.stringify(primary.openTypeFeatures)
       || run.letterSpacing !== 0)) return undefined;
   return {
     source: plan.source,
@@ -171,6 +172,7 @@ export function textFrozenLayoutFace(node: CanvasNode): TextFrozenLayoutFace | u
     fontSize: primary.fontSize,
     fontWeight: primary.fontWeight,
     italic: primary.italic,
+    openTypeFeatures: primary.openTypeFeatures,
   };
 }
 

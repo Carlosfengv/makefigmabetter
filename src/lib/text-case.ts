@@ -50,19 +50,40 @@ export function isRuntimeTextCase(value: unknown): value is RuntimeTextCase {
 }
 
 /** Presentation-only Unicode transform. Canonical characters and range offsets
- * always remain untouched. CSS/Canvas small-caps supplies the glyph variant. */
+ * always remain untouched. OpenType smcp/c2sc supplies both small-cap modes. */
 export function applyDocumentTextCase(text: string, value: DocumentTextCase | undefined): string {
   switch (value) {
     case "upper": return text.toUpperCase();
     case "lower": return text.toLowerCase();
     case "title": return titleCase(text);
-    case "smallCapsForced": return text.toLowerCase();
     default: return text;
   }
 }
 
 export function usesSmallCaps(value: DocumentTextCase | undefined): boolean {
   return value === "smallCaps" || value === "smallCapsForced";
+}
+
+export function textCaseFontVariantCaps(value: DocumentTextCase | undefined): "small-caps" | "all-small-caps" | undefined {
+  if (value === "smallCaps") return "small-caps";
+  if (value === "smallCapsForced") return "all-small-caps";
+  return undefined;
+}
+
+/** TextCase is a presentation override, so its required OpenType features win
+ * over contradictory explicit feature flags at the renderer boundary while
+ * the authored map remains unchanged in Canonical state and API reads. */
+export function effectiveTextOpenTypeFeatures(
+  value: DocumentTextCase | undefined,
+  explicit: Readonly<Record<string, boolean>> = {},
+): Readonly<Record<string, boolean>> {
+  const effective = usesSmallCaps(value) ? {
+    ...explicit,
+    SMCP: true,
+    ...(value === "smallCapsForced" ? { C2SC: true } : {}),
+  } : explicit;
+  return Object.fromEntries(Object.entries(effective)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
 }
 
 /**
@@ -73,9 +94,8 @@ export function usesSmallCaps(value: DocumentTextCase | undefined): boolean {
  * The map records every source Unicode-scalar boundary. One source scalar may
  * expand to several display scalars (`İ` -> `i` + combining dot), so display
  * offsets inside that expansion deliberately have no editable source boundary.
- * Small-cap transforms can use this map for Canvas/SVG slicing; Rust shaping
- * applies a separate admission check because it does not yet request the
- * OpenType smcp/c2sc features used by `font-variant-caps`.
+ * Small-cap runs retain an identity source/display map; every renderer applies
+ * the required OpenType smcp/c2sc features without changing source offsets.
  */
 export function projectDocumentTextCaseRanges(
   source: string,

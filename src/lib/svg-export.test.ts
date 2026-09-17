@@ -1120,7 +1120,8 @@ describe("SVG export", () => {
     const result = exportPageToSvg([text], { pageId, defaultPageId: pageId });
 
     expect(result.svg).toContain(">STRASSE</tspan>");
-    expect(result.svg).toContain('font-variant-caps="small-caps"');
+    expect(result.svg).toContain('font-variant-caps="all-small-caps"');
+    expect(result.svg).toContain("font-feature-settings=\"'c2sc' 1, 'smcp' 1\"");
     expect(result.svg).toContain("> test</tspan>");
     expect(text.text).toBe(canonical);
   });

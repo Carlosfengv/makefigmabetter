@@ -4096,8 +4096,8 @@ export function RuntimeM1Harness() {
       if (
         !svg.includes("STRASSE")
         || !svg.includes("Title")
-        || !svg.includes(">caps</tspan>")
-        || !svg.includes('font-variant-caps="small-caps"')
+        || !svg.includes(">CAPS</tspan>")
+        || !svg.includes('font-variant-caps="all-small-caps"')
         || !shapeSvg.includes("Shape Case")
         || !shapeSvg.includes('font-variant-caps="small-caps"')
       ) throw new Error("Frozen SVG did not preserve the TextCase presentation contract.");

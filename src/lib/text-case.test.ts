@@ -4,9 +4,11 @@ import {
   displayBoundaryToSource,
   displayClusterToSource,
   documentTextCase,
+  effectiveTextOpenTypeFeatures,
   projectDocumentTextCaseRanges,
   runtimeTextCase,
   sourceBoundaryToDisplay,
+  textCaseFontVariantCaps,
   usesSmallCaps,
 } from "./text-case";
 
@@ -26,9 +28,13 @@ describe("text case presentation", () => {
     expect(applyDocumentTextCase("ÉCOLE", "lower")).toBe("école");
     expect(applyDocumentTextCase("e\u0301cole déjà", "title")).toBe("E\u0301cole Déjà");
     expect(applyDocumentTextCase("MiXeD", "smallCaps")).toBe("MiXeD");
-    expect(applyDocumentTextCase("MiXeD", "smallCapsForced")).toBe("mixed");
+    expect(applyDocumentTextCase("MiXeD", "smallCapsForced")).toBe("MiXeD");
     expect(usesSmallCaps("smallCaps")).toBe(true);
     expect(usesSmallCaps("smallCapsForced")).toBe(true);
+    expect(textCaseFontVariantCaps("smallCaps")).toBe("small-caps");
+    expect(textCaseFontVariantCaps("smallCapsForced")).toBe("all-small-caps");
+    expect(effectiveTextOpenTypeFeatures("smallCaps", { LIGA: false, SMCP: false })).toEqual({ LIGA: false, SMCP: true });
+    expect(effectiveTextOpenTypeFeatures("smallCapsForced", { C2SC: false })).toEqual({ C2SC: true, SMCP: true });
   });
 
   it("maps expanding and contracting display scalars back to Canonical UTF-8 boundaries", () => {
@@ -68,6 +74,6 @@ describe("text case presentation", () => {
     expect(title?.display).toBe("Straße Déjà");
     expect(title?.boundaries.at(-1)).toEqual({ source: 14, display: 14 });
     expect(projectDocumentTextCaseRanges("ab", [{ start: 1, end: 2, textCase: "upper" }])).toBeUndefined();
-    expect(projectDocumentTextCaseRanges("AB", [{ start: 0, end: 2, textCase: "smallCapsForced" }])?.display).toBe("ab");
+    expect(projectDocumentTextCaseRanges("AB", [{ start: 0, end: 2, textCase: "smallCapsForced" }])?.display).toBe("AB");
   });
 });
