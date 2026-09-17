@@ -37,7 +37,10 @@ describe("synthetic font style GPU fixture", () => {
     expect(hasMissingRustTextGlyph(layout)).toBe(false);
     expect(new Set(layout.lines[0]!.glyphs.map((glyph) => glyph.runIndex))).toEqual(new Set([0, 1, 2, 3]));
     expect([regular, bold, italic, both].every(Boolean)).toBe(true);
+    expect(regular).toMatchObject({ descent: expect.any(Number), capHeight: expect.any(Number) });
+    expect(regular!.capHeight).toBeGreaterThan(0);
     expect([bold, italic, both].every((styled) => styled!.advanceX === regular!.advanceX && styled!.ascent === regular!.ascent)).toBe(true);
+    expect([bold, italic, both].every((styled) => styled!.descent === regular!.descent && styled!.capHeight === regular!.capHeight)).toBe(true);
     expect(new Set([regular, bold, italic, both].map((styled) => `${styled!.width}x${styled!.height}:${Array.from(styled!.alphaMask).join(",")}`)).size).toBe(4);
   });
 });

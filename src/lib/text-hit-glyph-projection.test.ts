@@ -12,8 +12,21 @@ describe("Text interaction glyph projection", () => {
   it("keeps authored rotation and position out of node-local hit glyphs", () => {
     const text = { ...createNode("text", 120, 240), id: "rotated", width: 100, rotation: 67 };
     expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12 })).toMatchObject([
-      { nodeId: "rotated", x: 0, y: 0, width: 4, height: 8, rotation: 0, paintRunIndex: 0 },
+      { nodeId: "rotated", x: 0, y: 1, width: 4, height: 8, rotation: 0, paintRunIndex: 0 },
     ]);
+  });
+
+  it("uses the explicit cap-height baseline for leading-trim hit ink", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "trimmed", text: "A", width: 100,
+      textProperties: {
+        runs: [{ start: 0, end: 1, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0, leadingTrim: "capHeight" as const }],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const metricRuns = [{ ...runs[0]!, rasters: new Map([[7, { ...raster, descent: 2, capHeight: 7 }]]) }];
+    expect(projectTextHitGlyphs({ node: text, runs: metricRuns, layout, lineHeight: 12 })?.[0]?.y).toBe(-1);
   });
 
   it("preserves physical centering for a shaped RTL line", () => {

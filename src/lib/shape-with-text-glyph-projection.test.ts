@@ -30,8 +30,21 @@ describe("ShapeWithText shaped-glyph hit projection", () => {
       },
     };
     expect(projectShapeWithTextHitGlyphs({ node, runs, layout, lineHeight: 12 })).toMatchObject([
-      { nodeId: "shape", x: 45, y: 24, width: 4, height: 8, paintRunIndex: 0 },
+      { nodeId: "shape", x: 45, y: 25, width: 4, height: 8, paintRunIndex: 0 },
     ]);
+  });
+
+  it("centers the trimmed cap-height block while allowing ink overflow", () => {
+    const node = {
+      ...createNode("shapeWithText", 0, 0), id: "trimmed-shape", text: "A", width: 100, height: 60,
+      textProperties: {
+        runs: [{ start: 0, end: 1, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0, leadingTrim: "capHeight" as const }],
+        paragraph: { alignment: "center" as const, lineHeight: 12, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+      },
+    };
+    const metricRuns = [{ ...runs[0]!, rasters: new Map([[7, { ...raster, descent: 2, capHeight: 7 }]]) }];
+    expect(projectShapeWithTextHitGlyphs({ node, runs: metricRuns, layout, lineHeight: 12 })?.[0]?.y).toBe(25.5);
   });
 
   it("right-anchors RTL inside the inset content box", () => {

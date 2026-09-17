@@ -9,12 +9,19 @@ export type ShapedTextLineMetrics = Readonly<{
   totalHeight: number;
 }>;
 
+export type ShapedTextFontMetrics = Readonly<{
+  ascent: number;
+  descent: number;
+  capHeight: number;
+}>;
+
 /** Replays Canonical paragraph vertical metrics over Rust-shaped line ranges. */
 export function shapedTextLineMetrics(
   node: CanvasNode,
   layout: RustTextLayout,
   fallbackFontSize: number,
   fallbackLineHeight: number,
+  fontMetrics?: ShapedTextFontMetrics,
 ): ShapedTextLineMetrics | undefined {
   const source = node.text ?? "";
   const bytes = new TextEncoder().encode(source);
@@ -39,5 +46,27 @@ export function shapedTextLineMetrics(
     cursor += height;
     previousEnd = line.end;
   }
-  return { tops, heights, totalHeight: cursor };
+  if (!fontMetrics) return { tops, heights, totalHeight: cursor };
+  const { ascent, descent, capHeight } = fontMetrics;
+  if (![ascent, descent, capHeight].every(Number.isFinite)
+      || ascent < 0 || descent < 0 || capHeight <= 0) return undefined;
+  const leadingTrim = (node.textProperties?.runs[0]?.leadingTrim
+    ?? node.textProperties?.baseStyle?.leadingTrim) === "capHeight";
+  const projectedTops = tops.map((top, index) => top + (leadingTrim
+    ? capHeight - ascent
+    : ((heights[index] ?? fallbackLineHeight) - ascent - descent) / 2));
+  if (!leadingTrim || !heights.length) {
+    return { tops: projectedTops, heights, totalHeight: cursor };
+  }
+  const cssBaseline = (height: number) => (height - ascent - descent) / 2 + ascent;
+  const firstBaseline = cssBaseline(heights[0]!);
+  const lastHeight = heights.at(-1)!;
+  const lastBaseline = cssBaseline(lastHeight);
+  const trimStart = Math.max(0, firstBaseline - capHeight);
+  const trimEnd = Math.max(0, lastHeight - lastBaseline);
+  return {
+    tops: projectedTops,
+    heights,
+    totalHeight: Math.max(0, cursor - trimStart - trimEnd),
+  };
 }

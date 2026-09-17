@@ -1905,8 +1905,9 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
 function rustTextLayoutRequest(node: CanvasNode) {
   if (node.textProperties?.paragraph.listType
     || node.textProperties?.paragraphStyleRuns?.some((run) => run.listType && run.listType !== "none")) return undefined;
-  if (node.textProperties?.runs.some((run) => run.leadingTrim !== undefined)
-    || node.textProperties?.baseStyle?.leadingTrim !== undefined) return undefined;
+  const leadingTrim = node.textProperties?.runs.map((run) => run.leadingTrim ?? null) ?? [];
+  const hasLeadingTrim = leadingTrim.some((value) => value !== null)
+    || node.textProperties?.baseStyle?.leadingTrim !== undefined;
   const plan = textFrozenLayoutPlan(node);
   if (!plan) return undefined;
   const firstLineIndents = shapedTextFirstLineIndents(node, plan.source);
@@ -1915,7 +1916,8 @@ function rustTextLayoutRequest(node: CanvasNode) {
   if (!firstLineIndents
       || node.kind === "textPath" && (firstLineIndents.some((indent) => indent !== 0)
         || paragraphWrapStyles.some((style) => style !== "auto")
-        || hangingPunctuation)) return undefined;
+        || hangingPunctuation
+        || hasLeadingTrim)) return undefined;
   const widthPx = node.kind === "textPath"
     ? TEXT_PATH_SINGLE_LINE_WIDTH
     : node.kind === "shapeWithText" ? Math.max(1, node.width - 20) : node.width;
@@ -1927,6 +1929,7 @@ function rustTextLayoutRequest(node: CanvasNode) {
     firstLineIndents,
     paragraphWrapStyles,
     hangingPunctuation,
+    leadingTrim,
     plan.runs.map((run) => [run.start, run.end, run.font.assetId, run.font.faceIndex, run.axes, run.fontSize, run.fontWeight, run.italic, run.letterSpacing, run.openTypeFeatures]),
   ]);
   return {

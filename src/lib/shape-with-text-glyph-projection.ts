@@ -1,5 +1,5 @@
 import type { CanvasNode } from "./editor-protocol";
-import { projectGpuTextGlyphs, type GpuTextProjectionRun } from "./gpu-text-projection";
+import { gpuTextFontMetrics, projectGpuTextGlyphs, type GpuTextProjectionRun } from "./gpu-text-projection";
 import type { RustTextLayout } from "./rust-text-layout";
 import type { WebGpuTextGlyph } from "./webgpu-scene";
 import { shapedTextLineBoxes } from "./shaped-text-line-boxes";
@@ -25,7 +25,13 @@ export function projectShapeWithTextHitGlyphs(
   const inset = 10;
   const width = Math.max(1, node.width - inset * 2);
   const height = Math.max(1, node.height - inset * 2);
-  const metrics = shapedTextLineMetrics(node, layout, 14, lineHeight);
+  const metrics = shapedTextLineMetrics(
+    node,
+    layout,
+    14,
+    lineHeight,
+    gpuTextFontMetrics(input.runs[0]),
+  );
   const boxes = shapedTextLineBoxes(node, layout, width);
   if (!metrics || !boxes) return undefined;
   const y = inset + Math.max(0, (height - metrics.totalHeight) / 2);

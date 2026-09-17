@@ -200,6 +200,11 @@ pub struct RasterizedGlyph {
     pub bearing_y: i16,
     /// Baseline-to-line-top ascent in device pixels, from the explicit font.
     pub ascent: i16,
+    /// Positive baseline-to-line-bottom descent in device pixels.
+    pub descent: i16,
+    /// Baseline-to-uppercase-H top in device pixels. This is the explicit-font
+    /// equivalent of Canvas `actualBoundingBoxAscent` used by CAP_HEIGHT trim.
+    pub cap_height: i16,
     /// Horizontal pen advance in device pixels.
     pub advance_x: i16,
     /// One alpha byte per row-major pixel.
@@ -580,6 +585,15 @@ pub fn rasterize_glyph_with_variations_and_style(
     let bearing_x = rounded_i16(f32::from(bounds.x_min) * scale)?;
     let bearing_y = rounded_i16(f32::from(bounds.y_max) * scale)?;
     let ascent = rounded_i16(f32::from(face.ascender()) * scale)?;
+    let descent = rounded_i16((-f32::from(face.descender()) * scale).max(0.0))?;
+    let cap_height_units = face
+        .glyph_index('H')
+        .and_then(|glyph| face.glyph_bounding_box(glyph))
+        .map(|bounds| bounds.y_max)
+        .filter(|height| *height > 0)
+        .or_else(|| face.capital_height().filter(|height| *height > 0))
+        .unwrap_or_else(|| (f32::from(units_per_em) * 0.7).round() as i16);
+    let cap_height = rounded_i16(f32::from(cap_height_units) * scale)?;
     let advance_x = rounded_i16(
         f32::from(
             face.glyph_hor_advance(ttf_parser::GlyphId(glyph_id))
@@ -593,6 +607,8 @@ pub fn rasterize_glyph_with_variations_and_style(
             bearing_x,
             bearing_y,
             ascent,
+            descent,
+            cap_height,
             advance_x,
             pixels,
         },
@@ -5150,6 +5166,8 @@ mod tests {
         );
         assert!(first.pixels.iter().any(|alpha| *alpha > 0));
         assert!(first.advance_x > 0);
+        assert!(first.ascent > 0 && first.descent >= 0 && first.cap_height > 0);
+        assert!(first.cap_height <= first.ascent);
     }
 
     #[test]
@@ -5204,6 +5222,8 @@ mod tests {
         for styled in [&bold, &italic, &bold_italic] {
             assert_eq!(styled.advance_x, regular.advance_x);
             assert_eq!(styled.ascent, regular.ascent);
+            assert_eq!(styled.descent, regular.descent);
+            assert_eq!(styled.cap_height, regular.cap_height);
             assert_eq!(
                 styled.pixels.len(),
                 usize::from(styled.width) * usize::from(styled.height)

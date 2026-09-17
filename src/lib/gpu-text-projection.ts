@@ -15,6 +15,28 @@ export type GpuTextProjectionRun = Readonly<{
   rasters: ReadonlyMap<number, RustGlyphRaster | undefined>;
 }>;
 
+export type GpuTextFontMetrics = Readonly<{
+  ascent: number;
+  descent: number;
+  capHeight: number;
+}>;
+
+/** Resolves the explicit primary face metrics carried by every immutable
+ * raster. Older cached payloads retain the established 0.8/0.2/0.7em rule. */
+export function gpuTextFontMetrics(run: GpuTextProjectionRun | undefined): GpuTextFontMetrics | undefined {
+  if (!run || !validRun(run)) return undefined;
+  const raster = firstRaster(run.rasters);
+  if (!raster) return undefined;
+  const scale = run.fontSize / run.pixelSize;
+  const ascent = raster.ascent * scale;
+  const descent = (raster.descent ?? run.pixelSize * 0.2) * scale;
+  const capHeight = (raster.capHeight ?? run.pixelSize * 0.7) * scale;
+  return [ascent, descent, capHeight].every(Number.isFinite)
+      && ascent >= 0 && descent >= 0 && capHeight > 0
+    ? { ascent, descent, capHeight }
+    : undefined;
+}
+
 export type GpuTextProjectionInput = {
   nodeId: string;
   /** One raster resource set per metric Style Run in the Rust request. */

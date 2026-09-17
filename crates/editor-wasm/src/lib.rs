@@ -4958,6 +4958,8 @@ pub fn rasterize_glyph_json(
         "bearingX": raster.bearing_x,
         "bearingY": raster.bearing_y,
         "ascent": raster.ascent,
+        "descent": raster.descent,
+        "capHeight": raster.cap_height,
         "advanceX": raster.advance_x,
         "pixels": raster.pixels,
     })
@@ -4989,6 +4991,8 @@ pub fn rasterize_glyph_with_variations_json(
         "bearingX": raster.bearing_x,
         "bearingY": raster.bearing_y,
         "ascent": raster.ascent,
+        "descent": raster.descent,
+        "capHeight": raster.cap_height,
         "advanceX": raster.advance_x,
         "pixels": raster.pixels,
     })
@@ -5026,6 +5030,8 @@ pub fn rasterize_glyph_with_style_json(
         "bearingX": raster.bearing_x,
         "bearingY": raster.bearing_y,
         "ascent": raster.ascent,
+        "descent": raster.descent,
+        "capHeight": raster.cap_height,
         "advanceX": raster.advance_x,
         "pixels": raster.pixels,
     })
@@ -8570,6 +8576,9 @@ mod tests {
         .unwrap();
         assert!(result["width"].as_u64().is_some_and(|value| value > 0));
         assert!(result["height"].as_u64().is_some_and(|value| value > 0));
+        assert!(result["ascent"].as_i64().is_some_and(|value| value > 0));
+        assert!(result["descent"].as_i64().is_some_and(|value| value >= 0));
+        assert!(result["capHeight"].as_i64().is_some_and(|value| value > 0));
         assert_eq!(
             result["pixels"].as_array().map(Vec::len),
             Some((result["width"].as_u64().unwrap() * result["height"].as_u64().unwrap()) as usize),
@@ -8607,6 +8616,8 @@ mod tests {
 
         assert_eq!(bold_italic["advanceX"], regular["advanceX"]);
         assert_eq!(bold_italic["ascent"], regular["ascent"]);
+        assert_eq!(bold_italic["descent"], regular["descent"]);
+        assert_eq!(bold_italic["capHeight"], regular["capHeight"]);
         assert_ne!(bold_italic["pixels"], regular["pixels"]);
     }
 

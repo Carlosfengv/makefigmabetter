@@ -20,6 +20,24 @@ describe("shaped text line metrics", () => {
       },
     };
     expect(shapedTextLineMetrics(node, layout, 10, 12)).toEqual({ tops: [0, 17], heights: [12, 20], totalHeight: 37 });
+    expect(shapedTextLineMetrics(node, layout, 10, 12, { ascent: 8, descent: 2, capHeight: 7 })).toEqual({
+      tops: [1, 22], heights: [12, 20], totalHeight: 37,
+    });
+  });
+
+  it("projects CAP_HEIGHT baselines and trims only the outer block edges", () => {
+    const node = {
+      ...createNode("shapeWithText", 0, 0), text: "A\nB",
+      textProperties: {
+        runs: [{ start: 0, end: 3, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0, leadingTrim: "capHeight" as const }],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 5 },
+        paragraphStyleRuns: [{ start: 2, lineHeight: 20 }],
+        autoSize: "fixed" as const,
+      },
+    };
+    expect(shapedTextLineMetrics(node, layout, 10, 12, { ascent: 8, descent: 2, capHeight: 7 })).toEqual({
+      tops: [-1, 16], heights: [12, 20], totalHeight: 28,
+    });
   });
 
   it("rejects shaped ranges outside the source", () => {
