@@ -2884,7 +2884,8 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
     vector.strokeCap = "ROUND";
     expect(vector.strokeCap).toBe("ROUND");
-    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ARROW_EQUILATERAL"; }), "INVALID_ARGUMENT")).toBe(true);
+    vector.strokeCap = "ARROW_EQUILATERAL";
+    expect(vector.strokeCap).toBe("ARROW_EQUILATERAL");
     const curved = {
       ...mixed,
       segments: [

@@ -1,4 +1,5 @@
 import type { DocumentPaintStack, DocumentVectorPath, StrokeCap, StrokeJoin } from "../lib/editor-protocol";
+import { decorativeCapMesh, isDecorativeCap } from "../lib/decorative-cap-mesh";
 import {
   documentPaintStackFromRuntime,
   runtimePaintsFromDocumentStack,
@@ -265,10 +266,6 @@ export function canonicalVectorPathFromRuntimeNetwork(
   if (new Set(startCaps).size > 1 || new Set(endCaps).size > 1) {
     return { reason: "Canonical VectorPath requires one shared start cap and one shared end cap across open subpaths." };
   }
-  if (hasMixedActiveJoins && [...startCaps, ...endCaps].some((cap) => cap !== "none" && cap !== "round" && cap !== "square")) {
-    return { reason: "Mixed per-vertex stroke joins support only NONE, ROUND or SQUARE endpoint caps." };
-  }
-
   const subpaths: DocumentVectorPath["subpaths"] = [];
   for (const component of components) {
     const componentVertices = component.vertexIndexes.map((vertexIndex) => input.vertices[vertexIndex]!);
@@ -541,11 +538,7 @@ export function vectorNetworkMixedStrokeMesh(
   ) return undefined;
   const components = independentNetworkComponents(network);
   if (!runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
-  if (components) {
-    const hasOpenComponent = components.some((component) => !component.closed && component.segmentIndexes.length > 0);
-    if (hasOpenComponent && (!["none", "round", "square"].includes(options.strokeCapStart ?? "none")
-      || !["none", "round", "square"].includes(options.strokeCapEnd ?? "none"))) return undefined;
-  } else if ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none") return undefined;
+  if (!components && ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none")) return undefined;
 
   const triangles: VectorNetworkStrokeTriangle[] = [];
   const half = options.strokeWidth / 2;
@@ -961,6 +954,16 @@ function addNetworkStrokeCap(
 ): void {
   if (cap === "none") return;
   const center = atStart ? segment.from : segment.to;
+  if (isDecorativeCap(cap)) {
+    decorativeCapMesh(cap, 0, atStart ? -1 : 1, half * 2).triangles.forEach((triangle) => {
+      const transformed = triangle.map((point) => ({
+        x: center.x + point.x * segment.tangent.x + point.y * segment.normal.x,
+        y: center.y + point.x * segment.tangent.y + point.y * segment.normal.y,
+      })) as [VectorNetworkStrokePoint, VectorNetworkStrokePoint, VectorNetworkStrokePoint];
+      pushNetworkStrokeTriangle(triangles, transformed[0], transformed[1], transformed[2]);
+    });
+    return;
+  }
   if (cap === "round") {
     for (let index = 0; index < 16; index += 1) {
       const start = index * Math.PI * 2 / 16;

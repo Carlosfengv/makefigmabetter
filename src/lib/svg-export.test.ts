@@ -535,10 +535,10 @@ describe("SVG export", () => {
     let sequence = 0;
     const network = {
       vertices: [
-        { x: 0, y: 0, strokeCap: "ROUND" as const },
+        { x: 0, y: 0, strokeCap: "DIAMOND_FILLED" as const },
         { x: 20, y: 0, strokeJoin: "ROUND" as const },
         { x: 20, y: 20, strokeJoin: "BEVEL" as const },
-        { x: 40, y: 20, strokeCap: "SQUARE" as const },
+        { x: 40, y: 20, strokeCap: "ARROW_EQUILATERAL" as const },
       ],
       segments: [
         { start: 0, end: 1 },
@@ -573,7 +573,7 @@ describe("SVG export", () => {
 
     const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
 
-    expect(result.svg).toContain('viewBox="-2 -2 44 24"');
+    expect(result.svg).toContain('viewBox="-16 -8 72 34.92820323027551"');
     expect(result.svg).toContain('M 0 2 L 20 -2 L 20 2 Z');
     expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(30);
     expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);

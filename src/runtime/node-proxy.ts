@@ -2224,8 +2224,7 @@ export class RuntimeNodeProxy {
     const canonical = canonicalStrokeCap(value);
     if (!canonical) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const hasMixedJoins = this.hasMixedVectorNetworkJoins();
-    if (hasMixedJoins && (!["none", "round", "square"].includes(canonical)
-      || canonical !== "none" && this.hasBranchedMixedVectorNetworkJoins())) {
+    if (hasMixedJoins && canonical !== "none" && this.hasBranchedMixedVectorNetworkJoins()) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     this.write({ strokeCapStart: canonical, strokeCapEnd: canonical });
@@ -2245,7 +2244,7 @@ export class RuntimeNodeProxy {
     const hasUnsupportedMixedJoinCap = [node.strokeCapStart ?? "none", node.strokeCapEnd ?? "none"]
       .some((cap) => typeof cap !== "string" || (hasBranchedMixedJoins
         ? cap !== "none"
-        : !["none", "round", "square"].includes(cap)));
+        : !["none", "round", "square", "arrowLines", "arrowEquilateral", "diamondFilled", "triangleFilled", "circleFilled"].includes(cap)));
     if (hasMixedJoins && (hasUnsupportedMixedJoinCap || Array.isArray(node.strokeDashPattern) && node.strokeDashPattern.length > 0)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }

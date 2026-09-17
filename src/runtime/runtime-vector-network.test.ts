@@ -395,13 +395,29 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(backtrackingMesh?.bounds?.min.x).toBeLessThan(-5);
     expect(backtrackingMesh?.bounds?.max.x).toBeGreaterThan(35);
 
-    expect(canonicalVectorPathFromRuntimeNetwork({
+    const decorativeNetwork = {
       ...network,
-      vertices: network.vertices.map((vertex, index) => index === network.vertices.length - 1
-        ? { ...vertex, strokeCap: "ARROW_EQUILATERAL" as const }
-        : vertex),
-    }, () => "decorative", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
-      .toMatchObject({ reason: expect.stringContaining("NONE, ROUND or SQUARE") });
+      vertices: network.vertices.map((vertex, index) => index === 0
+        ? { ...vertex, strokeCap: "DIAMOND_FILLED" as const }
+        : index === network.vertices.length - 1
+          ? { ...vertex, strokeCap: "ARROW_EQUILATERAL" as const }
+          : vertex),
+    };
+    const decorative = canonicalVectorPathFromRuntimeNetwork(decorativeNetwork, () => "decorative", {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in decorative) throw new Error(decorative.reason);
+    const decorativeMesh = vectorNetworkMixedStrokeMesh(decorativeNetwork, {
+      strokeWidth: 4,
+      strokeCapStart: decorative.strokeCapStart,
+      strokeCapEnd: decorative.strokeCapEnd,
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+    });
+    expect(decorativeMesh?.bounds?.min.x).toBe(-16);
+    expect(decorativeMesh?.bounds?.max.y).toBe(56);
+    expect(decorativeMesh && vectorNetworkStrokeMeshContains(decorativeMesh, { x: -8, y: 0 })).toBe(true);
+    expect(decorativeMesh && vectorNetworkStrokeMeshContains(decorativeMesh, { x: 40, y: 50 })).toBe(true);
 
     let allocations = 0;
     expect(canonicalVectorPathFromRuntimeNetwork({
