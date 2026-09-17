@@ -1,4 +1,5 @@
 import { COMPONENT_PROPERTY_REFERENCES_EXTENSION, createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type DocumentVectorPath, type EditorClipboard, type EditorCommand } from "./editor-protocol";
+import { absoluteStructuralChildAutoLayout } from "./auto-layout-normalization";
 import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, positionIdForLayerInsertion, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
@@ -325,6 +326,17 @@ export function resolveFlattenNodesBatch(
   if (!dissolvedGroups) return undefined;
   const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
   const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
+  const targetOwnsAutoLayout = ownsAutoLayout(targetParent);
+  if (targetOwnsAutoLayout && concreteSources.some((source) => source.parentId !== targetParentId || !isAbsoluteAutoLayoutChild(source))) return undefined;
+  for (const sourceParentId of new Set(concreteSources.map((source) => source.parentId))) {
+    if (sourceParentId === targetParentId) continue;
+    if (sourceParentId === undefined) continue;
+    const sourceParent = sourceParentId ? nodes.find((node) => node.id === sourceParentId) : undefined;
+    if (!sourceParent
+      || (sourceParent.kind === "group" && !dissolvedGroupIds.has(sourceParent.id))
+      || sourceParent.kind === "booleanOperation"
+      || ownsAutoLayout(sourceParent)) return undefined;
+  }
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
     node.pageId === targetPageId && node.parentId === targetParentId && !removedIds.has(node.id)));
   const destination = target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : Math.min(...concreteSources
@@ -372,6 +384,7 @@ export function resolveFlattenNodesBatch(
     radius: 0,
     cornerRadii: undefined,
     cornerSmoothing: 0,
+    autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : source.autoLayout,
     extensions: patch?.extensions,
     contentsHidden: false,
     clipsContent: undefined,
@@ -1037,6 +1050,8 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
       if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(parent.kind))) return undefined;
       if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
+      const targetOwnsAutoLayout = command.type === "boolean" && ownsAutoLayout(parent);
+      if (targetOwnsAutoLayout && roots.some((node) => node.parentId !== parentId || !isAbsoluteAutoLayoutChild(node))) return undefined;
       const id = (command.type === "transformGroup" || command.type === "boolean" || command.type === "componentSet") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
@@ -1093,6 +1108,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         height,
         positionId: groupPositionId,
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
+        ...(targetOwnsAutoLayout ? { autoLayout: absoluteStructuralChildAutoLayout() } : {}),
         ...booleanPatch,
         ...transformGroupPatch,
         ...componentSetPatch,
@@ -1659,7 +1675,15 @@ function isFrameLike(node: CanvasNode | undefined) {
 }
 
 function isAutoLayoutFrame(node: CanvasNode | undefined) {
-  return Boolean(node && isFrameLike(node) && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none");
+  return Boolean(node && isFrameLike(node) && ownsAutoLayout(node));
+}
+
+function ownsAutoLayout(node: CanvasNode | undefined) {
+  return Boolean(node && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none");
+}
+
+function isAbsoluteAutoLayoutChild(node: CanvasNode): boolean {
+  return node.autoLayout?.absolute === true;
 }
 
 /** Component edits propagate to the matching cloned instance layers in the

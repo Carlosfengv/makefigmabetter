@@ -87,6 +87,22 @@ export function normalizeAutoLayout(
   };
 }
 
+/** A structural aggregate inside an active Auto Layout parent must stay out
+ * of flow so its precomputed union bounds remain authoritative. */
+export function absoluteStructuralChildAutoLayout(): DocumentAutoLayout {
+  return {
+    mode: "none",
+    padding: [0, 0, 0, 0],
+    itemSpacing: 0,
+    wrap: false,
+    primaryAlignment: "start",
+    counterAlignment: "start",
+    primarySizing: "fixed",
+    counterSizing: "fixed",
+    absolute: true,
+  };
+}
+
 function normalizeGridTracks(value: unknown): DocumentAutoLayout["gridRows"] {
   if (!Array.isArray(value)) return [{ type: "flex", value: 1 }];
   const tracks: NonNullable<DocumentAutoLayout["gridRows"]> = [];

@@ -3633,6 +3633,65 @@ describe("M1 RuntimeSession", () => {
     expect(boolean.children.map((node) => node.id)).toEqual(["a", "b"]);
   });
 
+  it("keeps bounded structural replacements absolute inside Auto Layout", async () => {
+    const closedPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{ closed: true, points: [
+        { id: "p1", x: 0, y: 0, pointType: "corner" as const },
+        { id: "p2", x: 20, y: 0, pointType: "corner" as const },
+        { id: "p3", x: 0, y: 20, pointType: "corner" as const },
+      ] }],
+    };
+    const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "frame", type: "FRAME", name: "Layout", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 300, height: 160, autoLayout: ownerLayout },
+        { id: "first", type: "VECTOR", name: "First", parentId: "frame", siblingIndex: 0, x: 20, y: 30, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, autoLayout: absoluteLayout, vectorPath: closedPath },
+        { id: "second", type: "VECTOR", name: "Second", parentId: "frame", siblingIndex: 1, x: 80, y: 50, width: 20, height: 20, fill: "#ffffff", strokeWidth: 0, autoLayout: absoluteLayout, vectorPath: closedPath },
+      ],
+    };
+    const booleanTransport = new InMemoryTransport(projection);
+    const booleanSession = new RuntimeSession({ sessionId: "absolute-layout-boolean", projection, transport: booleanTransport, scheduleMicrotask: () => {} });
+    const booleanFrame = (await booleanSession.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const booleanFirst = (await booleanSession.getNodeByIdAsync("first"))!;
+    const booleanSecond = (await booleanSession.getNodeByIdAsync("second"))!;
+
+    const boolean = booleanSession.union([booleanFirst, booleanSecond], booleanFrame, 0);
+    expect(boolean.layoutPositioning).toBe("ABSOLUTE");
+    expect(boolean).toMatchObject({ x: 20, y: 30, width: 80, height: 40 });
+    await booleanSession.commitAsync();
+    expect(booleanTransport.submitted[0]?.operations).toContainEqual(expect.objectContaining({
+      type: "boolean",
+      node: expect.objectContaining({ autoLayout: expect.objectContaining({ mode: "none", absolute: true }) }),
+    }));
+
+    const flattenSession = new RuntimeSession({ sessionId: "absolute-layout-flatten", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const flattenFrame = (await flattenSession.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const flattenFirst = (await flattenSession.getNodeByIdAsync("first"))!;
+    const flattenSecond = (await flattenSession.getNodeByIdAsync("second"))!;
+    const flattened = flattenSession.flatten([flattenFirst, flattenSecond], flattenFrame, 0);
+    expect(flattened.layoutPositioning).toBe("ABSOLUTE");
+    expect(flattened).toMatchObject({ x: 20, y: 30, width: 80, height: 40 });
+
+    const flowProjection = structuredClone(projection);
+    flowProjection.nodes[4]!.autoLayout = { ...absoluteLayout, absolute: false };
+    const flowBooleanSession = new RuntimeSession({ sessionId: "flow-layout-boolean", projection: flowProjection, transport: new InMemoryTransport(flowProjection), scheduleMicrotask: () => {} });
+    const flowBooleanFrame = (await flowBooleanSession.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const flowBooleanFirst = (await flowBooleanSession.getNodeByIdAsync("first"))!;
+    const flowBooleanSecond = (await flowBooleanSession.getNodeByIdAsync("second"))!;
+    expect(isRuntimeError(captureError(() => flowBooleanSession.union([flowBooleanFirst, flowBooleanSecond], flowBooleanFrame)), "UNSUPPORTED_FEATURE")).toBe(true);
+
+    const flowFlattenSession = new RuntimeSession({ sessionId: "flow-layout-flatten", projection: flowProjection, transport: new InMemoryTransport(flowProjection), scheduleMicrotask: () => {} });
+    const flowFlattenFrame = (await flowFlattenSession.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const flowFlattenFirst = (await flowFlattenSession.getNodeByIdAsync("first"))!;
+    const flowFlattenSecond = (await flowFlattenSession.getNodeByIdAsync("second"))!;
+    expect(isRuntimeError(captureError(() => flowFlattenSession.flatten([flowFlattenFirst, flowFlattenSecond], flowFlattenFrame)), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
   it("flattens a confirmed Boolean into an alternate same-page parent and index", async () => {
     const path = {
       fillRule: "nonZero" as const,

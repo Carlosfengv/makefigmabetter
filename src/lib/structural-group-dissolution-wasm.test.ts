@@ -36,15 +36,31 @@ async function seededEngine(): Promise<{
   engine: InstanceType<WasmRuntime["DocumentEngine"]>;
   projection(): CanvasNode[];
 }> {
+  return seededEngineWith(nestedNodes(), "00000000-0000-4000-8000-000000000710");
+}
+
+async function seededEngineWith(nodes: CanvasNode[], transactionId: string): Promise<{
+  engine: InstanceType<WasmRuntime["DocumentEngine"]>;
+  projection(): CanvasNode[];
+}> {
   const wasm = await loadRuntime();
   const engine = new wasm.DocumentEngine();
-  const seed = resolveCoreBatch([], nestedNodes().map((node) => ({ type: "create" as const, node })))!;
-  expect(engine.apply_transaction_json("00000000-0000-4000-8000-000000000710", 0n, JSON.stringify(seed.batch))).toBe(1n);
+  const seed = resolveCoreBatch([], nodes.map((node) => ({ type: "create" as const, node })))!;
+  expect(engine.apply_transaction_json(transactionId, 0n, JSON.stringify(seed.batch))).toBe(1n);
   const projection = () => {
     const snapshot = JSON.parse(engine.snapshot_json()) as { nodes: Parameters<typeof canvasNodeFromWasmProjection>[0][] };
     return snapshot.nodes.map(canvasNodeFromWasmProjection);
   };
   return { engine, projection };
+}
+
+function autoLayoutNodes(): CanvasNode[] {
+  const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+  const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
+  const frame = { ...createNode("frame", 100, 50), id: outerId, pageId: DEFAULT_PAGE_ID, width: 300, height: 160, autoLayout: ownerLayout, positionId: "10000000000000000000000000000000:00000000000040008000000000000701" };
+  const first = { ...createNode("vector", 20, 30), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 40, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 }, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
+  const second = { ...createNode("vector", 90, 50), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 30, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 90, f: 50 }, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
+  return [frame, first, second];
 }
 
 describe("nested neutral Group Core dissolution", () => {
@@ -91,5 +107,57 @@ describe("nested neutral Group Core dissolution", () => {
     const confirmed = projection();
     expect(confirmed.some((node) => [outerId, innerId, firstId, secondId].includes(node.id))).toBe(false);
     expect(confirmed.find((node) => node.id === replacementId)).toMatchObject({ kind: "vector", parentId: undefined });
+  });
+
+  it("commits and restores absolute structural replacements inside Auto Layout", async () => {
+    const booleanId = "00000000-0000-4000-8000-000000000731";
+    const booleanSeed = await seededEngineWith(autoLayoutNodes(), "00000000-0000-4000-8000-000000000730");
+    const boolean = resolveCoreBatch(booleanSeed.projection(), [{
+      type: "boolean",
+      ids: [firstId, secondId],
+      operation: "union",
+      id: booleanId,
+      parentId: outerId,
+      index: 0,
+    }])!;
+
+    expect(booleanSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000732", 1n, JSON.stringify(boolean.batch))).toBe(2n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)).toMatchObject({
+      kind: "booleanOperation",
+      parentId: outerId,
+      autoLayout: { mode: "none", absolute: true },
+    });
+    expect(booleanSeed.engine.undo()).toBe(3n);
+    expect(booleanSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
+    expect(booleanSeed.engine.redo()).toBe(4n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)).toMatchObject({ parentId: outerId });
+
+    const replacementId = "00000000-0000-4000-8000-000000000733";
+    const flattenSeed = await seededEngineWith(autoLayoutNodes(), "00000000-0000-4000-8000-000000000734");
+    const vectorPath: DocumentVectorPath = {
+      fillRule: "nonZero",
+      subpaths: [{ closed: true, points: [
+        { id: "00000000-0000-4000-8000-000000000741", x: 0, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000742", x: 100, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000743", x: 0, y: 40, pointType: "corner" },
+      ] }],
+    };
+    const flattened = resolveFlattenNodesBatch(
+      flattenSeed.projection(),
+      [firstId, secondId],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: outerId, index: 0 },
+    )!;
+
+    expect(flattenSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000735", 1n, JSON.stringify(flattened.batch))).toBe(2n);
+    expect(flattenSeed.projection().find((node) => node.id === replacementId)).toMatchObject({
+      kind: "vector",
+      parentId: outerId,
+      autoLayout: { mode: "none", absolute: true },
+    });
+    expect(flattenSeed.engine.undo()).toBe(3n);
+    expect(flattenSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
   });
 });

@@ -50,7 +50,7 @@ import {
   type DocumentVariableValue,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
-import { normalizeAutoLayout } from "../lib/auto-layout-normalization";
+import { absoluteStructuralChildAutoLayout, normalizeAutoLayout } from "../lib/auto-layout-normalization";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
@@ -2608,7 +2608,11 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!dissolvedGroups) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]?.parentId });
     const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
-    if (crossesParents && runtimeOwnsAutoLayout(targetParentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    const targetOwnsAutoLayout = runtimeOwnsAutoLayout(targetParentNode);
+    if ((crossesParents && targetOwnsAutoLayout)
+      || (targetOwnsAutoLayout && selected.some((node) => !runtimeIsAbsoluteAutoLayoutChild(node)))) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    }
     for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === targetParent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
@@ -2797,6 +2801,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       booleanOperation: undefined,
       fillStack: structuredClone(paintStacks[0]!),
       fillStyleId: undefined,
+      autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : source.autoLayout,
       effectStack: sharedEffects.length ? structuredClone(sharedEffects) : undefined,
       dropShadow: structuredClone(sharedEffects.find((effect) => effect.dropShadow)?.dropShadow),
       extensions,
@@ -2902,7 +2907,11 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!dissolvedGroups) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]?.parentId });
     const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== parent.id);
-    if (crossesParents && runtimeOwnsAutoLayout(parentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    const targetOwnsAutoLayout = runtimeOwnsAutoLayout(parentNode);
+    if ((crossesParents && targetOwnsAutoLayout)
+      || (targetOwnsAutoLayout && selected.some((node) => !runtimeIsAbsoluteAutoLayoutChild(node)))) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    }
     for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === parent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
@@ -2962,6 +2971,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       visible: true,
       siblingIndex: destination,
       booleanOperation: operation,
+      autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : undefined,
     };
     const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
     const operandPatches = operandWorldTransforms.map((transform) => runtimeBooleanOperandPatch(multiplyRuntimeTransforms(wrapperInverse, transform!)));
@@ -4773,6 +4783,10 @@ function runtimeOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
   if (!autoLayout || typeof autoLayout !== "object") return false;
   const mode = (autoLayout as { mode?: unknown }).mode;
   return mode === "horizontal" || mode === "vertical" || mode === "grid";
+}
+
+function runtimeIsAbsoluteAutoLayoutChild(node: RuntimeProjectionNode): boolean {
+  return normalizeAutoLayout(node.autoLayout as DocumentAutoLayout | undefined)?.absolute === true;
 }
 
 function runtimeCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {

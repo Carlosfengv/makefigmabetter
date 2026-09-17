@@ -1024,6 +1024,10 @@ function validateBooleanOperation(
     }
   }
   const operandIds = new Set(operation.operandIds);
+  const operands = operation.operandIds.map((nodeId) => read(nodeId)!);
+  if (!projectionAdmitsAggregateInAutoLayout(read, operands, operation.node)) {
+    throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
+  }
   const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
   if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
@@ -1232,6 +1236,9 @@ function validateFlattenNodesOperation(
     new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   const sourceIds = new Set(operation.sourceIds);
+  if (!projectionAdmitsAggregateInAutoLayout(read, sources, operation.replacement)) {
+    throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
+  }
   const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
   if (!runtimeProjectionDissolvableNeutralGroups(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
@@ -1313,6 +1320,26 @@ function projectionOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
   if (!node.autoLayout || typeof node.autoLayout !== "object") return false;
   const mode = (node.autoLayout as { mode?: unknown }).mode;
   return mode === "horizontal" || mode === "vertical" || mode === "grid";
+}
+
+function projectionAdmitsAggregateInAutoLayout(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  sources: readonly RuntimeProjectionNode[],
+  replacement: RuntimeProjectionNode,
+): boolean {
+  const targetParent = typeof replacement.parentId === "string" ? read(replacement.parentId) : undefined;
+  if (targetParent && projectionOwnsAutoLayout(targetParent)) {
+    const replacementLayout = replacement.autoLayout as { mode?: unknown; absolute?: unknown } | undefined;
+    if (replacementLayout?.mode !== "none" || replacementLayout.absolute !== true
+      || sources.some((source) => source.parentId !== targetParent.id || (source.autoLayout as { absolute?: unknown } | undefined)?.absolute !== true)) {
+      return false;
+    }
+  }
+  return sources.every((source) => {
+    if (source.parentId === replacement.parentId) return true;
+    const sourceParent = typeof source.parentId === "string" ? read(source.parentId) : undefined;
+    return !sourceParent || (!projectionOwnsAutoLayout(sourceParent) && sourceParent.type !== "BOOLEAN_OPERATION");
+  });
 }
 
 function validatePatch(patch: Readonly<Record<string, unknown>>, transactionId: string, nodeId: string, convertToTextPath = false): void {

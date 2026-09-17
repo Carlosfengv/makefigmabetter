@@ -280,6 +280,64 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("flat")).toMatchObject({ parentId: "page", siblingIndex: 0, removed: false });
   });
 
+  it("validates absolute aggregate replacements inside active Auto Layout", () => {
+    const ownerLayout = { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const absoluteLayout = { ...ownerLayout, mode: "none" as const, itemSpacing: 0, absolute: true };
+    const projection = {
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" as const },
+        { id: "frame", type: "FRAME" as const, parentId: "page", autoLayout: ownerLayout },
+        { id: "a", type: "VECTOR" as const, parentId: "frame", siblingIndex: 0, autoLayout: absoluteLayout },
+        { id: "b", type: "VECTOR" as const, parentId: "frame", siblingIndex: 1, autoLayout: absoluteLayout },
+      ],
+    };
+    const store = new RuntimeProjectionStore(projection);
+    store.stage({
+      transactionId: "tx-absolute-layout-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "frame", siblingIndex: 0, booleanOperation: "union", autoLayout: absoluteLayout },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 10 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    });
+    expect(store.getNode("boolean")).toMatchObject({ autoLayout: { mode: "none", absolute: true } });
+
+    const flowProjection = structuredClone(projection);
+    flowProjection.nodes[3]!.autoLayout = { ...absoluteLayout, absolute: false };
+    const flowStore = new RuntimeProjectionStore(flowProjection);
+    expect(isRuntimeError(captureError(() => flowStore.stage({
+      transactionId: "tx-flow-layout-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "frame", siblingIndex: 0, booleanOperation: "union", autoLayout: absoluteLayout },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 10 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+
+    const missingLayoutStore = new RuntimeProjectionStore(projection);
+    expect(isRuntimeError(captureError(() => missingLayoutStore.stage({
+      transactionId: "tx-missing-layout-flatten",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["a", "b"],
+        replacement: { id: "flat", type: "VECTOR", parentId: "frame", siblingIndex: 0, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [],
+      }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+  });
+
   it("projects Frame-to-Component replacement and child adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

@@ -574,6 +574,34 @@ describe("Core transaction batch resolution", () => {
     }])).toBeUndefined();
   });
 
+  it("wraps only absolute siblings inside an active Auto Layout parent", () => {
+    const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
+    const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000151", pageId: "page", width: 300, height: 160, autoLayout: ownerLayout };
+    const first = { ...createNode("vector", 20, 30), id: "00000000-0000-4000-8000-000000000152", pageId: "page", parentId: frame.id, width: 40, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 }, positionId: "10000000000000000000000000000000:00000000000040008000000000000152" };
+    const second = { ...createNode("vector", 90, 50), id: "00000000-0000-4000-8000-000000000153", pageId: "page", parentId: frame.id, width: 30, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 90, f: 50 }, positionId: "20000000000000000000000000000000:00000000000040008000000000000153" };
+    const booleanId = "00000000-0000-4000-8000-000000000154";
+    const before = [first, second].map((node) => worldTransformForNode([frame, first, second], node.id)!);
+
+    const resolved = resolveCoreBatch([frame, first, second], [{
+      type: "boolean", ids: [first.id, second.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }]);
+
+    expect(resolved?.nextNodes.find((node) => node.id === booleanId)).toMatchObject({
+      kind: "booleanOperation",
+      parentId: frame.id,
+      autoLayout: { mode: "none", absolute: true, primarySizing: "fixed", counterSizing: "fixed" },
+    });
+    [first, second].forEach((node, index) => {
+      expect(worldTransformForNode(resolved!.nextNodes, node.id)).toEqual(before[index]);
+    });
+
+    const flowSecond = { ...second, autoLayout: { ...absoluteLayout, absolute: false } };
+    expect(resolveCoreBatch([frame, first, flowSecond], [{
+      type: "boolean", ids: [first.id, flowSecond.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+  });
+
   it("rejects wrapping every operand inside the same Boolean parent", () => {
     const outer = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000106", pageId: "page", booleanOperation: "union" as const };
     const first = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000107", pageId: "page", parentId: outer.id };
@@ -740,6 +768,57 @@ describe("Core transaction batch resolution", () => {
       { type: "delete", ids: [first.id, second.id] },
       { type: "reposition", positionIds: [{ id: replacementId, positionId: expect.any(String) }] },
     ]);
+  });
+
+  it("flattens only absolute siblings inside an active Auto Layout parent", () => {
+    const ownerLayout = { mode: "vertical" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
+    const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000161", pageId: "page", width: 300, height: 160, autoLayout: ownerLayout };
+    const first = { ...createNode("rectangle", 20, 30), id: "00000000-0000-4000-8000-000000000162", pageId: "page", parentId: frame.id, width: 40, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 }, strokeWidth: 0 };
+    const second = { ...createNode("ellipse", 90, 50), id: "00000000-0000-4000-8000-000000000163", pageId: "page", parentId: frame.id, width: 30, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 90, f: 50 }, strokeWidth: 0 };
+    const replacementId = "00000000-0000-4000-8000-000000000164";
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [
+      { id: "p1", x: 0, y: 0, pointType: "corner" as const },
+      { id: "p2", x: 100, y: 0, pointType: "corner" as const },
+      { id: "p3", x: 0, y: 40, pointType: "corner" as const },
+    ] }] };
+
+    const resolved = resolveFlattenNodesBatch(
+      [frame, first, second],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: frame.id, index: 0 },
+    );
+
+    expect(resolved?.replacement).toMatchObject({
+      id: replacementId,
+      parentId: frame.id,
+      x: 20,
+      y: 30,
+      width: 100,
+      height: 40,
+      autoLayout: { mode: "none", absolute: true, primarySizing: "fixed", counterSizing: "fixed" },
+    });
+
+    const flowSecond = { ...second, autoLayout: { ...absoluteLayout, absolute: false } };
+    expect(resolveFlattenNodesBatch(
+      [frame, first, flowSecond],
+      [first.id, flowSecond.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: frame.id, index: 0 },
+    )).toBeUndefined();
+    expect(resolveFlattenNodesBatch(
+      [frame, first, second],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { pageId: "page", index: 0 },
+    )).toBeUndefined();
   });
 
   it("removes a fully consumed neutral Group from the flatten projection", () => {
