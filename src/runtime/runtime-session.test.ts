@@ -2895,6 +2895,24 @@ describe("M1 RuntimeSession", () => {
     };
     vector.vectorNetwork = curved;
     expect(vector.vectorNetwork).toEqual(curved);
+
+    vector.strokeCap = "NONE";
+    const branched = {
+      vertices: [
+        { x: 0, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 0, strokeJoin: "BEVEL" as const },
+        { x: 0, y: -20 },
+        { x: 20, y: 20 },
+        { x: 40, y: 20 },
+      ],
+      segments: [
+        { start: 2, end: 0, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 0, end: 1 }, { start: 1, end: 3 }, { start: 1, end: 4 },
+      ],
+    };
+    vector.vectorNetwork = branched;
+    expect(vector.vectorNetwork).toEqual(branched);
+    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
   });
 
   it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {

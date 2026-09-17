@@ -151,6 +151,54 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(extensionsWithRuntimeVectorNetwork(extensions, undefined)).toEqual({ keep: [7] });
   });
 
+  it("materializes stable mixed joins at branched shared vertices", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 0, strokeJoin: "BEVEL" as const },
+        { x: 0, y: -20 },
+        { x: 20, y: 20 },
+        { x: 40, y: 20 },
+      ],
+      segments: [
+        { start: 2, end: 0, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 0, end: 1 },
+        { start: 1, end: 3 },
+        { start: 1, end: 4 },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `branch-join-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    expect(converted.network).toEqual(network);
+    const mesh = vectorNetworkMixedStrokeMeshFromExtension(
+      extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path),
+      converted.path,
+      { strokeWidth: 4, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter", strokeMiterLimit: 10 },
+    );
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: -1.25, y: 1.25 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21.5, y: -1.5 })).toBe(false);
+
+    const reordered = vectorNetworkMixedStrokeMesh({
+      ...network,
+      segments: [network.segments[3]!, network.segments[1]!, network.segments[0]!, network.segments[2]!],
+    }, { strokeWidth: 4, strokeJoin: "miter", strokeMiterLimit: 10 });
+    expect(reordered?.bounds).toEqual(mesh?.bounds);
+    expect(reordered && vectorNetworkStrokeMeshContains(reordered, { x: -1.25, y: 1.25 })).toBe(true);
+    expect(reordered && vectorNetworkStrokeMeshContains(reordered, { x: 21.5, y: -1.5 })).toBe(false);
+
+    let allocations = 0;
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      ...network,
+      vertices: network.vertices.map((vertex, index) => index === 1 ? { x: vertex.x, y: vertex.y } : vertex),
+    }, () => `incomplete-branch-join-${allocations++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    })).toMatchObject({ reason: expect.stringContaining("explicit value at every active shared vertex") });
+    expect(allocations).toBe(0);
+  });
+
   it("materializes one globally styled filled loop plus open branch edges", () => {
     let sequence = 0;
     const network = {

@@ -580,6 +580,44 @@ describe("SVG export", () => {
     expect(result.svg).not.toContain("stroke-linejoin=");
   });
 
+  it("exports branched mixed VectorNetwork joins from stable angular junctions", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 0, strokeJoin: "BEVEL" as const },
+        { x: 0, y: -20 },
+        { x: 20, y: 20 },
+        { x: 40, y: 20 },
+      ],
+      segments: [
+        { start: 2, end: 0, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 0, end: 1 }, { start: 1, end: 3 }, { start: 1, end: 4 },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `svg-branch-join-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const vector = {
+      ...createNode("vector", 0, 20), id: "00000000-0000-4000-8000-00000000007b", pageId,
+      width: 40, height: 40, strokeWidth: 4, strokeCapStart: "none" as const, strokeCapEnd: "none" as const,
+      strokeJoin: "miter" as const, fillStack: { layers: [] },
+      strokeStack: { layers: [{
+        visible: true, opacity: 1, blendMode: "normal" as const,
+        paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+      }] },
+      vectorPath: converted.path,
+      extensions: extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path),
+    };
+
+    const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(20);
+    expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);
+    expect(result.svg).not.toContain("stroke-linejoin=");
+  });
+
   it("preserves a Rust-derived Boolean through an alpha-mask Slice source and records the PDF fallback", () => {
     const mask = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000081", pageId, width: 80, height: 80, isMask: true, strokeWidth: 0 };
     const boolean = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000082", pageId, width: 120, height: 80 };
