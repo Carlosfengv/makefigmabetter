@@ -2754,8 +2754,8 @@ describe("M1 RuntimeSession", () => {
 
     await vector.setVectorNetworkAsync({
       vertices: [
-        { x: 0, y: 0, strokeCap: "ROUND", handleMirroring: "ANGLE" },
-        { x: 80, y: 40, strokeCap: "ARROW_EQUILATERAL", handleMirroring: "NONE" },
+        { x: 0, y: 0, strokeCap: "ROUND", strokeJoin: "ROUND", handleMirroring: "ANGLE" },
+        { x: 80, y: 40, strokeCap: "ARROW_EQUILATERAL", strokeJoin: "ROUND", handleMirroring: "NONE" },
       ],
       segments: [{ start: 0, end: 1, tangentStart: { x: 20, y: 0 }, tangentEnd: { x: -20, y: 0 } }],
     });
@@ -2763,8 +2763,8 @@ describe("M1 RuntimeSession", () => {
     expect(vector.vectorPaths[0]).toMatchObject({ windingRule: "NONE", data: expect.stringContaining("C") });
     expect(vector.strokeCap).toBe(RUNTIME_MIXED);
     expect(vector.vectorNetwork.vertices).toEqual([
-      { x: 0, y: 0, strokeCap: "ROUND", handleMirroring: "ANGLE" },
-      { x: 80, y: 40, strokeCap: "ARROW_EQUILATERAL", handleMirroring: "NONE" },
+      { x: 0, y: 0, strokeCap: "ROUND", strokeJoin: "ROUND", handleMirroring: "ANGLE" },
+      { x: 80, y: 40, strokeCap: "ARROW_EQUILATERAL", strokeJoin: "ROUND", handleMirroring: "NONE" },
     ]);
     expect(transport.submitted[1]?.operations).toContainEqual({
       type: "update",
@@ -2772,7 +2772,9 @@ describe("M1 RuntimeSession", () => {
       patch: expect.objectContaining({
         strokeCapStart: "round",
         strokeCapEnd: "arrowEquilateral",
+        strokeJoin: "round",
         vectorPath: expect.objectContaining({ subpaths: [expect.objectContaining({ closed: false })] }),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
       }),
     });
     vector.strokeCap = "NONE";

@@ -290,7 +290,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
     ...(hasExplicitJoin && resolvedJoins[0] ? { strokeJoin: resolvedJoins[0] } : {}),
-    ...(hasPerVertexCorners ? { network: structuredClone(input) } : {}),
+    ...(hasPerVertexCorners || hasExplicitJoin ? { network: structuredClone(input) } : {}),
   };
 }
 

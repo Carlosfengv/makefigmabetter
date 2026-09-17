@@ -64,16 +64,20 @@ describe("Runtime VectorNetwork adapter", () => {
 
   it("accepts endpoint-specific caps and one uniform per-vertex join", () => {
     let sequence = 0;
-    const converted = canonicalVectorPathFromRuntimeNetwork({
+    const network = {
       vertices: [
         { x: 0, y: 0, strokeCap: "SQUARE", strokeJoin: "ROUND" },
         { x: 20, y: 0, strokeJoin: "ROUND" },
         { x: 40, y: 0, strokeCap: "TRIANGLE_FILLED", strokeJoin: "ROUND" },
       ],
       segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
-    }, () => `p-${sequence++}`, { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" });
+    } as const;
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `p-${sequence++}`, { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" });
 
-    expect(converted).toMatchObject({ strokeCapStart: "square", strokeCapEnd: "triangleFilled", strokeJoin: "round" });
+    expect(converted).toMatchObject({ strokeCapStart: "square", strokeCapEnd: "triangleFilled", strokeJoin: "round", network });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const extensions = extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path);
+    expect(runtimeVectorNetworkFromExtension(extensions, converted.path)).toEqual(network);
   });
 
   it("materializes non-overlapping straight corner radii and preserves the authored network", () => {
