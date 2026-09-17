@@ -266,13 +266,13 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
   },
   {
     id: "prototype.reactions",
-    editorTypes: ["figma"],
+    editorTypes: ["figma", "slides"],
     documentAccess: RUNTIME_DOCUMENT_ACCESS_MODES,
-    nodeTypes: ["FRAME", "GROUP", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "VECTOR"],
-    property: "reactions|setReactionsAsync",
+    nodeTypes: ["FRAME", "GROUP", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "VECTOR", "SLIDE", "INTERACTIVE_SLIDE_ELEMENT"],
+    property: "reactions|setReactionsAsync|createPrototypePlayer|PrototypePlayer.nextSlide|PrototypePlayer.previousSlide|PrototypePlayer.dispatchKeyboard",
     surface: "prototype",
     status: "partial",
-    limitation: "M5 adds SMART_ANIMATE's frozen basic layer matching/interpolation plan, alongside Click/Press/Hover/Timeout and Navigate/Overlay/Back/Close/https URL. Variant mutation and advanced Smart Animate properties remain staged.",
+    limitation: "M5 adds SMART_ANIMATE's frozen basic layer matching/interpolation plan, alongside Click/Press/Hover/Timeout and Navigate/Overlay/Back/Close/https URL. In Slides, the same frozen RevisionLease follows SlideGrid row and sibling order, omits isSkippedSlide entries, advances ON_CLICK or bounded AFTER_DELAY transitions, and exposes deterministic next/previous plus Arrow/Page/Space keyboard navigation. Existing NONE/DISSOLVE/SMART_ANIMATE values are preserved; directional Slides styles map to the shared four-direction compositor and GENTLE/QUICK/BOUNCY/SLOW curves use its EASE_IN_AND_OUT fallback. Interactive Slide widgets remain static scene content and advanced Smart Animate properties remain staged.",
   },
   {
     id: "runtime.commit-async",

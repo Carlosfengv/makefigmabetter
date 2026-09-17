@@ -24,7 +24,67 @@ function player(input = projection()) {
   return new PrototypePlayer({ leasePool: new RevisionLeasePool({ maxLeases: 2, maxUniqueResourceBytes: 100 }), now: () => 1_000 }, input);
 }
 
+function slidesProjection(): RuntimeProjection {
+  return {
+    revision: 8,
+    nodes: [
+      { id: "document", type: "DOCUMENT" },
+      { id: "page", type: "PAGE", parentId: "document", siblingIndex: 0 },
+      { id: "grid", type: "SLIDE_GRID", parentId: "page", siblingIndex: 0 },
+      { id: "row-a", type: "SLIDE_ROW", parentId: "grid", siblingIndex: 0 },
+      { id: "slide-1", type: "SLIDE", parentId: "row-a", siblingIndex: 0, slideMetadata: { isSkippedSlide: false, transition: { style: "DISSOLVE", duration: .2, curve: "EASE_IN", timing: { type: "ON_CLICK" } } } },
+      { id: "slide-skipped", type: "SLIDE", parentId: "row-a", siblingIndex: 1, slideMetadata: { isSkippedSlide: true, transition: { style: "NONE", duration: 0, curve: "LINEAR", timing: { type: "ON_CLICK" } } } },
+      { id: "slide-2", type: "SLIDE", parentId: "row-a", siblingIndex: 2, slideMetadata: { isSkippedSlide: false, transition: { style: "SLIDE_FROM_RIGHT", duration: .3, curve: "GENTLE", timing: { type: "AFTER_DELAY", delay: .01 } } } },
+      { id: "row-b", type: "SLIDE_ROW", parentId: "grid", siblingIndex: 1 },
+      { id: "slide-3", type: "SLIDE", parentId: "row-b", siblingIndex: 0, slideMetadata: { isSkippedSlide: false, transition: { style: "NONE", duration: 0, curve: "LINEAR", timing: { type: "ON_CLICK" } } } },
+    ],
+  };
+}
+
 describe("PrototypePlayer", () => {
+  it("plays the frozen SlideGrid order, skips hidden slides and maps slide transitions", async () => {
+    expect(() => new PrototypePlayer(
+      { leasePool: new RevisionLeasePool({ maxLeases: 2, maxUniqueResourceBytes: 100 }) },
+      slidesProjection(),
+      "slide-skipped",
+    )).toThrow();
+    const subject = new PrototypePlayer(
+      { leasePool: new RevisionLeasePool({ maxLeases: 2, maxUniqueResourceBytes: 100 }), now: () => 1_000 },
+      slidesProjection(),
+      "slide-1",
+    );
+
+    await subject.dispatch({ type: "CLICK", targetId: "slide-1" });
+    expect(subject.state).toMatchObject({
+      currentFrameId: "slide-2",
+      navigationHistory: ["slide-1"],
+      transition: { fromFrameId: "slide-1", toFrameId: "slide-2", transition: { type: "DISSOLVE", duration: 200, easing: "EASE_IN" } },
+    });
+    await subject.dispatchKeyboard({ key: "ARROW_RIGHT" });
+    expect(subject.state).toMatchObject({
+      currentFrameId: "slide-3",
+      transition: { transition: { type: "DIRECTIONAL", direction: "RIGHT", duration: 300, easing: "EASE_IN_AND_OUT" } },
+    });
+    await subject.dispatchKeyboard({ key: "ARROW_LEFT" });
+    expect(subject.state.currentFrameId).toBe("slide-2");
+    expect(subject.state.transition).toBeUndefined();
+    subject.close();
+  });
+
+  it("auto-advances AFTER_DELAY slides and cancels the timer when closed", async () => {
+    vi.useFakeTimers();
+    const subject = new PrototypePlayer(
+      { leasePool: new RevisionLeasePool({ maxLeases: 2, maxUniqueResourceBytes: 100 }) },
+      slidesProjection(),
+      "slide-2",
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    expect(subject.state.currentFrameId).toBe("slide-3");
+    subject.close();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
+  });
+
   it("runs navigation, overlay close and history exclusively against the frozen lease", async () => {
     const source = projection();
     const subject = player(source);

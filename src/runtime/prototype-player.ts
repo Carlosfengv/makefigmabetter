@@ -1,4 +1,5 @@
 import type { RuntimeProjection, RuntimeProjectionNode } from "./runtime-projection-store";
+import type { DocumentSlideMetadata } from "../lib/editor-protocol";
 import { RevisionLeasePool, type RevisionLease, type RevisionLeaseResource } from "./revision-lease";
 import { runtimeError } from "./runtime-errors";
 import {
@@ -131,12 +132,17 @@ export class PrototypePlayer {
       }
       const target = input.targetId ? nodeFor(this.lease.projection, input.targetId) : undefined;
       if (!target || target.visible === false) return;
+      let handled = false;
       for (const node of interactionPath(this.lease.projection, target)) {
         const reactions = reactionsFor(node).filter((reaction) => matchesTrigger(reaction, input.type));
         for (const reaction of reactions) {
+          handled = true;
           const navigated = await this.runReaction(reaction, target.id);
           if (navigated) return;
         }
+      }
+      if (!handled && input.type === "CLICK" && slideTiming(this.currentSlide())?.type === "ON_CLICK") {
+        await this.navigateSlide(1);
       }
     });
   }
@@ -151,9 +157,18 @@ export class PrototypePlayer {
   /** A host should call this for Enter/Space/Tab after applying its platform
    * key normalization. Every resulting action still flows through the same
    * serialized queue as pointer and timer input. */
-  dispatchKeyboard(input: Readonly<{ key: "ENTER" | "SPACE" | "TAB"; shiftKey?: boolean }>): Promise<void> {
+  dispatchKeyboard(input: Readonly<{ key: "ENTER" | "SPACE" | "TAB" | "ARROW_LEFT" | "ARROW_RIGHT" | "PAGE_UP" | "PAGE_DOWN"; shiftKey?: boolean }>): Promise<void> {
+    if (input.key === "ARROW_LEFT" || input.key === "PAGE_UP") return this.previousSlide();
+    if (input.key === "ARROW_RIGHT" || input.key === "PAGE_DOWN" || (input.key === "SPACE" && this.currentSlide())) return this.nextSlide();
     return this.dispatch(input.key === "TAB" ? { type: "TAB", shiftKey: input.shiftKey } : { type: "ACTIVATE" });
   }
+
+  /** Slides extension: advances inside the current SlideGrid's frozen order,
+   * omitting authored skipped slides and stopping at the last playable slide. */
+  nextSlide(): Promise<void> { return this.enqueue(() => this.navigateSlide(1)); }
+
+  /** Slides extension: moves backward inside the same frozen SlideGrid. */
+  previousSlide(): Promise<void> { return this.enqueue(() => this.navigateSlide(-1)); }
 
   /** Rendering owns the surfaces; it asks this deterministic state machine for
    * the current interpolation point. Expired transitions remain semantically
@@ -280,6 +295,30 @@ export class PrototypePlayer {
     this.transition = undefined; this.emit();
   }
 
+  private currentSlide(): RuntimeProjectionNode | undefined {
+    const node = frameFor(this.lease.projection, this.currentFrameId);
+    return node?.type === "SLIDE" ? node : undefined;
+  }
+
+  private async navigateSlide(step: -1 | 1): Promise<void> {
+    const current = this.currentSlide();
+    if (!current) return;
+    const slides = playableSlidesFor(this.lease.projection, current.id);
+    const index = slides.findIndex((slide) => slide.id === current.id);
+    const destination = index >= 0 ? slides[index + step] : undefined;
+    if (!destination) return;
+    await this.prepare(destination.id);
+    const from = current.id;
+    if (step > 0) this.navigationHistory.push(from);
+    else if (this.navigationHistory.at(-1) === destination.id) this.navigationHistory.pop();
+    this.currentFrameId = destination.id;
+    this.overlays = [];
+    this.focusFirst(destination.id);
+    this.startTransition(from, destination.id, step > 0 ? slideTransition(current) : { type: "NONE" });
+    this.armTimeouts();
+    this.emit();
+  }
+
   private async dispatchActivation(targetId: string): Promise<void> {
     const target = nodeFor(this.lease.projection, targetId);
     if (!target || target.visible === false) return;
@@ -315,6 +354,14 @@ export class PrototypePlayer {
         const id = `${node.id}:${reactionIndex}`;
         this.timers.set(id, setTimeout(() => { void this.enqueue(async () => { await this.runReaction(reaction, node.id); }); }, reaction.trigger.timeout));
       });
+    }
+    const slide = this.currentSlide();
+    const timing = slideTiming(slide);
+    if (slide && timing?.type === "AFTER_DELAY") {
+      const timeout = Math.max(0, timing.delay ?? 0) * 1_000;
+      this.timers.set("slide:auto-advance", setTimeout(() => {
+        void this.enqueue(() => this.navigateSlide(1));
+      }, timeout));
     }
   }
 
@@ -386,9 +433,9 @@ function resourcesFor(projection: RuntimeProjection): RevisionLeaseResource[] {
     : []);
 }
 function nodeFor(projection: RuntimeProjection, id: string): RuntimeProjectionNode | undefined { return projection.nodes.find((node) => node.id === id && node.removed !== true); }
-function frameFor(projection: RuntimeProjection, id: string): RuntimeProjectionNode | undefined { const node = nodeFor(projection, id); return node?.type === "FRAME" || node?.type === "SLIDE" ? node : undefined; }
+function frameFor(projection: RuntimeProjection, id: string): RuntimeProjectionNode | undefined { const node = nodeFor(projection, id); return node?.type === "FRAME" || (node?.type === "SLIDE" && slideMetadataFor(node)?.isSkippedSlide !== true) ? node : undefined; }
 function startingFrameId(projection: RuntimeProjection): string {
-  const frames = projection.nodes.filter((node) => node.removed !== true && (node.type === "FRAME" || node.type === "SLIDE"));
+  const frames = projection.nodes.filter((node) => node.removed !== true && frameFor(projection, node.id));
   const explicit = frames.find((node) => metadataFor(node)?.startingPoint === true);
   const frame = explicit ?? frames[0];
   if (!frame) throw runtimeError("NODE_NOT_FOUND");
@@ -407,4 +454,70 @@ function metadataFor(node: RuntimeProjectionNode) {
 function interactionPath(projection: RuntimeProjection, target: RuntimeProjectionNode): RuntimeProjectionNode[] { const result: RuntimeProjectionNode[] = []; const seen = new Set<string>(); let current: RuntimeProjectionNode | undefined = target; while (current && !seen.has(current.id)) { result.push(current); seen.add(current.id); current = typeof current.parentId === "string" ? nodeFor(projection, current.parentId) : undefined; } return result; }
 function frameSubtree(projection: RuntimeProjection, frameId: string): RuntimeProjectionNode[] { const result: RuntimeProjectionNode[] = []; const visit = (id: string) => { const node = nodeFor(projection, id); if (!node) return; result.push(node); projection.nodes.filter((candidate) => candidate.parentId === id && candidate.removed !== true).forEach((child) => visit(child.id)); }; visit(frameId); return result; }
 function isDescendantOf(projection: RuntimeProjection, nodeId: string, ancestorId: string): boolean { let current = nodeFor(projection, nodeId); const seen = new Set<string>(); while (current && !seen.has(current.id)) { if (current.id === ancestorId) return true; seen.add(current.id); current = typeof current.parentId === "string" ? nodeFor(projection, current.parentId) : undefined; } return false; }
+function playableSlidesFor(projection: RuntimeProjection, currentSlideId: string): RuntimeProjectionNode[] {
+  const current = nodeFor(projection, currentSlideId);
+  const row = current?.parentId ? nodeFor(projection, current.parentId) : undefined;
+  const grid = row?.type === "SLIDE_ROW" && row.parentId ? nodeFor(projection, row.parentId) : undefined;
+  if (current?.type !== "SLIDE" || grid?.type !== "SLIDE_GRID") return [];
+  const orderedRows = projection.nodes
+    .filter((node) => node.removed !== true && node.type === "SLIDE_ROW" && node.parentId === grid.id)
+    .sort(comparePresentationSiblings);
+  return orderedRows.flatMap((candidateRow) => projection.nodes
+    .filter((node) => node.removed !== true && node.type === "SLIDE" && node.parentId === candidateRow.id && slideMetadataFor(node)?.isSkippedSlide !== true)
+    .sort(comparePresentationSiblings));
+}
+function comparePresentationSiblings(left: RuntimeProjectionNode, right: RuntimeProjectionNode): number {
+  const leftIndex = typeof left.siblingIndex === "number" && Number.isSafeInteger(left.siblingIndex) ? left.siblingIndex : Number.MAX_SAFE_INTEGER;
+  const rightIndex = typeof right.siblingIndex === "number" && Number.isSafeInteger(right.siblingIndex) ? right.siblingIndex : Number.MAX_SAFE_INTEGER;
+  return leftIndex - rightIndex || left.id.localeCompare(right.id);
+}
+function slideMetadataFor(slide: RuntimeProjectionNode | undefined): DocumentSlideMetadata | undefined {
+  const metadata = slide?.slideMetadata;
+  if (slide?.type !== "SLIDE" || !metadata || typeof metadata !== "object") return undefined;
+  const value = metadata as Record<string, unknown>;
+  const transition = value.transition;
+  if (typeof value.isSkippedSlide !== "boolean" || !transition || typeof transition !== "object") return undefined;
+  const record = transition as Record<string, unknown>;
+  const timing = record.timing;
+  if (typeof record.style !== "string" || typeof record.curve !== "string"
+    || !SLIDE_TRANSITION_STYLES.has(record.style as DocumentSlideMetadata["transition"]["style"])
+    || !SLIDE_TRANSITION_CURVES.has(record.curve as DocumentSlideMetadata["transition"]["curve"])
+    || typeof record.duration !== "number" || !Number.isFinite(record.duration) || record.duration < 0 || record.duration > 60
+    || !timing || typeof timing !== "object") return undefined;
+  const timingRecord = timing as Record<string, unknown>;
+  if (timingRecord.type !== "ON_CLICK" && (timingRecord.type !== "AFTER_DELAY"
+    || typeof timingRecord.delay !== "number" || !Number.isFinite(timingRecord.delay)
+    || timingRecord.delay < 0 || timingRecord.delay > 60)) return undefined;
+  return metadata as DocumentSlideMetadata;
+}
+function slideTiming(slide: RuntimeProjectionNode | undefined): DocumentSlideMetadata["transition"]["timing"] | undefined {
+  return slideMetadataFor(slide)?.transition.timing;
+}
+function slideTransition(slide: RuntimeProjectionNode): PrototypeTransition {
+  const transition = slideMetadataFor(slide)?.transition;
+  if (!transition || transition.style === "NONE") return { type: "NONE" };
+  const duration = transition.duration * 1_000;
+  const easing = slideTransitionEasing(transition.curve);
+  if (transition.style === "DISSOLVE") return { type: "DISSOLVE", duration, easing };
+  if (transition.style === "SMART_ANIMATE") return { type: "SMART_ANIMATE", duration, easing };
+  const direction = transition.style.includes("LEFT") ? "LEFT"
+    : transition.style.includes("RIGHT") ? "RIGHT"
+      : transition.style.includes("TOP") ? "UP"
+        : "DOWN";
+  return { type: "DIRECTIONAL", direction, duration, easing };
+}
+function slideTransitionEasing(curve: DocumentSlideMetadata["transition"]["curve"]): "LINEAR" | "EASE_IN" | "EASE_OUT" | "EASE_IN_AND_OUT" {
+  if (curve === "LINEAR" || curve === "EASE_IN" || curve === "EASE_OUT" || curve === "EASE_IN_AND_OUT") return curve;
+  return "EASE_IN_AND_OUT";
+}
+const SLIDE_TRANSITION_STYLES = new Set<DocumentSlideMetadata["transition"]["style"]>([
+  "NONE", "DISSOLVE", "SLIDE_FROM_LEFT", "SLIDE_FROM_RIGHT", "SLIDE_FROM_BOTTOM", "SLIDE_FROM_TOP",
+  "PUSH_FROM_LEFT", "PUSH_FROM_RIGHT", "PUSH_FROM_BOTTOM", "PUSH_FROM_TOP", "MOVE_FROM_LEFT",
+  "MOVE_FROM_RIGHT", "MOVE_FROM_TOP", "MOVE_FROM_BOTTOM", "SLIDE_OUT_TO_LEFT", "SLIDE_OUT_TO_RIGHT",
+  "SLIDE_OUT_TO_TOP", "SLIDE_OUT_TO_BOTTOM", "MOVE_OUT_TO_LEFT", "MOVE_OUT_TO_RIGHT", "MOVE_OUT_TO_TOP",
+  "MOVE_OUT_TO_BOTTOM", "SMART_ANIMATE",
+]);
+const SLIDE_TRANSITION_CURVES = new Set<DocumentSlideMetadata["transition"]["curve"]>([
+  "EASE_IN", "EASE_OUT", "EASE_IN_AND_OUT", "LINEAR", "GENTLE", "QUICK", "BOUNCY", "SLOW",
+]);
 function matchesTrigger(reaction: PrototypeReaction, input: PrototypeInput["type"]): boolean { return (input === "CLICK" && reaction.trigger.type === "ON_CLICK") || (input === "PRESS" && reaction.trigger.type === "ON_PRESS") || (input === "HOVER" && reaction.trigger.type === "ON_HOVER"); }
