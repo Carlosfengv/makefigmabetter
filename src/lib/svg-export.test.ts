@@ -601,7 +601,7 @@ describe("SVG export", () => {
     const vector = {
       ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000007c", pageId,
       width: 40, height: 40, strokeWidth: 4, strokeCapStart: "none" as const, strokeCapEnd: "none" as const,
-      strokeJoin: "miter" as const, fillStack: { layers: [] },
+      strokeJoin: "miter" as const, strokeDashPattern: [30, 5], fillStack: { layers: [] },
       strokeStack: { layers: [{
         visible: true, opacity: 1, blendMode: "normal" as const,
         paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
@@ -613,9 +613,10 @@ describe("SVG export", () => {
     const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
 
     expect(result.svg).toContain('viewBox="0 -2 42 42"');
-    expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(30);
+    expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(20);
     expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);
     expect(result.svg).not.toContain("stroke-linejoin=");
+    expect(result.svg).not.toContain("stroke-dasharray=");
   });
 
   it("exports branched mixed VectorNetwork joins from stable angular junctions", () => {

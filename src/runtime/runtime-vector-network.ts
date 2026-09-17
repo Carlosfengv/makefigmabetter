@@ -71,6 +71,7 @@ const MIXED_STROKE_CURVE_MITER_LIMIT = 4;
 // 16,384 centerline segments leave enough room under the 200K triangle cap
 // even when every one of the 8,192 authored vertices uses a round join.
 const MAX_MIXED_STROKE_SEGMENTS = 16_384;
+const MAX_MIXED_STROKE_DASH_STEPS = 16_384;
 const MAX_MIXED_STROKE_TRIANGLES = 200_000;
 export const VECTOR_NETWORK_EXTENSION = "figma.runtime.vector-network.v1";
 
@@ -538,11 +539,13 @@ export function vectorNetworkMixedStrokeMesh(
   if (!validNetworkShape(network)
     || !Number.isFinite(options.strokeWidth) || options.strokeWidth <= 0
     || !Number.isFinite(options.strokeMiterLimit) || options.strokeMiterLimit < 1
-    || options.strokeDashPattern?.length
   ) return undefined;
+  const dashPattern = normalizedMixedStrokeDashPattern(options.strokeDashPattern);
+  if (options.strokeDashPattern?.length && !dashPattern) return undefined;
   const sourceComponents = independentNetworkComponents(network);
   if (!runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
   if (!sourceComponents && network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) return undefined;
+  if (!sourceComponents && dashPattern) return undefined;
   if (!sourceComponents && ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none")) return undefined;
 
   const strokeNetwork = sourceComponents ? materializedIndependentStrokeNetwork(network, sourceComponents) : network;
@@ -553,6 +556,7 @@ export function vectorNetworkMixedStrokeMesh(
   const triangles: VectorNetworkStrokeTriangle[] = [];
   const half = options.strokeWidth / 2;
   let remainingSegments = MAX_MIXED_STROKE_SEGMENTS;
+  const remainingDashSteps = { value: MAX_MIXED_STROKE_DASH_STEPS };
   if (components) {
     for (const component of components) {
       if (component.vertexIndexes.length < 2) continue;
@@ -560,26 +564,39 @@ export function vectorNetworkMixedStrokeMesh(
       const resolved = networkStrokeSegmentGroups(strokeNetwork, component.segmentIndexes, remainingSegments);
       if (!resolved || resolved.count === 0) return undefined;
       remainingSegments -= resolved.count;
-      addNetworkStrokeSegmentGroups(triangles, resolved.groups, half);
-      const joinStart = component.closed ? 0 : 1;
-      const joinEnd = component.closed ? points.length : points.length - 1;
-      for (let index = joinStart; index < joinEnd; index += 1) {
-        const vertexIndex = index % points.length;
-        const previous = resolved.groups[(index + resolved.groups.length - 1) % resolved.groups.length]!.at(-1)!;
-        const next = resolved.groups[index % resolved.groups.length]![0]!;
-        addNetworkStrokeJoin(
+      if (dashPattern) {
+        if (!addDashedNetworkStrokeComponent(
           triangles,
-          points[vertexIndex]!,
-          previous,
-          next,
+          resolved.groups,
+          points,
+          component.closed,
           half,
-          effectiveNetworkJoin(points[vertexIndex]!, options.strokeJoin),
-          options.strokeMiterLimit,
-        );
-      }
-      if (!component.closed) {
-        addNetworkStrokeCap(triangles, resolved.groups[0]![0]!, true, half, options.strokeCapStart ?? "none");
-        addNetworkStrokeCap(triangles, resolved.groups.at(-1)!.at(-1)!, false, half, options.strokeCapEnd ?? "none");
+          options,
+          dashPattern,
+          remainingDashSteps,
+        )) return undefined;
+      } else {
+        addNetworkStrokeSegmentGroups(triangles, resolved.groups, half);
+        const joinStart = component.closed ? 0 : 1;
+        const joinEnd = component.closed ? points.length : points.length - 1;
+        for (let index = joinStart; index < joinEnd; index += 1) {
+          const vertexIndex = index % points.length;
+          const previous = resolved.groups[(index + resolved.groups.length - 1) % resolved.groups.length]!.at(-1)!;
+          const next = resolved.groups[index % resolved.groups.length]![0]!;
+          addNetworkStrokeJoin(
+            triangles,
+            points[vertexIndex]!,
+            previous,
+            next,
+            half,
+            effectiveNetworkJoin(points[vertexIndex]!, options.strokeJoin),
+            options.strokeMiterLimit,
+          );
+        }
+        if (!component.closed) {
+          addNetworkStrokeCap(triangles, resolved.groups[0]![0]!, true, half, options.strokeCapStart ?? "none");
+          addNetworkStrokeCap(triangles, resolved.groups.at(-1)!.at(-1)!, false, half, options.strokeCapEnd ?? "none");
+        }
       }
     }
   } else {
@@ -763,6 +780,16 @@ type NetworkStrokeSegmentGroups = Readonly<{
   count: number;
 }>;
 
+type DashedNetworkStrokeSegment = Readonly<{
+  segment: NetworkStrokeSegment;
+  groupIndex: number;
+}>;
+
+type DashedNetworkStrokeRun = Readonly<{
+  segments: readonly DashedNetworkStrokeSegment[];
+  closed: boolean;
+}>;
+
 function mixedNetworkStrokeSegmentsWithinBudget(
   network: RuntimeVectorNetwork,
   components: readonly IndependentNetworkComponent[],
@@ -817,6 +844,164 @@ function addNetworkStrokeSegmentGroups(
     for (let index = 1; index < group.length; index += 1) {
       addNetworkStrokeJoin(triangles, group[index]!.from, group[index - 1]!, group[index]!, half, "miter", MIXED_STROKE_CURVE_MITER_LIMIT);
     }
+  }
+}
+
+function normalizedMixedStrokeDashPattern(pattern: readonly number[] | undefined): readonly number[] | undefined {
+  if (!pattern?.length) return undefined;
+  if (pattern.length > 32 || pattern.some((value) => !Number.isFinite(value) || value < 0) || !pattern.some((value) => value > 0)) return undefined;
+  const canonical = pattern.length % 2 === 0 ? [...pattern] : [...pattern, ...pattern];
+  return canonical.length <= 32 ? canonical : undefined;
+}
+
+function addDashedNetworkStrokeComponent(
+  triangles: VectorNetworkStrokeTriangle[],
+  groups: readonly (readonly NetworkStrokeSegment[])[],
+  points: readonly RuntimeVectorVertex[],
+  closed: boolean,
+  half: number,
+  options: MixedStrokeOptions,
+  dashPattern: readonly number[],
+  remainingSteps: { value: number },
+): boolean {
+  const runs = dashedNetworkStrokeRuns(groups, dashPattern, closed, remainingSteps);
+  if (!runs) return false;
+  const startCap = options.strokeCapStart ?? "none";
+  const endCap = options.strokeCapEnd ?? "none";
+  const dashStartCap = isDecorativeCap(startCap) ? "none" : startCap;
+  const dashEndCap = isDecorativeCap(endCap) ? "none" : endCap;
+  for (const run of runs) {
+    addDashedNetworkStrokeRun(
+      triangles,
+      run,
+      points,
+      half,
+      options.strokeJoin,
+      options.strokeMiterLimit,
+      dashStartCap,
+      dashEndCap,
+    );
+  }
+  // Decorative markers belong to authored open endpoints rather than every
+  // generated dash boundary. This matches the existing Line/Connector model.
+  if (!closed) {
+    if (isDecorativeCap(startCap)) addNetworkStrokeCap(triangles, groups[0]![0]!, true, half, startCap);
+    if (isDecorativeCap(endCap)) addNetworkStrokeCap(triangles, groups.at(-1)!.at(-1)!, false, half, endCap);
+  }
+  return true;
+}
+
+function dashedNetworkStrokeRuns(
+  groups: readonly (readonly NetworkStrokeSegment[])[],
+  pattern: readonly number[],
+  closed: boolean,
+  remainingSteps: { value: number },
+): readonly DashedNetworkStrokeRun[] | undefined {
+  let dashIndex = 0;
+  let draw = true;
+  const nextNonzeroDash = (): number | undefined => {
+    for (let index = 0; index < pattern.length; index += 1) {
+      const value = pattern[dashIndex % pattern.length]!;
+      dashIndex += 1;
+      if (value > 0) return value;
+      draw = !draw;
+    }
+    return undefined;
+  };
+  let dashRemaining = nextNonzeroDash();
+  if (dashRemaining === undefined) return undefined;
+  const runs: Array<{ segments: DashedNetworkStrokeSegment[]; closed: boolean }> = [];
+  let activeRun: DashedNetworkStrokeSegment[] = [];
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    for (const source of groups[groupIndex]!) {
+      const length = Math.hypot(source.to.x - source.from.x, source.to.y - source.from.y);
+      if (!Number.isFinite(length) || length <= 1e-12) return undefined;
+      let travelled = 0;
+      while (travelled < length) {
+        if (remainingSteps.value <= 0) return undefined;
+        remainingSteps.value -= 1;
+        const nextDistance = Math.min(travelled + dashRemaining, length);
+        if (!Number.isFinite(nextDistance) || nextDistance <= travelled) return undefined;
+        if (draw) {
+          const from = travelled === 0
+            ? source.from
+            : offsetNetworkStrokePoint(source.from, source.tangent, travelled);
+          const to = nextDistance === length
+            ? source.to
+            : offsetNetworkStrokePoint(source.from, source.tangent, nextDistance);
+          const segment = networkStrokeSegment(from, to);
+          if (!segment) return undefined;
+          activeRun.push({ segment, groupIndex });
+        }
+        const consumed = nextDistance - travelled;
+        travelled = nextDistance;
+        dashRemaining -= consumed;
+        if (dashRemaining <= 1e-12) {
+          if (draw && activeRun.length) runs.push({ segments: activeRun, closed: false });
+          activeRun = [];
+          draw = !draw;
+          const next = nextNonzeroDash();
+          if (next === undefined) return undefined;
+          dashRemaining = next;
+        }
+      }
+    }
+  }
+  if (draw && activeRun.length) runs.push({ segments: activeRun, closed: false });
+  if (!closed || !runs.length) return runs;
+
+  const firstSource = groups[0]![0]!;
+  const lastSource = groups.at(-1)!.at(-1)!;
+  const beginsAtSeam = samePoint(runs[0]!.segments[0]!.segment.from, firstSource.from);
+  const endsAtSeam = samePoint(runs.at(-1)!.segments.at(-1)!.segment.to, lastSource.to);
+  if (!beginsAtSeam || !endsAtSeam) return runs;
+  if (runs.length === 1) {
+    runs[0] = { ...runs[0]!, closed: true };
+    return runs;
+  }
+  const first = runs.shift()!;
+  const last = runs.pop()!;
+  runs.push({ segments: [...last.segments, ...first.segments], closed: false });
+  return runs;
+}
+
+function addDashedNetworkStrokeRun(
+  triangles: VectorNetworkStrokeTriangle[],
+  run: DashedNetworkStrokeRun,
+  points: readonly RuntimeVectorVertex[],
+  half: number,
+  defaultJoin: StrokeJoin,
+  miterLimit: number,
+  startCap: StrokeCap,
+  endCap: StrokeCap,
+): void {
+  for (const { segment } of run.segments) {
+    addNetworkStrokeQuad(triangles,
+      offsetNetworkStrokePoint(segment.from, segment.normal, half),
+      offsetNetworkStrokePoint(segment.to, segment.normal, half),
+      offsetNetworkStrokePoint(segment.to, segment.normal, -half),
+      offsetNetworkStrokePoint(segment.from, segment.normal, -half));
+  }
+  const joinCount = run.segments.length - 1 + (run.closed ? 1 : 0);
+  for (let index = 0; index < joinCount; index += 1) {
+    const previous = run.segments[index]!;
+    const next = run.segments[(index + 1) % run.segments.length]!;
+    const withinCurve = previous.groupIndex === next.groupIndex;
+    const vertexIndex = next.groupIndex % points.length;
+    addNetworkStrokeJoin(
+      triangles,
+      next.segment.from,
+      previous.segment,
+      next.segment,
+      half,
+      withinCurve ? "miter" : effectiveNetworkJoin(points[vertexIndex]!, defaultJoin),
+      withinCurve ? MIXED_STROKE_CURVE_MITER_LIMIT : miterLimit,
+    );
+  }
+  if (!run.closed) {
+    addNetworkStrokeCap(triangles, run.segments[0]!.segment, true, half, startCap);
+    addNetworkStrokeCap(triangles, run.segments.at(-1)!.segment, false, half, endCap);
   }
 }
 

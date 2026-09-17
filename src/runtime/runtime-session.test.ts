@@ -2881,7 +2881,11 @@ describe("M1 RuntimeSession", () => {
         extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
       }),
     }));
-    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { vector.dashPattern = [1e-9, 1e-9]; }), "INVALID_ARGUMENT")).toBe(true);
+    vector.dashPattern = [.004, .004];
+    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
+    vector.dashPattern = [25, 5];
+    expect(vector.dashPattern).toEqual([25, 5]);
     vector.strokeCap = "ROUND";
     expect(vector.strokeCap).toBe("ROUND");
     vector.strokeCap = "ARROW_EQUILATERAL";
@@ -2912,9 +2916,10 @@ describe("M1 RuntimeSession", () => {
     vector.vectorNetwork = roundedMixed;
     expect(vector.vectorNetwork).toEqual(roundedMixed);
     expect(vector.vectorPaths[0]?.data).toMatch(/^M 0 0 L 15 0 C /u);
-    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(vector.dashPattern).toEqual([25, 5]);
 
     vector.strokeCap = "NONE";
+    vector.dashPattern = [];
     const branched = {
       vertices: [
         { x: 0, y: 0, strokeJoin: "ROUND" as const },
@@ -2931,6 +2936,7 @@ describe("M1 RuntimeSession", () => {
     vector.vectorNetwork = branched;
     expect(vector.vectorNetwork).toEqual(branched);
     expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
   });
 
   it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {

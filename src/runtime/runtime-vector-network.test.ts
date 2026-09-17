@@ -479,6 +479,101 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(allocations).toBe(0);
   });
 
+  it("preserves visible per-vertex joins while slicing mixed strokes into bounded dash runs", () => {
+    const network = {
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, strokeJoin: "ROUND" as const },
+        { x: 20, y: 20, strokeJoin: "BEVEL" as const },
+        { x: 40, y: 20 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }],
+    };
+    const mesh = vectorNetworkMixedStrokeMesh(network, {
+      strokeWidth: 4,
+      strokeCapStart: "round",
+      strokeCapEnd: "round",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [25, 5],
+    });
+
+    expect(mesh?.bounds).toEqual({ min: { x: -2, y: -2 }, max: { x: 37, y: 22 } });
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21, y: -1 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 20, y: 7.5 })).toBe(false);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.25, y: 21.75 })).toBe(false);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 34.5, y: 20 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 38, y: 20 })).toBe(false);
+    const decorativeDashMesh = vectorNetworkMixedStrokeMesh(network, {
+      strokeWidth: 4,
+      strokeCapStart: "diamondFilled",
+      strokeCapEnd: "arrowEquilateral",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [25, 5],
+    });
+    expect(decorativeDashMesh?.bounds?.min.x).toBe(-16);
+    expect(decorativeDashMesh?.bounds?.max.x).toBe(56);
+    expect(decorativeDashMesh && vectorNetworkStrokeMeshContains(decorativeDashMesh, { x: -8, y: 0 })).toBe(true);
+    expect(decorativeDashMesh && vectorNetworkStrokeMeshContains(decorativeDashMesh, { x: 50, y: 20 })).toBe(true);
+    expect(vectorNetworkMixedStrokeMesh(network, {
+      strokeWidth: 4,
+      strokeCapStart: "round",
+      strokeCapEnd: "round",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [25],
+    })).toEqual(vectorNetworkMixedStrokeMesh(network, {
+      strokeWidth: 4,
+      strokeCapStart: "round",
+      strokeCapEnd: "round",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [25, 25],
+    }));
+
+    const roundedMesh = vectorNetworkMixedStrokeMesh({
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, cornerRadius: 5 },
+        { x: 20, y: 20, strokeJoin: "ROUND" },
+        { x: 40, y: 20, strokeJoin: "BEVEL" },
+        { x: 40, y: 40 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 }],
+    }, {
+      strokeWidth: 4,
+      strokeCapStart: "none",
+      strokeCapEnd: "none",
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [30, 5],
+    });
+    expect(roundedMesh && vectorNetworkStrokeMeshContains(roundedMesh, { x: 18.5, y: 1.5 })).toBe(true);
+    expect(roundedMesh && vectorNetworkStrokeMeshContains(roundedMesh, { x: 21.8, y: -1.8 })).toBe(false);
+
+    const closedMesh = vectorNetworkMixedStrokeMesh({
+      vertices: [
+        { x: 0, y: 0 }, { x: 20, y: 0, strokeJoin: "ROUND" },
+        { x: 20, y: 20, strokeJoin: "BEVEL" }, { x: 0, y: 20 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 0 }],
+    }, {
+      strokeWidth: 4,
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [90, 10],
+    });
+    expect(closedMesh && vectorNetworkStrokeMeshContains(closedMesh, { x: -1.5, y: -1.5 })).toBe(true);
+
+    expect(vectorNetworkMixedStrokeMesh(network, {
+      strokeWidth: 4,
+      strokeJoin: "miter",
+      strokeMiterLimit: 10,
+      strokeDashPattern: [1e-9, 1e-9],
+    })).toBeUndefined();
+  });
+
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
