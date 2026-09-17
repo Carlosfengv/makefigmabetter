@@ -77,7 +77,7 @@ import {
   canonicalVectorPathFromRuntimeNetwork,
   extensionsWithRuntimeVectorNetwork,
   runtimeVectorNetworkHasBranchedTopology,
-  runtimeVectorNetworkHasMixedActiveJoins,
+  runtimeVectorNetworkNeedsStrokeMesh,
   runtimeVectorNetworkFromCanonical,
   runtimeVectorNetworkFromExtension,
   vectorNetworkMixedStrokeMesh,
@@ -2365,8 +2365,8 @@ export class RuntimeNodeProxy {
     if (this.type !== "VECTOR" && this.type !== "HIGHLIGHT") throw runtimeError("UNSUPPORTED_PROPERTY", { nodeId: this.handle.nodeId });
     const node = this.read();
     const defaultJoin = canonicalStrokeJoinValue(node.strokeJoin);
-    const hasMixedJoins = runtimeVectorNetworkHasMixedActiveJoins(value, defaultJoin);
-    if (hasMixedJoins && (this.type !== "VECTOR" || Array.isArray(node.strokeDashPattern) && node.strokeDashPattern.length > 0
+    const needsStrokeMesh = runtimeVectorNetworkNeedsStrokeMesh(value, defaultJoin);
+    if (needsStrokeMesh && (this.type !== "VECTOR" || Array.isArray(node.strokeDashPattern) && node.strokeDashPattern.length > 0
       && !this.canRenderMixedVectorNetwork(value, defaultJoin, node.strokeDashPattern))) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
@@ -2423,7 +2423,7 @@ export class RuntimeNodeProxy {
     const node = this.read();
     const path = node.vectorPath as DocumentVectorPath | undefined;
     const network = path ? runtimeVectorNetworkFromExtension(node.extensions, path) : undefined;
-    return network && runtimeVectorNetworkHasMixedActiveJoins(network, defaultJoin) ? network : undefined;
+    return network && runtimeVectorNetworkNeedsStrokeMesh(network, defaultJoin) ? network : undefined;
   }
 
   private hasBranchedMixedVectorNetworkJoins(defaultJoin = canonicalStrokeJoinValue(this.read().strokeJoin)): boolean {

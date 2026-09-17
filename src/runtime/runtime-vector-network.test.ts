@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentPaintStack, DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, runtimeVectorNetworkHasMixedActiveJoins, vectorNetworkMixedStrokeMesh, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, runtimeVectorNetworkHasMixedActiveJoins, runtimeVectorNetworkNeedsStrokeMesh, vectorNetworkMixedStrokeMesh, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -197,6 +197,41 @@ describe("Runtime VectorNetwork adapter", () => {
       strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
     })).toMatchObject({ reason: expect.stringContaining("explicit value at every active shared vertex") });
     expect(allocations).toBe(0);
+  });
+
+  it("materializes a uniform explicit join at a branched junction", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 20, strokeJoin: "ROUND" as const },
+        { x: 30, y: 0 },
+        { x: 30, y: 20 },
+        { x: 30, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 },
+        { start: 0, end: 2 },
+        { start: 0, end: 3 },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(
+      network,
+      () => `uniform-branch-${sequence++}`,
+      { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" },
+    );
+    if ("reason" in converted) throw new Error(converted.reason);
+    expect(converted.strokeJoin).toBe("round");
+    expect(converted.network).toEqual(network);
+    expect(runtimeVectorNetworkHasMixedActiveJoins(network, "round")).toBe(false);
+    expect(runtimeVectorNetworkNeedsStrokeMesh(network, "round")).toBe(true);
+
+    const mesh = vectorNetworkMixedStrokeMeshFromExtension(
+      extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path),
+      converted.path,
+      { strokeWidth: 6, strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "round", strokeMiterLimit: 10 },
+    );
+    expect(mesh?.triangles.length).toBeGreaterThan(6);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 0, y: 20 })).toBe(true);
   });
 
   it("materializes one globally styled filled loop plus open branch edges", () => {

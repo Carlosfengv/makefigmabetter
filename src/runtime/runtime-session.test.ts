@@ -2937,6 +2937,19 @@ describe("M1 RuntimeSession", () => {
     expect(vector.vectorNetwork).toEqual(branched);
     expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
+
+    const uniformBranch = {
+      vertices: [
+        { x: 0, y: 20, strokeJoin: "ROUND" as const },
+        { x: 30, y: 0 }, { x: 30, y: 20 }, { x: 30, y: 40 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }, { start: 0, end: 3 }],
+    };
+    vector.vectorNetwork = uniformBranch;
+    expect(vector.vectorNetwork).toEqual(uniformBranch);
+    expect(vector.strokeJoin).toBe("ROUND");
+    expect(isRuntimeError(captureError(() => { vector.strokeCap = "ROUND"; }), "INVALID_ARGUMENT")).toBe(true);
+    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
   });
 
   it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {
@@ -3000,6 +3013,15 @@ describe("M1 RuntimeSession", () => {
     });
     expect(highlight.handleMirroring).toBe(RUNTIME_MIXED);
     expect(highlight.vectorPaths[0]).toMatchObject({ windingRule: "NONE", data: expect.stringContaining("C") });
+    expect(isRuntimeError(captureError(() => {
+      highlight.vectorNetwork = {
+        vertices: [
+          { x: 0, y: 20, strokeJoin: "ROUND" },
+          { x: 30, y: 0 }, { x: 30, y: 20 }, { x: 30, y: 40 },
+        ],
+        segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }, { start: 0, end: 3 }],
+      };
+    }), "INVALID_ARGUMENT")).toBe(true);
     expect(transport.submitted[0]?.operations).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "update", nodeId: "highlight", patch: expect.objectContaining({ highlightHandleMirroring: "ANGLE_AND_LENGTH" }) }),
       expect.objectContaining({ type: "update", nodeId: "highlight", patch: expect.objectContaining({ vectorPath: expect.any(Object) }) }),

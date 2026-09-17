@@ -515,6 +515,21 @@ export function runtimeVectorNetworkHasMixedActiveJoins(
   return new Set(joins).size > 1;
 }
 
+/** A branched network cannot express even a uniform authored junction through
+ * independent VectorPath subpaths: every edge would otherwise receive its own
+ * terminal cap. Keep using the shared bounded mesh whenever an active branch
+ * vertex carries an explicit join, as well as for the existing mixed case. */
+export function runtimeVectorNetworkNeedsStrokeMesh(
+  network: RuntimeVectorNetwork,
+  defaultJoin: StrokeJoin,
+): boolean {
+  if (!validNetworkShape(network)) return false;
+  if (runtimeVectorNetworkHasMixedActiveJoins(network, defaultJoin)) return true;
+  if (independentNetworkComponents(network)) return false;
+  return activeNetworkJoinVertexIndexes(network)
+    .some((vertexIndex) => network.vertices[vertexIndex]!.strokeJoin !== undefined);
+}
+
 export function runtimeVectorNetworkHasBranchedTopology(network: RuntimeVectorNetwork): boolean {
   return validNetworkShape(network) && independentNetworkComponents(network) === undefined;
 }
@@ -543,7 +558,7 @@ export function vectorNetworkMixedStrokeMesh(
   const dashPattern = normalizedMixedStrokeDashPattern(options.strokeDashPattern);
   if (options.strokeDashPattern?.length && !dashPattern) return undefined;
   const sourceComponents = independentNetworkComponents(network);
-  if (!runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
+  if (!runtimeVectorNetworkNeedsStrokeMesh(network, options.strokeJoin)) return undefined;
   if (!sourceComponents && network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) return undefined;
   if (!sourceComponents && dashPattern) return undefined;
   if (!sourceComponents && ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none")) return undefined;
@@ -1284,9 +1299,7 @@ function canonicalBranchedNetwork(
   const activeJoinVertexIndexes = activeNetworkJoinVertexIndexes(input);
   const resolvedActiveJoins = activeJoinVertexIndexes.map((vertexIndex) => effectiveNetworkJoin(input.vertices[vertexIndex]!, defaults.strokeJoin));
   const hasMixedActiveJoins = new Set(resolvedActiveJoins).size > 1;
-  if (input.vertices.some((vertex) => vertex.strokeJoin !== undefined) && !hasMixedActiveJoins) {
-    return { reason: "Branched VectorNetwork explicit per-vertex stroke joins require at least two distinct active values." };
-  }
+  const hasExplicitActiveJoin = activeJoinVertexIndexes.some((vertexIndex) => input.vertices[vertexIndex]!.strokeJoin !== undefined);
   if (hasMixedActiveJoins && activeJoinVertexIndexes.some((vertexIndex) => input.vertices[vertexIndex]!.strokeJoin === undefined)) {
     return { reason: "Branched mixed stroke joins require an explicit value at every active shared vertex." };
   }
@@ -1301,8 +1314,9 @@ function canonicalBranchedNetwork(
     if (edgeKeys.has(key)) return { reason: "Branched VectorNetwork contains duplicate edges." };
     edgeKeys.add(key);
   }
-  if (hasMixedActiveJoins && !networkStrokeSegmentGroups(input, input.segments.map((_, index) => index), MAX_MIXED_STROKE_SEGMENTS)) {
-    return { reason: "Branched mixed stroke joins exceed the bounded curve tessellation budget or contain degenerate curve geometry." };
+  if ((hasMixedActiveJoins || hasExplicitActiveJoin)
+    && !networkStrokeSegmentGroups(input, input.segments.map((_, index) => index), MAX_MIXED_STROKE_SEGMENTS)) {
+    return { reason: "Branched explicit stroke joins exceed the bounded curve tessellation budget or contain degenerate curve geometry." };
   }
   const point = (vertexIndex: number, handleIn?: RuntimeVector, handleOut?: RuntimeVector) => {
     const vertex = input.vertices[vertexIndex]!;
@@ -1362,7 +1376,9 @@ function canonicalBranchedNetwork(
     ...(regionPaths.length ? { regionPaths } : {}),
     strokeCapStart: "none",
     strokeCapEnd: "none",
-    strokeJoin: defaults.strokeJoin,
+    strokeJoin: !hasMixedActiveJoins && resolvedActiveJoins[0]
+      ? resolvedActiveJoins[0]
+      : defaults.strokeJoin,
     network: structuredClone(input),
   };
 }

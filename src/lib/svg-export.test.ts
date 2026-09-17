@@ -672,6 +672,38 @@ describe("SVG export", () => {
     expect(result.svg).not.toContain("stroke-linejoin=");
   });
 
+  it("exports a uniform explicit branched join through the bounded mesh", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 20, strokeJoin: "ROUND" as const },
+        { x: 30, y: 0 }, { x: 30, y: 20 }, { x: 30, y: 40 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }, { start: 0, end: 3 }],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `svg-uniform-branch-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const vector = {
+      ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000007d", pageId,
+      width: 30, height: 40, strokeWidth: 6, strokeCapStart: "none" as const, strokeCapEnd: "none" as const,
+      strokeJoin: converted.strokeJoin, fillStack: { layers: [] },
+      strokeStack: { layers: [{
+        visible: true, opacity: 1, blendMode: "normal" as const,
+        paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+      }] },
+      vectorPath: converted.path,
+      extensions: extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path),
+    };
+
+    const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(6);
+    expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);
+    expect(result.svg).not.toContain("stroke-linejoin=");
+  });
+
   it("preserves a Rust-derived Boolean through an alpha-mask Slice source and records the PDF fallback", () => {
     const mask = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000081", pageId, width: 80, height: 80, isMask: true, strokeWidth: 0 };
     const boolean = { ...createNode("booleanOperation", 0, 0), id: "00000000-0000-4000-8000-000000000082", pageId, width: 120, height: 80 };
