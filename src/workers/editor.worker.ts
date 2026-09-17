@@ -94,6 +94,7 @@ import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-r
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
 import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-projection";
+import { projectTextHitGlyphs } from "@/lib/text-hit-glyph-projection";
 import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
@@ -424,10 +425,13 @@ const rustTextLayoutFallbacks = new Map<string, Omit<RustTextLayoutProjection, "
 type RustTextGlyphProjection = {
   revision: number;
   key: string;
+  gpuEligible: boolean;
   /** World-space unit-quad affines accepted by the WebGPU text pass. */
   glyphs: readonly WebGpuTextGlyph[];
   /** Node-local quads consumed under Canvas's existing full node affine. */
   canvasGlyphs?: readonly WebGpuTextGlyph[];
+  /** Node-local shaped ink boxes used only for pointer interaction. */
+  hitGlyphs: readonly WebGpuTextGlyph[];
 };
 const rustTextGlyphs = new Map<string, RustTextGlyphProjection>();
 const rustTextGlyphLoads = new Set<string>();
@@ -2071,28 +2075,30 @@ async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "t
  * draws. Each Rust glyph selects its run's immutable font raster resource.
  * Rust has already included PIXELS tracking in glyph advances; paint changes
  * remain on Canvas until the GPU pass preserves those semantics. */
-function rustTextGlyphRequest(node: CanvasNode) {
+function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = node) {
   const layoutRequest = rustTextLayoutRequest(node);
   const layout = rustTextLayoutFor(node);
   if (!layoutRequest || !layout || !layout.lines.length) return undefined;
   const properties = node.textProperties;
-  // Ordinary Text still needs a full box-transform projection. TextPath owns
-  // a complete local-glyph → world affine in its WebGPU instance.
+  // ShapeWithText and transformed/paint-rich Text may still build local hit
+  // glyphs even when their visible paint remains on Canvas.
   const interactionOnlyShape = node.kind === "shapeWithText";
-  if ((node.kind !== "textPath" && !interactionOnlyShape && node.rotation !== 0)
-    || (!interactionOnlyShape && (
+  const gpuEligible = node.kind === "textPath" || (node.kind === "text" && (
+    projectionNode.rotation === 0
+    && projectionNode.fillStack === undefined
+    && !projectionNode.fillGradient
+    && !projectionNode.fills?.length
+    && !properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)
+    && properties?.paragraph.alignment === "left"
+    && !properties?.runs.some((candidate) => candidate.color)
+  ));
+  if ((!interactionOnlyShape && node.kind !== "text" && (
       node.fillStack !== undefined
       || Boolean(node.fillGradient)
       || Boolean(node.fills?.length)
       || properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)
     ))) return undefined;
-  if (node.kind === "text" && (
-    properties?.paragraph.alignment !== "left"
-    || (properties?.paragraph.paragraphSpacing ?? 0) !== 0
-    || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
-    || properties?.runs.some((candidate) => candidate.color)
-  )) return undefined;
-  if (interactionOnlyShape && (
+  if ((node.kind === "text" || interactionOnlyShape) && (
     (properties?.paragraph.paragraphSpacing ?? 0) !== 0
     || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
   )) return undefined;
@@ -2117,7 +2123,7 @@ function rustTextGlyphRequest(node: CanvasNode) {
     gpuRuns.map((run) => [run.font.assetId, run.font.faceIndex, run.axesKey, run.syntheticStyleKey, run.fontSize, run.pixelSize]),
     node.kind === "textPath" ? textPathWorldTransform
       : interactionOnlyShape ? [node.width, node.height, properties?.paragraph.alignment]
-        : [node.x, node.y, node.rotation],
+        : [node.width, node.height, properties?.paragraph.alignment, gpuEligible ? [projectionNode.x, projectionNode.y, projectionNode.width, projectionNode.rotation] : "interaction-only"],
     node.fill,
     node.opacity,
     node.textProperties?.paragraph.lineHeight,
@@ -2130,13 +2136,14 @@ function rustTextGlyphRequest(node: CanvasNode) {
   return {
     ...layoutRequest,
     node,
+    gpuEligible,
     gpuRuns,
     key,
     layout,
-    nodeX: node.x,
-    nodeY: node.y,
-    nodeWidth: node.width,
-    nodeRotation: node.rotation,
+    nodeX: projectionNode.x,
+    nodeY: projectionNode.y,
+    nodeWidth: projectionNode.width,
+    nodeRotation: projectionNode.rotation,
     nodeFill: node.fill,
     nodeOpacity: node.opacity,
     nodeLineHeight: resolvedTextLineHeight(node.textProperties, node.kind === "shapeWithText" ? 14 : 31),
@@ -2158,7 +2165,7 @@ function refreshRustTextGlyphs() {
     const projectionNode = node.kind === "textPath" || node.kind === "shapeWithText"
       ? node
       : (nodeById.get(node.id) ?? node);
-    const request = rustTextGlyphRequest(projectionNode);
+    const request = rustTextGlyphRequest(node, projectionNode);
     if (!request) return;
     active.add(node.id);
     const cached = rustTextGlyphs.get(node.id);
@@ -2231,10 +2238,13 @@ async function loadRustTextGlyphs(
       : request.node.kind === "shapeWithText"
         ? projectShapeWithTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? 14 })
         : undefined;
+    const textHitGlyphs = request.node.kind === "text"
+      ? projectTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT })
+      : undefined;
     const glyphs = request.node.kind === "textPath"
       ? projectTextPathGpuGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, worldTransform: request.textPathWorldTransform })
       : request.node.kind === "shapeWithText" ? canvasGlyphs
-      : projectGpuTextGlyphs({
+      : request.gpuEligible ? projectGpuTextGlyphs({
           nodeId,
           runs: projectionRuns,
           x: request.nodeX,
@@ -2245,15 +2255,16 @@ async function loadRustTextGlyphs(
           opacity: request.nodeOpacity,
           lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
           layout: request.layout,
-        });
-    if (!glyphs || ((request.node.kind === "textPath" || request.node.kind === "shapeWithText") && !canvasGlyphs)) throw new Error("INVALID_GPU_TEXT_PROJECTION");
+        }) : textHitGlyphs;
+    const hitGlyphs = request.node.kind === "text" ? textHitGlyphs : canvasGlyphs;
+    if (!glyphs || !hitGlyphs || ((request.node.kind === "textPath" || request.node.kind === "shapeWithText") && !canvasGlyphs)) throw new Error("INVALID_GPU_TEXT_PROJECTION");
     const currentNode = nodes.find((node) => node.id === nodeId);
     const currentProjectionNode = currentNode?.kind === "textPath" || currentNode?.kind === "shapeWithText"
       ? currentNode
       : currentNode ? (nodeById.get(nodeId) ?? currentNode) : undefined;
-    const currentRequest = currentProjectionNode ? rustTextGlyphRequest(currentProjectionNode) : undefined;
+    const currentRequest = currentNode && currentProjectionNode ? rustTextGlyphRequest(currentNode, currentProjectionNode) : undefined;
     if (!currentNode || currentRequest?.key !== request.key) return;
-    rustTextGlyphs.set(nodeId, { revision, key: request.key, glyphs, ...(canvasGlyphs ? { canvasGlyphs } : {}) });
+    rustTextGlyphs.set(nodeId, { revision, key: request.key, gpuEligible: request.gpuEligible, glyphs, hitGlyphs, ...(canvasGlyphs ? { canvasGlyphs } : {}) });
     // Full-frame evidence runs expose the asynchronous resource fence so a
     // browser gate can distinguish the final GPU frame from the short Canvas
     // fallback shown while a newly created Text/TextPath raster is loading.
@@ -3100,20 +3111,14 @@ function shapedTextHyperlinkAtWorldPoint(node: CanvasNode | undefined, point: Re
   const projectionNode = canonical.kind === "textPath" || canonical.kind === "shapeWithText"
     ? canonical
     : (nodeById.get(canonical.id) ?? canonical);
-  const request = rustTextGlyphRequest(projectionNode);
+  const request = rustTextGlyphRequest(canonical, projectionNode);
   const cached = rustTextGlyphs.get(canonical.id);
   if (!request || cached?.revision !== revision || cached.key !== request.key) return undefined;
 
-  let glyphs = cached.glyphs;
-  let hitPoint = point;
-  if (canonical.kind === "textPath" || canonical.kind === "shapeWithText") {
-    const transform = worldTransformById.get(canonical.id);
-    const inverse = transform && invertAffine(transform);
-    if (!inverse || !cached.canvasGlyphs) return undefined;
-    glyphs = cached.canvasGlyphs;
-    hitPoint = transformPoint(inverse, point);
-  }
-  const runIndex = textGlyphPaintRunAtPoint(glyphs, hitPoint);
+  const transform = worldTransformById.get(canonical.id);
+  const inverse = transform && invertAffine(transform);
+  if (!inverse) return undefined;
+  const runIndex = textGlyphPaintRunAtPoint(cached.hitGlyphs, transformPoint(inverse, point));
   const target = runIndex === undefined ? undefined : properties.runs[runIndex]?.hyperlink;
   return target ? { nodeId: canonical.id, target } : undefined;
 }
@@ -8530,7 +8535,8 @@ function render(
         const gpuTextNodeIds = new Set([...rustTextGlyphs]
           .filter(([nodeId, cached]) => {
             const kind = canonicalNodeById.get(nodeId)?.kind;
-            return (kind === "text" || kind === "textPath") && cached.revision === revision && cached.glyphs.length > 0;
+            return (kind === "text" || kind === "textPath") && cached.gpuEligible
+              && cached.revision === revision && cached.glyphs.length > 0;
           })
           .map(([nodeId]) => nodeId));
         const plannedBackendIslands = gpuLayerIslands(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => {
