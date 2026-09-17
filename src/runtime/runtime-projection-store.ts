@@ -655,9 +655,11 @@ function validateOperations(
     }
 
     if (operation.type === "flattenNodes") {
-      validateFlattenNodesOperation(read, operation, transactionId);
+      validateFlattenNodesOperation(read, () => new Set([...base.keys(), ...overlay.keys()]), operation, transactionId);
+      const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
       overlay.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
       operation.sourceIds.forEach((nodeId) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, removed: true })));
+      sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex })));
       continue;
     }
@@ -781,9 +783,11 @@ function applyOperations(
     }
 
     if (operation.type === "flattenNodes") {
-      validateFlattenNodesOperation((nodeId) => nodes.get(nodeId), operation, transactionId);
+      validateFlattenNodesOperation((nodeId) => nodes.get(nodeId), () => nodes.keys(), operation, transactionId);
+      const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
       nodes.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
       operation.sourceIds.forEach((nodeId) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, removed: true })));
+      sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex })));
       continue;
     }
@@ -1194,6 +1198,7 @@ function validateFlattenNodeOperation(
 
 function validateFlattenNodesOperation(
   read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
   operation: Extract<PendingProjectionOperation, { type: "flattenNodes" }>,
   transactionId: string,
 ): void {
@@ -1217,6 +1222,19 @@ function validateFlattenNodesOperation(
     new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   const sourceIds = new Set(operation.sourceIds);
+  const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+  for (const parentId of sourceParentIds) {
+    const parent = read(parentId);
+    if (!parent || parent.type !== "GROUP" || operation.replacement.parentId === parentId) continue;
+    const children = [...nodeIds()]
+      .map((nodeId) => read(nodeId))
+      .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === parentId));
+    if (!children.length || children.some((child) => !sourceIds.has(child.id))) continue;
+    const grandparent = typeof parent.parentId === "string" ? read(parent.parentId) : undefined;
+    if (!runtimeProjectionCanDissolveFlattenGroup(parent) || (grandparent && (["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(grandparent.type) || projectionOwnsAutoLayout(grandparent)))) {
+      throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: parent.id });
+    }
+  }
   const occupiedSiblingSlots = new Set<string>();
   for (const { nodeId, siblingIndex } of operation.siblingIndexes) {
     const node = read(nodeId);
@@ -1226,6 +1244,25 @@ function validateFlattenNodesOperation(
     }
     occupiedSiblingSlots.add(slot);
   }
+}
+
+function runtimeProjectionCanDissolveFlattenGroup(node: RuntimeProjectionNode): boolean {
+  return node.type === "GROUP"
+    && node.visible !== false
+    && (typeof node.opacity !== "number" || node.opacity === 1)
+    && (node.blendMode === undefined || node.blendMode === "normal")
+    && node.isMask !== true
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.contentsHidden !== true
+    && node.clipsContent !== true
+    && !projectionOwnsAutoLayout(node);
+}
+
+function projectionOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
+  if (!node.autoLayout || typeof node.autoLayout !== "object") return false;
+  const mode = (node.autoLayout as { mode?: unknown }).mode;
+  return mode === "horizontal" || mode === "vertical" || mode === "grid";
 }
 
 function validatePatch(patch: Readonly<Record<string, unknown>>, transactionId: string, nodeId: string, convertToTextPath = false): void {

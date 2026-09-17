@@ -316,8 +316,19 @@ export function resolveFlattenNodesBatch(
   if (targetPageId !== sourcePageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
   const sourceIdSet = new Set(sourceIds);
   if (targetParentId && (sourceIdSet.has(targetParentId) || sourceIds.some((sourceId) => hasAncestor(nodes, targetParentId, sourceId)))) return undefined;
+  const dissolvedGroups = [...new Set(concreteSources.map((source) => source.parentId))]
+    .filter((parentId): parentId is string => typeof parentId === "string" && parentId !== targetParentId)
+    .map((parentId) => nodes.find((node) => node.id === parentId))
+    .filter((parent): parent is CanvasNode => Boolean(parent?.kind === "group"))
+    .filter((group) => {
+      const children = nodes.filter((candidate) => candidate.parentId === group.id);
+      return children.length > 0 && children.every((child) => sourceIdSet.has(child.id));
+    });
+  if (dissolvedGroups.some((group) => !canDissolveFlattenGroup(nodes, group))) return undefined;
+  const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
+  const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
-    node.pageId === targetPageId && node.parentId === targetParentId && !sourceIdSet.has(node.id)));
+    node.pageId === targetPageId && node.parentId === targetParentId && !removedIds.has(node.id)));
   const destination = target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : Math.min(...concreteSources
     .filter((source) => source.parentId === targetParentId)
     .map((source) => sortNodesByLayerOrder(nodes.filter((node) => node.pageId === source.pageId && node.parentId === source.parentId)).findIndex((node) => node.id === source.id))));
@@ -372,9 +383,31 @@ export function resolveFlattenNodesBatch(
     { type: "delete", ids: [...sourceIds] },
     { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
   ];
-  const nextNodes = [...nodes.filter((node) => !sourceIdSet.has(node.id)), { ...replacement, positionId: desiredPositionId }];
+  const nextNodes = [...nodes.filter((node) => !removedIds.has(node.id)), { ...replacement, positionId: desiredPositionId }];
   if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
   return { replacement, batch };
+}
+
+function canDissolveFlattenGroup(nodes: readonly CanvasNode[], group: CanvasNode): boolean {
+  if (
+    group.kind !== "group" ||
+    group.visible === false ||
+    (group.opacity ?? 1) !== 1 ||
+    (group.blendMode ?? "normal") !== "normal" ||
+    group.isMask === true ||
+    group.dropShadow != null ||
+    (group.effectStack?.length ?? 0) > 0 ||
+    group.contentsHidden === true ||
+    group.clipsContent === true ||
+    group.autoLayout !== undefined
+  ) return false;
+  if (!group.parentId) return true;
+  const parent = nodes.find((node) => node.id === group.parentId);
+  return Boolean(
+    parent &&
+    !["group", "booleanOperation", "transformGroup"].includes(parent.kind) &&
+    parent.autoLayout === undefined,
+  );
 }
 
 /** Replaces a Vector's paint stroke with the closed fill contours derived by

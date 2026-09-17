@@ -720,6 +720,43 @@ describe("Core transaction batch resolution", () => {
     ]);
   });
 
+  it("removes a fully consumed neutral Group from the flatten projection", () => {
+    const target = { ...createNode("frame", 0, 0), id: "00000000-0000-4000-8000-000000000146", width: 400, height: 200 };
+    const group = { ...createNode("group", 20, 30), id: "00000000-0000-4000-8000-000000000147", parentId: target.id, positionId: "10000000000000000000000000000000:00000000000000000000000000000000" };
+    const first = { ...createNode("rectangle", 10, 10), id: "00000000-0000-4000-8000-000000000148", parentId: group.id, width: 20, height: 20, strokeWidth: 0 };
+    const second = { ...createNode("ellipse", 40, 10), id: "00000000-0000-4000-8000-000000000149", parentId: group.id, width: 20, height: 20, strokeWidth: 0 };
+    const sibling = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-00000000014a", parentId: target.id, positionId: "f0000000000000000000000000000000:00000000000000000000000000000000" };
+    const replacementId = "00000000-0000-4000-8000-00000000014b";
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [{ closed: true, points: [
+      { id: "p1", x: 0, y: 0, pointType: "corner" as const },
+      { id: "p2", x: 50, y: 0, pointType: "corner" as const },
+      { id: "p3", x: 50, y: 20, pointType: "corner" as const },
+    ] }] };
+
+    const resolved = resolveFlattenNodesBatch(
+      [target, group, first, second, sibling],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: target.id, index: 0 },
+    );
+
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, parentId: target.id }) }),
+      { type: "delete", ids: [first.id, second.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: expect.any(String) }] },
+    ]);
+    expect(resolveFlattenNodesBatch(
+      [target, { ...group, opacity: .5 }, first, second, sibling],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: target.id, index: 0 },
+    )).toBeUndefined();
+  });
+
   it("outlines a Vector Stroke as one same-ID Vector update", () => {
     const vector = { ...createNode("vector", 10, 20), id: "00000000-0000-4000-8000-000000000051", name: "Curve", stroke: "#cc3366", strokeWidth: 6, strokeCapStart: "round" as const, strokeCapEnd: "round" as const };
     const ids = ["00000000-0000-4000-8000-000000000052", "00000000-0000-4000-8000-000000000053", "00000000-0000-4000-8000-000000000054"];

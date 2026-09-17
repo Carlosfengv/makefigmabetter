@@ -3042,6 +3042,40 @@ describe("M1 RuntimeSession", () => {
     expect(await session.getNodeByIdAsync("rect-b")).toBeNull();
   });
 
+  it("flattens every child of a neutral Group and dissolves the consumed wrapper", async () => {
+    const projection: RuntimeProjection = {
+      revision: 6,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "group", type: "GROUP", name: "Group", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 80, height: 40, opacity: 1, visible: true },
+        { id: "rect", type: "RECTANGLE", name: "Rectangle", parentId: "group", siblingIndex: 0, x: 10, y: 5, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
+        { id: "ellipse", type: "ELLIPSE", name: "Ellipse", parentId: "group", siblingIndex: 1, x: 40, y: 5, width: 20, height: 20, fill: "#3366cc", strokeWidth: 0 },
+        { id: "after", type: "VECTOR", name: "After", parentId: "page", siblingIndex: 1, x: 240, y: 50, width: 10, height: 10, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+      ],
+    };
+    let sequence = 0;
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-group", projection, transport, createId: () => `flatten-group-${++sequence}`, scheduleMicrotask: () => {} });
+    const group = (await session.getNodeByIdAsync("group")) as RuntimeContainerNodeProxy;
+    const first = (await session.getNodeByIdAsync("rect"))!;
+    const second = (await session.getNodeByIdAsync("ellipse"))!;
+
+    const flattened = session.flatten([first, second]);
+
+    expect(flattened.type).toBe("VECTOR");
+    expect({ x: flattened.x, y: flattened.y, width: flattened.width, height: flattened.height }).toEqual({ x: 110, y: 55, width: 50, height: 20 });
+    expect(flattened.parent?.id).toBe("page");
+    expect(first.removed).toBe(true);
+    expect(second.removed).toBe(true);
+    expect(group.removed).toBe(true);
+    expect(session.currentPage.children.map((node) => node.id)).toEqual([flattened.id, "after"]);
+
+    await session.commitAsync();
+    expect(await session.getNodeByIdAsync("group")).toBeNull();
+    expect(await session.getNodeByIdAsync(flattened.id)).toBe(flattened);
+  });
+
   it("preserves distinct solid paints as independent flatten regions", async () => {
     const projection: RuntimeProjection = {
       revision: 1,
@@ -4998,7 +5032,11 @@ class InMemoryTransport implements RuntimeTransactionTransport {
       }
       else if (operation.type === "flattenNodes") {
         nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
+        const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
         operation.sourceIds.forEach((nodeId) => nodes.delete(nodeId));
+        sourceParentIds.forEach((parentId) => {
+          if (nodes.get(parentId)?.type === "GROUP" && ![...nodes.values()].some((node) => node.parentId === parentId)) nodes.delete(parentId);
+        });
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });

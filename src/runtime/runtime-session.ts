@@ -2595,19 +2595,38 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
       return node;
     });
+    const selectedIds = new Set(selected.map((node) => node.id));
+    const dissolvedGroups: RuntimeProjectionNode[] = [];
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
     if (crossesParents && runtimeOwnsAutoLayout(targetParentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
     for (const sourceParentId of new Set(selected.map((node) => node.parentId))) {
       if (sourceParentId === targetParent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
+      if (sourceParent?.type === "GROUP") {
+        const directChildren = this.siblingsOf(sourceParent.id);
+        const sourceGrandparent = typeof sourceParent.parentId === "string" ? this.projectionStore.getNode(sourceParent.parentId) : undefined;
+        if (
+          directChildren.length > 0 &&
+          directChildren.every((child) => selectedIds.has(child.id)) &&
+          runtimeCanDissolveFlattenGroup(sourceParent) &&
+          sourceGrandparent &&
+          !["GROUP", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(sourceGrandparent.type) &&
+          !runtimeOwnsAutoLayout(sourceGrandparent)
+        ) {
+          dissolvedGroups.push(sourceParent);
+          continue;
+        }
+      }
       if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
       }
     }
+    const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     for (const structuralParentId of new Set([...selected.map((node) => node.parentId), targetParent.id])) {
       if (typeof structuralParentId !== "string") continue;
       const structuralParent = this.projectionStore.getNode(structuralParentId);
       if (!structuralParent || (structuralParent.type !== "GROUP" && structuralParent.type !== "BOOLEAN_OPERATION")) continue;
+      if (dissolvedGroupIds.has(structuralParentId)) continue;
       const selectedChildCount = selected.filter((node) => node.parentId === structuralParentId).length;
       const childCountAfter = this.siblingsOf(structuralParentId).length - selectedChildCount + (structuralParentId === targetParent.id ? 1 : 0);
       if ((structuralParent.type === "GROUP" && childCountAfter < 1) || (structuralParent.type === "BOOLEAN_OPERATION" && childCountAfter < 2)) {
@@ -2615,9 +2634,16 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
-    const selectedIds = new Set(orderedSelected.map((node) => node.id));
-    const remaining = this.siblingsOf(targetParent.id).filter((node) => !selectedIds.has(node.id));
-    const destination = index ?? remaining.length;
+    const removedIds = new Set([...selectedIds, ...dissolvedGroupIds]);
+    const targetSiblings = this.siblingsOf(targetParent.id);
+    const remaining = targetSiblings.filter((node) => !removedIds.has(node.id));
+    const dissolvedTargetIndexes = dissolvedGroups
+      .filter((group) => group.parentId === targetParent.id)
+      .map((group) => targetSiblings.findIndex((sibling) => sibling.id === group.id))
+      .filter((candidateIndex) => candidateIndex >= 0);
+    const destination = index ?? (dissolvedTargetIndexes.length
+      ? targetSiblings.slice(0, Math.min(...dissolvedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
+      : remaining.length);
     if (!Number.isSafeInteger(destination) || destination < 0 || destination > remaining.length) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: targetParent.id });
     }
@@ -2769,10 +2795,16 @@ export class RuntimeSession implements RuntimeContainerHost {
     };
     const siblingIndexes = [...remaining.slice(0, destination), replacement, ...remaining.slice(destination)].flatMap((sibling, siblingIndex) =>
       sibling.id === replacementId || sibling.siblingIndex === siblingIndex ? [] : [{ nodeId: sibling.id, siblingIndex }]);
-    for (const sourceParentId of new Set(orderedSelected.map((sourceNode) => sourceNode.parentId))) {
-      if (sourceParentId === targetParent.id) continue;
-      this.siblingsOf(sourceParentId)
-        .filter((sibling) => !selectedIds.has(sibling.id))
+    const affectedParentIds = new Set<string | undefined>([
+      ...orderedSelected
+        .map((sourceNode) => sourceNode.parentId)
+        .filter((sourceParentId) => typeof sourceParentId !== "string" || !dissolvedGroupIds.has(sourceParentId)),
+      ...dissolvedGroups.map((group) => group.parentId),
+    ]);
+    for (const affectedParentId of affectedParentIds) {
+      if (affectedParentId === targetParent.id) continue;
+      this.siblingsOf(affectedParentId)
+        .filter((sibling) => !removedIds.has(sibling.id))
         .forEach((sibling, siblingIndex) => {
           if (sibling.siblingIndex !== siblingIndex) siblingIndexes.push({ nodeId: sibling.id, siblingIndex });
         });
@@ -4704,6 +4736,19 @@ function runtimeOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
   if (!autoLayout || typeof autoLayout !== "object") return false;
   const mode = (autoLayout as { mode?: unknown }).mode;
   return mode === "horizontal" || mode === "vertical" || mode === "grid";
+}
+
+function runtimeCanDissolveFlattenGroup(node: RuntimeProjectionNode): boolean {
+  return node.type === "GROUP"
+    && node.visible !== false
+    && finiteNodeNumber(node.opacity, 1) === 1
+    && (node.blendMode === undefined || node.blendMode === "normal")
+    && node.isMask !== true
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.contentsHidden !== true
+    && node.clipsContent !== true
+    && !runtimeOwnsAutoLayout(node);
 }
 
 function runtimeBooleanHasImmutableAncestor(

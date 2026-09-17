@@ -217,6 +217,35 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("sibling")).toMatchObject({ siblingIndex: 0 });
   });
 
+  it("dissolves a neutral Group when flatten consumes every direct child", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "group", type: "GROUP", parentId: "page", siblingIndex: 0, opacity: 1, visible: true },
+        { id: "rect", type: "RECTANGLE", parentId: "group", siblingIndex: 0, width: 40, height: 30 },
+        { id: "ellipse", type: "ELLIPSE", parentId: "group", siblingIndex: 1, width: 40, height: 30 },
+        { id: "sibling", type: "VECTOR", parentId: "page", siblingIndex: 1 },
+      ],
+    });
+
+    store.stage({
+      transactionId: "tx-flatten-group",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["rect", "ellipse"],
+        replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 0, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [{ nodeId: "sibling", siblingIndex: 1 }],
+      }],
+    });
+
+    expect(store.getNode("rect")).toMatchObject({ removed: true });
+    expect(store.getNode("ellipse")).toMatchObject({ removed: true });
+    expect(store.getNode("group")).toMatchObject({ removed: true });
+    expect(store.getNode("flat")).toMatchObject({ parentId: "page", siblingIndex: 0, removed: false });
+  });
+
   it("projects Frame-to-Component replacement and child adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,
