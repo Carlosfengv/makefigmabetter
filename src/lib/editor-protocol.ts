@@ -433,6 +433,39 @@ export interface DocumentEffectStyleResource {
   effects: DocumentEffect[];
 }
 
+export type DocumentLayoutGrid =
+  | {
+      pattern: "rows" | "columns";
+      alignment: "min" | "max" | "stretch" | "center";
+      /** Omission is valid only for stretch alignment. */
+      sectionSize?: number;
+      /** Omission represents Figma's Infinity/auto count. */
+      count?: number;
+      gutterSize?: number;
+      offset?: number;
+      visible: boolean;
+      color?: DocumentColor;
+    }
+  | {
+      pattern: "grid";
+      sectionSize: number;
+      visible: boolean;
+      color?: DocumentColor;
+    };
+
+/** Complete document-owned GridStyle resource. Variable bindings and node
+ * style links remain explicit future schema extensions. */
+export interface DocumentGridStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  descriptionMarkdown: string;
+  documentationLinks: Array<{ uri: string }>;
+  remote: boolean;
+  layoutGrids: DocumentLayoutGrid[];
+}
+
 export type DocumentVariableResolvedType = "BOOLEAN" | "COLOR" | "FLOAT" | "STRING";
 export interface DocumentVariableMode { modeId: string; name: string; }
 export interface DocumentVariableCollectionResource {
@@ -628,10 +661,13 @@ export type CoreBatchCommand =
   | { type: "registerTextStyle"; style: DocumentTextStyleResource }
   | { type: "registerPaintStyle"; style: DocumentPaintStyleResource }
   | { type: "registerEffectStyle"; style: DocumentEffectStyleResource }
+  | { type: "registerGridStyle"; style: DocumentGridStyleResource }
   | { type: "setTextStyle"; style: DocumentTextStyleResource }
   | { type: "deleteTextStyle"; id: string }
   | { type: "setPaintStyle"; style: DocumentPaintStyleResource }
   | { type: "deletePaintStyle"; id: string }
+  | { type: "setGridStyle"; style: DocumentGridStyleResource }
+  | { type: "deleteGridStyle"; id: string }
   | { type: "setEffectStyle"; style: DocumentEffectStyleResource }
   | { type: "deleteEffectStyle"; id: string }
   | { type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }
@@ -907,6 +943,7 @@ export interface EditorSnapshot {
   textStyles?: DocumentTextStyleResource[];
   paintStyles?: DocumentPaintStyleResource[];
   effectStyles?: DocumentEffectStyleResource[];
+  gridStyles?: DocumentGridStyleResource[];
   variableCollections?: DocumentVariableCollectionResource[];
   variables?: DocumentVariableResource[];
   /** Runtime-only FontFace loading state. It never enters Canonical snapshots. */
@@ -940,10 +977,13 @@ export type EditorCommand =
   | { type: "register-text-style"; style: DocumentTextStyleResource }
   | { type: "register-paint-style"; style: DocumentPaintStyleResource }
   | { type: "register-effect-style"; style: DocumentEffectStyleResource }
+  | { type: "register-grid-style"; style: DocumentGridStyleResource }
   | { type: "set-text-style"; style: DocumentTextStyleResource }
   | { type: "delete-text-style"; id: string }
   | { type: "set-paint-style"; style: DocumentPaintStyleResource }
   | { type: "delete-paint-style"; id: string }
+  | { type: "set-grid-style"; style: DocumentGridStyleResource }
+  | { type: "delete-grid-style"; id: string }
   | { type: "set-effect-style"; style: DocumentEffectStyleResource }
   | { type: "delete-effect-style"; id: string }
   | { type: "register-variable-collection"; collection: DocumentVariableCollectionResource }

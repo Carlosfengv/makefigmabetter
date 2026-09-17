@@ -750,6 +750,10 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       batch.push({ type: "registerEffectStyle", style: structuredClone(command.style) });
       continue;
     }
+    if (command.type === "register-grid-style") {
+      batch.push({ type: "registerGridStyle", style: structuredClone(command.style) });
+      continue;
+    }
     if (command.type === "set-text-style") {
       batch.push({ type: "setTextStyle", style: structuredClone(command.style) });
       continue;
@@ -772,6 +776,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
     }
     if (command.type === "delete-effect-style") {
       batch.push({ type: "deleteEffectStyle", id: command.id });
+      continue;
+    }
+    if (command.type === "set-grid-style") {
+      batch.push({ type: "setGridStyle", style: structuredClone(command.style) });
+      continue;
+    }
+    if (command.type === "delete-grid-style") {
+      batch.push({ type: "deleteGridStyle", id: command.id });
       continue;
     }
     if (command.type === "register-variable-collection") {

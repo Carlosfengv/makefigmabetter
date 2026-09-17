@@ -47,6 +47,10 @@ pub const MAX_PAINT_STYLE_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_EFFECT_STYLE_RESOURCES: usize = 4_096;
 pub const MAX_EFFECT_STYLE_RESOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_EFFECT_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_GRID_STYLE_RESOURCES: usize = 4_096;
+pub const MAX_GRID_STYLE_RESOURCE_BYTES: usize = 64 * 1024;
+pub const MAX_GRID_STYLE_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_LAYOUT_GRIDS_PER_STYLE: usize = 8;
 pub const MAX_STYLE_NAME_BYTES: usize = 1_024;
 pub const MAX_STYLE_DESCRIPTION_BYTES: usize = 32 * 1024;
 pub const MAX_STYLE_KEY_BYTES: usize = 2_048;
@@ -1032,6 +1036,49 @@ pub struct EffectStyleResource {
     pub effects: Vec<Effect>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutGridPattern {
+    Rows,
+    Columns,
+    Grid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutGridAlignment {
+    Min,
+    Max,
+    Stretch,
+    Center,
+}
+
+/// Canonical form of Figma's LayoutGrid union. `count = None` represents the
+/// plugin API's `Infinity` auto-count without admitting non-finite numbers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutGrid {
+    pub pattern: LayoutGridPattern,
+    pub alignment: Option<LayoutGridAlignment>,
+    pub section_size: Option<f64>,
+    pub count: Option<u32>,
+    pub gutter_size: Option<f64>,
+    pub offset: Option<f64>,
+    pub visible: bool,
+    pub color: Option<Color>,
+}
+
+/// A complete, document-owned Figma GridStyle resource. Layout grids preserve
+/// their authored order and use a bounded, finite canonical representation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridStyleResource {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub description_markdown: String,
+    pub documentation_links: Vec<String>,
+    pub remote: bool,
+    pub layout_grids: Vec<LayoutGrid>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaintStyleVariableBinding {
     pub paint_index: u32,
@@ -1341,6 +1388,9 @@ pub struct Document {
     /// Complete EffectStyle values keyed by their stable Figma-compatible ID.
     effect_styles: SharedOrdMap<String, EffectStyleResource>,
     effect_style_bytes: usize,
+    /// Complete GridStyle values keyed by their stable Figma-compatible ID.
+    grid_styles: SharedOrdMap<String, GridStyleResource>,
+    grid_style_bytes: usize,
     variable_collections: SharedOrdMap<String, VariableCollectionResource>,
     variables: SharedOrdMap<String, VariableResource>,
     variable_catalog_bytes: usize,
@@ -1578,6 +1628,9 @@ pub enum Command {
     RegisterEffectStyle {
         style: EffectStyleResource,
     },
+    RegisterGridStyle {
+        style: GridStyleResource,
+    },
     SetTextStyle {
         style: TextStyleResource,
     },
@@ -1594,6 +1647,12 @@ pub enum Command {
         style: EffectStyleResource,
     },
     DeleteEffectStyle {
+        id: String,
+    },
+    SetGridStyle {
+        style: GridStyleResource,
+    },
+    DeleteGridStyle {
         id: String,
     },
     RegisterVariableCollection {
@@ -1766,6 +1825,9 @@ pub enum AppliedChange {
     EffectStyleRegistered {
         style: EffectStyleResource,
     },
+    GridStyleRegistered {
+        style: GridStyleResource,
+    },
     TextStyleChanged {
         before: TextStyleResource,
         after: TextStyleResource,
@@ -1786,6 +1848,13 @@ pub enum AppliedChange {
     },
     EffectStyleDeleted {
         style: EffectStyleResource,
+    },
+    GridStyleChanged {
+        before: GridStyleResource,
+        after: GridStyleResource,
+    },
+    GridStyleDeleted {
+        style: GridStyleResource,
     },
     VariableCollectionRegistered {
         collection: VariableCollectionResource,
@@ -2000,6 +2069,10 @@ pub enum CommandError {
         id: String,
     },
     InvalidEffectStyle,
+    DuplicateGridStyle {
+        id: String,
+    },
+    InvalidGridStyle,
     InvalidPaintStyleLinks,
     DuplicateVariableCollection {
         id: String,
@@ -2053,6 +2126,8 @@ impl Document {
             paint_style_bytes: 0,
             effect_styles: SharedOrdMap::new(),
             effect_style_bytes: 0,
+            grid_styles: SharedOrdMap::new(),
+            grid_style_bytes: 0,
             variable_collections: SharedOrdMap::new(),
             variables: SharedOrdMap::new(),
             variable_catalog_bytes: 0,
@@ -2318,6 +2393,14 @@ impl Document {
         self.effect_styles.get(id)
     }
 
+    pub fn grid_styles(&self) -> impl Iterator<Item = &GridStyleResource> {
+        self.grid_styles.values()
+    }
+
+    pub fn grid_style(&self, id: &str) -> Option<&GridStyleResource> {
+        self.grid_styles.get(id)
+    }
+
     pub fn variable_collections(&self) -> impl Iterator<Item = &VariableCollectionResource> {
         self.variable_collections.values()
     }
@@ -2490,6 +2573,13 @@ impl Document {
             hash_len(&mut hasher, self.effect_styles.len());
             for style in self.effect_styles.values() {
                 hash_effect_style_resource(&mut hasher, style);
+            }
+        }
+        if !self.grid_styles.is_empty() {
+            hasher.update(b"makefigma/editor-core/grid-style-catalog-v1");
+            hash_len(&mut hasher, self.grid_styles.len());
+            for style in self.grid_styles.values() {
+                hash_grid_style_resource(&mut hasher, style);
             }
         }
         if !self.variable_collections.is_empty() || !self.variables.is_empty() {
@@ -2674,6 +2764,11 @@ impl Document {
     /// Installs one verified EffectStyle while hydrating a trusted snapshot.
     pub fn seed_effect_style(&mut self, style: EffectStyleResource) -> Result<(), CommandError> {
         self.insert_effect_style(style)
+    }
+
+    /// Installs one verified GridStyle while hydrating a trusted snapshot.
+    pub fn seed_grid_style(&mut self, style: GridStyleResource) -> Result<(), CommandError> {
+        self.insert_grid_style(style)
     }
 
     pub fn seed_variable_collection(
@@ -3133,7 +3228,10 @@ impl Document {
         if self.paint_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicatePaintStyle { id: style.id });
         }
-        if self.text_styles.contains_key(&style.id) || self.effect_styles.contains_key(&style.id) {
+        if self.text_styles.contains_key(&style.id)
+            || self.effect_styles.contains_key(&style.id)
+            || self.grid_styles.contains_key(&style.id)
+        {
             return Err(CommandError::InvalidPaintStyle);
         }
         let bytes = style.estimated_bytes();
@@ -3204,7 +3302,7 @@ impl Document {
     }
 
     fn insert_text_style(&mut self, style: TextStyleResource) -> Result<(), CommandError> {
-        if self.text_styles.contains_key(&style.id) {
+        if self.text_styles.contains_key(&style.id) || self.grid_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicateTextStyle { id: style.id });
         }
         if self.paint_styles.contains_key(&style.id) || self.effect_styles.contains_key(&style.id) {
@@ -3325,7 +3423,10 @@ impl Document {
         if self.effect_styles.contains_key(&style.id) {
             return Err(CommandError::DuplicateEffectStyle { id: style.id });
         }
-        if self.text_styles.contains_key(&style.id) || self.paint_styles.contains_key(&style.id) {
+        if self.text_styles.contains_key(&style.id)
+            || self.paint_styles.contains_key(&style.id)
+            || self.grid_styles.contains_key(&style.id)
+        {
             return Err(CommandError::InvalidEffectStyle);
         }
         let bytes = style.estimated_bytes();
@@ -3381,6 +3482,92 @@ impl Document {
         self.effect_styles.remove(id);
         self.effect_style_bytes = self
             .effect_style_bytes
+            .saturating_sub(style.estimated_bytes());
+        Ok(style)
+    }
+
+    fn valid_grid_style_resource(&self, style: &GridStyleResource) -> bool {
+        !style.id.is_empty()
+            && style.id.len() <= MAX_STYLE_ID_BYTES
+            && !style.id.contains('\0')
+            && style.key.len() <= MAX_STYLE_KEY_BYTES
+            && !style.key.contains('\0')
+            && (!style.remote || !style.key.is_empty())
+            && !style.name.trim().is_empty()
+            && style.name.len() <= MAX_STYLE_NAME_BYTES
+            && !style.name.contains('\0')
+            && style.description.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description.contains('\0')
+            && style.description_markdown.len() <= MAX_STYLE_DESCRIPTION_BYTES
+            && !style.description_markdown.contains('\0')
+            && valid_style_documentation_links(&style.documentation_links)
+            && style.layout_grids.len() <= MAX_LAYOUT_GRIDS_PER_STYLE
+            && style.layout_grids.iter().all(valid_layout_grid)
+    }
+
+    fn insert_grid_style(&mut self, style: GridStyleResource) -> Result<(), CommandError> {
+        if self.grid_styles.contains_key(&style.id) {
+            return Err(CommandError::DuplicateGridStyle { id: style.id });
+        }
+        if self.text_styles.contains_key(&style.id)
+            || self.paint_styles.contains_key(&style.id)
+            || self.effect_styles.contains_key(&style.id)
+        {
+            return Err(CommandError::InvalidGridStyle);
+        }
+        let bytes = style.estimated_bytes();
+        if !self.valid_grid_style_resource(&style)
+            || bytes > MAX_GRID_STYLE_RESOURCE_BYTES
+            || self.grid_styles.len() >= MAX_GRID_STYLE_RESOURCES
+            || self.grid_style_bytes.saturating_add(bytes) > MAX_GRID_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidGridStyle);
+        }
+        self.grid_style_bytes += bytes;
+        self.grid_styles.insert(style.id.clone(), style);
+        Ok(())
+    }
+
+    fn replace_grid_style(
+        &mut self,
+        style: GridStyleResource,
+    ) -> Result<GridStyleResource, CommandError> {
+        let before = self
+            .grid_styles
+            .get(&style.id)
+            .cloned()
+            .ok_or(CommandError::InvalidGridStyle)?;
+        if before.remote || style.remote || before.key != style.key {
+            return Err(CommandError::InvalidGridStyle);
+        }
+        let bytes = style.estimated_bytes();
+        let next_catalog_bytes = self
+            .grid_style_bytes
+            .saturating_sub(before.estimated_bytes())
+            .saturating_add(bytes);
+        if !self.valid_grid_style_resource(&style)
+            || bytes > MAX_GRID_STYLE_RESOURCE_BYTES
+            || next_catalog_bytes > MAX_GRID_STYLE_CATALOG_BYTES
+        {
+            return Err(CommandError::InvalidGridStyle);
+        }
+        self.grid_style_bytes = next_catalog_bytes;
+        self.grid_styles.insert(style.id.clone(), style);
+        Ok(before)
+    }
+
+    fn remove_grid_style(&mut self, id: &str) -> Result<GridStyleResource, CommandError> {
+        let style = self
+            .grid_styles
+            .get(id)
+            .cloned()
+            .ok_or(CommandError::InvalidGridStyle)?;
+        if style.remote {
+            return Err(CommandError::InvalidGridStyle);
+        }
+        self.grid_styles.remove(id);
+        self.grid_style_bytes = self
+            .grid_style_bytes
             .saturating_sub(style.estimated_bytes());
         Ok(style)
     }
@@ -3718,6 +3905,12 @@ impl Document {
                     style: style.clone(),
                 })
             }
+            Command::RegisterGridStyle { style } => {
+                self.insert_grid_style(style.clone())?;
+                Ok(AppliedChange::GridStyleRegistered {
+                    style: style.clone(),
+                })
+            }
             Command::SetTextStyle { style } => {
                 let before = self.replace_text_style(style.clone())?;
                 Ok(AppliedChange::TextStyleChanged {
@@ -3750,6 +3943,17 @@ impl Document {
             Command::DeleteEffectStyle { id } => {
                 let style = self.remove_effect_style(id)?;
                 Ok(AppliedChange::EffectStyleDeleted { style })
+            }
+            Command::SetGridStyle { style } => {
+                let before = self.replace_grid_style(style.clone())?;
+                Ok(AppliedChange::GridStyleChanged {
+                    before,
+                    after: style.clone(),
+                })
+            }
+            Command::DeleteGridStyle { id } => {
+                let style = self.remove_grid_style(id)?;
+                Ok(AppliedChange::GridStyleDeleted { style })
             }
             _ => self.apply_non_style_command(command),
         }
@@ -5327,12 +5531,15 @@ impl Document {
             Command::RegisterTextStyle { .. }
             | Command::RegisterPaintStyle { .. }
             | Command::RegisterEffectStyle { .. }
+            | Command::RegisterGridStyle { .. }
             | Command::SetTextStyle { .. }
             | Command::DeleteTextStyle { .. }
             | Command::SetPaintStyle { .. }
             | Command::DeletePaintStyle { .. }
             | Command::SetEffectStyle { .. }
-            | Command::DeleteEffectStyle { .. } => {
+            | Command::DeleteEffectStyle { .. }
+            | Command::SetGridStyle { .. }
+            | Command::DeleteGridStyle { .. } => {
                 unreachable!("style commands are dispatched first")
             }
             Command::RegisterVariableCollection { collection } => {
@@ -5478,6 +5685,12 @@ impl Document {
                     .effect_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
+            AppliedChange::GridStyleRegistered { style } => {
+                self.grid_styles.remove(&style.id);
+                self.grid_style_bytes = self
+                    .grid_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
             AppliedChange::TextStyleChanged { before, after } => {
                 self.text_styles.insert(before.id.clone(), before.clone());
                 self.text_style_bytes = self
@@ -5516,6 +5729,19 @@ impl Document {
                     .effect_style_bytes
                     .saturating_add(style.estimated_bytes());
                 self.effect_styles.insert(style.id.clone(), style.clone());
+            }
+            AppliedChange::GridStyleChanged { before, after } => {
+                self.grid_styles.insert(before.id.clone(), before.clone());
+                self.grid_style_bytes = self
+                    .grid_style_bytes
+                    .saturating_sub(after.estimated_bytes())
+                    .saturating_add(before.estimated_bytes());
+            }
+            AppliedChange::GridStyleDeleted { style } => {
+                self.grid_style_bytes = self
+                    .grid_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.grid_styles.insert(style.id.clone(), style.clone());
             }
             AppliedChange::VariableCollectionRegistered { collection } => {
                 self.variable_collections.remove(&collection.id);
@@ -5648,6 +5874,12 @@ impl Document {
                     .saturating_add(style.estimated_bytes());
                 self.effect_styles.insert(style.id.clone(), style.clone());
             }
+            AppliedChange::GridStyleRegistered { style } => {
+                self.grid_style_bytes = self
+                    .grid_style_bytes
+                    .saturating_add(style.estimated_bytes());
+                self.grid_styles.insert(style.id.clone(), style.clone());
+            }
             AppliedChange::TextStyleChanged { before, after } => {
                 self.text_styles.insert(after.id.clone(), after.clone());
                 self.text_style_bytes = self
@@ -5685,6 +5917,19 @@ impl Document {
                 self.effect_styles.remove(&style.id);
                 self.effect_style_bytes = self
                     .effect_style_bytes
+                    .saturating_sub(style.estimated_bytes());
+            }
+            AppliedChange::GridStyleChanged { before, after } => {
+                self.grid_styles.insert(after.id.clone(), after.clone());
+                self.grid_style_bytes = self
+                    .grid_style_bytes
+                    .saturating_sub(before.estimated_bytes())
+                    .saturating_add(after.estimated_bytes());
+            }
+            AppliedChange::GridStyleDeleted { style } => {
+                self.grid_styles.remove(&style.id);
+                self.grid_style_bytes = self
+                    .grid_style_bytes
                     .saturating_sub(style.estimated_bytes());
             }
             AppliedChange::VariableCollectionRegistered { collection } => {
@@ -5982,10 +6227,13 @@ impl Document {
                 | Command::RegisterTextStyle { .. }
                 | Command::RegisterPaintStyle { .. }
                 | Command::RegisterEffectStyle { .. }
+                | Command::RegisterGridStyle { .. }
                 | Command::SetTextStyle { .. }
                 | Command::DeleteTextStyle { .. }
                 | Command::SetPaintStyle { .. }
                 | Command::DeletePaintStyle { .. }
+                | Command::SetGridStyle { .. }
+                | Command::DeleteGridStyle { .. }
                 | Command::SetEffectStyle { .. }
                 | Command::DeleteEffectStyle { .. }
                 | Command::RegisterVariableCollection { .. }
@@ -9141,10 +9389,13 @@ impl Command {
             Command::RegisterTextStyle { style } => style.estimated_bytes(),
             Command::RegisterPaintStyle { style } => style.estimated_bytes(),
             Command::RegisterEffectStyle { style } => style.estimated_bytes(),
+            Command::RegisterGridStyle { style } => style.estimated_bytes(),
             Command::SetTextStyle { style } => style.estimated_bytes(),
             Command::DeleteTextStyle { id } => id.len(),
             Command::SetPaintStyle { style } => style.estimated_bytes(),
             Command::DeletePaintStyle { id } => id.len(),
+            Command::SetGridStyle { style } => style.estimated_bytes(),
+            Command::DeleteGridStyle { id } => id.len(),
             Command::SetEffectStyle { style } => style.estimated_bytes(),
             Command::DeleteEffectStyle { id } => id.len(),
             Command::RegisterVariableCollection { collection } => collection.estimated_bytes(),
@@ -9367,6 +9618,60 @@ impl EffectStyleResource {
                 .map(String::len)
                 .sum::<usize>()
             + effect_stack_bytes(&self.effects)
+    }
+}
+
+impl GridStyleResource {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.id.len()
+            + self.key.len()
+            + self.name.len()
+            + self.description.len()
+            + self.description_markdown.len()
+            + self
+                .documentation_links
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+            + self.layout_grids.len() * std::mem::size_of::<LayoutGrid>()
+    }
+}
+
+fn valid_layout_grid(grid: &LayoutGrid) -> bool {
+    let valid_positive =
+        |value: Option<f64>| value.is_some_and(|value| value.is_finite() && value > 0.0);
+    let valid_non_negative =
+        |value: Option<f64>| value.is_none_or(|value| value.is_finite() && value >= 0.0);
+    let valid_color = grid.color.is_none_or(|color| {
+        color
+            .components
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            && color.alpha.is_finite()
+            && (0.0..=1.0).contains(&color.alpha)
+    });
+    if !valid_color {
+        return false;
+    }
+    match grid.pattern {
+        LayoutGridPattern::Grid => {
+            grid.alignment.is_none()
+                && valid_positive(grid.section_size)
+                && grid.count.is_none()
+                && grid.gutter_size.is_none()
+                && grid.offset.is_none()
+        }
+        LayoutGridPattern::Rows | LayoutGridPattern::Columns => {
+            grid.alignment.is_some()
+                && match grid.section_size {
+                    Some(value) => value.is_finite() && value > 0.0,
+                    None => grid.alignment == Some(LayoutGridAlignment::Stretch),
+                }
+                && grid.count.is_none_or(|count| (1..=4_096).contains(&count))
+                && valid_non_negative(grid.gutter_size)
+                && valid_non_negative(grid.offset)
+        }
     }
 }
 
@@ -9644,6 +9949,11 @@ impl AppliedChange {
                 before.estimated_bytes() + after.estimated_bytes()
             }
             AppliedChange::EffectStyleDeleted { style } => style.estimated_bytes(),
+            AppliedChange::GridStyleRegistered { style } => style.estimated_bytes(),
+            AppliedChange::GridStyleChanged { before, after } => {
+                before.estimated_bytes() + after.estimated_bytes()
+            }
+            AppliedChange::GridStyleDeleted { style } => style.estimated_bytes(),
             AppliedChange::VariableCollectionRegistered { collection } => {
                 collection.estimated_bytes()
             }
@@ -10350,6 +10660,63 @@ fn hash_effect_style_resource(hasher: &mut Sha256, resource: &EffectStyleResourc
     hash_text(hasher, &resource.description);
     hasher.update([u8::from(resource.remote)]);
     hash_effect_stack(hasher, &resource.effects);
+    hash_style_publishable_metadata(
+        hasher,
+        &resource.description_markdown,
+        &resource.documentation_links,
+    );
+}
+
+fn hash_grid_style_resource(hasher: &mut Sha256, resource: &GridStyleResource) {
+    hash_text(hasher, &resource.id);
+    hash_text(hasher, &resource.key);
+    hash_text(hasher, &resource.name);
+    hash_text(hasher, &resource.description);
+    hasher.update([u8::from(resource.remote)]);
+    hash_len(hasher, resource.layout_grids.len());
+    for grid in &resource.layout_grids {
+        hasher.update([match grid.pattern {
+            LayoutGridPattern::Rows => 0,
+            LayoutGridPattern::Columns => 1,
+            LayoutGridPattern::Grid => 2,
+        }]);
+        match grid.alignment {
+            Some(alignment) => hasher.update([
+                1,
+                match alignment {
+                    LayoutGridAlignment::Min => 0,
+                    LayoutGridAlignment::Max => 1,
+                    LayoutGridAlignment::Stretch => 2,
+                    LayoutGridAlignment::Center => 3,
+                },
+            ]),
+            None => hasher.update([0]),
+        }
+        for value in [grid.section_size, grid.gutter_size, grid.offset] {
+            match value {
+                Some(value) => {
+                    hasher.update([1]);
+                    hasher.update(value.to_bits().to_be_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+        match grid.count {
+            Some(count) => {
+                hasher.update([1]);
+                hasher.update(count.to_be_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        hasher.update([u8::from(grid.visible)]);
+        match grid.color {
+            Some(color) => {
+                hasher.update([1]);
+                hash_color(hasher, color);
+            }
+            None => hasher.update([0]),
+        }
+    }
     hash_style_publishable_metadata(
         hasher,
         &resource.description_markdown,
@@ -11761,6 +12128,18 @@ fn hash_command(hasher: &mut Sha256, command: &Command) {
             hasher.update(b"makefigma/editor-core/delete-effect-style-v1");
             hash_text(hasher, id);
         }
+        Command::RegisterGridStyle { style } => {
+            hasher.update(b"makefigma/editor-core/register-grid-style-v1");
+            hash_grid_style_resource(hasher, style);
+        }
+        Command::SetGridStyle { style } => {
+            hasher.update(b"makefigma/editor-core/set-grid-style-v1");
+            hash_grid_style_resource(hasher, style);
+        }
+        Command::DeleteGridStyle { id } => {
+            hasher.update(b"makefigma/editor-core/delete-grid-style-v1");
+            hash_text(hasher, id);
+        }
         Command::RegisterVariableCollection { collection } => {
             hasher.update([28]);
             hash_variable_collection(hasher, collection);
@@ -12895,6 +13274,32 @@ mod tests {
                 radius: 8.0,
                 visible: true,
             })],
+        }
+    }
+
+    fn grid_style_resource(id: &str) -> GridStyleResource {
+        GridStyleResource {
+            id: id.into(),
+            key: String::new(),
+            name: "12 columns".into(),
+            description: "Desktop layout grid".into(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
+            remote: false,
+            layout_grids: vec![LayoutGrid {
+                pattern: LayoutGridPattern::Columns,
+                alignment: Some(LayoutGridAlignment::Stretch),
+                section_size: None,
+                count: Some(12),
+                gutter_size: Some(24.0),
+                offset: Some(80.0),
+                visible: true,
+                color: Some(Color {
+                    space: ColorSpace::Srgb,
+                    components: [1.0, 0.0, 0.0],
+                    alpha: 0.1,
+                }),
+            }],
         }
     }
 
@@ -16346,6 +16751,67 @@ mod tests {
         assert!(document.effect_style("S:soft-shadow").is_none());
         document.undo().unwrap();
         assert_eq!(document.effect_style("S:soft-shadow"), Some(&changed));
+    }
+
+    #[test]
+    fn grid_style_catalog_is_hashed_bounded_and_undoable() {
+        let mut document = Document::empty();
+        let baseline = document.canonical_hash_hex();
+        let style = grid_style_resource("S:soft-shadow");
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::RegisterGridStyle {
+                        style: style.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.grid_style("S:soft-shadow"), Some(&style));
+        assert_ne!(document.canonical_hash_hex(), baseline);
+        document.undo().unwrap();
+        assert!(document.grid_style("S:soft-shadow").is_none());
+        assert_eq!(document.canonical_hash_hex(), baseline);
+        document.redo().unwrap();
+        assert_eq!(document.grid_style("S:soft-shadow"), Some(&style));
+
+        let mut changed = style.clone();
+        changed.layout_grids[0].gutter_size = Some(32.0);
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::SetGridStyle {
+                        style: changed.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.grid_style("S:soft-shadow"), Some(&changed));
+        document
+            .submit(
+                transaction(
+                    document.revision,
+                    vec![Command::DeleteGridStyle {
+                        id: changed.id.clone(),
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert!(document.grid_style("S:soft-shadow").is_none());
+        document.undo().unwrap();
+        assert_eq!(document.grid_style("S:soft-shadow"), Some(&changed));
+
+        let mut invalid = grid_style_resource("S:invalid-grid");
+        invalid.layout_grids[0].section_size = Some(f64::NAN);
+        assert_eq!(
+            document.seed_grid_style(invalid),
+            Err(CommandError::InvalidGridStyle)
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ export function assertFigmaPluginTypingsContract(
     const createdTextStyle: TextStyle = figma.createTextStyle();
     const createdPaintStyle: PaintStyle = figma.createPaintStyle();
     const createdEffectStyle: EffectStyle = figma.createEffectStyle();
+    const createdGridStyle: GridStyle = figma.createGridStyle();
     createdTextStyle.name = createdTextStyle.name;
     createdTextStyle.description = createdTextStyle.description;
     createdTextStyle.descriptionMarkdown = createdTextStyle.descriptionMarkdown;
@@ -33,12 +34,16 @@ export function assertFigmaPluginTypingsContract(
     createdPaintStyle.description = createdPaintStyle.description;
     createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
     createdEffectStyle.effects = createdEffectStyle.effects;
+    createdGridStyle.layoutGrids = createdGridStyle.layoutGrids;
     void figma.getLocalEffectStyles();
     void figma.getLocalEffectStylesAsync();
+    void figma.getLocalGridStyles();
+    void figma.getLocalGridStylesAsync();
     void createdPaintStyle.boundVariables?.paints;
     createdTextStyle.remove();
     createdPaintStyle.remove();
     createdEffectStyle.remove();
+    createdGridStyle.remove();
     const style = figma.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

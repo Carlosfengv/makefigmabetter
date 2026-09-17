@@ -405,6 +405,23 @@ export enum TextStyleLetterSpacingUnit {
   UNRECOGNIZED = -1,
 }
 
+export enum LayoutGridPattern {
+  LAYOUT_GRID_PATTERN_UNSPECIFIED = 0,
+  LAYOUT_GRID_PATTERN_ROWS = 1,
+  LAYOUT_GRID_PATTERN_COLUMNS = 2,
+  LAYOUT_GRID_PATTERN_GRID = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum LayoutGridAlignment {
+  LAYOUT_GRID_ALIGNMENT_UNSPECIFIED = 0,
+  LAYOUT_GRID_ALIGNMENT_MIN = 1,
+  LAYOUT_GRID_ALIGNMENT_MAX = 2,
+  LAYOUT_GRID_ALIGNMENT_STRETCH = 3,
+  LAYOUT_GRID_ALIGNMENT_CENTER = 4,
+  UNRECOGNIZED = -1,
+}
+
 export enum VariableResolvedType {
   VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0,
   VARIABLE_RESOLVED_TYPE_BOOLEAN = 1,
@@ -544,6 +561,8 @@ export interface DocumentSnapshot {
   variables: VariableResource[];
   /** Complete document-owned EffectStyle values using the bounded effect stack. */
   effectStyles: EffectStyleResource[];
+  /** Complete document-owned GridStyle values using finite canonical grids. */
+  gridStyles: GridStyleResource[];
 }
 
 export interface DocumentSnapshot_ExtensionsEntry {
@@ -1138,6 +1157,31 @@ export interface EffectStyleResource {
   documentationLinks: DocumentationLink[];
 }
 
+export interface LayoutGrid {
+  pattern: LayoutGridPattern;
+  alignment?: LayoutGridAlignment | undefined;
+  sectionSize?:
+    | number
+    | undefined;
+  /** Absence represents Figma's Infinity/auto count. */
+  count?: number | undefined;
+  gutterSize?: number | undefined;
+  offset?: number | undefined;
+  visible: boolean;
+  color?: Color | undefined;
+}
+
+export interface GridStyleResource {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  remote: boolean;
+  layoutGrids: LayoutGrid[];
+  descriptionMarkdown: string;
+  documentationLinks: DocumentationLink[];
+}
+
 export interface VariableMode {
   modeId: string;
   name: string;
@@ -1509,6 +1553,18 @@ export interface DeleteEffectStyle {
   styleId: string;
 }
 
+export interface RegisterGridStyle {
+  style?: GridStyleResource | undefined;
+}
+
+export interface SetGridStyle {
+  style?: GridStyleResource | undefined;
+}
+
+export interface DeleteGridStyle {
+  styleId: string;
+}
+
 export interface RegisterVariableCollection {
   collection?: VariableCollectionResource | undefined;
 }
@@ -1723,6 +1779,9 @@ export interface ResolvedOperation {
   registerEffectStyle?: RegisterEffectStyle | undefined;
   setEffectStyle?: SetEffectStyle | undefined;
   deleteEffectStyle?: DeleteEffectStyle | undefined;
+  registerGridStyle?: RegisterGridStyle | undefined;
+  setGridStyle?: SetGridStyle | undefined;
+  deleteGridStyle?: DeleteGridStyle | undefined;
 }
 
 export interface ResolvedOperationBatch {
@@ -2519,6 +2578,7 @@ function createBaseDocumentSnapshot(): DocumentSnapshot {
     variableCollections: [],
     variables: [],
     effectStyles: [],
+    gridStyles: [],
   };
 }
 
@@ -2568,6 +2628,9 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
     }
     for (const v of message.effectStyles) {
       EffectStyleResource.encode(v!, writer.uint32(178).fork()).join();
+    }
+    for (const v of message.gridStyles) {
+      GridStyleResource.encode(v!, writer.uint32(186).fork()).join();
     }
     return writer;
   },
@@ -2702,6 +2765,14 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
           message.effectStyles.push(EffectStyleResource.decode(reader, reader.uint32()));
           continue;
         }
+        case 23: {
+          if (tag !== 186) {
+            break;
+          }
+
+          message.gridStyles.push(GridStyleResource.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2740,6 +2811,7 @@ export const DocumentSnapshot: MessageFns<DocumentSnapshot> = {
       [];
     message.variables = object.variables?.map((e) => VariableResource.fromPartial(e)) || [];
     message.effectStyles = object.effectStyles?.map((e) => EffectStyleResource.fromPartial(e)) || [];
+    message.gridStyles = object.gridStyles?.map((e) => GridStyleResource.fromPartial(e)) || [];
     return message;
   },
 };
@@ -6990,6 +7062,284 @@ export const EffectStyleResource: MessageFns<EffectStyleResource> = {
   },
 };
 
+function createBaseLayoutGrid(): LayoutGrid {
+  return {
+    pattern: 0,
+    alignment: undefined,
+    sectionSize: undefined,
+    count: undefined,
+    gutterSize: undefined,
+    offset: undefined,
+    visible: false,
+    color: undefined,
+  };
+}
+
+export const LayoutGrid: MessageFns<LayoutGrid> = {
+  encode(message: LayoutGrid, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.pattern !== 0) {
+      writer.uint32(8).int32(message.pattern);
+    }
+    if (message.alignment !== undefined) {
+      writer.uint32(16).int32(message.alignment);
+    }
+    if (message.sectionSize !== undefined) {
+      writer.uint32(25).double(message.sectionSize);
+    }
+    if (message.count !== undefined) {
+      writer.uint32(32).uint32(message.count);
+    }
+    if (message.gutterSize !== undefined) {
+      writer.uint32(41).double(message.gutterSize);
+    }
+    if (message.offset !== undefined) {
+      writer.uint32(49).double(message.offset);
+    }
+    if (message.visible !== false) {
+      writer.uint32(56).bool(message.visible);
+    }
+    if (message.color !== undefined) {
+      Color.encode(message.color, writer.uint32(66).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LayoutGrid {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLayoutGrid();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.pattern = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.alignment = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.sectionSize = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.count = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.gutterSize = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.offset = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.visible = reader.bool();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.color = Color.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<LayoutGrid>, I>>(base?: I): LayoutGrid {
+    return LayoutGrid.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LayoutGrid>, I>>(object: I): LayoutGrid {
+    const message = createBaseLayoutGrid();
+    message.pattern = object.pattern ?? 0;
+    message.alignment = object.alignment ?? undefined;
+    message.sectionSize = object.sectionSize ?? undefined;
+    message.count = object.count ?? undefined;
+    message.gutterSize = object.gutterSize ?? undefined;
+    message.offset = object.offset ?? undefined;
+    message.visible = object.visible ?? false;
+    message.color = (object.color !== undefined && object.color !== null) ? Color.fromPartial(object.color) : undefined;
+    return message;
+  },
+};
+
+function createBaseGridStyleResource(): GridStyleResource {
+  return {
+    id: "",
+    key: "",
+    name: "",
+    description: "",
+    remote: false,
+    layoutGrids: [],
+    descriptionMarkdown: "",
+    documentationLinks: [],
+  };
+}
+
+export const GridStyleResource: MessageFns<GridStyleResource> = {
+  encode(message: GridStyleResource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.key !== "") {
+      writer.uint32(18).string(message.key);
+    }
+    if (message.name !== "") {
+      writer.uint32(26).string(message.name);
+    }
+    if (message.description !== "") {
+      writer.uint32(34).string(message.description);
+    }
+    if (message.remote !== false) {
+      writer.uint32(40).bool(message.remote);
+    }
+    for (const v of message.layoutGrids) {
+      LayoutGrid.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.descriptionMarkdown !== "") {
+      writer.uint32(58).string(message.descriptionMarkdown);
+    }
+    for (const v of message.documentationLinks) {
+      DocumentationLink.encode(v!, writer.uint32(66).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GridStyleResource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGridStyleResource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.remote = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.layoutGrids.push(LayoutGrid.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.descriptionMarkdown = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.documentationLinks.push(DocumentationLink.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GridStyleResource>, I>>(base?: I): GridStyleResource {
+    return GridStyleResource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GridStyleResource>, I>>(object: I): GridStyleResource {
+    const message = createBaseGridStyleResource();
+    message.id = object.id ?? "";
+    message.key = object.key ?? "";
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.remote = object.remote ?? false;
+    message.layoutGrids = object.layoutGrids?.map((e) => LayoutGrid.fromPartial(e)) || [];
+    message.descriptionMarkdown = object.descriptionMarkdown ?? "";
+    message.documentationLinks = object.documentationLinks?.map((e) => DocumentationLink.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseVariableMode(): VariableMode {
   return { modeId: "", name: "" };
 }
@@ -10949,6 +11299,148 @@ export const DeleteEffectStyle: MessageFns<DeleteEffectStyle> = {
   },
 };
 
+function createBaseRegisterGridStyle(): RegisterGridStyle {
+  return { style: undefined };
+}
+
+export const RegisterGridStyle: MessageFns<RegisterGridStyle> = {
+  encode(message: RegisterGridStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      GridStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterGridStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterGridStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = GridStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterGridStyle>, I>>(base?: I): RegisterGridStyle {
+    return RegisterGridStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterGridStyle>, I>>(object: I): RegisterGridStyle {
+    const message = createBaseRegisterGridStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? GridStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSetGridStyle(): SetGridStyle {
+  return { style: undefined };
+}
+
+export const SetGridStyle: MessageFns<SetGridStyle> = {
+  encode(message: SetGridStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.style !== undefined) {
+      GridStyleResource.encode(message.style, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetGridStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetGridStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.style = GridStyleResource.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SetGridStyle>, I>>(base?: I): SetGridStyle {
+    return SetGridStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetGridStyle>, I>>(object: I): SetGridStyle {
+    const message = createBaseSetGridStyle();
+    message.style = (object.style !== undefined && object.style !== null)
+      ? GridStyleResource.fromPartial(object.style)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDeleteGridStyle(): DeleteGridStyle {
+  return { styleId: "" };
+}
+
+export const DeleteGridStyle: MessageFns<DeleteGridStyle> = {
+  encode(message: DeleteGridStyle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.styleId !== "") {
+      writer.uint32(10).string(message.styleId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteGridStyle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteGridStyle();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.styleId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteGridStyle>, I>>(base?: I): DeleteGridStyle {
+    return DeleteGridStyle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteGridStyle>, I>>(object: I): DeleteGridStyle {
+    const message = createBaseDeleteGridStyle();
+    message.styleId = object.styleId ?? "";
+    return message;
+  },
+};
+
 function createBaseRegisterVariableCollection(): RegisterVariableCollection {
   return { collection: undefined };
 }
@@ -12417,6 +12909,9 @@ function createBaseResolvedOperation(): ResolvedOperation {
     registerEffectStyle: undefined,
     setEffectStyle: undefined,
     deleteEffectStyle: undefined,
+    registerGridStyle: undefined,
+    setGridStyle: undefined,
+    deleteGridStyle: undefined,
   };
 }
 
@@ -12550,6 +13045,15 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
     }
     if (message.deleteEffectStyle !== undefined) {
       DeleteEffectStyle.encode(message.deleteEffectStyle, writer.uint32(346).fork()).join();
+    }
+    if (message.registerGridStyle !== undefined) {
+      RegisterGridStyle.encode(message.registerGridStyle, writer.uint32(354).fork()).join();
+    }
+    if (message.setGridStyle !== undefined) {
+      SetGridStyle.encode(message.setGridStyle, writer.uint32(362).fork()).join();
+    }
+    if (message.deleteGridStyle !== undefined) {
+      DeleteGridStyle.encode(message.deleteGridStyle, writer.uint32(370).fork()).join();
     }
     return writer;
   },
@@ -12905,6 +13409,30 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
           message.deleteEffectStyle = DeleteEffectStyle.decode(reader, reader.uint32());
           continue;
         }
+        case 44: {
+          if (tag !== 354) {
+            break;
+          }
+
+          message.registerGridStyle = RegisterGridStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 45: {
+          if (tag !== 362) {
+            break;
+          }
+
+          message.setGridStyle = SetGridStyle.decode(reader, reader.uint32());
+          continue;
+        }
+        case 46: {
+          if (tag !== 370) {
+            break;
+          }
+
+          message.deleteGridStyle = DeleteGridStyle.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13054,6 +13582,15 @@ export const ResolvedOperation: MessageFns<ResolvedOperation> = {
       : undefined;
     message.deleteEffectStyle = (object.deleteEffectStyle !== undefined && object.deleteEffectStyle !== null)
       ? DeleteEffectStyle.fromPartial(object.deleteEffectStyle)
+      : undefined;
+    message.registerGridStyle = (object.registerGridStyle !== undefined && object.registerGridStyle !== null)
+      ? RegisterGridStyle.fromPartial(object.registerGridStyle)
+      : undefined;
+    message.setGridStyle = (object.setGridStyle !== undefined && object.setGridStyle !== null)
+      ? SetGridStyle.fromPartial(object.setGridStyle)
+      : undefined;
+    message.deleteGridStyle = (object.deleteGridStyle !== undefined && object.deleteGridStyle !== null)
+      ? DeleteGridStyle.fromPartial(object.deleteGridStyle)
       : undefined;
     return message;
   },

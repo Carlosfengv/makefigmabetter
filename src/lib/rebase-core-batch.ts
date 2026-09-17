@@ -44,10 +44,15 @@ export function rebaseCoreBatchForSnapshot(currentNodes: readonly CanvasNode[], 
     if (command.type === "registerEffectStyle") {
       return { type: "registerEffectStyle", style: structuredClone(command.style) };
     }
+    if (command.type === "registerGridStyle") {
+      return { type: "registerGridStyle", style: structuredClone(command.style) };
+    }
     if (command.type === "setTextStyle") return { type: "setTextStyle", style: structuredClone(command.style) };
     if (command.type === "deleteTextStyle") return { type: "deleteTextStyle", id: command.id };
     if (command.type === "setPaintStyle") return { type: "setPaintStyle", style: structuredClone(command.style) };
     if (command.type === "deletePaintStyle") return { type: "deletePaintStyle", id: command.id };
+    if (command.type === "setGridStyle") return { type: "setGridStyle", style: structuredClone(command.style) };
+    if (command.type === "deleteGridStyle") return { type: "deleteGridStyle", id: command.id };
     if (command.type === "setEffectStyle") return { type: "setEffectStyle", style: structuredClone(command.style) };
     if (command.type === "deleteEffectStyle") return { type: "deleteEffectStyle", id: command.id };
     if (command.type === "registerVariableCollection") {

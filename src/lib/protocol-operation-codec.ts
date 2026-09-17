@@ -20,6 +20,8 @@ import {
   GridItemsPositioning as ProtoGridItemsPositioning,
   GridAutoTracks as ProtoGridAutoTracks,
   GridChildAlignment as ProtoGridChildAlignment,
+  LayoutGridPattern as ProtoLayoutGridPattern,
+  LayoutGridAlignment as ProtoLayoutGridAlignment,
   LineHeightUnit as ProtoLineHeightUnit,
   LeadingTrim as ProtoLeadingTrim,
   TextListType as ProtoTextListType,
@@ -41,7 +43,7 @@ import {
   type PaintStack as ProtoPaintStack,
   type ResolvedOperation,
 } from "@makefigma/protocol-types";
-import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentEffectStyleResource, type DocumentFontFaceMetadata, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVariableCollectionResource, type DocumentVariableResource, type DocumentVariableValue, type DocumentVectorPath } from "./editor-protocol";
+import { DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex, type CanvasPage, type DocumentAutoLayout, type DocumentBooleanOperation, type DocumentColor, type DocumentConstraints, type DocumentDropShadow, type DocumentEffect, type DocumentEffectStyleResource, type DocumentFontFaceMetadata, type DocumentGridStyleResource, type DocumentLayoutGrid, type DocumentPaint, type DocumentPaintStack, type DocumentPaintStyleResource, type DocumentParametricShape, type DocumentTextProperties, type DocumentTextStyleResource, type DocumentVariableCollectionResource, type DocumentVariableResource, type DocumentVariableValue, type DocumentVectorPath } from "./editor-protocol";
 import { sha256Bytes } from "./sha256";
 import type { CoreBatchCommand, CoreProjectionNode } from "./transaction-batch";
 import { clipsChildren } from "./node-capabilities";
@@ -152,6 +154,9 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "registerEffectStyle") {
     return [{ registerEffectStyle: { style: effectStyleResourceProto(command.style) } }];
   }
+  if (command.type === "registerGridStyle") {
+    return [{ registerGridStyle: { style: gridStyleResourceProto(command.style) } }];
+  }
   if (command.type === "setTextStyle") {
     return [{ setTextStyle: { style: textStyleResourceProto(command.style) } }];
   }
@@ -169,6 +174,12 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   }
   if (command.type === "deleteEffectStyle") {
     return [{ deleteEffectStyle: { styleId: command.id } }];
+  }
+  if (command.type === "setGridStyle") {
+    return [{ setGridStyle: { style: gridStyleResourceProto(command.style) } }];
+  }
+  if (command.type === "deleteGridStyle") {
+    return [{ deleteGridStyle: { styleId: command.id } }];
   }
   if (command.type === "registerVariableCollection") {
     return [{ registerVariableCollection: { collection: variableCollectionResourceProto(command.collection) } }];
@@ -326,6 +337,41 @@ function effectStyleResourceProto(resource: DocumentEffectStyleResource) {
     documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
     remote: resource.remote,
     effects: effectStackProto(resource.effects),
+  };
+}
+
+function gridStyleResourceProto(resource: DocumentGridStyleResource) {
+  return {
+    id: resource.id,
+    key: resource.key,
+    name: resource.name,
+    description: resource.description,
+    descriptionMarkdown: resource.descriptionMarkdown,
+    documentationLinks: resource.documentationLinks.map((link) => ({ uri: link.uri })),
+    remote: resource.remote,
+    layoutGrids: resource.layoutGrids.map(layoutGridProto),
+  };
+}
+
+function layoutGridProto(grid: DocumentLayoutGrid) {
+  return {
+    pattern: grid.pattern === "rows"
+      ? ProtoLayoutGridPattern.LAYOUT_GRID_PATTERN_ROWS
+      : grid.pattern === "columns"
+        ? ProtoLayoutGridPattern.LAYOUT_GRID_PATTERN_COLUMNS
+        : ProtoLayoutGridPattern.LAYOUT_GRID_PATTERN_GRID,
+    alignment: grid.pattern === "grid" ? undefined : {
+      min: ProtoLayoutGridAlignment.LAYOUT_GRID_ALIGNMENT_MIN,
+      max: ProtoLayoutGridAlignment.LAYOUT_GRID_ALIGNMENT_MAX,
+      stretch: ProtoLayoutGridAlignment.LAYOUT_GRID_ALIGNMENT_STRETCH,
+      center: ProtoLayoutGridAlignment.LAYOUT_GRID_ALIGNMENT_CENTER,
+    }[grid.alignment],
+    sectionSize: grid.sectionSize,
+    count: grid.pattern === "grid" ? undefined : grid.count,
+    gutterSize: grid.pattern === "grid" ? undefined : grid.gutterSize,
+    offset: grid.pattern === "grid" ? undefined : grid.offset,
+    visible: grid.visible,
+    color: grid.color ? colorProto(grid.color) : undefined,
   };
 }
 

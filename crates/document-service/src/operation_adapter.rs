@@ -5,9 +5,10 @@ use editor_core::{
     ActorId, Appearance, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, Command, ConstraintType, Constraints, DropShadow, Effect,
     EffectStyleResource, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
-    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    GridChildAlignment, GridItemsPositioning, GridStyleResource, GridTrack, HyperlinkTarget,
+    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutGrid, LayoutGridAlignment,
+    LayoutGridPattern, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId,
+    NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
     PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
     ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
     TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
@@ -54,6 +55,21 @@ pub fn commands_from_payload_with_semantics(
     {
         return Err(ServiceError::EngineSemanticsUnsupported {
             minimum: makefigma_document_codec::EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        });
+    }
+    if engine_semantics_version
+        < makefigma_document_codec::GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && batch.operations.iter().any(|operation| {
+            matches!(
+                operation.kind,
+                Some(v1::resolved_operation::Kind::RegisterGridStyle(_))
+                    | Some(v1::resolved_operation::Kind::SetGridStyle(_))
+                    | Some(v1::resolved_operation::Kind::DeleteGridStyle(_))
+            )
+        })
+    {
+        return Err(ServiceError::EngineSemanticsUnsupported {
+            minimum: makefigma_document_codec::GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
         });
     }
     if engine_semantics_version < makefigma_document_codec::GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION
@@ -1998,6 +2014,17 @@ fn command_from_proto(operation: v1::ResolvedOperation) -> Result<Command, Servi
             )?,
         }),
         Kind::DeleteEffectStyle(value) => Ok(Command::DeleteEffectStyle { id: value.style_id }),
+        Kind::RegisterGridStyle(value) => Ok(Command::RegisterGridStyle {
+            style: grid_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::SetGridStyle(value) => Ok(Command::SetGridStyle {
+            style: grid_style_resource_from_proto(
+                value.style.ok_or(ServiceError::InvalidEnvelope)?,
+            )?,
+        }),
+        Kind::DeleteGridStyle(value) => Ok(Command::DeleteGridStyle { id: value.style_id }),
         Kind::RegisterVariableCollection(value) => Ok(Command::RegisterVariableCollection {
             collection: variable_collection_from_proto(
                 value.collection.ok_or(ServiceError::InvalidEnvelope)?,
@@ -2853,6 +2880,58 @@ fn effect_style_resource_from_proto(
             .effects
             .into_iter()
             .map(effect_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn layout_grid_from_proto(grid: v1::LayoutGrid) -> Result<LayoutGrid, ServiceError> {
+    Ok(LayoutGrid {
+        pattern: match v1::LayoutGridPattern::try_from(grid.pattern) {
+            Ok(v1::LayoutGridPattern::Rows) => LayoutGridPattern::Rows,
+            Ok(v1::LayoutGridPattern::Columns) => LayoutGridPattern::Columns,
+            Ok(v1::LayoutGridPattern::Grid) => LayoutGridPattern::Grid,
+            _ => return Err(ServiceError::InvalidEnvelope),
+        },
+        alignment: grid
+            .alignment
+            .map(
+                |alignment| match v1::LayoutGridAlignment::try_from(alignment) {
+                    Ok(v1::LayoutGridAlignment::Min) => Ok(LayoutGridAlignment::Min),
+                    Ok(v1::LayoutGridAlignment::Max) => Ok(LayoutGridAlignment::Max),
+                    Ok(v1::LayoutGridAlignment::Stretch) => Ok(LayoutGridAlignment::Stretch),
+                    Ok(v1::LayoutGridAlignment::Center) => Ok(LayoutGridAlignment::Center),
+                    _ => Err(ServiceError::InvalidEnvelope),
+                },
+            )
+            .transpose()?,
+        section_size: grid.section_size,
+        count: grid.count,
+        gutter_size: grid.gutter_size,
+        offset: grid.offset,
+        visible: grid.visible,
+        color: grid.color.map(color_from_proto).transpose()?,
+    })
+}
+
+fn grid_style_resource_from_proto(
+    resource: v1::GridStyleResource,
+) -> Result<GridStyleResource, ServiceError> {
+    Ok(GridStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
+        remote: resource.remote,
+        layout_grids: resource
+            .layout_grids
+            .into_iter()
+            .map(layout_grid_from_proto)
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -6340,6 +6419,70 @@ mod tests {
                 Command::SetEffectStyle { style: changed },
                 Command::DeleteEffectStyle { id },
             ] if registered.name == "Elevation" && changed.effects.len() == 1 && id == "S:elevation"
+        ));
+    }
+
+    #[test]
+    fn grid_style_operations_require_semantics_sixty_five() {
+        let style = v1::GridStyleResource {
+            id: "S:columns".into(),
+            key: String::new(),
+            name: "Columns".into(),
+            description: String::new(),
+            description_markdown: String::new(),
+            documentation_links: Vec::new(),
+            remote: false,
+            layout_grids: vec![v1::LayoutGrid {
+                pattern: v1::LayoutGridPattern::Columns as i32,
+                alignment: Some(v1::LayoutGridAlignment::Stretch as i32),
+                section_size: None,
+                count: Some(12),
+                gutter_size: Some(24.0),
+                offset: Some(80.0),
+                visible: true,
+                color: None,
+            }],
+        };
+        let payload = v1::ResolvedOperationBatch {
+            operations: vec![
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::RegisterGridStyle(
+                        v1::RegisterGridStyle {
+                            style: Some(style.clone()),
+                        },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::SetGridStyle(
+                        v1::SetGridStyle { style: Some(style) },
+                    )),
+                },
+                v1::ResolvedOperation {
+                    kind: Some(v1::resolved_operation::Kind::DeleteGridStyle(
+                        v1::DeleteGridStyle {
+                            style_id: "S:columns".into(),
+                        },
+                    )),
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        assert!(
+            matches!(commands_from_payload_with_semantics(&payload, makefigma_document_codec::GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1), Err(ServiceError::EngineSemanticsUnsupported { minimum }) if minimum == makefigma_document_codec::GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION)
+        );
+        assert!(matches!(
+            commands_from_payload_with_semantics(
+                &payload,
+                makefigma_document_codec::GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            )
+            .unwrap()
+            .as_slice(),
+            [
+                Command::RegisterGridStyle { style: registered },
+                Command::SetGridStyle { style: changed },
+                Command::DeleteGridStyle { id },
+            ] if registered.name == "Columns" && changed.layout_grids.len() == 1 && id == "S:columns"
         ));
     }
 

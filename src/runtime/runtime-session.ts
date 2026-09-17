@@ -34,6 +34,7 @@ import {
   type DocumentColor,
   type DocumentEffect,
   type DocumentEffectStyleResource,
+  type DocumentGridStyleResource,
   type DocumentEmbedMetadata,
   type DocumentFontReference,
   type DocumentInstanceMetadata,
@@ -60,6 +61,7 @@ import { DEFAULT_RUNTIME_FONT_NAME, isRuntimeFontName, runtimeFontNameForReferen
 import { RuntimeTextStyle, textStyleVariableValuePatch } from "./runtime-text-style";
 import { RuntimePaintStyle, materializePaintStyleVariableValues } from "./runtime-paint-style";
 import { RuntimeEffectStyle } from "./runtime-effect-style";
+import { RuntimeGridStyle } from "./runtime-grid-style";
 import { positionIdForLayerInsertion } from "../lib/layer-order";
 import { RuntimeTask, type RuntimeTaskControl } from "./runtime-task";
 import type { RuntimeWorkerViewState } from "./runtime-worker-bridge";
@@ -335,6 +337,11 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.projectionStore.listEffectStyles().find((style) => style.id === styleId);
   }
 
+  gridStyleResource(styleId: string): DocumentGridStyleResource | undefined {
+    this.assertOpen();
+    return this.projectionStore.listGridStyles().find((style) => style.id === styleId);
+  }
+
   variableResource(id: string): DocumentVariableResource | undefined {
     this.assertOpen();
     return this.projectionStore.listVariables().find((variable) => variable.id === id);
@@ -534,6 +541,22 @@ export class RuntimeSession implements RuntimeContainerHost {
     return new RuntimeEffectStyle(style, this.effectStyleHost());
   }
 
+  createGridStyle(): RuntimeGridStyle {
+    this.assertOpen();
+    const style: DocumentGridStyleResource = {
+      id: this.allocateRuntimeStyleId(),
+      key: "",
+      name: "Grid Style",
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      layoutGrids: [],
+    };
+    this.enqueueOperations([{ type: "registerGridStyle", style }]);
+    return new RuntimeGridStyle(style, this.gridStyleHost());
+  }
+
   setTextStyle(style: DocumentTextStyleResource): void {
     this.assertOpen();
     const current = this.textStyleResource(style.id);
@@ -596,19 +619,33 @@ export class RuntimeSession implements RuntimeContainerHost {
     this.enqueueOperations([{ type: "deleteEffectStyle", id: styleId }]);
   }
 
+  setGridStyle(style: DocumentGridStyleResource): void {
+    this.assertOpen();
+    const current = this.gridStyleResource(style.id);
+    if (!current || current.remote || style.remote || current.key !== style.key) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "setGridStyle", style }]);
+  }
+
+  deleteGridStyle(styleId: string): void {
+    this.assertSynchronousDocumentAccess();
+    const style = this.gridStyleResource(styleId);
+    if (!style || style.remote) throw runtimeError("UNSUPPORTED_FEATURE");
+    this.enqueueOperations([{ type: "deleteGridStyle", id: styleId }]);
+  }
+
   private allocateRuntimeStyleId(): string {
     const id = `S:${this.createId()}`;
-    if (this.textStyleResource(id) || this.paintStyleResource(id) || this.effectStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
+    if (this.textStyleResource(id) || this.paintStyleResource(id) || this.effectStyleResource(id) || this.gridStyleResource(id)) throw runtimeError("INVALID_ARGUMENT");
     return id;
   }
 
-  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null {
+  getStyleById(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | RuntimeGridStyle | null {
     this.assertOpen();
     if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
     return this.styleForId(styleId);
   }
 
-  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null> {
+  async getStyleByIdAsync(styleId: string): Promise<RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | RuntimeGridStyle | null> {
     this.assertOpen();
     if (typeof styleId !== "string" || !styleId) throw runtimeError("INVALID_ARGUMENT");
     await Promise.resolve();
@@ -651,13 +688,27 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.localEffectStyles();
   }
 
-  private styleForId(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | null {
+  getLocalGridStyles(): readonly RuntimeGridStyle[] {
+    this.assertOpen();
+    if (this.documentAccess !== "full-document") throw runtimeError("PAGE_NOT_LOADED");
+    return this.localGridStyles();
+  }
+
+  async getLocalGridStylesAsync(): Promise<readonly RuntimeGridStyle[]> {
+    this.assertOpen();
+    await Promise.resolve();
+    return this.localGridStyles();
+  }
+
+  private styleForId(styleId: string): RuntimeTextStyle | RuntimePaintStyle | RuntimeEffectStyle | RuntimeGridStyle | null {
     const resource = this.textStyleResource(styleId);
     if (resource) return new RuntimeTextStyle(resource, this.textStyleHost());
     const paintResource = this.paintStyleResource(styleId);
     if (paintResource) return new RuntimePaintStyle(paintResource, this.paintStyleHost());
     const effectResource = this.effectStyleResource(styleId);
-    return effectResource ? new RuntimeEffectStyle(effectResource, this.effectStyleHost()) : null;
+    if (effectResource) return new RuntimeEffectStyle(effectResource, this.effectStyleHost());
+    const gridResource = this.gridStyleResource(styleId);
+    return gridResource ? new RuntimeGridStyle(gridResource, this.gridStyleHost()) : null;
   }
 
   private localTextStyles(): readonly RuntimeTextStyle[] {
@@ -692,6 +743,27 @@ export class RuntimeSession implements RuntimeContainerHost {
       getSharedPluginData: (styleId: string, namespace: string, key: string): string => this.getStyleSharedPluginData("effect", styleId, namespace, key),
       setSharedPluginData: (styleId: string, namespace: string, key: string, value: string): void => this.setStyleSharedPluginData("effect", styleId, namespace, key, value),
       getSharedPluginDataKeys: (styleId: string, namespace: string): readonly string[] => this.getStyleSharedPluginDataKeys("effect", styleId, namespace),
+    };
+  }
+
+  private localGridStyles(): readonly RuntimeGridStyle[] {
+    const host = this.gridStyleHost();
+    return Object.freeze(this.projectionStore.listGridStyles()
+      .filter((style) => !style.remote)
+      .map((style) => new RuntimeGridStyle(style, host)));
+  }
+
+  private gridStyleHost() {
+    return {
+      gridStyleResource: (styleId: string): DocumentGridStyleResource | undefined => this.gridStyleResource(styleId),
+      setGridStyle: (style: DocumentGridStyleResource): void => this.setGridStyle(style),
+      deleteGridStyle: (styleId: string): void => this.deleteGridStyle(styleId),
+      getPluginData: (styleId: string, key: string): string => this.getStylePluginData("grid", styleId, key),
+      setPluginData: (styleId: string, key: string, value: string): void => this.setStylePluginData("grid", styleId, key, value),
+      getPluginDataKeys: (styleId: string): readonly string[] => this.getStylePluginDataKeys("grid", styleId),
+      getSharedPluginData: (styleId: string, namespace: string, key: string): string => this.getStyleSharedPluginData("grid", styleId, namespace, key),
+      setSharedPluginData: (styleId: string, namespace: string, key: string, value: string): void => this.setStyleSharedPluginData("grid", styleId, namespace, key, value),
+      getSharedPluginDataKeys: (styleId: string, namespace: string): readonly string[] => this.getStyleSharedPluginDataKeys("grid", styleId, namespace),
     };
   }
 
@@ -3218,32 +3290,32 @@ export class RuntimeSession implements RuntimeContainerHost {
     return this.runtimeExtensionDataKeys(node, this.runtimeSharedPluginDataPrefix(namespace));
   }
 
-  private getStylePluginData(kind: "text" | "paint" | "effect", styleId: string, key: string): string {
+  private getStylePluginData(kind: "text" | "paint" | "effect" | "grid", styleId: string, key: string): string {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataValue(node, this.runtimeStylePluginDataPrefix(kind, styleId), key);
   }
 
-  private setStylePluginData(kind: "text" | "paint" | "effect", styleId: string, key: string, value: string): void {
+  private setStylePluginData(kind: "text" | "paint" | "effect" | "grid", styleId: string, key: string, value: string): void {
     const node = this.runtimeStyleDataNode(kind, styleId);
     this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStylePluginDataPrefix(kind, styleId), key, value);
   }
 
-  private getStylePluginDataKeys(kind: "text" | "paint" | "effect", styleId: string): readonly string[] {
+  private getStylePluginDataKeys(kind: "text" | "paint" | "effect" | "grid", styleId: string): readonly string[] {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataKeys(node, this.runtimeStylePluginDataPrefix(kind, styleId));
   }
 
-  private getStyleSharedPluginData(kind: "text" | "paint" | "effect", styleId: string, namespace: string, key: string): string {
+  private getStyleSharedPluginData(kind: "text" | "paint" | "effect" | "grid", styleId: string, namespace: string, key: string): string {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataValue(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key);
   }
 
-  private setStyleSharedPluginData(kind: "text" | "paint" | "effect", styleId: string, namespace: string, key: string, value: string): void {
+  private setStyleSharedPluginData(kind: "text" | "paint" | "effect" | "grid", styleId: string, namespace: string, key: string, value: string): void {
     const node = this.runtimeStyleDataNode(kind, styleId);
     this.setRuntimeExtensionData(this.rootNodeId, node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace), key, value);
   }
 
-  private getStyleSharedPluginDataKeys(kind: "text" | "paint" | "effect", styleId: string, namespace: string): readonly string[] {
+  private getStyleSharedPluginDataKeys(kind: "text" | "paint" | "effect" | "grid", styleId: string, namespace: string): readonly string[] {
     const node = this.runtimeStyleDataNode(kind, styleId);
     return this.runtimeExtensionDataKeys(node, this.runtimeStyleSharedPluginDataPrefix(kind, styleId, namespace));
   }
@@ -3322,19 +3394,19 @@ export class RuntimeSession implements RuntimeContainerHost {
     return `${RUNTIME_RELAUNCH_DATA_PREFIX}${this.pluginId}`;
   }
 
-  private runtimeStyleDataNode(kind: "text" | "paint" | "effect", styleId: string): RuntimeProjectionNode {
+  private runtimeStyleDataNode(kind: "text" | "paint" | "effect" | "grid", styleId: string): RuntimeProjectionNode {
     this.assertOpen();
-    const style = kind === "text" ? this.textStyleResource(styleId) : kind === "paint" ? this.paintStyleResource(styleId) : this.effectStyleResource(styleId);
+    const style = kind === "text" ? this.textStyleResource(styleId) : kind === "paint" ? this.paintStyleResource(styleId) : kind === "effect" ? this.effectStyleResource(styleId) : this.gridStyleResource(styleId);
     if (!style) throw runtimeError("RESOURCE_UNAVAILABLE");
     return this.runtimeDataNode(this.rootNodeId);
   }
 
-  private runtimeStylePluginDataPrefix(kind: "text" | "paint" | "effect", styleId: string): string {
+  private runtimeStylePluginDataPrefix(kind: "text" | "paint" | "effect" | "grid", styleId: string): string {
     if (!this.pluginId) throw runtimeError("PERMISSION_DENIED");
     return `${RUNTIME_STYLE_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${this.pluginId}/`;
   }
 
-  private runtimeStyleSharedPluginDataPrefix(kind: "text" | "paint" | "effect", styleId: string, namespace: string): string {
+  private runtimeStyleSharedPluginDataPrefix(kind: "text" | "paint" | "effect" | "grid", styleId: string, namespace: string): string {
     if (!validRuntimePluginId(namespace)) throw runtimeError("INVALID_ARGUMENT");
     return `${RUNTIME_STYLE_SHARED_PLUGIN_DATA_PREFIX}${kind}/${runtimeStyleDataId(styleId)}/${namespace}/`;
   }

@@ -149,6 +149,28 @@ describe("protocol operation codec", () => {
     expect(batch.operations[2]?.deleteEffectStyle).toEqual({ styleId: effectStyle.id });
   });
 
+  it("serializes bounded GridStyle lifecycle operations", () => {
+    const gridStyle = {
+      id: "S:columns",
+      key: "",
+      name: "Columns",
+      description: "Desktop grid",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      layoutGrids: [{ pattern: "columns" as const, alignment: "stretch" as const, count: 12, gutterSize: 24, offset: 80, visible: true }],
+    };
+    const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([
+      { type: "registerGridStyle", style: gridStyle },
+      { type: "setGridStyle", style: { ...gridStyle, layoutGrids: [{ pattern: "grid" as const, sectionSize: 8, visible: false }] } },
+      { type: "deleteGridStyle", id: gridStyle.id },
+    ]));
+
+    expect(batch.operations[0]?.registerGridStyle?.style).toMatchObject({ id: gridStyle.id, layoutGrids: [{ count: 12, gutterSize: 24, offset: 80, visible: true }] });
+    expect(batch.operations[1]?.setGridStyle?.style).toMatchObject({ id: gridStyle.id, layoutGrids: [{ sectionSize: 8, visible: false }] });
+    expect(batch.operations[2]?.deleteGridStyle).toEqual({ styleId: gridStyle.id });
+  });
+
   it("serializes variable collection and variable registrations", () => {
     const collection = { id: "VC:tokens", key: "", name: "Tokens", remote: false, hiddenFromPublishing: false, modes: [{ modeId: "default", name: "Mode 1" }], defaultModeId: "default" };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload([

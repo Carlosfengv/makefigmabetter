@@ -7,9 +7,10 @@ use editor_core::{
     ActorId, ArcData, AssetId, AssetReference, AutoLayout, BackgroundBlur, BlendMode,
     BooleanOperation, ConstraintType, Constraints, Document, DocumentId, DropShadow, Effect,
     EffectStyleResource, FillRule, FontFaceMetadata, FontNameAlias, FontReference, GridAutoTracks,
-    GridChildAlignment, GridItemsPositioning, GridTrack, HyperlinkTarget, HyperlinkType,
-    InnerShadow, LayerBlur, LayoutAlignment, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit,
-    Node, NodeId, NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    GridChildAlignment, GridItemsPositioning, GridStyleResource, GridTrack, HyperlinkTarget,
+    HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutGrid, LayoutGridAlignment,
+    LayoutGridPattern, LayoutMode, LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId,
+    NodeKind, OpenTypeFeature, Page, PageId, PaintStyleLinks, PaintStyleResource,
     PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
     ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
     TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
@@ -91,8 +92,9 @@ pub const GRID_CHILD_ALIGNMENT_ENGINE_SEMANTICS_VERSION: u32 = 61;
 pub const GRID_CONTAINER_HUG_ENGINE_SEMANTICS_VERSION: u32 = 62;
 pub const TEXT_DECORATION_COLOR_VARIABLE_ENGINE_SEMANTICS_VERSION: u32 = 63;
 pub const EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 64;
+pub const GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION: u32 = 65;
 pub const NORMAL_BLEND_ISOLATION_EXTENSION: &str = "makefigma.blend.normal-isolation.v1";
-pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
+pub const CURRENT_ENGINE_SEMANTICS_VERSION: u32 = GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION;
 pub type Hash = [u8; 32];
 pub type Id = [u8; 16];
 
@@ -126,6 +128,11 @@ pub fn snapshot_from_document(
     document: &Document,
     engine_semantics_version: u32,
 ) -> Result<Vec<u8>, SnapshotError> {
+    if engine_semantics_version < GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && document.grid_styles().next().is_some()
+    {
+        return Err(SnapshotError::UnsupportedEngineSemantics);
+    }
     if engine_semantics_version < EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
         && document.effect_styles().next().is_some()
     {
@@ -726,6 +733,10 @@ pub fn snapshot_from_document(
             .effect_styles()
             .map(effect_style_resource_to_proto)
             .collect(),
+        grid_styles: document
+            .grid_styles()
+            .map(grid_style_resource_to_proto)
+            .collect(),
     }
     .encode_to_vec())
 }
@@ -955,6 +966,11 @@ pub fn document_from_snapshot_with_engine_semantics(
     {
         return Err(SnapshotError::Invalid);
     }
+    if declared_engine_semantics_version < GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION
+        && !snapshot.grid_styles.is_empty()
+    {
+        return Err(SnapshotError::Invalid);
+    }
     if declared_engine_semantics_version < PAINT_STYLE_VARIABLE_BINDINGS_ENGINE_SEMANTICS_VERSION
         && snapshot
             .paint_styles
@@ -999,6 +1015,11 @@ pub fn document_from_snapshot_with_engine_semantics(
     for style in snapshot.effect_styles {
         document
             .seed_effect_style(effect_style_resource_from_proto(style)?)
+            .map_err(|_| SnapshotError::Invalid)?;
+    }
+    for style in snapshot.grid_styles {
+        document
+            .seed_grid_style(grid_style_resource_from_proto(style)?)
             .map_err(|_| SnapshotError::Invalid)?;
     }
     let mut page_hashes = BTreeMap::new();
@@ -3040,6 +3061,101 @@ fn effect_style_resource_from_proto(
             .into_iter()
             .map(effect_from_proto)
             .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn grid_style_resource_to_proto(resource: &GridStyleResource) -> v1::GridStyleResource {
+    v1::GridStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        remote: resource.remote,
+        layout_grids: resource
+            .layout_grids
+            .iter()
+            .map(layout_grid_to_proto)
+            .collect(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| v1::DocumentationLink { uri: uri.clone() })
+            .collect(),
+    }
+}
+
+fn grid_style_resource_from_proto(
+    resource: v1::GridStyleResource,
+) -> Result<GridStyleResource, SnapshotError> {
+    Ok(GridStyleResource {
+        id: resource.id,
+        key: resource.key,
+        name: resource.name,
+        description: resource.description,
+        description_markdown: resource.description_markdown,
+        documentation_links: resource
+            .documentation_links
+            .into_iter()
+            .map(|link| link.uri)
+            .collect(),
+        remote: resource.remote,
+        layout_grids: resource
+            .layout_grids
+            .into_iter()
+            .map(layout_grid_from_proto)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn layout_grid_to_proto(grid: &LayoutGrid) -> v1::LayoutGrid {
+    v1::LayoutGrid {
+        pattern: match grid.pattern {
+            LayoutGridPattern::Rows => v1::LayoutGridPattern::Rows as i32,
+            LayoutGridPattern::Columns => v1::LayoutGridPattern::Columns as i32,
+            LayoutGridPattern::Grid => v1::LayoutGridPattern::Grid as i32,
+        },
+        alignment: grid.alignment.map(|alignment| match alignment {
+            LayoutGridAlignment::Min => v1::LayoutGridAlignment::Min as i32,
+            LayoutGridAlignment::Max => v1::LayoutGridAlignment::Max as i32,
+            LayoutGridAlignment::Stretch => v1::LayoutGridAlignment::Stretch as i32,
+            LayoutGridAlignment::Center => v1::LayoutGridAlignment::Center as i32,
+        }),
+        section_size: grid.section_size,
+        count: grid.count,
+        gutter_size: grid.gutter_size,
+        offset: grid.offset,
+        visible: grid.visible,
+        color: grid.color.map(color_to_proto),
+    }
+}
+
+fn layout_grid_from_proto(grid: v1::LayoutGrid) -> Result<LayoutGrid, SnapshotError> {
+    Ok(LayoutGrid {
+        pattern: match v1::LayoutGridPattern::try_from(grid.pattern) {
+            Ok(v1::LayoutGridPattern::Rows) => LayoutGridPattern::Rows,
+            Ok(v1::LayoutGridPattern::Columns) => LayoutGridPattern::Columns,
+            Ok(v1::LayoutGridPattern::Grid) => LayoutGridPattern::Grid,
+            _ => return Err(SnapshotError::Invalid),
+        },
+        alignment: grid
+            .alignment
+            .map(
+                |alignment| match v1::LayoutGridAlignment::try_from(alignment) {
+                    Ok(v1::LayoutGridAlignment::Min) => Ok(LayoutGridAlignment::Min),
+                    Ok(v1::LayoutGridAlignment::Max) => Ok(LayoutGridAlignment::Max),
+                    Ok(v1::LayoutGridAlignment::Stretch) => Ok(LayoutGridAlignment::Stretch),
+                    Ok(v1::LayoutGridAlignment::Center) => Ok(LayoutGridAlignment::Center),
+                    _ => Err(SnapshotError::Invalid),
+                },
+            )
+            .transpose()?,
+        section_size: grid.section_size,
+        count: grid.count,
+        gutter_size: grid.gutter_size,
+        offset: grid.offset,
+        visible: grid.visible,
+        color: grid.color.map(color_from_proto).transpose()?,
     })
 }
 
@@ -7403,6 +7519,58 @@ mod tests {
                 181_u128.to_be_bytes(),
                 hash,
                 EFFECT_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+            ),
+            Err(SnapshotError::Invalid)
+        );
+    }
+
+    #[test]
+    fn grid_style_catalog_round_trips_and_requires_semantics_sixty_five() {
+        let mut document = Document::with_id(DocumentId(181));
+        let style = GridStyleResource {
+            id: "S:columns".into(),
+            key: "library-grid-key".into(),
+            name: "Columns".into(),
+            description: "Desktop grid".into(),
+            description_markdown: "**Desktop grid**".into(),
+            documentation_links: vec!["https://example.com/grid".into()],
+            remote: true,
+            layout_grids: vec![LayoutGrid {
+                pattern: LayoutGridPattern::Columns,
+                alignment: Some(LayoutGridAlignment::Stretch),
+                section_size: None,
+                count: Some(12),
+                gutter_size: Some(24.0),
+                offset: Some(80.0),
+                visible: true,
+                color: None,
+            }],
+        };
+        document.seed_grid_style(style.clone()).unwrap();
+        assert_eq!(
+            snapshot_from_document(&document, GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1),
+            Err(SnapshotError::UnsupportedEngineSemantics)
+        );
+        let hash = document.canonical_hash();
+        let snapshot =
+            snapshot_from_document(&document, GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION).unwrap();
+        let restored = document_from_snapshot_with_engine_semantics(
+            &snapshot,
+            181_u128.to_be_bytes(),
+            hash,
+            GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        assert_eq!(restored.grid_style("S:columns"), Some(&style));
+
+        let mut mislabeled = v1::DocumentSnapshot::decode(snapshot.as_slice()).unwrap();
+        mislabeled.engine_semantics_version = GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION - 1;
+        assert_eq!(
+            document_from_snapshot_with_engine_semantics(
+                &mislabeled.encode_to_vec(),
+                181_u128.to_be_bytes(),
+                hash,
+                GRID_STYLE_CATALOG_ENGINE_SEMANTICS_VERSION,
             ),
             Err(SnapshotError::Invalid)
         );

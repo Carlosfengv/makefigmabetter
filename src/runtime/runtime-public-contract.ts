@@ -15,6 +15,7 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
     const createdTextStyle = runtime.createTextStyle();
     const createdPaintStyle = runtime.createPaintStyle();
     const createdEffectStyle = runtime.createEffectStyle();
+    const createdGridStyle = runtime.createGridStyle();
     createdTextStyle.name = createdTextStyle.name;
     createdTextStyle.description = createdTextStyle.description;
     createdTextStyle.descriptionMarkdown = createdTextStyle.descriptionMarkdown;
@@ -22,12 +23,16 @@ export function assertRuntimePublicContract(runtime: FigmaCompatibleRuntime): {
     createdPaintStyle.description = createdPaintStyle.description;
     createdPaintStyle.descriptionMarkdown = createdPaintStyle.descriptionMarkdown;
     createdEffectStyle.effects = createdEffectStyle.effects;
+    createdGridStyle.layoutGrids = createdGridStyle.layoutGrids;
     void runtime.getLocalEffectStyles();
     void runtime.getLocalEffectStylesAsync();
+    void runtime.getLocalGridStyles();
+    void runtime.getLocalGridStylesAsync();
     void createdPaintStyle.boundVariables?.paints;
     createdTextStyle.remove();
     createdPaintStyle.remove();
     createdEffectStyle.remove();
+    createdGridStyle.remove();
     const style = runtime.getLocalTextStyles()[0];
     if (style) {
       void style.getPluginData("key");

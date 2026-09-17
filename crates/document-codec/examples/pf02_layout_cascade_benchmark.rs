@@ -96,10 +96,13 @@ fn collect_touched_node_ids(change: &AppliedChange, ids: &mut BTreeSet<NodeId>) 
         | AppliedChange::TextStyleRegistered { .. }
         | AppliedChange::PaintStyleRegistered { .. }
         | AppliedChange::EffectStyleRegistered { .. }
+        | AppliedChange::GridStyleRegistered { .. }
         | AppliedChange::TextStyleChanged { .. }
         | AppliedChange::TextStyleDeleted { .. }
         | AppliedChange::PaintStyleChanged { .. }
         | AppliedChange::PaintStyleDeleted { .. }
+        | AppliedChange::GridStyleChanged { .. }
+        | AppliedChange::GridStyleDeleted { .. }
         | AppliedChange::EffectStyleChanged { .. }
         | AppliedChange::EffectStyleDeleted { .. }
         | AppliedChange::VariableCollectionRegistered { .. }

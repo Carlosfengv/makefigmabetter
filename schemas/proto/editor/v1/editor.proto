@@ -87,6 +87,8 @@ message DocumentSnapshot {
   repeated VariableResource variables = 21;
   // Complete document-owned EffectStyle values using the bounded effect stack.
   repeated EffectStyleResource effect_styles = 22;
+  // Complete document-owned GridStyle values using finite canonical grids.
+  repeated GridStyleResource grid_styles = 23;
 }
 
 enum NodeKind {
@@ -869,6 +871,44 @@ message EffectStyleResource {
   repeated DocumentationLink documentation_links = 8;
 }
 
+enum LayoutGridPattern {
+  LAYOUT_GRID_PATTERN_UNSPECIFIED = 0;
+  LAYOUT_GRID_PATTERN_ROWS = 1;
+  LAYOUT_GRID_PATTERN_COLUMNS = 2;
+  LAYOUT_GRID_PATTERN_GRID = 3;
+}
+
+enum LayoutGridAlignment {
+  LAYOUT_GRID_ALIGNMENT_UNSPECIFIED = 0;
+  LAYOUT_GRID_ALIGNMENT_MIN = 1;
+  LAYOUT_GRID_ALIGNMENT_MAX = 2;
+  LAYOUT_GRID_ALIGNMENT_STRETCH = 3;
+  LAYOUT_GRID_ALIGNMENT_CENTER = 4;
+}
+
+message LayoutGrid {
+  LayoutGridPattern pattern = 1;
+  optional LayoutGridAlignment alignment = 2;
+  optional double section_size = 3;
+  // Absence represents Figma's Infinity/auto count.
+  optional uint32 count = 4;
+  optional double gutter_size = 5;
+  optional double offset = 6;
+  bool visible = 7;
+  optional Color color = 8;
+}
+
+message GridStyleResource {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  string description = 4;
+  bool remote = 5;
+  repeated LayoutGrid layout_grids = 6;
+  string description_markdown = 7;
+  repeated DocumentationLink documentation_links = 8;
+}
+
 enum VariableResolvedType {
   VARIABLE_RESOLVED_TYPE_UNSPECIFIED = 0;
   VARIABLE_RESOLVED_TYPE_BOOLEAN = 1;
@@ -1189,6 +1229,18 @@ message DeleteEffectStyle {
   string style_id = 1;
 }
 
+message RegisterGridStyle {
+  GridStyleResource style = 1;
+}
+
+message SetGridStyle {
+  GridStyleResource style = 1;
+}
+
+message DeleteGridStyle {
+  string style_id = 1;
+}
+
 message RegisterVariableCollection {
   VariableCollectionResource collection = 1;
 }
@@ -1375,6 +1427,9 @@ message ResolvedOperation {
     RegisterEffectStyle register_effect_style = 41;
     SetEffectStyle set_effect_style = 42;
     DeleteEffectStyle delete_effect_style = 43;
+    RegisterGridStyle register_grid_style = 44;
+    SetGridStyle set_grid_style = 45;
+    DeleteGridStyle delete_grid_style = 46;
   }
 }
 

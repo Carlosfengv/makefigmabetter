@@ -1,7 +1,7 @@
 import { runtimeError } from "./runtime-errors";
 import { validRuntimeStyleDocumentationLinks } from "./runtime-style-metadata";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
-import type { DocumentEffectStyleResource, DocumentPaintStyleResource, DocumentTextProperties, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
+import type { DocumentEffectStyleResource, DocumentGridStyleResource, DocumentLayoutGrid, DocumentPaintStyleResource, DocumentTextProperties, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
 import { matchesStructuralAggregateChildLayout, matchesStructuralReplacementLayout, structuralAggregateLayoutAdmission, structuralReplacementLayoutAdmission } from "../lib/auto-layout-normalization";
 
@@ -19,6 +19,7 @@ export type RuntimeProjection = Readonly<{
   textStyles?: readonly DocumentTextStyleResource[];
   paintStyles?: readonly DocumentPaintStyleResource[];
   effectStyles?: readonly DocumentEffectStyleResource[];
+  gridStyles?: readonly DocumentGridStyleResource[];
   variableCollections?: readonly DocumentVariableCollectionResource[];
   variables?: readonly DocumentVariableResource[];
 }>;
@@ -27,10 +28,13 @@ export type PendingProjectionOperation =
   | Readonly<{ type: "registerTextStyle"; style: DocumentTextStyleResource }>
   | Readonly<{ type: "registerPaintStyle"; style: DocumentPaintStyleResource }>
   | Readonly<{ type: "registerEffectStyle"; style: DocumentEffectStyleResource }>
+  | Readonly<{ type: "registerGridStyle"; style: DocumentGridStyleResource }>
   | Readonly<{ type: "setTextStyle"; style: DocumentTextStyleResource }>
   | Readonly<{ type: "deleteTextStyle"; id: string }>
   | Readonly<{ type: "setPaintStyle"; style: DocumentPaintStyleResource }>
   | Readonly<{ type: "deletePaintStyle"; id: string }>
+  | Readonly<{ type: "setGridStyle"; style: DocumentGridStyleResource }>
+  | Readonly<{ type: "deleteGridStyle"; id: string }>
   | Readonly<{ type: "setEffectStyle"; style: DocumentEffectStyleResource }>
   | Readonly<{ type: "deleteEffectStyle"; id: string }>
   | Readonly<{ type: "registerVariableCollection"; collection: DocumentVariableCollectionResource }>
@@ -169,6 +173,7 @@ export class RuntimeProjectionStore {
       this.listTextStyles(),
       this.listPaintStyles(),
       this.listEffectStyles(),
+      this.listGridStyles(),
       this.listVariableCollections(),
       this.listVariables(),
       [...this.composedNodeMap().values()],
@@ -280,6 +285,18 @@ export class RuntimeProjectionStore {
     return [...styles.values()];
   }
 
+  listGridStyles(): readonly DocumentGridStyleResource[] {
+    const styles = new Map((this.confirmed.gridStyles ?? []).map((value) => [value.id, value]));
+    for (const { transaction } of this.pending.values()) {
+      for (const operation of transaction.operations) {
+        if (operation.type === "registerGridStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "setGridStyle") styles.set(operation.style.id, operation.style);
+        if (operation.type === "deleteGridStyle") styles.delete(operation.id);
+      }
+    }
+    return [...styles.values()];
+  }
+
   listVariableCollections(): readonly DocumentVariableCollectionResource[] {
     const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
     for (const { transaction } of this.pending.values()) {
@@ -332,6 +349,7 @@ export class RuntimeProjectionStore {
     const textStyles = new Map((this.confirmed.textStyles ?? []).map((value) => [value.id, value]));
     const paintStyles = new Map((this.confirmed.paintStyles ?? []).map((value) => [value.id, value]));
     const effectStyles = new Map((this.confirmed.effectStyles ?? []).map((value) => [value.id, value]));
+    const gridStyles = new Map((this.confirmed.gridStyles ?? []).map((value) => [value.id, value]));
     const collections = new Map((this.confirmed.variableCollections ?? []).map((value) => [value.id, value]));
     const variables = new Map((this.confirmed.variables ?? []).map((value) => [value.id, value]));
     for (const [candidateId, entry] of this.pending) {
@@ -340,13 +358,14 @@ export class RuntimeProjectionStore {
         [...textStyles.values()],
         [...paintStyles.values()],
         [...effectStyles.values()],
+        [...gridStyles.values()],
         [...collections.values()],
         [...variables.values()],
         [...nodes.values()],
         transaction.operations,
         transaction.transactionId,
       );
-      applyResourceOperations(textStyles, paintStyles, effectStyles, collections, variables, transaction.operations);
+      applyResourceOperations(textStyles, paintStyles, effectStyles, gridStyles, collections, variables, transaction.operations);
       applyOperations(nodes, transaction.operations, transaction.transactionId);
     }
   }
@@ -356,6 +375,7 @@ function validateResourceOperations(
   baseTextStyles: readonly DocumentTextStyleResource[],
   basePaintStyles: readonly DocumentPaintStyleResource[],
   baseEffectStyles: readonly DocumentEffectStyleResource[],
+  baseGridStyles: readonly DocumentGridStyleResource[],
   baseCollections: readonly DocumentVariableCollectionResource[],
   baseVariables: readonly DocumentVariableResource[],
   baseNodes: readonly RuntimeProjectionNode[],
@@ -365,13 +385,14 @@ function validateResourceOperations(
   const textStyles = new Map(baseTextStyles.map((value) => [value.id, value]));
   const paintStyles = new Map(basePaintStyles.map((value) => [value.id, value]));
   const effectStyles = new Map(baseEffectStyles.map((value) => [value.id, value]));
+  const gridStyles = new Map(baseGridStyles.map((value) => [value.id, value]));
   const collections = new Map(baseCollections.map((value) => [value.id, value]));
   const variables = new Map(baseVariables.map((value) => [value.id, value]));
   const bindingNodes = effectiveVariableBindingNodes(baseNodes, operations);
   for (const operation of operations) {
     if (operation.type === "registerTextStyle") {
       const value = operation.style;
-      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id)
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id) || gridStyles.has(value.id)
         || !Number.isFinite(value.style.fontSize) || value.style.fontSize <= 0
         || !validTextStyleLetterSpacing(value) || !Number.isFinite(value.paragraph.paragraphSpacing)
         || !validTextStyleVariableBindings(value, variables)) {
@@ -393,7 +414,7 @@ function validateResourceOperations(
       textStyles.delete(operation.id);
     } else if (operation.type === "registerPaintStyle") {
       const value = operation.style;
-      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id)
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id) || gridStyles.has(value.id)
         || !value.paints || !Array.isArray(value.paints.layers)
         || !validPaintStyleVariableBindings(value, variables)) {
         throw runtimeError("INVALID_ARGUMENT", { transactionId });
@@ -413,7 +434,7 @@ function validateResourceOperations(
       paintStyles.delete(operation.id);
     } else if (operation.type === "registerEffectStyle") {
       const value = operation.style;
-      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id)
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id) || gridStyles.has(value.id)
         || !validPendingEffectStyle(value)) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       effectStyles.set(value.id, value);
     } else if (operation.type === "setEffectStyle") {
@@ -425,6 +446,20 @@ function validateResourceOperations(
     } else if (operation.type === "deleteEffectStyle") {
       if (effectStyles.get(operation.id)?.remote !== false) throw runtimeError("INVALID_ARGUMENT", { transactionId });
       effectStyles.delete(operation.id);
+    } else if (operation.type === "registerGridStyle") {
+      const value = operation.style;
+      if (!validPendingStyleIdentity(value) || value.remote || textStyles.has(value.id) || paintStyles.has(value.id) || effectStyles.has(value.id) || gridStyles.has(value.id)
+        || !validPendingGridStyle(value)) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      gridStyles.set(value.id, value);
+    } else if (operation.type === "setGridStyle") {
+      const value = operation.style;
+      const before = gridStyles.get(value.id);
+      if (!before || before.remote || value.remote || before.key !== value.key || !validPendingStyleIdentity(value)
+        || !validPendingGridStyle(value)) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      gridStyles.set(value.id, value);
+    } else if (operation.type === "deleteGridStyle") {
+      if (gridStyles.get(operation.id)?.remote !== false) throw runtimeError("INVALID_ARGUMENT", { transactionId });
+      gridStyles.delete(operation.id);
     } else if (operation.type === "registerVariableCollection") {
       const value = operation.collection;
       if (!value.id || !value.name.trim() || collections.has(value.id) || !value.modes.length || !value.modes.some((mode) => mode.modeId === value.defaultModeId)) {
@@ -511,7 +546,7 @@ function textPropertiesBindAnyVariable(properties: DocumentTextProperties | unde
     || Boolean(properties?.baseStyle?.textDecorationColor?.variableId && variableIds.has(properties.baseStyle.textDecorationColor.variableId));
 }
 
-function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource | DocumentEffectStyleResource): boolean {
+function validPendingStyleIdentity(value: DocumentTextStyleResource | DocumentPaintStyleResource | DocumentEffectStyleResource | DocumentGridStyleResource): boolean {
   const encoder = new TextEncoder();
   return Boolean(value.id && !value.id.includes("\0") && encoder.encode(value.id).byteLength <= 2_048
     && value.name.trim() && !value.name.includes("\0") && encoder.encode(value.name).byteLength <= 1_024
@@ -534,6 +569,24 @@ function validPendingEffectStyle(value: DocumentEffectStyleResource): boolean {
     const blur = effect.layerBlur ?? effect.backgroundBlur!;
     return Number.isFinite(blur.radius) && blur.radius >= 0 && blur.radius <= 256;
   });
+}
+
+function validPendingGridStyle(value: DocumentGridStyleResource): boolean {
+  return Array.isArray(value.layoutGrids) && value.layoutGrids.length <= 8
+    && value.layoutGrids.every(validPendingLayoutGrid);
+}
+
+function validPendingLayoutGrid(grid: DocumentLayoutGrid): boolean {
+  const color = grid.color;
+  if (color && (!color.components.every((value) => Number.isFinite(value) && value >= 0 && value <= 1)
+    || !Number.isFinite(color.alpha) || color.alpha < 0 || color.alpha > 1)) return false;
+  if (grid.pattern === "grid") return Number.isFinite(grid.sectionSize) && grid.sectionSize > 0;
+  return ["rows", "columns"].includes(grid.pattern)
+    && ["min", "max", "stretch", "center"].includes(grid.alignment)
+    && (grid.sectionSize === undefined ? grid.alignment === "stretch" : Number.isFinite(grid.sectionSize) && grid.sectionSize > 0)
+    && (grid.count === undefined || (Number.isInteger(grid.count) && grid.count >= 1 && grid.count <= 4096))
+    && (grid.gutterSize === undefined || (Number.isFinite(grid.gutterSize) && grid.gutterSize >= 0))
+    && (grid.offset === undefined || (Number.isFinite(grid.offset) && grid.offset >= 0));
 }
 
 function validTextStyleLetterSpacing(value: DocumentTextStyleResource): boolean {
@@ -608,6 +661,7 @@ function applyResourceOperations(
   textStyles: Map<string, DocumentTextStyleResource>,
   paintStyles: Map<string, DocumentPaintStyleResource>,
   effectStyles: Map<string, DocumentEffectStyleResource>,
+  gridStyles: Map<string, DocumentGridStyleResource>,
   collections: Map<string, DocumentVariableCollectionResource>,
   variables: Map<string, DocumentVariableResource>,
   operations: readonly PendingProjectionOperation[],
@@ -622,6 +676,9 @@ function applyResourceOperations(
     if (operation.type === "registerEffectStyle") effectStyles.set(operation.style.id, operation.style);
     if (operation.type === "setEffectStyle") effectStyles.set(operation.style.id, operation.style);
     if (operation.type === "deleteEffectStyle") effectStyles.delete(operation.id);
+    if (operation.type === "registerGridStyle") gridStyles.set(operation.style.id, operation.style);
+    if (operation.type === "setGridStyle") gridStyles.set(operation.style.id, operation.style);
+    if (operation.type === "deleteGridStyle") gridStyles.delete(operation.id);
     if (operation.type === "registerVariableCollection") collections.set(operation.collection.id, operation.collection);
     if (operation.type === "registerVariable") variables.set(operation.variable.id, operation.variable);
     if (operation.type === "setVariable") variables.set(operation.variable.id, operation.variable);
@@ -651,7 +708,7 @@ function validateOperations(
     (nodeId, node) => overlay.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerEffectStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "setEffectStyle" || operation.type === "deleteEffectStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerEffectStyle" || operation.type === "registerGridStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "setEffectStyle" || operation.type === "deleteEffectStyle" || operation.type === "setGridStyle" || operation.type === "deleteGridStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || read(operation.node.id)) {
@@ -794,7 +851,7 @@ function applyOperations(
     (nodeId, node) => nodes.set(nodeId, node),
   );
   for (const operation of operations) {
-    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerEffectStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "setEffectStyle" || operation.type === "deleteEffectStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
+    if (operation.type === "registerTextStyle" || operation.type === "registerPaintStyle" || operation.type === "registerEffectStyle" || operation.type === "registerGridStyle" || operation.type === "setTextStyle" || operation.type === "deleteTextStyle" || operation.type === "setPaintStyle" || operation.type === "deletePaintStyle" || operation.type === "setEffectStyle" || operation.type === "deleteEffectStyle" || operation.type === "setGridStyle" || operation.type === "deleteGridStyle" || operation.type === "registerVariableCollection" || operation.type === "registerVariable" || operation.type === "setVariable" || operation.type === "deleteVariable" || operation.type === "setVariableCollection" || operation.type === "deleteVariableCollection") continue;
     if (operation.type !== "update" && operation.type !== "remove") structural.invalidate();
     if (operation.type === "create" || operation.type === "boolean" || operation.type === "transformGroup" || operation.type === "componentSet") {
       if (!operation.node.id || !operation.node.type || nodes.has(operation.node.id)) {
@@ -1589,6 +1646,7 @@ function freezeProjection(projection: RuntimeProjection): RuntimeProjection {
   const textStyles = projection.textStyles?.map((style) => deepFreeze(structuredClone(style)));
   const paintStyles = projection.paintStyles?.map((style) => deepFreeze(structuredClone(style)));
   const effectStyles = projection.effectStyles?.map((style) => deepFreeze(structuredClone(style)));
+  const gridStyles = projection.gridStyles?.map((style) => deepFreeze(structuredClone(style)));
   const variableCollections = projection.variableCollections?.map((collection) => deepFreeze(structuredClone(collection)));
   const variables = projection.variables?.map((variable) => deepFreeze(structuredClone(variable)));
   return Object.freeze({
@@ -1597,6 +1655,7 @@ function freezeProjection(projection: RuntimeProjection): RuntimeProjection {
     ...(textStyles ? { textStyles: Object.freeze(textStyles) } : {}),
     ...(paintStyles ? { paintStyles: Object.freeze(paintStyles) } : {}),
     ...(effectStyles ? { effectStyles: Object.freeze(effectStyles) } : {}),
+    ...(gridStyles ? { gridStyles: Object.freeze(gridStyles) } : {}),
     ...(variableCollections ? { variableCollections: Object.freeze(variableCollections) } : {}),
     ...(variables ? { variables: Object.freeze(variables) } : {}),
   });

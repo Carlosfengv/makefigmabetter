@@ -113,6 +113,16 @@ describe("RuntimeWorkerBridge", () => {
       remote: false,
       effects: [{ layerBlur: { radius: 8, visible: true } }],
     };
+    const gridStyle = {
+      id: "S:grid",
+      key: "",
+      name: "Grid Style",
+      description: "",
+      descriptionMarkdown: "",
+      documentationLinks: [],
+      remote: false,
+      layoutGrids: [{ pattern: "grid" as const, sectionSize: 8, visible: true }],
+    };
 
     const pending = bridge.submit({
       transactionId: "tx-styles",
@@ -121,12 +131,15 @@ describe("RuntimeWorkerBridge", () => {
         { type: "registerTextStyle", style: textStyle },
         { type: "registerPaintStyle", style: paintStyle },
         { type: "registerEffectStyle", style: effectStyle },
+        { type: "registerGridStyle", style: gridStyle },
         { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
         { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
         { type: "setEffectStyle", style: { ...effectStyle, name: "Elevation" } },
+        { type: "setGridStyle", style: { ...gridStyle, name: "8px Grid" } },
         { type: "deleteTextStyle", id: textStyle.id },
         { type: "deletePaintStyle", id: paintStyle.id },
         { type: "deleteEffectStyle", id: effectStyle.id },
+        { type: "deleteGridStyle", id: gridStyle.id },
       ],
     });
     const commands = posted[0]!.transaction.commands;
@@ -134,23 +147,29 @@ describe("RuntimeWorkerBridge", () => {
       { type: "register-text-style", style: textStyle },
       { type: "register-paint-style", style: paintStyle },
       { type: "register-effect-style", style: effectStyle },
+      { type: "register-grid-style", style: gridStyle },
       { type: "set-text-style", style: { ...textStyle, name: "Body" } },
       { type: "set-paint-style", style: { ...paintStyle, name: "Brand" } },
       { type: "set-effect-style", style: { ...effectStyle, name: "Elevation" } },
+      { type: "set-grid-style", style: { ...gridStyle, name: "8px Grid" } },
       { type: "delete-text-style", id: textStyle.id },
       { type: "delete-paint-style", id: paintStyle.id },
       { type: "delete-effect-style", id: effectStyle.id },
+      { type: "delete-grid-style", id: gridStyle.id },
     ]);
     expect(resolveCoreBatch([], commands)?.batch).toEqual([
       { type: "registerTextStyle", style: textStyle },
       { type: "registerPaintStyle", style: paintStyle },
       { type: "registerEffectStyle", style: effectStyle },
+      { type: "registerGridStyle", style: gridStyle },
       { type: "setTextStyle", style: { ...textStyle, name: "Body" } },
       { type: "setPaintStyle", style: { ...paintStyle, name: "Brand" } },
       { type: "setEffectStyle", style: { ...effectStyle, name: "Elevation" } },
+      { type: "setGridStyle", style: { ...gridStyle, name: "8px Grid" } },
       { type: "deleteTextStyle", id: textStyle.id },
       { type: "deletePaintStyle", id: paintStyle.id },
       { type: "deleteEffectStyle", id: effectStyle.id },
+      { type: "deleteGridStyle", id: gridStyle.id },
     ]);
     bridge.close();
     await expect(pending).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RUNTIME_CLOSED"));

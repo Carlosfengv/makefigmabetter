@@ -8,9 +8,10 @@ use editor_core::{
     BackgroundBlur, BlendMode, BooleanOperation, Command, ConstraintType, Constraints,
     DEFAULT_PAGE_ID, Document, DocumentId, DropShadow, Effect, EffectStyleResource, FillRule,
     FontFaceMetadata, FontReference, GridAutoTracks, GridChildAlignment, GridItemsPositioning,
-    GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur, LayoutAlignment, LayoutMode,
-    LayoutSizing, LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature,
-    OperationEnvelope, OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
+    GridStyleResource, GridTrack, HyperlinkTarget, HyperlinkType, InnerShadow, LayerBlur,
+    LayoutAlignment, LayoutGrid, LayoutGridAlignment, LayoutGridPattern, LayoutMode, LayoutSizing,
+    LeadingTrim, LineHeightUnit, Node, NodeId, NodeKind, OpenTypeFeature, OperationEnvelope,
+    OperationId, Origin, Page, PageId, PaintStyleLinks, PaintStyleResource,
     PaintStyleVariableBinding, ParagraphListType, ParagraphStyle, ParagraphStyleRun,
     ParametricShape, PointId, PositionId, StrokeAlign, StrokeCap, StrokeJoin, TextAlign,
     TextAutoSize, TextCase, TextDecoration, TextDecorationColor, TextDecorationOffset,
@@ -311,6 +312,11 @@ impl DocumentEngine {
                         style: effect_style_resource_from_projection(&style)?,
                     });
                 }
+                BatchCommand::RegisterGridStyle { style } => {
+                    commands.push(Command::RegisterGridStyle {
+                        style: grid_style_resource_from_projection(&style)?,
+                    });
+                }
                 BatchCommand::SetTextStyle { style } => {
                     commands.push(Command::SetTextStyle {
                         style: text_style_resource_from_projection(&style)?,
@@ -334,6 +340,14 @@ impl DocumentEngine {
                 }
                 BatchCommand::DeleteEffectStyle { id } => {
                     commands.push(Command::DeleteEffectStyle { id });
+                }
+                BatchCommand::SetGridStyle { style } => {
+                    commands.push(Command::SetGridStyle {
+                        style: grid_style_resource_from_projection(&style)?,
+                    });
+                }
+                BatchCommand::DeleteGridStyle { id } => {
+                    commands.push(Command::DeleteGridStyle { id });
                 }
                 BatchCommand::RegisterVariableCollection { collection } => {
                     commands.push(Command::RegisterVariableCollection {
@@ -951,6 +965,8 @@ struct CoreSnapshot {
     #[serde(default)]
     effect_styles: Option<Vec<ProjectionEffectStyleResource>>,
     #[serde(default)]
+    grid_styles: Option<Vec<ProjectionGridStyleResource>>,
+    #[serde(default)]
     variable_collections: Option<Vec<ProjectionVariableCollectionResource>>,
     #[serde(default)]
     variables: Option<Vec<ProjectionVariableResource>>,
@@ -960,7 +976,12 @@ struct CoreSnapshot {
 }
 
 fn validate_core_snapshot_version(snapshot: &CoreSnapshot) -> Result<(), &'static str> {
-    if !(1..=78).contains(&snapshot.schema_version)
+    if !(1..=79).contains(&snapshot.schema_version)
+        || (snapshot.schema_version < 79
+            && snapshot
+                .grid_styles
+                .as_ref()
+                .is_some_and(|styles| !styles.is_empty()))
         || (snapshot.schema_version < 78
             && snapshot
                 .effect_styles
@@ -1507,6 +1528,10 @@ fn default_document_color_profile() -> String {
     "srgb".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_document_id() -> String {
     "00000000-0000-0000-0000-000000000000".into()
 }
@@ -1960,6 +1985,61 @@ struct ProjectionPaintStyleResource {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectionGridStyleResource {
+    id: String,
+    #[serde(default)]
+    key: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    description_markdown: String,
+    #[serde(default)]
+    documentation_links: Vec<ProjectionDocumentationLink>,
+    #[serde(default)]
+    remote: bool,
+    layout_grids: Vec<ProjectionLayoutGrid>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProjectionLayoutGridPattern {
+    Rows,
+    Columns,
+    Grid,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProjectionLayoutGridAlignment {
+    Min,
+    Max,
+    Stretch,
+    Center,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionLayoutGrid {
+    pattern: ProjectionLayoutGridPattern,
+    #[serde(default)]
+    alignment: Option<ProjectionLayoutGridAlignment>,
+    #[serde(default)]
+    section_size: Option<f64>,
+    #[serde(default)]
+    count: Option<u32>,
+    #[serde(default)]
+    gutter_size: Option<f64>,
+    #[serde(default)]
+    offset: Option<f64>,
+    #[serde(default = "default_true")]
+    visible: bool,
+    #[serde(default)]
+    color: Option<ProjectionColor>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectionPaintStyleVariableBinding {
     paint_index: u32,
     #[serde(default)]
@@ -2300,6 +2380,9 @@ enum BatchCommand {
     RegisterEffectStyle {
         style: ProjectionEffectStyleResource,
     },
+    RegisterGridStyle {
+        style: ProjectionGridStyleResource,
+    },
     SetTextStyle {
         style: ProjectionTextStyleResource,
     },
@@ -2316,6 +2399,12 @@ enum BatchCommand {
         style: ProjectionEffectStyleResource,
     },
     DeleteEffectStyle {
+        id: String,
+    },
+    SetGridStyle {
+        style: ProjectionGridStyleResource,
+    },
+    DeleteGridStyle {
         id: String,
     },
     RegisterVariableCollection {
@@ -2505,7 +2594,9 @@ impl DocumentEngine {
 
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
-        let schema_version = if self.document.effect_styles().next().is_some() {
+        let schema_version = if self.document.grid_styles().next().is_some() {
+            79
+        } else if self.document.effect_styles().next().is_some() {
             78
         } else if self.document.nodes().any(|node| {
             self.document
@@ -2949,6 +3040,12 @@ impl DocumentEngine {
                     .map(projection_effect_style_resource)
                     .collect(),
             ),
+            grid_styles: Some(
+                self.document
+                    .grid_styles()
+                    .map(projection_grid_style_resource)
+                    .collect(),
+            ),
             variable_collections: Some(
                 self.document
                     .variable_collections()
@@ -3322,6 +3419,11 @@ impl DocumentEngine {
                 .seed_effect_style(effect_style_resource_from_projection(&style)?)
                 .map_err(core_error)?;
         }
+        for style in snapshot.grid_styles.clone().unwrap_or_default() {
+            document
+                .seed_grid_style(grid_style_resource_from_projection(&style)?)
+                .map_err(core_error)?;
+        }
         for node in snapshot.nodes {
             let page_id = node
                 .page_id
@@ -3474,10 +3576,13 @@ impl DocumentEngine {
                 | BatchCommand::RegisterTextStyle { .. }
                 | BatchCommand::RegisterPaintStyle { .. }
                 | BatchCommand::RegisterEffectStyle { .. }
+                | BatchCommand::RegisterGridStyle { .. }
                 | BatchCommand::SetTextStyle { .. }
                 | BatchCommand::DeleteTextStyle { .. }
                 | BatchCommand::SetPaintStyle { .. }
                 | BatchCommand::DeletePaintStyle { .. }
+                | BatchCommand::SetGridStyle { .. }
+                | BatchCommand::DeleteGridStyle { .. }
                 | BatchCommand::SetEffectStyle { .. }
                 | BatchCommand::DeleteEffectStyle { .. }
                 | BatchCommand::RegisterVariableCollection { .. }
@@ -6791,6 +6896,94 @@ fn effect_style_resource_from_projection(
             .iter()
             .cloned()
             .map(effect_from_projection)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn projection_layout_grid(grid: &LayoutGrid) -> ProjectionLayoutGrid {
+    ProjectionLayoutGrid {
+        pattern: match grid.pattern {
+            LayoutGridPattern::Rows => ProjectionLayoutGridPattern::Rows,
+            LayoutGridPattern::Columns => ProjectionLayoutGridPattern::Columns,
+            LayoutGridPattern::Grid => ProjectionLayoutGridPattern::Grid,
+        },
+        alignment: grid.alignment.map(|alignment| match alignment {
+            LayoutGridAlignment::Min => ProjectionLayoutGridAlignment::Min,
+            LayoutGridAlignment::Max => ProjectionLayoutGridAlignment::Max,
+            LayoutGridAlignment::Stretch => ProjectionLayoutGridAlignment::Stretch,
+            LayoutGridAlignment::Center => ProjectionLayoutGridAlignment::Center,
+        }),
+        section_size: grid.section_size,
+        count: grid.count,
+        gutter_size: grid.gutter_size,
+        offset: grid.offset,
+        visible: grid.visible,
+        color: grid.color.map(projection_color),
+    }
+}
+
+fn layout_grid_from_projection(grid: &ProjectionLayoutGrid) -> Result<LayoutGrid, JsValue> {
+    Ok(LayoutGrid {
+        pattern: match grid.pattern {
+            ProjectionLayoutGridPattern::Rows => LayoutGridPattern::Rows,
+            ProjectionLayoutGridPattern::Columns => LayoutGridPattern::Columns,
+            ProjectionLayoutGridPattern::Grid => LayoutGridPattern::Grid,
+        },
+        alignment: grid.alignment.map(|alignment| match alignment {
+            ProjectionLayoutGridAlignment::Min => LayoutGridAlignment::Min,
+            ProjectionLayoutGridAlignment::Max => LayoutGridAlignment::Max,
+            ProjectionLayoutGridAlignment::Stretch => LayoutGridAlignment::Stretch,
+            ProjectionLayoutGridAlignment::Center => LayoutGridAlignment::Center,
+        }),
+        section_size: grid.section_size,
+        count: grid.count,
+        gutter_size: grid.gutter_size,
+        offset: grid.offset,
+        visible: grid.visible,
+        color: grid.color.as_ref().map(color_from_projection).transpose()?,
+    })
+}
+
+fn projection_grid_style_resource(resource: &GridStyleResource) -> ProjectionGridStyleResource {
+    ProjectionGridStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|uri| ProjectionDocumentationLink { uri: uri.clone() })
+            .collect(),
+        remote: resource.remote,
+        layout_grids: resource
+            .layout_grids
+            .iter()
+            .map(projection_layout_grid)
+            .collect(),
+    }
+}
+
+fn grid_style_resource_from_projection(
+    resource: &ProjectionGridStyleResource,
+) -> Result<GridStyleResource, JsValue> {
+    Ok(GridStyleResource {
+        id: resource.id.clone(),
+        key: resource.key.clone(),
+        name: resource.name.clone(),
+        description: resource.description.clone(),
+        description_markdown: resource.description_markdown.clone(),
+        documentation_links: resource
+            .documentation_links
+            .iter()
+            .map(|link| link.uri.clone())
+            .collect(),
+        remote: resource.remote,
+        layout_grids: resource
+            .layout_grids
+            .iter()
+            .map(layout_grid_from_projection)
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -11927,6 +12120,56 @@ mod tests {
 
         let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
         mislabeled.schema_version = 77;
+        assert_eq!(
+            validate_core_snapshot_version(&mislabeled),
+            Err("UNSUPPORTED_CORE_SNAPSHOT")
+        );
+    }
+
+    #[test]
+    fn snapshot_v79_round_trips_the_grid_style_catalog_and_v78_rejects_it() {
+        let mut engine = DocumentEngine::new();
+        let commands = serde_json::json!([{
+            "type": "registerGridStyle",
+            "style": {
+                "id": "S:columns",
+                "key": "",
+                "name": "Columns",
+                "description": "Desktop grid",
+                "descriptionMarkdown": "",
+                "documentationLinks": [],
+                "remote": false,
+                "layoutGrids": [{
+                    "pattern": "columns",
+                    "alignment": "stretch",
+                    "count": 12,
+                    "gutterSize": 24.0,
+                    "offset": 80.0,
+                    "visible": true
+                }]
+            }
+        }]);
+        engine
+            .apply_transaction_json(
+                "00000000-0000-4000-8000-000000000079",
+                0,
+                &commands.to_string(),
+            )
+            .unwrap();
+
+        let snapshot = engine.snapshot_json();
+        assert!(snapshot.contains("\"schemaVersion\":79"));
+        assert!(snapshot.contains("\"gridStyles\":[{\"id\":\"S:columns\""));
+        let mut restored = DocumentEngine::new();
+        restored.load_snapshot_json(&snapshot).unwrap();
+        assert_eq!(restored.canonical_hash(), engine.canonical_hash());
+        assert_eq!(
+            restored.document.grid_style("S:columns").unwrap().name,
+            "Columns"
+        );
+
+        let mut mislabeled: CoreSnapshot = serde_json::from_str(&snapshot).unwrap();
+        mislabeled.schema_version = 78;
         assert_eq!(
             validate_core_snapshot_version(&mislabeled),
             Err("UNSUPPORTED_CORE_SNAPSHOT")
