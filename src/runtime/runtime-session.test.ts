@@ -3172,6 +3172,56 @@ describe("M1 RuntimeSession", () => {
     });
   });
 
+  it("preserves tiled image regions only when the flattened phase is exact", async () => {
+    const tileStack = () => ({ layers: [{
+      visible: true,
+      opacity: 1,
+      blendMode: "normal" as const,
+      image: {
+        assetId: "tile",
+        scaleMode: "tile" as const,
+        transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        rotationDegrees: 90 as const,
+      },
+    }] });
+    const projection = (offset: number): RuntimeProjection => ({
+      revision: 1,
+      nodes: [
+        {
+          id: "document",
+          type: "DOCUMENT",
+          name: "Document",
+          assets: [{ assetId: "tile", contentHash: "b".repeat(64), mediaType: "image/png", byteLength: 400, pixelWidth: 10, pixelHeight: 10 }],
+        },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "first", type: "RECTANGLE", name: "First", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fillStack: tileStack(), strokeWidth: 0 },
+        { id: "second", type: "RECTANGLE", name: "Second", parentId: "page", siblingIndex: 1, x: offset, y: 0, width: 20, height: 20, fillStack: tileStack(), strokeWidth: 0 },
+      ],
+    });
+    const exactProjection = projection(20);
+    const transport = new InMemoryTransport(exactProjection);
+    const session = new RuntimeSession({ sessionId: "flatten-tile-exact", projection: exactProjection, transport, scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("first"))!;
+    const second = (await session.getNodeByIdAsync("second"))!;
+
+    const flattened = session.flatten([first, second]);
+    expect(flattened.vectorNetwork.regions?.map((region) => region.fills?.[0])).toEqual([
+      expect.objectContaining({ type: "IMAGE", scaleMode: "TILE", scalingFactor: 1, rotation: 90 }),
+      expect.objectContaining({ type: "IMAGE", scaleMode: "TILE", scalingFactor: 1, rotation: 90 }),
+    ]);
+
+    const shiftedProjection = projection(25);
+    const shiftedSession = new RuntimeSession({
+      sessionId: "flatten-tile-shifted",
+      projection: shiftedProjection,
+      transport: new InMemoryTransport(shiftedProjection),
+      scheduleMicrotask: () => {},
+    });
+    const shiftedFirst = (await shiftedSession.getNodeByIdAsync("first"))!;
+    const shiftedSecond = (await shiftedSession.getNodeByIdAsync("second"))!;
+    expect(isRuntimeError(captureError(() => shiftedSession.flatten([shiftedFirst, shiftedSecond])), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
   it("creates a same-page Boolean from Vector children of different Frames", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,

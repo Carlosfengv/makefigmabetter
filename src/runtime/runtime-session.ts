@@ -4943,7 +4943,8 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
   if (node.fillStack !== undefined) {
     try {
       const stack = structuredClone(node.fillStack as DocumentPaintStack);
-      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE" || paint.scaleMode !== "TILE") ? stack : undefined;
+      runtimePaintsFromDocumentStack(stack);
+      return stack;
     } catch {
       return undefined;
     }
@@ -4957,7 +4958,8 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
     paint: { css: fill },
   }] };
   try {
-    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE" || paint.scaleMode !== "TILE") ? stack : undefined;
+    runtimePaintsFromDocumentStack(stack);
+    return stack;
   } catch {
     return undefined;
   }
@@ -5015,6 +5017,18 @@ function runtimeFlattenRegionPaintStack(
   const layers: Array<DocumentPaintLayer | undefined> = stack.layers.map((layer): DocumentPaintLayer | undefined => {
     if (layer.image) {
       const asset = resolveImage(layer.image.assetId);
+      if (asset && layer.image.scaleMode === "tile") {
+        const sourceTransform = resolvedImagePaintTransform(layer.image, sourceWidth, sourceHeight);
+        const outputImage = sourceTransform && runtimeEquivalentTileImage(
+          multiplyRuntimeTransforms(sourceToReplacement, sourceTransform),
+          replacementWidth,
+          replacementHeight,
+          asset.width,
+          asset.height,
+          layer.image,
+        );
+        return outputImage ? { ...structuredClone(layer), image: outputImage } : undefined;
+      }
       const sourcePlacement = asset && runtimeImagePaintPlacement(layer.image, sourceWidth, sourceHeight, asset.width, asset.height);
       if (!asset || !sourcePlacement) return undefined;
       const outputImage: DocumentImagePaint = {
@@ -5091,6 +5105,57 @@ function runtimeImagePaintPlacement(
     f: layout.y + (layout.height - imageHeight * scale) / 2,
   };
   return multiplyRuntimeTransforms(transform, placement);
+}
+
+/** Figma exposes TILE phase through scalingFactor and quarter-turn rotation
+ * only. Admit a flattened tile when its full affine differs from that public
+ * shape by whole repeat cells, which is visually identical. */
+function runtimeEquivalentTileImage(
+  desired: RuntimeTransform,
+  nodeWidth: number,
+  nodeHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+  source: DocumentImagePaint,
+): DocumentImagePaint | undefined {
+  if (![nodeWidth, nodeHeight, imageWidth, imageHeight].every((value) => Number.isFinite(value) && value > 0)) return undefined;
+  const rotations = [0, 90, 180, 270] as const;
+  for (const rotationDegrees of rotations) {
+    const unit = resolvedImagePaintTransform({
+      assetId: source.assetId,
+      scaleMode: "tile",
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      ...(rotationDegrees ? { rotationDegrees } : {}),
+    }, nodeWidth, nodeHeight);
+    if (!unit) continue;
+    const scale = (desired.a * unit.a + desired.b * unit.b + desired.c * unit.c + desired.d * unit.d) / 2;
+    if (!Number.isFinite(scale) || scale <= 0) continue;
+    const output: DocumentImagePaint = {
+      assetId: source.assetId,
+      scaleMode: "tile",
+      transform: { a: scale, b: 0, c: 0, d: scale, e: 0, f: 0 },
+      ...(rotationDegrees ? { rotationDegrees } : {}),
+      ...(source.filters ? { filters: structuredClone(source.filters) } : {}),
+    };
+    const candidate = resolvedImagePaintTransform(output, nodeWidth, nodeHeight);
+    if (!candidate || !runtimeLinearTransformsClose(desired, candidate)) continue;
+    const inverseLinear = invertRuntimeTransform({ ...candidate, e: 0, f: 0 });
+    if (!inverseLinear) continue;
+    const phase = runtimeTransformPoint(inverseLinear, desired.e - candidate.e, desired.f - candidate.f);
+    if (runtimeNearInteger(phase.x / imageWidth) && runtimeNearInteger(phase.y / imageHeight)) return output;
+  }
+  return undefined;
+}
+
+function runtimeLinearTransformsClose(left: RuntimeTransform, right: RuntimeTransform) {
+  const pairs: readonly (readonly [number, number])[] = [
+    [left.a, right.a], [left.b, right.b], [left.c, right.c], [left.d, right.d],
+  ];
+  return pairs.every(([first, second]) => Math.abs(first - second) <= 1e-9 * Math.max(1, Math.abs(first), Math.abs(second)));
+}
+
+function runtimeNearInteger(value: number) {
+  return Number.isFinite(value) && Math.abs(value - Math.round(value)) <= 1e-9 * Math.max(1, Math.abs(value));
 }
 
 function runtimeTransformPoint(
