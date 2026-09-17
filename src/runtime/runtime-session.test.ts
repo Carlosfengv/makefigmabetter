@@ -3115,6 +3115,63 @@ describe("M1 RuntimeSession", () => {
     expect(plans?.[1]?.fillStack?.layers[0]?.paint?.gradientPaint?.transform).toMatchObject({ a: 3, d: 1, e: -2, f: 0 });
   });
 
+  it("remaps fill and fit image regions through a crop transform", async () => {
+    const imageLayer = (scaleMode: "fill" | "fit") => ({
+      layers: [{
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+        image: {
+          assetId: "image-1",
+          scaleMode,
+          transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          filters: { contrast: .25 },
+        },
+      }],
+    });
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        {
+          id: "document",
+          type: "DOCUMENT",
+          name: "Document",
+          assets: [{ assetId: "image-1", contentHash: "a".repeat(64), mediaType: "image/png", byteLength: 800, pixelWidth: 40, pixelHeight: 20 }],
+        },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "fill", type: "RECTANGLE", name: "Fill", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fillStack: imageLayer("fill"), strokeWidth: 0 },
+        { id: "fit", type: "RECTANGLE", name: "Fit", parentId: "page", siblingIndex: 1, x: 30, y: 0, width: 20, height: 20, fillStack: imageLayer("fit"), strokeWidth: 0 },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-image-regions", projection, transport, scheduleMicrotask: () => {} });
+    const fill = (await session.getNodeByIdAsync("fill"))!;
+    const fit = (await session.getNodeByIdAsync("fit"))!;
+
+    const flattened = session.flatten([fill, fit]);
+    await session.commitAsync();
+
+    const operation = transport.submitted[0]?.operations.find((candidate) => candidate.type === "flattenNodes");
+    if (!operation || operation.type !== "flattenNodes" || !operation.replacement.vectorPath) throw new Error("Expected image flatten operation.");
+    const plans = vectorNetworkRegionPaintPlansFromExtension(operation.replacement.extensions, operation.replacement.vectorPath);
+    expect(flattened.vectorNetwork.regions?.map((region) => region.fills?.[0])).toEqual([
+      expect.objectContaining({ type: "IMAGE", scaleMode: "CROP", filters: { contrast: .25 } }),
+      expect.objectContaining({ type: "IMAGE", scaleMode: "CROP", filters: { contrast: .25 } }),
+    ]);
+    expect(plans?.[0]?.fillStack?.layers[0]?.image).toMatchObject({
+      assetId: "image-1",
+      scaleMode: "crop",
+      transform: { a: .8, b: 0, c: 0, d: .8, e: -10, f: 2 },
+      filters: { contrast: .25 },
+    });
+    expect(plans?.[1]?.fillStack?.layers[0]?.image).toMatchObject({
+      assetId: "image-1",
+      scaleMode: "crop",
+      transform: { a: .4, b: 0, c: 0, d: .4, e: 30, f: 6 },
+      filters: { contrast: .25 },
+    });
+  });
+
   it("creates a same-page Boolean from Vector children of different Frames", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,

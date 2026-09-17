@@ -34,6 +34,7 @@ import {
   type DocumentEmbedMetadata,
   type DocumentFontReference,
   type DocumentInstanceMetadata,
+  type DocumentImagePaint,
   type DocumentLinkUnfurlMetadata,
   type DocumentPaintStyleResource,
   type DocumentPaintLayer,
@@ -76,6 +77,7 @@ import {
 import { fontsForRuntimeTextRange, updateRuntimeText } from "./runtime-text";
 import { runtimePaintsFromDocumentStack } from "./runtime-paint";
 import { extensionsWithRuntimeVectorNetwork, type RuntimeVectorNetwork, type VectorNetworkRegionPaintRecord } from "./runtime-vector-network";
+import { imagePaintLayoutBox, resolvedImagePaintTransform } from "../lib/image-paint-transform";
 
 const CONTAINER_TYPES = new Set<M1NodeType>([
   "DOCUMENT", "PAGE", "FRAME", "GROUP", "SECTION", "BOOLEAN_OPERATION", "COMPONENT", "INSTANCE", "SLOT",
@@ -2680,6 +2682,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       resolvedPaths[sourceIndex]!.relative,
       Math.max(1, right - left),
       Math.max(1, bottom - top),
+      (assetId) => this.getImageByHash(assetId) ?? undefined,
     ));
     if (paintStacks.some((stack) => !stack)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
     const networkVertices: RuntimeVectorNetwork["vertices"][number][] = [];
@@ -4926,8 +4929,6 @@ function runtimeVectorSupportsBoolean(node: RuntimeProjectionNode): boolean {
   ));
 }
 
-/** Image placement depends on source bounds and decoded asset aspect ratio.
- * Solid and gradient stacks can be remapped without accessing asset bytes. */
 function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPaintStack | undefined {
   if (
     node.visible === false ||
@@ -4942,7 +4943,7 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
   if (node.fillStack !== undefined) {
     try {
       const stack = structuredClone(node.fillStack as DocumentPaintStack);
-      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE") ? stack : undefined;
+      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE" || paint.scaleMode !== "TILE") ? stack : undefined;
     } catch {
       return undefined;
     }
@@ -4956,7 +4957,7 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
     paint: { css: fill },
   }] };
   try {
-    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE") ? stack : undefined;
+    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type !== "IMAGE" || paint.scaleMode !== "TILE") ? stack : undefined;
   } catch {
     return undefined;
   }
@@ -4969,10 +4970,11 @@ function runtimeFlattenRegionPaintStack(
   sourceToReplacement: RuntimeTransform,
   replacementWidth: number,
   replacementHeight: number,
+  resolveImage: (assetId: string) => Readonly<{ width: number; height: number }> | undefined,
 ): DocumentPaintStack | undefined {
   if (![sourceWidth, sourceHeight].every((value) => Number.isFinite(value) && value >= 0)
     || ![replacementWidth, replacementHeight].every((value) => Number.isFinite(value) && value > 0)) return undefined;
-  if (!stack.layers.some((layer) => Boolean(layer.paint?.gradient || layer.paint?.gradientPaint))) return structuredClone(stack);
+  if (!stack.layers.some((layer) => Boolean(layer.image || layer.paint?.gradient || layer.paint?.gradientPaint))) return structuredClone(stack);
   if (sourceWidth <= 0 || sourceHeight <= 0) return undefined;
   const replacementToSource = invertRuntimeTransform(sourceToReplacement);
   if (!replacementToSource) return undefined;
@@ -5011,7 +5013,25 @@ function runtimeFlattenRegionPaintStack(
     };
   };
   const layers: Array<DocumentPaintLayer | undefined> = stack.layers.map((layer): DocumentPaintLayer | undefined => {
-    if (layer.image) return undefined;
+    if (layer.image) {
+      const asset = resolveImage(layer.image.assetId);
+      const sourcePlacement = asset && runtimeImagePaintPlacement(layer.image, sourceWidth, sourceHeight, asset.width, asset.height);
+      if (!asset || !sourcePlacement) return undefined;
+      const outputImage: DocumentImagePaint = {
+        assetId: layer.image.assetId,
+        scaleMode: "crop",
+        transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        ...(layer.image.filters ? { filters: structuredClone(layer.image.filters) } : {}),
+      };
+      const replacementPlacement = runtimeImagePaintPlacement(outputImage, replacementWidth, replacementHeight, asset.width, asset.height);
+      const replacementPlacementInverse = replacementPlacement && invertRuntimeTransform(replacementPlacement);
+      if (!replacementPlacementInverse) return undefined;
+      outputImage.transform = multiplyRuntimeTransforms(
+        multiplyRuntimeTransforms(sourceToReplacement, sourcePlacement),
+        replacementPlacementInverse,
+      );
+      return { ...structuredClone(layer), image: outputImage };
+    }
     const paint = layer.paint;
     if (!paint) return undefined;
     if (paint.gradient) {
@@ -5043,6 +5063,34 @@ function runtimeFlattenRegionPaintStack(
     return structuredClone(layer);
   });
   return layers.every((layer): layer is DocumentPaintLayer => Boolean(layer)) ? { layers } : undefined;
+}
+
+/** Resolve the bitmap-to-node matrix used by Canvas/SVG before region clipping. */
+function runtimeImagePaintPlacement(
+  image: DocumentImagePaint,
+  nodeWidth: number,
+  nodeHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+): RuntimeTransform | undefined {
+  if (image.scaleMode === "tile"
+    || ![nodeWidth, nodeHeight, imageWidth, imageHeight].every((value) => Number.isFinite(value) && value > 0)) return undefined;
+  const transform = resolvedImagePaintTransform(image, nodeWidth, nodeHeight);
+  const layout = imagePaintLayoutBox(image, nodeWidth, nodeHeight);
+  if (!transform || !layout) return undefined;
+  const scale = image.scaleMode === "fit"
+    ? Math.min(layout.width / imageWidth, layout.height / imageHeight)
+    : Math.max(layout.width / imageWidth, layout.height / imageHeight);
+  if (!Number.isFinite(scale) || scale <= 0) return undefined;
+  const placement: RuntimeTransform = {
+    a: scale,
+    b: 0,
+    c: 0,
+    d: scale,
+    e: layout.x + (layout.width - imageWidth * scale) / 2,
+    f: layout.y + (layout.height - imageHeight * scale) / 2,
+  };
+  return multiplyRuntimeTransforms(transform, placement);
 }
 
 function runtimeTransformPoint(
