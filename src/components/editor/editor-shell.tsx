@@ -730,12 +730,24 @@ async function deriveTextSvgLayouts(
     try {
       const firstLineIndents = shapedTextFirstLineIndents(node, input.source);
       const paragraphWrapStyles = shapedTextParagraphWrapStyles(node, input.source);
+      const hangingPunctuation = node.textProperties?.paragraph.hangingPunctuation === true;
       if (!firstLineIndents
           || node.kind === "textPath" && (firstLineIndents.some((indent) => indent !== 0)
-            || paragraphWrapStyles.some((style) => style !== "auto"))) continue;
+            || paragraphWrapStyles.some((style) => style !== "auto")
+            || hangingPunctuation)) continue;
       const width = node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width;
-      const payload = paragraphWrapStyles.some((style) => style !== "auto")
-        ? wasm.layout_shaped_text_runs_with_paragraph_options_json(
+      const payload = hangingPunctuation
+        ? wasm.layout_shaped_text_runs_with_layout_options_json(
+            new Uint8Array(input.fontBundle),
+            input.runsJson,
+            input.shapingSource,
+            width,
+            JSON.stringify(firstLineIndents),
+            JSON.stringify(paragraphWrapStyles),
+            true,
+          )
+        : paragraphWrapStyles.some((style) => style !== "auto")
+          ? wasm.layout_shaped_text_runs_with_paragraph_options_json(
             new Uint8Array(input.fontBundle),
             input.runsJson,
             input.shapingSource,

@@ -52,6 +52,26 @@ describe("Rust text layout boundary", () => {
     }), "😀")).toBeUndefined();
   });
 
+  it("accepts only paired bounded hanging punctuation advances", () => {
+    const line = {
+      start: 0,
+      end: 2,
+      direction: "ltr",
+      advance: 900,
+      hangingLeftAdvance: 100,
+      hangingRightAdvance: 200,
+      glyphs: [],
+    };
+    expect(parseRustTextLayout(JSON.stringify({ unitsPerEm: 1000, lines: [line] }), "ab")?.lines[0])
+      .toMatchObject({ hangingLeftAdvance: 100, hangingRightAdvance: 200 });
+    expect(parseRustTextLayout(JSON.stringify({ unitsPerEm: 1000, lines: [{ ...line, hangingRightAdvance: undefined }] }), "ab"))
+      .toBeUndefined();
+    expect(parseRustTextLayout(JSON.stringify({ unitsPerEm: 1000, lines: [{ ...line, hangingLeftAdvance: -1 }] }), "ab"))
+      .toBeUndefined();
+    expect(parseRustTextLayout(JSON.stringify({ unitsPerEm: 1000, lines: [{ ...line, hangingLeftAdvance: 901, hangingRightAdvance: 0 }] }), "ab"))
+      .toBeUndefined();
+  });
+
   it("requires supplied visual runs to cover each UTF-8 line exactly once", () => {
     const source = "A😀";
     const line = { start: 0, end: 5, direction: "ltr", advance: 20, glyphs: [] };

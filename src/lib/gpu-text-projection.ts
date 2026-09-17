@@ -57,13 +57,16 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
   for (const [lineIndex, line] of input.layout.lines.entries()) {
     if (input.lineYOffsets) lineY = input.lineYOffsets[lineIndex]!;
     const advance = line.advance * metricScale;
+    const hangingLeft = (line.hangingLeftAdvance ?? 0) * metricScale;
+    const hangingRight = (line.hangingRightAdvance ?? 0) * metricScale;
+    const effectiveAdvance = Math.max(0, advance - hangingLeft - hangingRight);
     const lineX = input.lineXOffsets?.[lineIndex] ?? 0;
     const lineWidth = input.lineWidths?.[lineIndex] ?? input.width;
     let penX = input.alignment === "center"
-      ? lineX + (lineWidth - advance) / 2
+      ? lineX + (lineWidth - effectiveAdvance) / 2 - hangingLeft
       : input.alignment === "right" || line.direction === "rtl"
-        ? lineX + lineWidth - advance
-        : lineX;
+        ? lineX + lineWidth - advance + hangingRight
+        : lineX - hangingLeft;
     for (const glyph of line.glyphs) {
       if (glyph.glyphId === 0 || !Number.isInteger(glyph.runIndex)) return undefined;
       const run = input.runs[glyph.runIndex];

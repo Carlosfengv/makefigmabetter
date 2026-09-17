@@ -6,6 +6,9 @@ export type RustTextLayoutLine = {
   end: number;
   direction: "ltr" | "rtl";
   advance: number;
+  /** Physical boundary advances excluded from line fitting, in font units. */
+  hangingLeftAdvance?: number;
+  hangingRightAdvance?: number;
   visualRuns: RustTextVisualRun[];
   visualCarets?: RustTextVisualCaret[];
   glyphs: RustTextGlyph[];
@@ -144,6 +147,14 @@ export function parseRustTextLayout(value: string, source: string): RustTextLayo
       if (!isByteOffset(line.start) || !isByteOffset(line.end) || !boundaries.has(line.start) || !boundaries.has(line.end) || line.end < line.start || line.end > sourceByteLength) return undefined;
       if (line.start < previousEnd || (line.direction !== "ltr" && line.direction !== "rtl")) return undefined;
       if (typeof line.advance !== "number" || !Number.isFinite(line.advance) || line.advance < 0 || !Array.isArray(line.glyphs)) return undefined;
+      const hasHangingLeft = line.hangingLeftAdvance !== undefined;
+      const hasHangingRight = line.hangingRightAdvance !== undefined;
+      if (hasHangingLeft !== hasHangingRight) return undefined;
+      const hangingLeftAdvance = hasHangingLeft ? line.hangingLeftAdvance : 0;
+      const hangingRightAdvance = hasHangingRight ? line.hangingRightAdvance : 0;
+      if (typeof hangingLeftAdvance !== "number" || !Number.isFinite(hangingLeftAdvance) || hangingLeftAdvance < 0
+        || typeof hangingRightAdvance !== "number" || !Number.isFinite(hangingRightAdvance) || hangingRightAdvance < 0
+        || hangingLeftAdvance > line.advance || hangingRightAdvance > line.advance) return undefined;
       const visualRuns = parseVisualRuns(line.visualRuns, line.start, line.end, line.direction, boundaries);
       if (!visualRuns) return undefined;
       const visualCarets = parseVisualCarets(line.visualCarets, line.start, line.end, line.advance, boundaries);
@@ -156,7 +167,16 @@ export function parseRustTextLayout(value: string, source: string): RustTextLayo
         if (!isGlyphInteger(glyph.glyphId) || !isRunIndex(runIndex) || !isByteOffset(glyph.cluster) || glyph.cluster < line.start || glyph.cluster > line.end || !isFiniteGlyphMetric(glyph.xAdvance) || !isFiniteGlyphMetric(glyph.yAdvance) || !isFiniteGlyphMetric(glyph.xOffset) || !isFiniteGlyphMetric(glyph.yOffset)) return undefined;
         glyphs.push({ glyphId: glyph.glyphId, runIndex, cluster: glyph.cluster, xAdvance: glyph.xAdvance, yAdvance: glyph.yAdvance, xOffset: glyph.xOffset, yOffset: glyph.yOffset });
       }
-      lines.push({ start: line.start, end: line.end, direction: line.direction, advance: line.advance, visualRuns, ...(visualCarets ? { visualCarets } : {}), glyphs });
+      lines.push({
+        start: line.start,
+        end: line.end,
+        direction: line.direction,
+        advance: line.advance,
+        ...(hasHangingLeft ? { hangingLeftAdvance, hangingRightAdvance } : {}),
+        visualRuns,
+        ...(visualCarets ? { visualCarets } : {}),
+        glyphs,
+      });
       previousEnd = line.end;
     }
     let carets: RustTextLayout["carets"];

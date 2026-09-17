@@ -52,6 +52,10 @@ pub struct ShapedTextLine {
     pub direction: TextDirection,
     /// Absolute magnitude in font units; it is independent of browser zoom.
     pub advance: i32,
+    /// Physical boundary advances excluded from line fitting when optical
+    /// hanging punctuation is enabled. The full `advance` remains unchanged.
+    pub hanging_left_advance: i32,
+    pub hanging_right_advance: i32,
     /// UAX #9 level runs in display order. Their byte ranges stay in the
     /// unmodified Canonical source coordinate system.
     pub visual_runs: Vec<VisualTextRun>,
@@ -1021,6 +1025,27 @@ pub fn layout_shaped_text_runs_with_paragraph_options(
     first_line_indents_px: &[f32],
     paragraph_wrap_styles: &[TextWrapStyle],
 ) -> Result<ShapedTextLayout, TextShapingError> {
+    layout_shaped_text_runs_with_layout_options(
+        runs,
+        text,
+        max_width_px,
+        first_line_indents_px,
+        paragraph_wrap_styles,
+        false,
+    )
+}
+
+/// Adds whole-text optical hanging punctuation to the frozen paragraph
+/// options. Boundary glyph advances remain part of the shaped line but are
+/// excluded from width fitting and exposed as physical left/right offsets.
+pub fn layout_shaped_text_runs_with_layout_options(
+    runs: &[TextShapingRun<'_>],
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_px: &[f32],
+    paragraph_wrap_styles: &[TextWrapStyle],
+    hanging_punctuation: bool,
+) -> Result<ShapedTextLayout, TextShapingError> {
     if !max_width_px.is_finite() || max_width_px <= 0.0 {
         return Err(TextShapingError::InvalidLineWidth);
     }
@@ -1150,6 +1175,7 @@ pub fn layout_shaped_text_runs_with_paragraph_options(
                 .get(paragraph_index)
                 .copied()
                 .unwrap_or(TextWrapStyle::Auto),
+            hanging_punctuation,
             segmenter,
             units_per_em,
             &mut lines,
@@ -1167,6 +1193,7 @@ pub fn layout_shaped_text_runs_with_paragraph_options(
             .get(paragraph_count - 1)
             .copied()
             .unwrap_or(TextWrapStyle::Auto),
+        hanging_punctuation,
         segmenter,
         units_per_em,
         &mut lines,
@@ -1365,6 +1392,8 @@ fn append_shaped_paragraph(
             end: paragraph_start as u32,
             direction,
             advance: 0,
+            hanging_left_advance: 0,
+            hanging_right_advance: 0,
             visual_runs: Vec::new(),
             visual_carets: vec![PositionedCaretStop {
                 byte_offset: paragraph_start as u32,
@@ -1437,6 +1466,8 @@ fn append_shaped_paragraph(
             end: (paragraph_start + end) as u32,
             direction,
             advance,
+            hanging_left_advance: 0,
+            hanging_right_advance: 0,
             visual_runs,
             visual_carets,
             glyphs: shaped.glyphs,
@@ -1464,6 +1495,7 @@ fn append_shaped_run_paragraph(
     first_line_max_advance: i32,
     max_advance: i32,
     wrap_style: TextWrapStyle,
+    hanging_punctuation: bool,
     segmenter: icu_segmenter::LineSegmenterBorrowed<'static>,
     units_per_em: i32,
     lines: &mut Vec<ShapedTextLine>,
@@ -1475,6 +1507,7 @@ fn append_shaped_run_paragraph(
         paragraph_start,
         first_line_max_advance,
         max_advance,
+        hanging_punctuation,
         segmenter,
         units_per_em,
     )?;
@@ -1501,6 +1534,7 @@ fn append_shaped_run_paragraph(
                 paragraph_start,
                 candidate_first,
                 candidate_max,
+                hanging_punctuation,
                 segmenter,
                 units_per_em,
             )?;
@@ -1541,6 +1575,7 @@ fn shaped_run_paragraph_lines(
     paragraph_start: usize,
     first_line_max_advance: i32,
     max_advance: i32,
+    hanging_punctuation: bool,
     segmenter: icu_segmenter::LineSegmenterBorrowed<'static>,
     units_per_em: i32,
 ) -> Result<Vec<ShapedTextLine>, TextShapingError> {
@@ -1551,6 +1586,8 @@ fn shaped_run_paragraph_lines(
             end: paragraph_start as u32,
             direction,
             advance: 0,
+            hanging_left_advance: 0,
+            hanging_right_advance: 0,
             visual_runs: Vec::new(),
             visual_carets: vec![PositionedCaretStop {
                 byte_offset: paragraph_start as u32,
@@ -1583,14 +1620,29 @@ fn shaped_run_paragraph_lines(
                 paragraph_start + start,
                 units_per_em,
             )?;
-            if candidate.2 <= line_max_advance {
-                fitted = Some((end, candidate));
+            let hanging = if hanging_punctuation {
+                shaped_hanging_punctuation_advances(
+                    runs,
+                    &paragraph[start..end],
+                    paragraph_start + start,
+                    direction,
+                    units_per_em,
+                )?
             } else {
-                first_overflow = Some((end, candidate));
+                (0, 0)
+            };
+            let effective_advance = candidate
+                .2
+                .saturating_sub(hanging.0)
+                .saturating_sub(hanging.1);
+            if effective_advance <= line_max_advance {
+                fitted = Some((end, candidate, hanging));
+            } else {
+                first_overflow = Some((end, candidate, hanging));
                 break;
             }
         }
-        let (end, (mut shaped, mut visual_runs, advance, mut visual_carets)) =
+        let (end, (mut shaped, mut visual_runs, advance, mut visual_carets), hanging) =
             match fitted.or(first_overflow) {
                 Some(candidate) => candidate,
                 None => (
@@ -1601,6 +1653,17 @@ fn shaped_run_paragraph_lines(
                         paragraph_start + start,
                         units_per_em,
                     )?,
+                    if hanging_punctuation {
+                        shaped_hanging_punctuation_advances(
+                            runs,
+                            &paragraph[start..],
+                            paragraph_start + start,
+                            direction,
+                            units_per_em,
+                        )?
+                    } else {
+                        (0, 0)
+                    },
                 ),
             };
         let absolute_start = (paragraph_start + start) as u32;
@@ -1619,6 +1682,8 @@ fn shaped_run_paragraph_lines(
             end: (paragraph_start + end) as u32,
             direction,
             advance,
+            hanging_left_advance: hanging.0,
+            hanging_right_advance: hanging.1,
             visual_runs,
             visual_carets,
             glyphs: shaped.glyphs,
@@ -1626,6 +1691,103 @@ fn shaped_run_paragraph_lines(
         start = end;
     }
     Ok(lines)
+}
+
+fn shaped_hanging_punctuation_advances(
+    runs: &[PreparedTextShapingRun<'_>],
+    text: &str,
+    absolute_start: usize,
+    direction: TextDirection,
+    units_per_em: i32,
+) -> Result<(i32, i32), TextShapingError> {
+    let mut graphemes = text.grapheme_indices(true);
+    let Some((first_offset, first)) = graphemes.next() else {
+        return Ok((0, 0));
+    };
+    let (last_offset, last) = text
+        .grapheme_indices(true)
+        .next_back()
+        .unwrap_or((first_offset, first));
+    let start_advance = if is_hanging_start_punctuation(first) {
+        shape_styled_visual_line(runs, first, absolute_start + first_offset, units_per_em)?.2
+    } else {
+        0
+    };
+    let end_advance = if last_offset != first_offset && is_hanging_end_punctuation(last) {
+        shape_styled_visual_line(runs, last, absolute_start + last_offset, units_per_em)?.2
+    } else if last_offset == first_offset
+        && is_hanging_end_punctuation(last)
+        && !is_hanging_start_punctuation(last)
+    {
+        shape_styled_visual_line(runs, last, absolute_start + last_offset, units_per_em)?.2
+    } else {
+        0
+    };
+    Ok(match direction {
+        TextDirection::LeftToRight => (start_advance, end_advance),
+        TextDirection::RightToLeft => (end_advance, start_advance),
+    })
+}
+
+fn is_hanging_start_punctuation(value: &str) -> bool {
+    matches!(
+        value,
+        "\"" | "'"
+            | "“"
+            | "‘"
+            | "«"
+            | "‹"
+            | "「"
+            | "『"
+            | "《"
+            | "〈"
+            | "【"
+            | "〔"
+            | "〖"
+            | "〘"
+            | "〚"
+            | "（"
+            | "［"
+            | "｛"
+    )
+}
+
+fn is_hanging_end_punctuation(value: &str) -> bool {
+    matches!(
+        value,
+        "\"" | "'"
+            | ","
+            | "."
+            | "!"
+            | "?"
+            | ":"
+            | ";"
+            | "”"
+            | "’"
+            | "»"
+            | "›"
+            | "」"
+            | "』"
+            | "》"
+            | "〉"
+            | "】"
+            | "〕"
+            | "〗"
+            | "〙"
+            | "〛"
+            | "）"
+            | "］"
+            | "｝"
+            | "、"
+            | "。"
+            | "，"
+            | "．"
+            | "！"
+            | "？"
+            | "："
+            | "；"
+            | "…"
+    )
 }
 
 fn shaped_lines_have_orphaned_last_word(
@@ -3499,6 +3661,7 @@ mod tests {
         gdef_ligature_carets, gdef_logical_caret_step, glyf_contour_x_from_tables,
         layout_shaped_text, layout_shaped_text_runs,
         layout_shaped_text_runs_with_first_line_indents,
+        layout_shaped_text_runs_with_layout_options,
         layout_shaped_text_runs_with_paragraph_options, layout_shaped_text_with_variations,
         rasterize_glyph, rasterize_glyph_with_variations,
         rasterize_glyph_with_variations_and_style, replace_text_selection, shape_text,
@@ -5430,6 +5593,73 @@ mod tests {
         )
         .unwrap();
         assert_eq!(balanced, automatic);
+    }
+
+    #[test]
+    fn multi_run_layout_fits_and_exposes_hanging_punctuation_advances() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "aa bb.";
+        let run = |end| TextShapingRun {
+            font_bytes: font,
+            face_index: 0,
+            variations: &[],
+            features: &[],
+            start: 0,
+            end,
+            font_size: 16.0,
+            synthetic_style: super::SyntheticFontStyle::default(),
+            letter_spacing: 0.0,
+        };
+        let unbounded =
+            layout_shaped_text_runs(&[run(source.len() as u32)], source, 1_000.0).unwrap();
+        let full_advance = unbounded.lines[0].advance;
+        let punctuation = layout_shaped_text_runs(&[run(1)], ".", 1_000.0)
+            .unwrap()
+            .lines[0]
+            .advance;
+        let width =
+            (full_advance - punctuation) as f32 * 16.0 / unbounded.units_per_em as f32 + 0.25;
+        let automatic =
+            layout_shaped_text_runs(&[run(source.len() as u32)], source, width).unwrap();
+        let hanging = layout_shaped_text_runs_with_layout_options(
+            &[run(source.len() as u32)],
+            source,
+            width,
+            &[0.0],
+            &[TextWrapStyle::Auto],
+            true,
+        )
+        .unwrap();
+
+        assert!(automatic.lines.len() > 1);
+        assert_eq!(hanging.lines.len(), 1);
+        assert_eq!(hanging.lines[0].advance, full_advance);
+        assert_eq!(hanging.lines[0].hanging_left_advance, 0);
+        assert_eq!(hanging.lines[0].hanging_right_advance, punctuation);
+
+        let rtl_source = "בדכה.";
+        let rtl = layout_shaped_text_runs_with_layout_options(
+            &[TextShapingRun {
+                font_bytes: font_test_data::NOTOSERIFHEBREW_AUTOHINT_METRICS,
+                face_index: 0,
+                variations: &[],
+                features: &[],
+                start: 0,
+                end: rtl_source.len() as u32,
+                font_size: 48.0,
+                synthetic_style: super::SyntheticFontStyle::default(),
+                letter_spacing: 0.0,
+            }],
+            rtl_source,
+            1_000.0,
+            &[0.0],
+            &[TextWrapStyle::Auto],
+            true,
+        )
+        .unwrap();
+        assert_eq!(rtl.lines[0].direction, TextDirection::RightToLeft);
+        assert!(rtl.lines[0].hanging_left_advance > 0);
+        assert_eq!(rtl.lines[0].hanging_right_advance, 0);
     }
 
     #[test]

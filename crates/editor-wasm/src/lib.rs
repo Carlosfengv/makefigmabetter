@@ -5154,7 +5154,7 @@ pub fn layout_shaped_text_runs_json(
     text: &str,
     max_width_px: f32,
 ) -> Result<String, JsValue> {
-    layout_shaped_text_runs_impl(font_bundle, runs_json, text, max_width_px, &[], &[])
+    layout_shaped_text_runs_impl(font_bundle, runs_json, text, max_width_px, &[], &[], false)
 }
 
 /// Variant of `layout_shaped_text_runs_json` whose JSON array supplies one
@@ -5176,6 +5176,7 @@ pub fn layout_shaped_text_runs_with_first_line_indents_json(
         max_width_px,
         &first_line_indents,
         &[],
+        false,
     )
 }
 
@@ -5209,6 +5210,42 @@ pub fn layout_shaped_text_runs_with_paragraph_options_json(
         max_width_px,
         &first_line_indents,
         &paragraph_wrap_styles,
+        false,
+    )
+}
+
+/// Shapes the complete paragraph option set, including whole-text optical
+/// hanging punctuation, through the same bounded transient boundary.
+#[wasm_bindgen]
+pub fn layout_shaped_text_runs_with_layout_options_json(
+    font_bundle: &[u8],
+    runs_json: &str,
+    text: &str,
+    max_width_px: f32,
+    first_line_indents_json: &str,
+    paragraph_wrap_styles_json: &str,
+    hanging_punctuation: bool,
+) -> Result<String, JsValue> {
+    let first_line_indents = serde_json::from_str::<Vec<f32>>(first_line_indents_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_FIRST_LINE_INDENTS"))?;
+    let paragraph_wrap_styles = serde_json::from_str::<Vec<String>>(paragraph_wrap_styles_json)
+        .map_err(|_| JsValue::from_str("INVALID_TEXT_WRAP_STYLES"))?
+        .into_iter()
+        .map(|style| match style.as_str() {
+            "auto" => Ok(makefigma_graphics_core::TextWrapStyle::Auto),
+            "balance" => Ok(makefigma_graphics_core::TextWrapStyle::Balance),
+            "pretty" => Ok(makefigma_graphics_core::TextWrapStyle::Pretty),
+            _ => Err(JsValue::from_str("INVALID_TEXT_WRAP_STYLES")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    layout_shaped_text_runs_impl(
+        font_bundle,
+        runs_json,
+        text,
+        max_width_px,
+        &first_line_indents,
+        &paragraph_wrap_styles,
+        hanging_punctuation,
     )
 }
 
@@ -5219,6 +5256,7 @@ fn layout_shaped_text_runs_impl(
     max_width_px: f32,
     first_line_indents: &[f32],
     paragraph_wrap_styles: &[makefigma_graphics_core::TextWrapStyle],
+    hanging_punctuation: bool,
 ) -> Result<String, JsValue> {
     let inputs = serde_json::from_str::<Vec<TextShapingRunInput>>(runs_json)
         .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_RUNS"))?;
@@ -5259,12 +5297,13 @@ fn layout_shaped_text_runs_impl(
             })
         })
         .collect::<Result<Vec<_>, JsValue>>()?;
-    let layout = makefigma_graphics_core::layout_shaped_text_runs_with_paragraph_options(
+    let layout = makefigma_graphics_core::layout_shaped_text_runs_with_layout_options(
         &runs,
         text,
         max_width_px,
         first_line_indents,
         paragraph_wrap_styles,
+        hanging_punctuation,
     )
     .map_err(|_| JsValue::from_str("INVALID_TEXT_STYLE_LAYOUT_INPUT"))?;
     Ok(serde_json::json!({
@@ -5277,6 +5316,8 @@ fn layout_shaped_text_runs_impl(
                 makefigma_graphics_core::TextDirection::RightToLeft => "rtl",
             },
             "advance": line.advance,
+            "hangingLeftAdvance": line.hanging_left_advance,
+            "hangingRightAdvance": line.hanging_right_advance,
             "visualRuns": line.visual_runs.into_iter().map(|run| serde_json::json!({
                 "start": run.start,
                 "end": run.end,
@@ -8766,6 +8807,67 @@ mod tests {
         assert_eq!(automatic["lines"].as_array().map(Vec::len), Some(2));
         assert_eq!(balanced["lines"].as_array().map(Vec::len), Some(2));
         assert_ne!(automatic["lines"], balanced["lines"]);
+    }
+
+    #[test]
+    fn exposes_hanging_punctuation_through_the_wasm_boundary() {
+        let font = font_test_data::NOTO_SERIF_DISPLAY_TRIMMED;
+        let source = "aa bb.";
+        let request = |end: usize| {
+            serde_json::json!([{
+                "start": 0,
+                "end": end,
+                "fontOffset": 0,
+                "fontLength": font.len(),
+                "faceIndex": 0,
+                "variationAxes": [],
+                "fontSize": 16.0,
+                "letterSpacing": 0.0
+            }])
+        };
+        let unbounded = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_json(
+                font,
+                &request(source.len()).to_string(),
+                source,
+                1_000.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let punctuation = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_json(font, &request(1).to_string(), ".", 1_000.0).unwrap(),
+        )
+        .unwrap();
+        let full_advance = unbounded["lines"][0]["advance"].as_f64().unwrap();
+        let punctuation_advance = punctuation["lines"][0]["advance"].as_f64().unwrap();
+        let width = (full_advance - punctuation_advance) * 16.0
+            / unbounded["unitsPerEm"].as_f64().unwrap()
+            + 0.25;
+        let hanging = serde_json::from_str::<serde_json::Value>(
+            &layout_shaped_text_runs_with_layout_options_json(
+                font,
+                &request(source.len()).to_string(),
+                source,
+                width as f32,
+                "[0]",
+                "[\"auto\"]",
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(hanging["lines"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            hanging["lines"][0]["advance"],
+            unbounded["lines"][0]["advance"]
+        );
+        assert_eq!(hanging["lines"][0]["hangingLeftAdvance"], 0);
+        assert_eq!(
+            hanging["lines"][0]["hangingRightAdvance"],
+            punctuation["lines"][0]["advance"]
+        );
     }
 
     #[test]

@@ -116,6 +116,19 @@ describe("GPU text projection", () => {
     expect(glyphs?.[0]?.x).toBe(56);
   });
 
+  it("aligns the effective line body while preserving physical hanging punctuation", () => {
+    const layout = { unitsPerEm: 1000, lines: [{
+      start: 0, end: 2, direction: "ltr" as const, advance: 1000,
+      hangingLeftAdvance: 100, hangingRightAdvance: 200, visualRuns: [],
+      glyphs: [{ glyphId: 7, runIndex: 0, cluster: 0, xAdvance: 1000, yAdvance: 0, xOffset: 0, yOffset: 0 }],
+    }] };
+    const input = { nodeId: "hanging", runs: [run()], x: 0, y: 0, width: 100, rotation: 0, fill: "#000", opacity: 1, lineHeight: 25, layout };
+    expect(projectGpuTextGlyphs({ ...input, alignment: "left" })?.[0]?.x).toBe(-1);
+    expect(projectGpuTextGlyphs({ ...input, alignment: "center" })?.[0]?.x).toBe(42);
+    expect(projectGpuTextGlyphs({ ...input, alignment: "right" })?.[0]?.x).toBe(85);
+    expect(projectGpuTextGlyphs({ ...input, layout: { ...layout, lines: [{ ...layout.lines[0]!, direction: "rtl" as const }] } })?.[0]?.x).toBe(85);
+  });
+
   it("preserves Canvas overflow semantics when an RTL line is wider than its text box", () => {
     const glyphs = projectGpuTextGlyphs({
       nodeId: "rtl-overflow", runs: [run()],

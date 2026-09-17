@@ -324,6 +324,49 @@ describe("textSvgLayoutInput", () => {
       .not.toEqual(automatic?.lines.map(({ start, end }) => [start, end]));
   });
 
+  it("uses generated WASM hanging punctuation for fitting and physical offsets", async () => {
+    const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
+    const explicit = { assetId: "font-geist-hanging", faceIndex: 0 };
+    const source = "aa bb.";
+    const wasm = await import("../wasm/generated/editor_wasm");
+    wasm.initSync(readFileSync(new URL("../wasm/generated/editor_wasm_bg.wasm", import.meta.url)));
+    const inputFor = (text: string) => {
+      const input = textSvgLayoutInput({
+        ...node({
+          runs: [{ start: 0, end: text.length, font: explicit, fontSize: 16, fontWeight: 400, italic: false, letterSpacing: 0 }],
+          paragraph: { ...paragraph, hangingPunctuation: true }, autoSize: "fixed", fallbackFonts: [],
+        }),
+        text,
+        width: 1_000,
+      }, new Map([[explicit.assetId, bytes.buffer]]));
+      if (!input) throw new Error("Hanging fixture did not produce a shaping input");
+      const layout = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+        new Uint8Array(input.fontBundle), input.runsJson, input.shapingSource, 1_000,
+      ), input.shapingSource);
+      if (!layout) throw new Error("Hanging fixture did not produce a shaped layout");
+      return { input, layout };
+    };
+    const full = inputFor(source);
+    const punctuation = inputFor(".");
+    const width = (full.layout.lines[0]!.advance - punctuation.layout.lines[0]!.advance)
+      * 16 / full.layout.unitsPerEm + .25;
+    const automatic = parseRustTextLayout(wasm.layout_shaped_text_runs_json(
+      new Uint8Array(full.input.fontBundle), full.input.runsJson, full.input.shapingSource, width,
+    ), full.input.shapingSource);
+    const hanging = parseRustTextLayout(wasm.layout_shaped_text_runs_with_layout_options_json(
+      new Uint8Array(full.input.fontBundle), full.input.runsJson, full.input.shapingSource,
+      width, "[0]", "[\"auto\"]", true,
+    ), full.input.shapingSource);
+
+    expect(automatic?.lines.length).toBeGreaterThan(1);
+    expect(hanging?.lines).toHaveLength(1);
+    expect(hanging?.lines[0]).toMatchObject({
+      advance: full.layout.lines[0]!.advance,
+      hangingLeftAdvance: 0,
+      hangingRightAdvance: punctuation.layout.lines[0]!.advance,
+    });
+  });
+
   it("uses generated WASM tracking for line advance and physical caret coordinates", async () => {
     const bytes = Uint8Array.from(readFileSync(new URL("../../node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf", import.meta.url)));
     const explicit = { assetId: "font-geist-tracking", faceIndex: 0 };
