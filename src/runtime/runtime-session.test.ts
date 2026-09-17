@@ -3698,6 +3698,123 @@ describe("M1 RuntimeSession", () => {
     })]);
   });
 
+  it("replaces a fully consumed direct Boolean during Boolean creation and multi-node flatten", async () => {
+    const closedPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{ closed: true, points: [
+        { id: "boolean-parent-a", x: 0, y: 0, pointType: "corner" as const },
+        { id: "boolean-parent-b", x: 40, y: 0, pointType: "corner" as const },
+        { id: "boolean-parent-c", x: 0, y: 40, pointType: "corner" as const },
+      ] }],
+    };
+    const projection: RuntimeProjection = {
+      revision: 3,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "before", type: "VECTOR", name: "Before", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 10, height: 10, vectorPath: closedPath },
+        { id: "old-boolean", type: "BOOLEAN_OPERATION", name: "Old Boolean", parentId: "page", siblingIndex: 1, x: 20, y: 30, width: 80, height: 40, opacity: .6, blendMode: "multiply", booleanOperation: "union" },
+        { id: "a", type: "VECTOR", name: "A", parentId: "old-boolean", siblingIndex: 0, x: 0, y: 0, width: 40, height: 40, fill: "#3366cc", vectorPath: closedPath },
+        { id: "b", type: "VECTOR", name: "B", parentId: "old-boolean", siblingIndex: 1, x: 40, y: 0, width: 40, height: 40, fill: "#3366cc", vectorPath: closedPath },
+        { id: "after", type: "VECTOR", name: "After", parentId: "page", siblingIndex: 2, x: 120, y: 0, width: 10, height: 10, vectorPath: closedPath },
+      ],
+    };
+
+    let booleanSequence = 0;
+    const booleanTransport = new InMemoryTransport(projection);
+    const booleanSession = new RuntimeSession({ sessionId: "replace-direct-boolean", projection, transport: booleanTransport, createId: () => `replacement-boolean-${++booleanSequence}`, scheduleMicrotask: () => {} });
+    const first = (await booleanSession.getNodeByIdAsync("a"))!;
+    const second = (await booleanSession.getNodeByIdAsync("b"))!;
+    const replacement = booleanSession.intersect([first, second], booleanSession.currentPage);
+
+    expect(await booleanSession.getNodeByIdAsync("old-boolean")).toBeNull();
+    expect(replacement).toMatchObject({ x: 20, y: 30, width: 80, height: 40, opacity: .6, blendMode: "MULTIPLY" });
+    expect(booleanSession.currentPage.children.map((node) => node.id)).toEqual(["before", replacement.id, "after"]);
+    await booleanSession.commitAsync();
+    expect(await booleanSession.getNodeByIdAsync("old-boolean")).toBeNull();
+    expect(booleanTransport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "boolean",
+      node: expect.objectContaining({ parentId: "page", siblingIndex: 1, opacity: .6, blendMode: "multiply" }),
+      operandIds: ["a", "b"],
+    })]);
+
+    let flattenSequence = 0;
+    const flattenTransport = new InMemoryTransport(projection);
+    const flattenSession = new RuntimeSession({ sessionId: "flatten-direct-boolean", projection, transport: flattenTransport, createId: () => `replacement-flat-${++flattenSequence}`, scheduleMicrotask: () => {} });
+    const flatFirst = (await flattenSession.getNodeByIdAsync("a"))!;
+    const flatSecond = (await flattenSession.getNodeByIdAsync("b"))!;
+    const flattened = flattenSession.flatten([flatFirst, flatSecond]);
+
+    expect(await flattenSession.getNodeByIdAsync("old-boolean")).toBeNull();
+    expect(flattened).toMatchObject({ type: "VECTOR", x: 20, y: 30, width: 80, height: 40, opacity: .6, blendMode: "MULTIPLY" });
+    expect(flattenSession.currentPage.children.map((node) => node.id)).toEqual(["before", flattened.id, "after"]);
+    await flattenSession.commitAsync();
+    expect(await flattenSession.getNodeByIdAsync("old-boolean")).toBeNull();
+    expect(flattenTransport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "flattenNodes",
+      replacement: expect.objectContaining({ parentId: "page", siblingIndex: 1, opacity: .6, blendMode: "multiply" }),
+      sourceIds: ["a", "b"],
+    })]);
+  });
+
+  it("preserves a consumed Boolean flow slot beside retained Auto Layout siblings", async () => {
+    const closedPath = {
+      fillRule: "nonZero" as const,
+      subpaths: [{ closed: true, points: [
+        { id: "flow-parent-a", x: 0, y: 0, pointType: "corner" as const },
+        { id: "flow-parent-b", x: 40, y: 0, pointType: "corner" as const },
+        { id: "flow-parent-c", x: 0, y: 40, pointType: "corner" as const },
+      ] }],
+    };
+    const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const flowLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0 };
+    const projection: RuntimeProjection = {
+      revision: 5,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "frame", type: "FRAME", name: "Layout", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 320, height: 180, autoLayout: ownerLayout },
+        { id: "old-boolean", type: "BOOLEAN_OPERATION", name: "Old Boolean", parentId: "frame", siblingIndex: 0, x: 8, y: 8, width: 80, height: 40, rotation: 0, autoLayout: flowLayout, booleanOperation: "union" },
+        { id: "a", type: "VECTOR", name: "A", parentId: "old-boolean", siblingIndex: 0, x: 0, y: 0, width: 40, height: 40, fill: "#3366cc", vectorPath: closedPath },
+        { id: "b", type: "VECTOR", name: "B", parentId: "old-boolean", siblingIndex: 1, x: 40, y: 0, width: 40, height: 40, fill: "#3366cc", vectorPath: closedPath },
+        { id: "retained", type: "VECTOR", name: "Retained", parentId: "frame", siblingIndex: 1, x: 100, y: 8, width: 40, height: 40, fill: "#3366cc", autoLayout: flowLayout, vectorPath: closedPath },
+      ],
+    };
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "replace-flow-boolean", projection, transport, createId: () => "flow-replacement", scheduleMicrotask: () => {} });
+    const frame = (await session.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const first = (await session.getNodeByIdAsync("a"))!;
+    const second = (await session.getNodeByIdAsync("b"))!;
+
+    const replacement = session.exclude([first, second], frame);
+
+    expect(session.projectionStore.getNode(replacement.id)).toMatchObject({
+      parentId: "frame",
+      siblingIndex: 0,
+      x: 108,
+      y: 58,
+      width: 80,
+      height: 40,
+      autoLayout: flowLayout,
+      relativeTransform: undefined,
+    });
+    expect(frame.children.map((node) => node.id)).toEqual([replacement.id, "retained"]);
+    await session.commitAsync();
+    expect(await session.getNodeByIdAsync("old-boolean")).toBeNull();
+    expect(transport.submitted[0]?.operations).toEqual([expect.objectContaining({
+      type: "boolean",
+      node: expect.objectContaining({ siblingIndex: 0, autoLayout: flowLayout, relativeTransform: undefined }),
+    })]);
+
+    const mismatchProjection = structuredClone(projection);
+    mismatchProjection.nodes[3] = { ...mismatchProjection.nodes[3]!, width: 81 };
+    const mismatchSession = new RuntimeSession({ sessionId: "replace-flow-boolean-mismatch", projection: mismatchProjection, transport: new InMemoryTransport(mismatchProjection), scheduleMicrotask: () => {} });
+    const mismatchFrame = (await mismatchSession.getNodeByIdAsync("frame")) as RuntimeContainerNodeProxy;
+    const mismatchFirst = (await mismatchSession.getNodeByIdAsync("a"))!;
+    const mismatchSecond = (await mismatchSession.getNodeByIdAsync("b"))!;
+    expect(isRuntimeError(captureError(() => mismatchSession.union([mismatchFirst, mismatchSecond], mismatchFrame)), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
   it("keeps absolute aggregates out of flow and preserves complete bounded flow aggregates", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,
@@ -5401,6 +5518,7 @@ class InMemoryTransport implements RuntimeTransactionTransport {
       else if (operation.type === "boolean") {
         nodes.set(operation.node.id, { ...structuredClone(operation.node), removed: false });
         const sourceParentIds = new Set(operation.operandIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+        const consumedBooleanId = fullyConsumedRuntimeBooleanId(nodes, operation.operandIds, operation.node.parentId);
         operation.operandIds.forEach((nodeId, index) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, ...structuredClone(operation.operandPatches[index]), parentId: operation.node.id, siblingIndex: index });
@@ -5409,6 +5527,7 @@ class InMemoryTransport implements RuntimeTransactionTransport {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
         });
+        if (consumedBooleanId) nodes.delete(consumedBooleanId);
         dissolveEmptyRuntimeGroups(nodes, sourceParentIds);
       }
       else if (operation.type === "transformGroup") {
@@ -5442,7 +5561,9 @@ class InMemoryTransport implements RuntimeTransactionTransport {
       else if (operation.type === "flattenNodes") {
         nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
         const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+        const consumedBooleanId = fullyConsumedRuntimeBooleanId(nodes, operation.sourceIds, operation.replacement.parentId);
         operation.sourceIds.forEach((nodeId) => nodes.delete(nodeId));
+        if (consumedBooleanId) nodes.delete(consumedBooleanId);
         dissolveEmptyRuntimeGroups(nodes, sourceParentIds);
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
@@ -5475,6 +5596,22 @@ class InMemoryTransport implements RuntimeTransactionTransport {
     this.projection = { revision: this.projection.revision + 1, nodes: [...nodes.values()] };
     return { type: "accepted", acceptedRevision: this.projection.revision, projection: this.projection };
   }
+}
+
+function fullyConsumedRuntimeBooleanId(
+  nodes: ReadonlyMap<string, RuntimeProjectionNode>,
+  sourceIds: readonly string[],
+  targetParentId: unknown,
+): string | undefined {
+  const selected = new Set(sourceIds);
+  const sourceParentIds = new Set(sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId));
+  if (sourceParentIds.size !== 1) return undefined;
+  const [booleanId] = sourceParentIds;
+  if (typeof booleanId !== "string") return undefined;
+  const boolean = nodes.get(booleanId);
+  if (!boolean || boolean.type !== "BOOLEAN_OPERATION" || boolean.parentId !== targetParentId) return undefined;
+  const children = [...nodes.values()].filter((node) => node.parentId === booleanId);
+  return children.length >= 2 && children.every((child) => selected.has(child.id)) ? booleanId : undefined;
 }
 
 function dissolveEmptyRuntimeGroups(nodes: Map<string, RuntimeProjectionNode>, initialParentIds: ReadonlySet<string>): void {

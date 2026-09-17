@@ -50,7 +50,7 @@ import {
   type DocumentVariableValue,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
-import { normalizeAutoLayout, structuralAggregateLayoutAdmission } from "../lib/auto-layout-normalization";
+import { normalizeAutoLayout, structuralAggregateLayoutAdmission, structuralReplacementLayoutAdmission } from "../lib/auto-layout-normalization";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
@@ -2600,6 +2600,10 @@ export class RuntimeSession implements RuntimeContainerHost {
     const selectedIds = new Set(selected.map((node) => node.id));
     const sourceParentIds = new Set(selected.map((node) => node.parentId));
     const liveNodes = this.projectionStore.listLiveNodes();
+    const consumedBoolean = runtimeFullyConsumedDirectBoolean(liveNodes, selectedIds, sourceParentIds, targetParent.id);
+    if (consumedBoolean && !runtimeCanConsumePresentationBoolean(consumedBoolean)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedBoolean.id });
+    }
     const directPresentationGroup = runtimeFullyConsumedDirectGroup(liveNodes, selectedIds, sourceParentIds, targetParent.id);
     const consumedPresentationGroup = directPresentationGroup && !runtimeCanDissolveNeutralGroup(directPresentationGroup)
       ? directPresentationGroup
@@ -2607,7 +2611,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (consumedPresentationGroup && !runtimeCanConsumePresentationGroup(consumedPresentationGroup)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedPresentationGroup.id });
     }
-    const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
+    const dissolvedGroups = consumedBoolean ? [] : consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
       liveNodes,
       selectedIds,
       sourceParentIds,
@@ -2618,19 +2622,25 @@ export class RuntimeSession implements RuntimeContainerHost {
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
     const targetOwnsAutoLayout = runtimeOwnsAutoLayout(targetParentNode);
     const aggregateLayout = targetOwnsAutoLayout
-      ? structuralAggregateLayoutAdmission(
-          targetParentNode.autoLayout as DocumentAutoLayout | null | undefined,
-          selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
-          liveNodes.filter((node) => node.parentId === targetParent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
-        )
+      ? consumedBoolean
+        ? structuralReplacementLayoutAdmission(
+            targetParentNode.autoLayout as DocumentAutoLayout | null | undefined,
+            consumedBoolean as Parameters<typeof structuralReplacementLayoutAdmission>[1],
+          )
+        : structuralAggregateLayoutAdmission(
+            targetParentNode.autoLayout as DocumentAutoLayout | null | undefined,
+            selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+            liveNodes.filter((node) => node.parentId === targetParent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+          )
       : undefined;
-    if ((crossesParents && targetOwnsAutoLayout) || (targetOwnsAutoLayout && !aggregateLayout)) {
+    if ((crossesParents && targetOwnsAutoLayout && !consumedBoolean) || (targetOwnsAutoLayout && !aggregateLayout)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
     }
     for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === targetParent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
       if (sourceParent?.type === "GROUP" && dissolvedGroupIds.has(sourceParent.id)) continue;
+      if (sourceParent?.id === consumedBoolean?.id) continue;
       if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
       }
@@ -2639,7 +2649,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       if (typeof structuralParentId !== "string") continue;
       const structuralParent = this.projectionStore.getNode(structuralParentId);
       if (!structuralParent || (structuralParent.type !== "GROUP" && structuralParent.type !== "BOOLEAN_OPERATION")) continue;
-      if (dissolvedGroupIds.has(structuralParentId)) continue;
+      if (dissolvedGroupIds.has(structuralParentId) || structuralParentId === consumedBoolean?.id) continue;
       const selectedChildCount = selected.filter((node) => node.parentId === structuralParentId).length;
       const childCountAfter = this.siblingsOf(structuralParentId).length - selectedChildCount + (structuralParentId === targetParent.id ? 1 : 0);
       if ((structuralParent.type === "GROUP" && childCountAfter < 1) || (structuralParent.type === "BOOLEAN_OPERATION" && childCountAfter < 2)) {
@@ -2647,16 +2657,18 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
-    const removedIds = new Set([...selectedIds, ...dissolvedGroupIds]);
+    const removedIds = new Set([...selectedIds, ...dissolvedGroupIds, ...(consumedBoolean ? [consumedBoolean.id] : [])]);
     const targetSiblings = this.siblingsOf(targetParent.id);
     const remaining = targetSiblings.filter((node) => !removedIds.has(node.id));
-    const dissolvedTargetIndexes = dissolvedGroups
+    const dissolvedTargetIndexes = [...dissolvedGroups, ...(consumedBoolean ? [consumedBoolean] : [])]
       .filter((group) => group.parentId === targetParent.id)
       .map((group) => targetSiblings.findIndex((sibling) => sibling.id === group.id))
       .filter((candidateIndex) => candidateIndex >= 0);
-    const selectedTargetIndexes = selected
-      .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
-      .filter((candidateIndex) => candidateIndex >= 0);
+    const selectedTargetIndexes = consumedBoolean
+      ? [targetSiblings.findIndex((sibling) => sibling.id === consumedBoolean.id)]
+      : selected
+          .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
+          .filter((candidateIndex) => candidateIndex >= 0);
     const flowDestination = aggregateLayout?.kind === "flow"
       ? targetSiblings.slice(0, Math.min(...selectedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
       : undefined;
@@ -2676,6 +2688,17 @@ export class RuntimeSession implements RuntimeContainerHost {
     const top = Math.min(...bounds.map((bound) => bound.top));
     const right = Math.max(...bounds.map((bound) => bound.right));
     const bottom = Math.max(...bounds.map((bound) => bound.bottom));
+    if (targetOwnsAutoLayout && consumedBoolean) {
+      const consumedWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), consumedBoolean);
+      const consumedBounds = consumedWorld && runtimeBoundsForTransform(consumedBoolean, consumedWorld);
+      if (!consumedBounds
+        || Math.abs(consumedBounds.left - left) > 1e-6
+        || Math.abs(consumedBounds.top - top) > 1e-6
+        || Math.abs(consumedBounds.right - right) > 1e-6
+        || Math.abs(consumedBounds.bottom - bottom) > 1e-6) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedBoolean.id });
+      }
+    }
     const wrapperWorld: RuntimeTransform = { a: 1, b: 0, c: 0, d: 1, e: left, f: top };
     const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
     const resolvedPaths = orderedSelected.map((source, sourceIndex) => {
@@ -2810,8 +2833,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       type: "VECTOR",
       name: "Flattened",
       parentId: targetParent.id,
-      x: replacementLocal.e,
-      y: replacementLocal.f,
+      x: aggregateLayout?.kind === "flow" ? wrapperWorld.e : replacementLocal.e,
+      y: aggregateLayout?.kind === "flow" ? wrapperWorld.f : replacementLocal.f,
       width: Math.max(1, right - left),
       height: Math.max(1, bottom - top),
       rotation: Math.atan2(replacementLocal.b, replacementLocal.a) * 180 / Math.PI,
@@ -2824,12 +2847,12 @@ export class RuntimeSession implements RuntimeContainerHost {
       booleanOperation: undefined,
       fillStack: structuredClone(paintStacks[0]!),
       fillStyleId: undefined,
-      autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : source.autoLayout,
+      autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : consumedBoolean?.autoLayout ?? source.autoLayout,
       ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
       effectStack: sharedEffects.length ? structuredClone(sharedEffects) : undefined,
       dropShadow: structuredClone(sharedEffects.find((effect) => effect.dropShadow)?.dropShadow),
       extensions,
-      ...(consumedPresentationGroup ? runtimePresentationGroupPatch(consumedPresentationGroup) : {}),
+      ...((consumedBoolean ?? consumedPresentationGroup) ? runtimePresentationContainerPatch((consumedBoolean ?? consumedPresentationGroup)!) : {}),
       radius: 0,
       cornerRadii: undefined,
       cornerSmoothing: 0,
@@ -2840,8 +2863,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     const affectedParentIds = new Set<string | undefined>([
       ...orderedSelected
         .map((sourceNode) => sourceNode.parentId)
-        .filter((sourceParentId) => typeof sourceParentId !== "string" || !dissolvedGroupIds.has(sourceParentId)),
+        .filter((sourceParentId) => typeof sourceParentId !== "string" || (!dissolvedGroupIds.has(sourceParentId) && sourceParentId !== consumedBoolean?.id)),
       ...dissolvedGroups.map((group) => group.parentId),
+      ...(consumedBoolean ? [consumedBoolean.parentId] : []),
     ]);
     for (const affectedParentId of affectedParentIds) {
       if (affectedParentId === targetParent.id) continue;
@@ -2924,6 +2948,10 @@ export class RuntimeSession implements RuntimeContainerHost {
     const selectedIds = new Set(selected.map((node) => node.id));
     const sourceParentIds = new Set(selected.map((node) => node.parentId));
     const liveNodes = this.projectionStore.listLiveNodes();
+    const consumedBoolean = runtimeFullyConsumedDirectBoolean(liveNodes, selectedIds, sourceParentIds, parent.id);
+    if (consumedBoolean && !runtimeCanConsumePresentationBoolean(consumedBoolean)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedBoolean.id });
+    }
     const directPresentationGroup = runtimeFullyConsumedDirectGroup(liveNodes, selectedIds, sourceParentIds, parent.id);
     const consumedPresentationGroup = directPresentationGroup && !runtimeCanDissolveNeutralGroup(directPresentationGroup)
       ? directPresentationGroup
@@ -2931,7 +2959,7 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (consumedPresentationGroup && !runtimeCanConsumePresentationGroup(consumedPresentationGroup)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedPresentationGroup.id });
     }
-    const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
+    const dissolvedGroups = consumedBoolean ? [] : consumedPresentationGroup ? [consumedPresentationGroup] : runtimeDissolvableNeutralGroups(
       liveNodes,
       selectedIds,
       sourceParentIds,
@@ -2942,19 +2970,25 @@ export class RuntimeSession implements RuntimeContainerHost {
     const crossesParents = selected.some((node) => node.parentId !== parent.id);
     const targetOwnsAutoLayout = runtimeOwnsAutoLayout(parentNode);
     const aggregateLayout = targetOwnsAutoLayout
-      ? structuralAggregateLayoutAdmission(
-          parentNode.autoLayout as DocumentAutoLayout | null | undefined,
-          selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
-          liveNodes.filter((node) => node.parentId === parent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
-        )
+      ? consumedBoolean
+        ? structuralReplacementLayoutAdmission(
+            parentNode.autoLayout as DocumentAutoLayout | null | undefined,
+            consumedBoolean as Parameters<typeof structuralReplacementLayoutAdmission>[1],
+          )
+        : structuralAggregateLayoutAdmission(
+            parentNode.autoLayout as DocumentAutoLayout | null | undefined,
+            selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+            liveNodes.filter((node) => node.parentId === parent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+          )
       : undefined;
-    if ((crossesParents && targetOwnsAutoLayout) || (targetOwnsAutoLayout && !aggregateLayout)) {
+    if ((crossesParents && targetOwnsAutoLayout && !consumedBoolean) || (targetOwnsAutoLayout && !aggregateLayout)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
     }
     for (const sourceParentId of sourceParentIds) {
       if (sourceParentId === parent.id) continue;
       const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
       if (sourceParent?.type === "GROUP" && dissolvedGroupIds.has(sourceParent.id)) continue;
+      if (sourceParent?.id === consumedBoolean?.id) continue;
       if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
       }
@@ -2963,7 +2997,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       if (typeof structuralParentId !== "string") continue;
       const structuralParent = this.projectionStore.getNode(structuralParentId);
       if (!structuralParent || (structuralParent.type !== "GROUP" && structuralParent.type !== "BOOLEAN_OPERATION")) continue;
-      if (dissolvedGroupIds.has(structuralParentId)) continue;
+      if (dissolvedGroupIds.has(structuralParentId) || structuralParentId === consumedBoolean?.id) continue;
       const selectedChildCount = selected.filter((node) => node.parentId === structuralParentId).length;
       const childCountAfter = this.siblingsOf(structuralParentId).length - selectedChildCount + (structuralParentId === parent.id ? 1 : 0);
       if ((structuralParent.type === "GROUP" && childCountAfter < 1) || (structuralParent.type === "BOOLEAN_OPERATION" && childCountAfter < 2)) {
@@ -2971,16 +3005,18 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
-    const removedIds = new Set([...selectedIds, ...dissolvedGroupIds]);
+    const removedIds = new Set([...selectedIds, ...dissolvedGroupIds, ...(consumedBoolean ? [consumedBoolean.id] : [])]);
     const targetSiblings = this.siblingsOf(parent.id);
     const remaining = targetSiblings.filter((node) => !removedIds.has(node.id));
-    const dissolvedTargetIndexes = dissolvedGroups
+    const dissolvedTargetIndexes = [...dissolvedGroups, ...(consumedBoolean ? [consumedBoolean] : [])]
       .filter((group) => group.parentId === parent.id)
       .map((group) => targetSiblings.findIndex((sibling) => sibling.id === group.id))
       .filter((candidateIndex) => candidateIndex >= 0);
-    const selectedTargetIndexes = selected
-      .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
-      .filter((candidateIndex) => candidateIndex >= 0);
+    const selectedTargetIndexes = consumedBoolean
+      ? [targetSiblings.findIndex((sibling) => sibling.id === consumedBoolean.id)]
+      : selected
+          .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
+          .filter((candidateIndex) => candidateIndex >= 0);
     const flowDestination = aggregateLayout?.kind === "flow"
       ? targetSiblings.slice(0, Math.min(...selectedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
       : undefined;
@@ -2998,6 +3034,17 @@ export class RuntimeSession implements RuntimeContainerHost {
     const top = Math.min(...bounds.map((bound) => bound.top));
     const right = Math.max(...bounds.map((bound) => bound.right));
     const bottom = Math.max(...bounds.map((bound) => bound.bottom));
+    if (targetOwnsAutoLayout && consumedBoolean) {
+      const consumedWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), consumedBoolean);
+      const consumedBounds = consumedWorld && runtimeBoundsForTransform(consumedBoolean, consumedWorld);
+      if (!consumedBounds
+        || Math.abs(consumedBounds.left - left) > 1e-6
+        || Math.abs(consumedBounds.top - top) > 1e-6
+        || Math.abs(consumedBounds.right - right) > 1e-6
+        || Math.abs(consumedBounds.bottom - bottom) > 1e-6) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: consumedBoolean.id });
+      }
+    }
     const parentWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), this.projectionStore.getNode(parent.id)!);
     const parentInverse = parentWorld && invertRuntimeTransform(parentWorld);
     if (!parentInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
@@ -3009,8 +3056,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       type: "BOOLEAN_OPERATION",
       parentId: parent.id,
       name: runtimeBooleanName(operation),
-      x: wrapperLocal.e,
-      y: wrapperLocal.f,
+      x: aggregateLayout?.kind === "flow" ? wrapperWorld.e : wrapperLocal.e,
+      y: aggregateLayout?.kind === "flow" ? wrapperWorld.f : wrapperLocal.f,
       width: Math.max(1, right - left),
       height: Math.max(1, bottom - top),
       rotation: Math.atan2(wrapperLocal.b, wrapperLocal.a) * 180 / Math.PI,
@@ -3021,7 +3068,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       booleanOperation: operation,
       autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : undefined,
       ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
-      ...(consumedPresentationGroup ? runtimePresentationGroupPatch(consumedPresentationGroup) : {}),
+      ...((consumedBoolean ?? consumedPresentationGroup) ? runtimePresentationContainerPatch((consumedBoolean ?? consumedPresentationGroup)!) : {}),
     };
     const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
     const operandPatches = operandWorldTransforms.map((transform) => runtimeBooleanOperandPatch(multiplyRuntimeTransforms(wrapperInverse, transform!)));
@@ -3032,8 +3079,9 @@ export class RuntimeSession implements RuntimeContainerHost {
     const affectedParentIds = new Set<string | undefined>([
       ...orderedSelected
         .map((operand) => operand.parentId)
-        .filter((sourceParentId) => typeof sourceParentId !== "string" || !dissolvedGroupIds.has(sourceParentId)),
+        .filter((sourceParentId) => typeof sourceParentId !== "string" || (!dissolvedGroupIds.has(sourceParentId) && sourceParentId !== consumedBoolean?.id)),
       ...dissolvedGroups.map((group) => group.parentId),
+      ...(consumedBoolean ? [consumedBoolean.parentId] : []),
     ]);
     for (const affectedParentId of affectedParentIds) {
       if (affectedParentId === parent.id) continue;
@@ -4878,6 +4926,28 @@ function runtimeCanConsumePresentationGroup(node: RuntimeProjectionNode): boolea
     && node.prototypeMetadata === undefined;
 }
 
+function runtimeCanConsumePresentationBoolean(node: RuntimeProjectionNode): boolean {
+  const opacity = node.opacity ?? 1;
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
+  return node.type === "BOOLEAN_OPERATION"
+    && typeof opacity === "number"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.clipsContent !== true
+    && node.locked !== true
+    && node.contentsHidden !== true
+    && !runtimeOwnsAutoLayout(node)
+    && node.constraints == null
+    && (extensions.length === 0 || (node.isMask === true && extensions.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
 function runtimeFullyConsumedDirectGroup(
   nodes: readonly RuntimeProjectionNode[],
   selectedIds: ReadonlySet<string>,
@@ -4893,7 +4963,23 @@ function runtimeFullyConsumedDirectGroup(
   return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
 }
 
-function runtimePresentationGroupPatch(group: RuntimeProjectionNode): Readonly<Record<string, unknown>> {
+function runtimeFullyConsumedDirectBoolean(
+  nodes: readonly RuntimeProjectionNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string,
+): RuntimeProjectionNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [booleanId] = sourceParentIds;
+  if (typeof booleanId !== "string") return undefined;
+  if (nodes.find((node) => node.id === targetParentId && node.removed !== true)?.type === "BOOLEAN_OPERATION") return undefined;
+  const boolean = nodes.find((node) => node.id === booleanId && node.removed !== true);
+  if (!boolean || boolean.type !== "BOOLEAN_OPERATION" || boolean.parentId !== targetParentId) return undefined;
+  const children = nodes.filter((node) => node.removed !== true && node.parentId === boolean.id);
+  return children.length >= 2 && children.every((child) => selectedIds.has(child.id)) ? boolean : undefined;
+}
+
+function runtimePresentationContainerPatch(group: RuntimeProjectionNode): Readonly<Record<string, unknown>> {
   return {
     opacity: finiteNodeNumber(group.opacity, 1),
     blendMode: group.blendMode ?? "normal",

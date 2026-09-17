@@ -3,7 +3,7 @@ import { validRuntimeStyleDocumentationLinks } from "./runtime-style-metadata";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
 import type { DocumentPaintStyleResource, DocumentTextProperties, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
-import { matchesStructuralAggregateChildLayout, structuralAggregateLayoutAdmission } from "../lib/auto-layout-normalization";
+import { matchesStructuralAggregateChildLayout, matchesStructuralReplacementLayout, structuralAggregateLayoutAdmission, structuralReplacementLayoutAdmission } from "../lib/auto-layout-normalization";
 
 export type RuntimeProjectionNode = Readonly<{
   id: string;
@@ -610,6 +610,7 @@ function validateOperations(
       overlay.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
         const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+        const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean(read, () => new Set([...base.keys(), ...overlay.keys()]), new Set(operation.operandIds), sourceParentIds, operation.node.parentId);
         operation.operandIds.forEach((nodeId, siblingIndex) => {
           const node = read(nodeId)!;
           overlay.set(nodeId, cloneNode({ ...node, ...operation.operandPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
@@ -617,6 +618,7 @@ function validateOperations(
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex }));
         });
+        if (consumedBoolean) overlay.set(consumedBoolean.id, cloneNode({ ...consumedBoolean, removed: true }));
         sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       }
       if (operation.type === "transformGroup") {
@@ -660,8 +662,10 @@ function validateOperations(
     if (operation.type === "flattenNodes") {
       validateFlattenNodesOperation(read, () => new Set([...base.keys(), ...overlay.keys()]), operation, transactionId);
       const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+      const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean(read, () => new Set([...base.keys(), ...overlay.keys()]), new Set(operation.sourceIds), sourceParentIds, operation.replacement.parentId);
       overlay.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
       operation.sourceIds.forEach((nodeId) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, removed: true })));
+      if (consumedBoolean) overlay.set(consumedBoolean.id, cloneNode({ ...consumedBoolean, removed: true }));
       sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => overlay.set(nodeId, cloneNode({ ...read(nodeId)!, siblingIndex })));
       continue;
@@ -743,12 +747,14 @@ function applyOperations(
       nodes.set(operation.node.id, cloneNode({ ...operation.node, ...(operation.type === "transformGroup" ? operation.wrapperPatch : {}), removed: false }));
       if (operation.type === "boolean") {
         const sourceParentIds = new Set(operation.operandIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+        const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean((nodeId) => nodes.get(nodeId), () => nodes.keys(), new Set(operation.operandIds), sourceParentIds, operation.node.parentId);
         operation.operandIds.forEach((nodeId, siblingIndex) => {
           nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, ...operation.operandPatches[siblingIndex], parentId: operation.node.id, siblingIndex }));
         });
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex }));
         });
+        if (consumedBoolean) nodes.set(consumedBoolean.id, cloneNode({ ...consumedBoolean, removed: true }));
         sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       }
       if (operation.type === "transformGroup") {
@@ -790,8 +796,10 @@ function applyOperations(
     if (operation.type === "flattenNodes") {
       validateFlattenNodesOperation((nodeId) => nodes.get(nodeId), () => nodes.keys(), operation, transactionId);
       const sourceParentIds = new Set(operation.sourceIds.map((nodeId) => nodes.get(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+      const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean((nodeId) => nodes.get(nodeId), () => nodes.keys(), new Set(operation.sourceIds), sourceParentIds, operation.replacement.parentId);
       nodes.set(operation.replacement.id, cloneNode({ ...operation.replacement, removed: false }));
       operation.sourceIds.forEach((nodeId) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, removed: true })));
+      if (consumedBoolean) nodes.set(consumedBoolean.id, cloneNode({ ...consumedBoolean, removed: true }));
       sourceParentIds.forEach((parentId) => structural.dissolveFrom(parentId));
       operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => nodes.set(nodeId, cloneNode({ ...nodes.get(nodeId)!, siblingIndex })));
       continue;
@@ -1026,15 +1034,30 @@ function validateBooleanOperation(
   }
   const operandIds = new Set(operation.operandIds);
   const operands = operation.operandIds.map((nodeId) => read(nodeId)!);
-  if (!projectionAdmitsAggregateInAutoLayout(read, nodeIds, operands, operation.node)) {
+  const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+  const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId);
+  const targetParent = typeof operation.node.parentId === "string" ? read(operation.node.parentId) : undefined;
+  const replacesLayoutSlot = Boolean(consumedBoolean && targetParent && projectionOwnsAutoLayout(targetParent));
+  const invalidConsumedBoolean = Boolean(consumedBoolean && (
+    !runtimeProjectionCanConsumePresentationBoolean(consumedBoolean)
+    || !runtimeProjectionMatchesPresentation(operation.node, consumedBoolean)
+    || (replacesLayoutSlot && (
+      typeof operation.node.width !== "number"
+      || typeof operation.node.height !== "number"
+      || typeof consumedBoolean.width !== "number"
+      || typeof consumedBoolean.height !== "number"
+      || Math.abs(operation.node.width - consumedBoolean.width) > 1e-6
+      || Math.abs(operation.node.height - consumedBoolean.height) > 1e-6
+    ))
+  ));
+  if (invalidConsumedBoolean || !projectionAdmitsAggregateInAutoLayout(read, nodeIds, operands, operation.node, consumedBoolean)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
   }
-  const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
   const directPresentationGroup = runtimeProjectionFullyConsumedDirectGroup(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId);
   const consumedPresentationGroup = directPresentationGroup && !runtimeProjectionCanDissolveNeutralGroup(directPresentationGroup)
     ? directPresentationGroup
     : undefined;
-  if (consumedPresentationGroup
+  if (consumedBoolean ? false : consumedPresentationGroup
     ? !runtimeProjectionCanConsumePresentationGroup(consumedPresentationGroup) || !runtimeProjectionMatchesPresentation(operation.node, consumedPresentationGroup)
     : !runtimeProjectionDissolvableNeutralGroups(read, nodeIds, operandIds, sourceParentIds, operation.node.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
@@ -1243,15 +1266,30 @@ function validateFlattenNodesOperation(
     new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   const sourceIds = new Set(operation.sourceIds);
-  if (!projectionAdmitsAggregateInAutoLayout(read, nodeIds, sources, operation.replacement)) {
+  const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
+  const consumedBoolean = runtimeProjectionFullyConsumedDirectBoolean(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId);
+  const targetParent = typeof operation.replacement.parentId === "string" ? read(operation.replacement.parentId) : undefined;
+  const replacesLayoutSlot = Boolean(consumedBoolean && targetParent && projectionOwnsAutoLayout(targetParent));
+  const invalidConsumedBoolean = Boolean(consumedBoolean && (
+    !runtimeProjectionCanConsumePresentationBoolean(consumedBoolean)
+    || !runtimeProjectionMatchesPresentation(operation.replacement, consumedBoolean)
+    || (replacesLayoutSlot && (
+      typeof operation.replacement.width !== "number"
+      || typeof operation.replacement.height !== "number"
+      || typeof consumedBoolean.width !== "number"
+      || typeof consumedBoolean.height !== "number"
+      || Math.abs(operation.replacement.width - consumedBoolean.width) > 1e-6
+      || Math.abs(operation.replacement.height - consumedBoolean.height) > 1e-6
+    ))
+  ));
+  if (invalidConsumedBoolean || !projectionAdmitsAggregateInAutoLayout(read, nodeIds, sources, operation.replacement, consumedBoolean)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   }
-  const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
   const directPresentationGroup = runtimeProjectionFullyConsumedDirectGroup(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId);
   const consumedPresentationGroup = directPresentationGroup && !runtimeProjectionCanDissolveNeutralGroup(directPresentationGroup)
     ? directPresentationGroup
     : undefined;
-  if (consumedPresentationGroup
+  if (consumedBoolean ? false : consumedPresentationGroup
     ? !runtimeProjectionCanConsumePresentationGroup(consumedPresentationGroup) || !runtimeProjectionMatchesPresentation(operation.replacement, consumedPresentationGroup)
     : !runtimeProjectionDissolvableNeutralGroups(read, nodeIds, sourceIds, sourceParentIds, operation.replacement.parentId)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
@@ -1310,6 +1348,28 @@ function runtimeProjectionCanConsumePresentationGroup(node: RuntimeProjectionNod
     && node.prototypeMetadata === undefined;
 }
 
+function runtimeProjectionCanConsumePresentationBoolean(node: RuntimeProjectionNode): boolean {
+  const opacity = node.opacity ?? 1;
+  const extensions = node.extensions && typeof node.extensions === "object" && !Array.isArray(node.extensions)
+    ? Object.keys(node.extensions as Record<string, unknown>)
+    : [];
+  return node.type === "BOOLEAN_OPERATION"
+    && typeof opacity === "number"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && node.dropShadow == null
+    && (!Array.isArray(node.effectStack) || node.effectStack.length === 0)
+    && node.clipsContent !== true
+    && node.locked !== true
+    && node.contentsHidden !== true
+    && !projectionOwnsAutoLayout(node)
+    && node.constraints == null
+    && (extensions.length === 0 || (node.isMask === true && extensions.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (!Array.isArray(node.reactions) || node.reactions.length === 0)
+    && node.prototypeMetadata === undefined;
+}
+
 function runtimeProjectionFullyConsumedDirectGroup(
   read: (nodeId: string) => RuntimeProjectionNode | undefined,
   nodeIds: () => Iterable<string>,
@@ -1325,6 +1385,24 @@ function runtimeProjectionFullyConsumedDirectGroup(
     .map((nodeId) => read(nodeId))
     .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === group.id));
   return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
+}
+
+function runtimeProjectionFullyConsumedDirectBoolean(
+  read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string>,
+  targetParentId: unknown,
+): RuntimeProjectionNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [booleanId] = sourceParentIds;
+  if (typeof targetParentId === "string" && read(targetParentId)?.type === "BOOLEAN_OPERATION") return undefined;
+  const boolean = read(booleanId!);
+  if (!boolean || boolean.removed === true || boolean.type !== "BOOLEAN_OPERATION" || boolean.parentId !== targetParentId) return undefined;
+  const children = [...nodeIds()]
+    .map((nodeId) => read(nodeId))
+    .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === boolean.id));
+  return children.length >= 2 && children.every((child) => selectedIds.has(child.id)) ? boolean : undefined;
 }
 
 function runtimeProjectionMatchesPresentation(replacement: RuntimeProjectionNode, group: RuntimeProjectionNode): boolean {
@@ -1397,19 +1475,27 @@ function projectionAdmitsAggregateInAutoLayout(
   nodeIds: () => Iterable<string>,
   sources: readonly RuntimeProjectionNode[],
   replacement: RuntimeProjectionNode,
+  consumedBoolean?: RuntimeProjectionNode,
 ): boolean {
   const targetParent = typeof replacement.parentId === "string" ? read(replacement.parentId) : undefined;
   if (targetParent && projectionOwnsAutoLayout(targetParent)) {
     const siblings = [...nodeIds()]
       .map((nodeId) => read(nodeId))
       .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === targetParent.id));
-    const admission = structuralAggregateLayoutAdmission(
-      targetParent.autoLayout as Parameters<typeof structuralAggregateLayoutAdmission>[0],
-      sources as Parameters<typeof structuralAggregateLayoutAdmission>[1],
-      siblings as Parameters<typeof structuralAggregateLayoutAdmission>[2],
-    );
-    if (!admission || sources.some((source) => source.parentId !== targetParent.id)
-      || !matchesStructuralAggregateChildLayout(replacement.autoLayout as Parameters<typeof matchesStructuralAggregateChildLayout>[0], admission.kind)
+    const admission = consumedBoolean
+      ? structuralReplacementLayoutAdmission(
+          targetParent.autoLayout as Parameters<typeof structuralReplacementLayoutAdmission>[0],
+          consumedBoolean as Parameters<typeof structuralReplacementLayoutAdmission>[1],
+        )
+      : structuralAggregateLayoutAdmission(
+          targetParent.autoLayout as Parameters<typeof structuralAggregateLayoutAdmission>[0],
+          sources as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+          siblings as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+        );
+    if (!admission || (!consumedBoolean && sources.some((source) => source.parentId !== targetParent.id))
+      || (consumedBoolean
+        ? !matchesStructuralReplacementLayout(replacement.autoLayout as Parameters<typeof matchesStructuralReplacementLayout>[0], admission)
+        : !matchesStructuralAggregateChildLayout(replacement.autoLayout as Parameters<typeof matchesStructuralAggregateChildLayout>[0], admission.kind))
       || (admission.kind === "flow" && replacement.relativeTransform != null)) {
       return false;
     }
@@ -1417,7 +1503,9 @@ function projectionAdmitsAggregateInAutoLayout(
   return sources.every((source) => {
     if (source.parentId === replacement.parentId) return true;
     const sourceParent = typeof source.parentId === "string" ? read(source.parentId) : undefined;
-    return !sourceParent || (!projectionOwnsAutoLayout(sourceParent) && sourceParent.type !== "BOOLEAN_OPERATION");
+    return Boolean(consumedBoolean && sourceParent?.id === consumedBoolean.id)
+      || !sourceParent
+      || (!projectionOwnsAutoLayout(sourceParent) && sourceParent.type !== "BOOLEAN_OPERATION");
   });
 }
 

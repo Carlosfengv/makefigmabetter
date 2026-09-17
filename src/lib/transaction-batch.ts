@@ -1,5 +1,5 @@
 import { COMPONENT_PROPERTY_REFERENCES_EXTENSION, createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type DocumentVectorPath, type EditorClipboard, type EditorCommand } from "./editor-protocol";
-import { absoluteStructuralChildAutoLayout, structuralAggregateLayoutAdmission } from "./auto-layout-normalization";
+import { absoluteStructuralChildAutoLayout, structuralAggregateLayoutAdmission, structuralReplacementLayoutAdmission } from "./auto-layout-normalization";
 import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, positionIdForLayerInsertion, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
@@ -318,12 +318,14 @@ export function resolveFlattenNodesBatch(
   const sourceIdSet = new Set(sourceIds);
   if (targetParentId && (sourceIdSet.has(targetParentId) || sourceIds.some((sourceId) => hasAncestor(nodes, targetParentId, sourceId)))) return undefined;
   const sourceParentIds = new Set(concreteSources.map((source) => source.parentId));
+  const consumedBoolean = fullyConsumedDirectBoolean(nodes, sourceIdSet, sourceParentIds, targetParentId);
+  if (consumedBoolean && !canConsumePresentationBoolean(consumedBoolean)) return undefined;
   const directPresentationGroup = fullyConsumedDirectGroup(nodes, sourceIdSet, sourceParentIds, targetParentId);
   const consumedPresentationGroup = directPresentationGroup && !canDissolveNeutralGroup(directPresentationGroup)
     ? directPresentationGroup
     : undefined;
   if (consumedPresentationGroup && !canConsumePresentationGroup(consumedPresentationGroup)) return undefined;
-  const dissolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
+  const dissolvedGroups = consumedBoolean ? [] : consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
     nodes,
     sourceIdSet,
     sourceParentIds,
@@ -331,20 +333,23 @@ export function resolveFlattenNodesBatch(
   );
   if (!dissolvedGroups) return undefined;
   const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
-  const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
+  const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds, ...(consumedBoolean ? [consumedBoolean.id] : [])]);
   const targetOwnsAutoLayout = ownsAutoLayout(targetParent);
   const aggregateLayout = targetOwnsAutoLayout
-    ? structuralAggregateLayoutAdmission(
-        targetParent?.autoLayout,
-        concreteSources,
-        nodes.filter((node) => node.parentId === targetParentId),
-      )
+    ? consumedBoolean
+      ? structuralReplacementLayoutAdmission(targetParent?.autoLayout, consumedBoolean)
+      : structuralAggregateLayoutAdmission(
+          targetParent?.autoLayout,
+          concreteSources,
+          nodes.filter((node) => node.parentId === targetParentId),
+        )
     : undefined;
-  if (targetOwnsAutoLayout && (concreteSources.some((source) => source.parentId !== targetParentId) || !aggregateLayout)) return undefined;
+  if (targetOwnsAutoLayout && ((!consumedBoolean && concreteSources.some((source) => source.parentId !== targetParentId)) || !aggregateLayout)) return undefined;
   for (const sourceParentId of new Set(concreteSources.map((source) => source.parentId))) {
     if (sourceParentId === targetParentId) continue;
     if (sourceParentId === undefined) continue;
     const sourceParent = sourceParentId ? nodes.find((node) => node.id === sourceParentId) : undefined;
+    if (consumedBoolean?.id === sourceParentId) continue;
     if (!sourceParent
       || (sourceParent.kind === "group" && !dissolvedGroupIds.has(sourceParent.id))
       || sourceParent.kind === "booleanOperation"
@@ -353,15 +358,20 @@ export function resolveFlattenNodesBatch(
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
     node.pageId === targetPageId && node.parentId === targetParentId && !removedIds.has(node.id)));
   const orderedTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) => node.pageId === targetPageId && node.parentId === targetParentId));
-  const sourceIndexesAtTarget = concreteSources
-    .filter((source) => source.parentId === targetParentId)
-    .map((source) => orderedTargetSiblings.findIndex((node) => node.id === source.id));
+  const sourceIndexesAtTarget = consumedBoolean
+    ? [orderedTargetSiblings.findIndex((node) => node.id === consumedBoolean.id)]
+    : concreteSources
+        .filter((source) => source.parentId === targetParentId)
+        .map((source) => orderedTargetSiblings.findIndex((node) => node.id === source.id));
   const firstSourceIndex = sourceIndexesAtTarget.length ? Math.min(...sourceIndexesAtTarget) : remainingTargetSiblings.length;
   const flowDestination = aggregateLayout?.kind === "flow"
     ? orderedTargetSiblings.slice(0, firstSourceIndex).filter((node) => !removedIds.has(node.id)).length
     : undefined;
+  const consumedDestination = consumedBoolean
+    ? orderedTargetSiblings.slice(0, firstSourceIndex).filter((node) => !removedIds.has(node.id)).length
+    : undefined;
   if (flowDestination !== undefined && target?.index !== undefined && target.index !== flowDestination) return undefined;
-  const destination = flowDestination ?? target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : firstSourceIndex);
+  const destination = flowDestination ?? target?.index ?? consumedDestination ?? (hasExplicitTarget ? remainingTargetSiblings.length : firstSourceIndex);
   if (!Number.isSafeInteger(destination) || destination < 0 || destination > remainingTargetSiblings.length) return undefined;
   const bounds = concreteSources.map((source) => worldBoundsForNode(nodes, source));
   if (bounds.some((bound) => !bound)) return undefined;
@@ -371,6 +381,14 @@ export function resolveFlattenNodesBatch(
   const bottom = Math.max(...bounds.map((bound) => bound!.bottom));
   const width = Math.max(1, right - left);
   const height = Math.max(1, bottom - top);
+  if (targetOwnsAutoLayout && consumedBoolean) {
+    const consumedBounds = worldBoundsForNode(nodes, consumedBoolean);
+    if (!consumedBounds
+      || Math.abs(consumedBounds.left - left) > 1e-6
+      || Math.abs(consumedBounds.top - top) > 1e-6
+      || Math.abs(consumedBounds.right - right) > 1e-6
+      || Math.abs(consumedBounds.bottom - bottom) > 1e-6) return undefined;
+  }
   const targetParentWorld = targetParentId ? worldTransformForNode(nodes, targetParentId) : undefined;
   const replacementTransform = nodePropsForWorldTransform({ a: 1, b: 0, c: 0, d: 1, e: left, f: top }, targetParentWorld, width, height);
   if (!replacementTransform) return undefined;
@@ -394,6 +412,7 @@ export function resolveFlattenNodesBatch(
     pageId: targetPageId,
     parentId: targetParentId,
     ...replacementTransform,
+    ...(aggregateLayout?.kind === "flow" ? { x: left, y: top, rotation: 0 } : {}),
     width,
     height,
     positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
@@ -404,19 +423,19 @@ export function resolveFlattenNodesBatch(
     radius: 0,
     cornerRadii: undefined,
     cornerSmoothing: 0,
-    autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : source.autoLayout,
+    autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : consumedBoolean?.autoLayout ?? source.autoLayout,
     ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
     extensions: patch?.extensions,
     contentsHidden: false,
     clipsContent: undefined,
-    ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
+    ...((consumedBoolean ?? consumedPresentationGroup) ? presentationContainerPatch((consumedBoolean ?? consumedPresentationGroup)!) : {}),
   };
   const replacementAtCreation = aggregateLayout?.kind === "flow"
     ? { ...replacement, ...replacementTransform, autoLayout: absoluteStructuralChildAutoLayout() }
     : replacement;
   const batch: CoreBatchCommand[] = [
     { type: "create", node: coreProjectionNode(replacementAtCreation) },
-    { type: "delete", ids: [...sourceIds] },
+    { type: "delete", ids: [...sourceIds, ...(consumedBoolean ? [consumedBoolean.id] : [])] },
     { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
   ];
   if (aggregateLayout?.kind === "flow") {
@@ -468,6 +487,25 @@ function canConsumePresentationGroup(group: CanvasNode): boolean {
     && group.prototypeMetadata === undefined;
 }
 
+function canConsumePresentationBoolean(node: CanvasNode): boolean {
+  const opacity = node.opacity ?? 1;
+  const extensionKeys = Object.keys(node.extensions ?? {});
+  return node.kind === "booleanOperation"
+    && Number.isFinite(opacity)
+    && opacity >= 0
+    && opacity <= 1
+    && node.dropShadow == null
+    && (node.effectStack?.length ?? 0) === 0
+    && node.clipsContent !== true
+    && node.locked !== true
+    && node.contentsHidden !== true
+    && !ownsAutoLayout(node)
+    && node.constraints == null
+    && (extensionKeys.length === 0 || (node.isMask === true && extensionKeys.every((key) => key === "makefigma.mask.alpha.v1")))
+    && (node.reactions?.length ?? 0) === 0
+    && node.prototypeMetadata === undefined;
+}
+
 function fullyConsumedDirectGroup(
   nodes: readonly CanvasNode[],
   selectedIds: ReadonlySet<string>,
@@ -483,7 +521,23 @@ function fullyConsumedDirectGroup(
   return children.length > 0 && children.every((child) => selectedIds.has(child.id)) ? group : undefined;
 }
 
-function presentationGroupPatch(group: CanvasNode): Partial<CanvasNode> {
+function fullyConsumedDirectBoolean(
+  nodes: readonly CanvasNode[],
+  selectedIds: ReadonlySet<string>,
+  sourceParentIds: ReadonlySet<string | undefined>,
+  targetParentId: string | undefined,
+): CanvasNode | undefined {
+  if (sourceParentIds.size !== 1) return undefined;
+  const [booleanId] = sourceParentIds;
+  if (!booleanId) return undefined;
+  if (targetParentId && nodes.find((node) => node.id === targetParentId)?.kind === "booleanOperation") return undefined;
+  const boolean = nodes.find((node) => node.id === booleanId);
+  if (!boolean || boolean.kind !== "booleanOperation" || boolean.parentId !== targetParentId) return undefined;
+  const children = nodes.filter((node) => node.parentId === boolean.id);
+  return children.length >= 2 && children.every((child) => selectedIds.has(child.id)) ? boolean : undefined;
+}
+
+function presentationContainerPatch(group: CanvasNode): Partial<CanvasNode> {
   return {
     opacity: group.opacity ?? 1,
     blendMode: group.blendMode ?? "normal",
@@ -1087,6 +1141,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       let parentId = commonParentId;
       let dissolvedGroups: CanvasNode[] = [];
       let consumedPresentationGroup: CanvasNode | undefined;
+      let consumedBoolean: CanvasNode | undefined;
       if (command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") {
         if (command.parentId !== undefined && command.pageId !== undefined) return undefined;
         if (command.parentId !== undefined) {
@@ -1100,12 +1155,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         if (command.index !== undefined && (!Number.isSafeInteger(command.index) || command.index < 0)) return undefined;
         if (command.type === "boolean") {
           const sourceParentIds = new Set(roots.map((node) => node.parentId));
+          consumedBoolean = fullyConsumedDirectBoolean(nextNodes, selectedIds, sourceParentIds, parentId);
+          if (consumedBoolean && !canConsumePresentationBoolean(consumedBoolean)) return undefined;
           const directPresentationGroup = fullyConsumedDirectGroup(nextNodes, selectedIds, sourceParentIds, parentId);
           consumedPresentationGroup = directPresentationGroup && !canDissolveNeutralGroup(directPresentationGroup)
             ? directPresentationGroup
             : undefined;
           if (consumedPresentationGroup && !canConsumePresentationGroup(consumedPresentationGroup)) return undefined;
-          const resolvedGroups = consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
+          const resolvedGroups = consumedBoolean ? [] : consumedPresentationGroup ? [consumedPresentationGroup] : dissolvableNeutralGroups(
             nextNodes,
             selectedIds,
             sourceParentIds,
@@ -1118,13 +1175,13 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         const crossParentRoots = roots.filter((node) => node.parentId !== parentId);
         if (crossParentRoots.some((node) => {
           const sourceParent = node.parentId ? nextNodes.find((candidate) => candidate.id === node.parentId) : undefined;
-          return sourceParent && ((sourceParent.kind === "group" && !dissolvedGroupIds.has(sourceParent.id)) || sourceParent.kind === "booleanOperation" || isAutoLayoutFrame(sourceParent));
+          return sourceParent && ((sourceParent.kind === "group" && !dissolvedGroupIds.has(sourceParent.id)) || (sourceParent.kind === "booleanOperation" && sourceParent.id !== consumedBoolean?.id) || isAutoLayoutFrame(sourceParent));
         })) return undefined;
         for (const structuralParentId of new Set([...roots.map((node) => node.parentId), parentId])) {
           if (!structuralParentId) continue;
           const structuralParent = nextNodes.find((node) => node.id === structuralParentId);
           if (!structuralParent || (structuralParent.kind !== "group" && structuralParent.kind !== "booleanOperation")) continue;
-          if (dissolvedGroupIds.has(structuralParentId)) continue;
+          if (dissolvedGroupIds.has(structuralParentId) || structuralParentId === consumedBoolean?.id) continue;
           const selectedChildCount = roots.filter((node) => node.parentId === structuralParentId).length;
           const currentChildCount = nextNodes.filter((node) => node.parentId === structuralParentId).length;
           const childCountAfter = currentChildCount - selectedChildCount + (structuralParentId === parentId ? 1 : 0);
@@ -1133,16 +1190,18 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       const parent = parentId ? nextNodes.find((node) => node.id === parentId) : undefined;
       if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(parent.kind))) return undefined;
-      if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
+      if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && !consumedBoolean && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
       const targetOwnsAutoLayout = command.type === "boolean" && ownsAutoLayout(parent);
       const aggregateLayout = targetOwnsAutoLayout
-        ? structuralAggregateLayoutAdmission(
-            parent?.autoLayout,
-            roots,
-            nextNodes.filter((node) => node.parentId === parentId),
-          )
+        ? consumedBoolean
+          ? structuralReplacementLayoutAdmission(parent?.autoLayout, consumedBoolean)
+          : structuralAggregateLayoutAdmission(
+              parent?.autoLayout,
+              roots,
+              nextNodes.filter((node) => node.parentId === parentId),
+            )
         : undefined;
-      if (targetOwnsAutoLayout && (roots.some((node) => node.parentId !== parentId) || !aggregateLayout)) return undefined;
+      if (targetOwnsAutoLayout && ((!consumedBoolean && roots.some((node) => node.parentId !== parentId)) || !aggregateLayout)) return undefined;
       const id = (command.type === "transformGroup" || command.type === "boolean" || command.type === "componentSet") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
@@ -1154,6 +1213,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       const bottom = Math.max(...resolvedBounds.map((bound) => bound.bottom));
       const width = Math.max(1, right - left);
       const height = Math.max(1, bottom - top);
+      if (targetOwnsAutoLayout && consumedBoolean) {
+        const consumedBounds = worldBoundsForNode(nextNodes, consumedBoolean);
+        if (!consumedBounds
+          || Math.abs(consumedBounds.left - left) > 1e-6
+          || Math.abs(consumedBounds.top - top) > 1e-6
+          || Math.abs(consumedBounds.right - right) > 1e-6
+          || Math.abs(consumedBounds.bottom - bottom) > 1e-6) return undefined;
+      }
       const parentWorld = parentId ? worldTransformForNode(nextNodes, parentId) : undefined;
       if (parentId && !parentWorld) return undefined;
       const groupTransform = nodePropsForWorldTransform({ a: 1, b: 0, c: 0, d: 1, e: left, f: top }, parentWorld, width, height);
@@ -1163,16 +1230,22 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // state: reusing a selected root's front key here makes the all-or-
       // nothing batch fail before the root has vacated that sibling slot.
       const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
-      const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id) && !dissolvedGroupIds.has(node.id));
+      const removedStructuralIds = new Set([...dissolvedGroupIds, ...(consumedBoolean ? [consumedBoolean.id] : [])]);
+      const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id) && !removedStructuralIds.has(node.id));
       const orderedParentSiblings = sortNodesByLayerOrder(nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId));
-      const firstRootIndex = Math.min(...roots.map((node) => orderedParentSiblings.findIndex((sibling) => sibling.id === node.id)));
+      const firstRootIndex = consumedBoolean
+        ? orderedParentSiblings.findIndex((sibling) => sibling.id === consumedBoolean!.id)
+        : Math.min(...roots.map((node) => orderedParentSiblings.findIndex((sibling) => sibling.id === node.id)));
       const flowDestination = aggregateLayout?.kind === "flow"
-        ? orderedParentSiblings.slice(0, firstRootIndex).filter((node) => !selectedIds.has(node.id) && !dissolvedGroupIds.has(node.id)).length
+        ? orderedParentSiblings.slice(0, firstRootIndex).filter((node) => !selectedIds.has(node.id) && !removedStructuralIds.has(node.id)).length
+        : undefined;
+      const consumedDestination = consumedBoolean
+        ? orderedParentSiblings.slice(0, firstRootIndex).filter((node) => !removedStructuralIds.has(node.id)).length
         : undefined;
       const commandIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet" ? command.index : undefined;
       if (flowDestination !== undefined && commandIndex !== undefined && commandIndex !== flowDestination) return undefined;
       const requestedIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet"
-        ? flowDestination ?? commandIndex
+        ? flowDestination ?? commandIndex ?? consumedDestination
         : undefined;
       if (requestedIndex !== undefined && requestedIndex > remainingSiblings.length) return undefined;
       const groupPositionId = requestedIndex === undefined
@@ -1210,7 +1283,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
         ...(targetOwnsAutoLayout ? { autoLayout: aggregateLayout!.autoLayout } : {}),
         ...booleanPatch,
-        ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
+        ...((consumedBoolean ?? consumedPresentationGroup) ? presentationContainerPatch((consumedBoolean ?? consumedPresentationGroup)!) : {}),
         ...transformGroupPatch,
         ...componentSetPatch,
         ...(command.type === "transformGroup" ? { transformModifiers: structuredClone(command.modifiers) } : {}),
@@ -1258,8 +1331,9 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // The child matrices above are local to the newly created Group. Their
       // geometry must therefore be updated only after that parent link exists.
       reparented.forEach((node) => batch.push({ type: "update", node: coreProjectionNode(node) }));
-      if (dissolvedGroupIds.size) {
-        nextNodes.splice(0, nextNodes.length, ...nextNodes.filter((node) => !dissolvedGroupIds.has(node.id)));
+      if (consumedBoolean) batch.push({ type: "delete", ids: [consumedBoolean.id] });
+      if (removedStructuralIds.size) {
+        nextNodes.splice(0, nextNodes.length, ...nextNodes.filter((node) => !removedStructuralIds.has(node.id)));
       }
       if (command.type === "group" && command.autoLayout) {
         batch.push({ type: "update", node: coreProjectionNode(group) });
@@ -1276,6 +1350,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       affectedGroupIds.add(id);
       roots.forEach((root) => groupAncestorIds(nextNodes, root.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId)));
       dissolvedGroups.forEach((group) => groupAncestorIds(nextNodes, group.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId)));
+      if (consumedBoolean) groupAncestorIds(nextNodes, consumedBoolean.parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId));
       groupAncestorIds(nextNodes, parentId).forEach((ancestorId) => affectedGroupIds.add(ancestorId));
       continue;
     }

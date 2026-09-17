@@ -171,6 +171,32 @@ export function structuralAggregateLayoutAdmission(
   return { kind: "flow", autoLayout: flowStructuralChildAutoLayout() };
 }
 
+/** A complete structural-container replacement keeps one existing layout
+ * slot, so it may preserve that slot's fixed child record without requiring
+ * every sibling in the parent's flow to participate. */
+export function structuralReplacementLayoutAdmission(
+  parentValue: DocumentAutoLayout | null | undefined,
+  source: StructuralAggregateLayoutNode,
+): StructuralAggregateLayoutAdmission | undefined {
+  const parent = normalizeAutoLayout(parentValue ?? undefined);
+  if (!parent || !["horizontal", "vertical", "grid"].includes(parent.mode)) return undefined;
+  const sourceLayout = normalizeAutoLayout(source.autoLayout ?? undefined) ?? flowStructuralChildAutoLayout();
+  if (
+    sourceLayout.mode !== "none"
+    || sourceLayout.primarySizing !== "fixed"
+    || sourceLayout.counterSizing !== "fixed"
+    || sourceLayout.alignSelf !== undefined
+    || typeof source.width !== "number"
+    || !Number.isFinite(source.width)
+    || source.width < 0
+    || typeof source.height !== "number"
+    || !Number.isFinite(source.height)
+    || source.height < 0
+  ) return undefined;
+  if (!sourceLayout.absolute && (source.relativeTransform != null || (source.rotation !== undefined && source.rotation !== 0))) return undefined;
+  return { kind: sourceLayout.absolute ? "absolute" : "flow", autoLayout: sourceLayout };
+}
+
 export function matchesStructuralAggregateChildLayout(
   value: DocumentAutoLayout | null | undefined,
   kind: StructuralAggregateLayoutAdmission["kind"],
@@ -185,6 +211,15 @@ export function matchesStructuralAggregateChildLayout(
     && layout.primarySizing === "fixed"
     && layout.counterSizing === "fixed"
     && layout.alignSelf === undefined);
+}
+
+export function matchesStructuralReplacementLayout(
+  value: DocumentAutoLayout | null | undefined,
+  admission: StructuralAggregateLayoutAdmission,
+): boolean {
+  const actual = normalizeAutoLayout(value ?? undefined) ?? flowStructuralChildAutoLayout();
+  const expected = normalizeAutoLayout(admission.autoLayout)!;
+  return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
 function normalizeGridTracks(value: unknown): DocumentAutoLayout["gridRows"] {

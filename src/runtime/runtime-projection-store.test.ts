@@ -420,6 +420,86 @@ describe("RuntimeProjectionStore", () => {
     })), "INVALID_ARGUMENT")).toBe(true);
   });
 
+  it("projects direct Boolean replacement for Boolean creation and multi-node flatten", () => {
+    const projection = {
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" as const },
+        { id: "before", type: "VECTOR" as const, parentId: "page", siblingIndex: 0 },
+        { id: "old-boolean", type: "BOOLEAN_OPERATION" as const, parentId: "page", siblingIndex: 1, width: 80, height: 40, opacity: .6, blendMode: "multiply", booleanOperation: "union" },
+        { id: "a", type: "VECTOR" as const, parentId: "old-boolean", siblingIndex: 0, width: 40, height: 40 },
+        { id: "b", type: "VECTOR" as const, parentId: "old-boolean", siblingIndex: 1, width: 40, height: 40 },
+        { id: "after", type: "VECTOR" as const, parentId: "page", siblingIndex: 2 },
+      ],
+    };
+    const booleanOperation = {
+      type: "boolean" as const,
+      node: { id: "new-boolean", type: "BOOLEAN_OPERATION" as const, parentId: "page", siblingIndex: 1, width: 80, height: 40, opacity: .6, blendMode: "multiply", visible: true, isMask: false, booleanOperation: "intersect" },
+      operandIds: ["a", "b"],
+      operandPatches: [{ x: 0 }, { x: 40 }],
+      siblingIndexes: [],
+      wrapperPatch: {},
+      operation: "intersect" as const,
+    };
+    const booleanStore = new RuntimeProjectionStore(projection);
+    booleanStore.stage({ transactionId: "tx-replace-boolean", baseRevision: 7, operations: [booleanOperation] });
+    expect(booleanStore.getNode("old-boolean")).toMatchObject({ removed: true });
+    expect(booleanStore.getNode("new-boolean")).toMatchObject({ parentId: "page", siblingIndex: 1, opacity: .6, blendMode: "multiply" });
+    expect(booleanStore.getNode("a")).toMatchObject({ parentId: "new-boolean", siblingIndex: 0 });
+
+    const flattenStore = new RuntimeProjectionStore(projection);
+    flattenStore.stage({
+      transactionId: "tx-flatten-old-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["a", "b"],
+        replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 1, width: 80, height: 40, opacity: .6, blendMode: "multiply", visible: true, isMask: false, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [],
+      }],
+    });
+    expect(flattenStore.getNode("old-boolean")).toMatchObject({ removed: true });
+    expect(flattenStore.getNode("a")).toMatchObject({ removed: true });
+    expect(flattenStore.getNode("b")).toMatchObject({ removed: true });
+    expect(flattenStore.getNode("flat")).toMatchObject({ parentId: "page", siblingIndex: 1, opacity: .6, blendMode: "multiply" });
+
+    const mismatchStore = new RuntimeProjectionStore(projection);
+    expect(isRuntimeError(captureError(() => mismatchStore.stage({
+      transactionId: "tx-boolean-presentation-mismatch",
+      baseRevision: 7,
+      operations: [{ ...booleanOperation, node: { ...booleanOperation.node, opacity: 1 } }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+
+    const ownerLayout = { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const flowLayout = { ...ownerLayout, mode: "none" as const, itemSpacing: 0 };
+    const layoutProjection = {
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" as const },
+        { id: "frame", type: "FRAME" as const, parentId: "page", autoLayout: ownerLayout },
+        { id: "old-boolean", type: "BOOLEAN_OPERATION" as const, parentId: "frame", siblingIndex: 0, width: 80, height: 40, rotation: 0, autoLayout: flowLayout, booleanOperation: "union" },
+        { id: "a", type: "VECTOR" as const, parentId: "old-boolean", siblingIndex: 0, width: 40, height: 40 },
+        { id: "b", type: "VECTOR" as const, parentId: "old-boolean", siblingIndex: 1, width: 40, height: 40 },
+        { id: "retained", type: "VECTOR" as const, parentId: "frame", siblingIndex: 1, width: 20, height: 20, autoLayout: flowLayout },
+      ],
+    };
+    const layoutOperation = {
+      ...booleanOperation,
+      node: { ...booleanOperation.node, parentId: "frame", siblingIndex: 0, opacity: 1, blendMode: "normal", autoLayout: flowLayout },
+    };
+    const layoutStore = new RuntimeProjectionStore(layoutProjection);
+    layoutStore.stage({ transactionId: "tx-layout-boolean-replacement", baseRevision: 7, operations: [layoutOperation] });
+    expect(layoutStore.getNode("old-boolean")).toMatchObject({ removed: true });
+    expect(layoutStore.getNode("new-boolean")).toMatchObject({ autoLayout: flowLayout, siblingIndex: 0 });
+
+    const wrongLayoutStore = new RuntimeProjectionStore(layoutProjection);
+    expect(isRuntimeError(captureError(() => wrongLayoutStore.stage({
+      transactionId: "tx-layout-boolean-size-mismatch",
+      baseRevision: 7,
+      operations: [{ ...layoutOperation, node: { ...layoutOperation.node, width: 79 } }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+  });
+
   it("projects Frame-to-Component replacement and child adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

@@ -92,6 +92,27 @@ function presentedGroupNodes(): CanvasNode[] {
   return [frame, group, first, second, sibling];
 }
 
+function presentedBooleanNodes(): CanvasNode[] {
+  const frame = { ...createNode("frame", 0, 0), id: presentedFrameId, pageId: DEFAULT_PAGE_ID, width: 360, height: 200, positionId: "08000000000000000000000000000000:00000000000040008000000000000706" };
+  const before = { ...createNode("vector", 0, 0), id: siblingId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 10, height: 10, positionId: "10000000000000000000000000000000:00000000000040008000000000000705" };
+  const boolean = {
+    ...createNode("booleanOperation", 20, 30),
+    id: outerId,
+    pageId: DEFAULT_PAGE_ID,
+    parentId: frame.id,
+    positionId: "20000000000000000000000000000000:00000000000040008000000000000701",
+    width: 80,
+    height: 40,
+    opacity: .6,
+    blendMode: "multiply" as const,
+    booleanOperation: "union" as const,
+  };
+  const first = { ...createNode("vector", 20, 30), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: boolean.id, width: 40, height: 40, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
+  const second = { ...createNode("vector", 60, 30), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: boolean.id, width: 40, height: 40, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
+  const after = { ...createNode("vector", 120, 0), id: innerId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 10, height: 10, positionId: "30000000000000000000000000000000:00000000000040008000000000000702" };
+  return [frame, before, boolean, first, second, after];
+}
+
 describe("nested neutral Group Core dissolution", () => {
   it("recursively dissolves the consumed Group chain for Boolean creation", async () => {
     const { engine, projection } = await seededEngine();
@@ -302,5 +323,68 @@ describe("nested neutral Group Core dissolution", () => {
     expect(worldTransformForNode(flattenProjection, replacementId)).toEqual(beforeFlatten);
     expect(flattenSeed.engine.undo()).toBe(3n);
     expect(flattenSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
+  });
+
+  it("commits, undoes and redoes direct Boolean ancestor replacement", async () => {
+    const booleanId = "00000000-0000-4000-8000-000000000791";
+    const booleanSeed = await seededEngineWith(presentedBooleanNodes(), "00000000-0000-4000-8000-000000000790");
+    const boolean = resolveCoreBatch(booleanSeed.projection(), [{
+      type: "boolean",
+      ids: [firstId, secondId],
+      operation: "intersect",
+      id: booleanId,
+      parentId: presentedFrameId,
+    }])!;
+
+    expect(booleanSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000792", 1n, JSON.stringify(boolean.batch))).toBe(2n);
+    let projection = booleanSeed.projection();
+    expect(projection.some((node) => node.id === outerId)).toBe(false);
+    expect(projection.find((node) => node.id === booleanId)).toMatchObject({
+      kind: "booleanOperation",
+      parentId: presentedFrameId,
+      opacity: .6,
+      blendMode: "multiply",
+      booleanOperation: "intersect",
+    });
+    expect(projection.filter((node) => node.parentId === presentedFrameId).map((node) => node.id)).toEqual([siblingId, booleanId, innerId]);
+    expect(projection.filter((node) => node.parentId === booleanId).map((node) => node.id)).toEqual([firstId, secondId]);
+    expect(booleanSeed.engine.undo()).toBe(3n);
+    expect(booleanSeed.projection().find((node) => node.id === outerId)).toMatchObject({ opacity: .6, blendMode: "multiply" });
+    expect(booleanSeed.engine.redo()).toBe(4n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)).toMatchObject({ booleanOperation: "intersect", opacity: .6 });
+
+    const replacementId = "00000000-0000-4000-8000-000000000793";
+    const flattenSeed = await seededEngineWith(presentedBooleanNodes(), "00000000-0000-4000-8000-000000000794");
+    const vectorPath: DocumentVectorPath = {
+      fillRule: "nonZero",
+      subpaths: [{ closed: true, points: [
+        { id: "00000000-0000-4000-8000-000000000795", x: 0, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000796", x: 80, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000797", x: 0, y: 40, pointType: "corner" },
+      ] }],
+    };
+    const flattened = resolveFlattenNodesBatch(
+      flattenSeed.projection(),
+      [firstId, secondId],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: presentedFrameId },
+    )!;
+
+    expect(flattenSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000798", 1n, JSON.stringify(flattened.batch))).toBe(2n);
+    projection = flattenSeed.projection();
+    expect(projection.some((node) => [outerId, firstId, secondId].includes(node.id))).toBe(false);
+    expect(projection.find((node) => node.id === replacementId)).toMatchObject({
+      kind: "vector",
+      parentId: presentedFrameId,
+      opacity: .6,
+      blendMode: "multiply",
+    });
+    expect(projection.filter((node) => node.parentId === presentedFrameId).map((node) => node.id)).toEqual([siblingId, replacementId, innerId]);
+    expect(flattenSeed.engine.undo()).toBe(3n);
+    expect(flattenSeed.projection().find((node) => node.id === outerId)).toMatchObject({ kind: "booleanOperation", opacity: .6 });
+    expect(flattenSeed.engine.redo()).toBe(4n);
+    expect(flattenSeed.projection().find((node) => node.id === replacementId)).toMatchObject({ kind: "vector", opacity: .6 });
   });
 });
