@@ -95,6 +95,7 @@ import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
 import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-projection";
 import { projectTextHitGlyphs } from "@/lib/text-hit-glyph-projection";
+import { shapedTextLineMetrics } from "@/lib/shaped-text-line-metrics";
 import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
@@ -1903,8 +1904,6 @@ function rustRenderGraphForVisibleNodes(viewportBounds: { x: number; y: number; 
 function rustTextLayoutRequest(node: CanvasNode) {
   if ((node.textProperties?.paragraph.paragraphIndent ?? 0) !== 0
       || node.textProperties?.paragraphStyleRuns?.some((run) => (run.paragraphIndent ?? 0) !== 0)) return undefined;
-  if (node.textProperties?.paragraphStyleRuns?.some((run) =>
-    run.lineHeight !== undefined || run.lineHeightUnit !== undefined)) return undefined;
   if (node.textProperties?.paragraph.textWrapStyle
       || node.textProperties?.paragraphStyleRuns?.some((run) => run.textWrapStyle !== undefined)) return undefined;
   if (node.textProperties?.paragraph.hangingPunctuation) return undefined;
@@ -2091,6 +2090,9 @@ function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = nod
     && !properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)
     && properties?.paragraph.alignment === "left"
     && !properties?.runs.some((candidate) => candidate.color)
+    && (properties?.paragraph.paragraphSpacing ?? 0) === 0
+    && !properties?.paragraphStyleRuns?.some((run) =>
+      (run.paragraphSpacing ?? 0) !== 0 || run.lineHeight !== undefined || run.lineHeightUnit !== undefined)
   ));
   if ((!interactionOnlyShape && node.kind !== "text" && (
       node.fillStack !== undefined
@@ -2098,10 +2100,6 @@ function rustTextGlyphRequest(node: CanvasNode, projectionNode: CanvasNode = nod
       || Boolean(node.fills?.length)
       || properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)
     ))) return undefined;
-  if ((node.kind === "text" || interactionOnlyShape) && (
-    (properties?.paragraph.paragraphSpacing ?? 0) !== 0
-    || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
-  )) return undefined;
   if (node.kind === "textPath" && layout.lines.length !== 1) return undefined;
   if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_TEXT_GLYPHS_PER_NODE) return undefined;
   const gpuRuns = layoutRequest.plan.runs.map((run, index) => ({
@@ -2233,6 +2231,10 @@ async function loadRustTextGlyphs(
       fill: request.gpuRuns[index]!.fill,
       opacity: request.gpuRuns[index]!.opacity,
     }));
+    const textLineMetrics = request.node.kind === "text"
+      ? shapedTextLineMetrics(request.node, request.layout, 31, request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT)
+      : undefined;
+    if (request.node.kind === "text" && !textLineMetrics) throw new Error("INVALID_TEXT_LINE_METRICS");
     const canvasGlyphs = request.node.kind === "textPath"
       ? projectTextPathLocalGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout })
       : request.node.kind === "shapeWithText"
@@ -2254,6 +2256,7 @@ async function loadRustTextGlyphs(
           fill: request.nodeFill,
           opacity: request.nodeOpacity,
           lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
+          lineYOffsets: textLineMetrics?.tops,
           layout: request.layout,
         }) : textHitGlyphs;
     const hitGlyphs = request.node.kind === "text" ? textHitGlyphs : canvasGlyphs;

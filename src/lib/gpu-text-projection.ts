@@ -28,6 +28,7 @@ export type GpuTextProjectionInput = {
   fill: string;
   opacity: number;
   lineHeight: number;
+  lineYOffsets?: readonly number[];
   layout: RustTextLayout;
 };
 
@@ -40,6 +41,7 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
     || input.runs.some((run) => !validRun(run))
     || !Number.isFinite(input.width) || input.width <= 0
     || !Number.isFinite(input.lineHeight) || input.lineHeight <= 0
+    || input.lineYOffsets && (input.lineYOffsets.length !== input.layout.lines.length || input.lineYOffsets.some((offset) => !Number.isFinite(offset)))
     || input.layout.unitsPerEm <= 0) return undefined;
   const primaryRaster = firstRaster(primary.rasters);
   if (!primaryRaster) return undefined;
@@ -47,7 +49,8 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
   const baselineAscent = primaryRaster.ascent * primary.fontSize / primary.pixelSize;
   const glyphs: WebGpuTextGlyph[] = [];
   let lineY = 0;
-  for (const line of input.layout.lines) {
+  for (const [lineIndex, line] of input.layout.lines.entries()) {
+    if (input.lineYOffsets) lineY = input.lineYOffsets[lineIndex]!;
     const advance = line.advance * metricScale;
     let penX = input.alignment === "center"
       ? (input.width - advance) / 2
@@ -77,7 +80,7 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
       });
       penX += glyph.xAdvance * metricScale;
     }
-    lineY += input.lineHeight;
+    if (!input.lineYOffsets) lineY += input.lineHeight;
   }
   return glyphs;
 }

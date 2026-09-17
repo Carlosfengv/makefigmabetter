@@ -38,6 +38,19 @@ describe("GPU text projection", () => {
     expect(glyphs?.map((glyph) => glyph.x)).toEqual([1, 15]);
   });
 
+  it("uses canonical per-line vertical offsets when provided", () => {
+    const glyphs = projectGpuTextGlyphs({
+      nodeId: "paragraphs", runs: [run()],
+      x: 0, y: 10, width: 100, rotation: 0, fill: "#000000", opacity: 1, lineHeight: 25,
+      lineYOffsets: [0, 40],
+      layout: { unitsPerEm: 1000, lines: [0, 1].map((index) => ({
+        start: index, end: index + 1, direction: "ltr" as const, advance: 500, visualRuns: [],
+        glyphs: [{ glyphId: 7, runIndex: 0, cluster: index, xAdvance: 500, yAdvance: 0, xOffset: 0, yOffset: 0 }],
+      })) },
+    });
+    expect(glyphs?.map((glyph) => glyph.y)).toEqual([14, 54]);
+  });
+
   it("selects each glyph's font resource and preserves a primary-run baseline", () => {
     const largeRaster = { ...raster, width: 8, height: 10, bearingX: 2, bearingY: 8, ascent: 16, alphaMask: Uint8Array.from(Array(80).fill(255)) };
     const glyphs = projectGpuTextGlyphs({
