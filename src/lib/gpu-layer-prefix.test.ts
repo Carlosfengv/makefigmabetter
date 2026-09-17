@@ -36,6 +36,17 @@ describe("GPU layer prefix", () => {
     expect(gpuLayerPrefix([text], new Set(), new Set(["text"]))).toEqual([]);
   });
 
+  it("keeps layered TextPath paint in its ordered Canvas island", () => {
+    const textPath = {
+      ...node("text-path", "textPath"),
+      fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, image: { assetId: "paint-image", scaleMode: "fill" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } } }] },
+    };
+    expect(gpuLayerPrefix([textPath], new Set(["paint-image"]), new Set([textPath.id]))).toEqual([]);
+    expect(gpuLayerIslands([textPath], new Set(["paint-image"]), new Set([textPath.id]))).toEqual([
+      { backend: "canvas", reason: "unsupported-node", backdrop: "transparent", nodes: [textPath] },
+    ]);
+  });
+
   it("admits aligned full Ellipse rings once the GPU has the equivalent two-ring pass", () => {
     const ellipse = { ...node("ellipse", "ellipse"), strokeWidth: 8, strokeAlign: "outside" as const };
     expect(gpuLayerPrefix([ellipse], new Set()).map((entry) => entry.id)).toEqual(["ellipse"]);

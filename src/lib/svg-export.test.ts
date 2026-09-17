@@ -929,6 +929,47 @@ describe("SVG export", () => {
     expect(result.svg).toContain('<tspan x="0" y="20" text-anchor="start" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="400" font-style="normal" letter-spacing="0">abc</tspan></tspan><tspan x="0" y="44" text-anchor="start" direction="ltr" unicode-bidi="plaintext"><tspan font-size="20" font-weight="400" font-style="normal" letter-spacing="0">def</tspan></tspan>');
   });
 
+  it("exports TextPath node-level gradient and image Paint Stack layers", () => {
+    const textPath = {
+      ...createNode("textPath", 0, 0),
+      id: "00000000-0000-4000-8000-00000000009b",
+      pageId,
+      width: 120,
+      height: 40,
+      text: "AB",
+      vectorPath: { fillRule: "nonZero" as const, subpaths: [{ closed: false, points: [
+        { id: "00000000-0000-4000-8000-00000000009c", x: 0, y: 20, pointType: "corner" as const },
+        { id: "00000000-0000-4000-8000-00000000009d", x: 120, y: 20, pointType: "corner" as const },
+      ] }] },
+      textPathMetadata: { startSegment: 0, startPosition: 0, autoRename: true, textAlignHorizontal: "LEFT" as const, textAlignVertical: "CENTER" as const },
+      fillStack: { layers: [
+        { visible: true, opacity: .75, blendMode: "normal" as const, paint: { css: "#f00", gradient: { start: [0, 0] as [number, number], end: [1, 0] as [number, number], stops: [
+          { position: 0, color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+          { position: 1, color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } },
+        ] } } },
+        { visible: true, opacity: .5, blendMode: "multiply" as const, image: { assetId: "paint-image", scaleMode: "fill" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } } },
+      ] },
+      textProperties: {
+        runs: [{ start: 0, end: 2, fontSize: 20, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 24, paragraphSpacing: 0 },
+        autoSize: "fixed" as const,
+        fallbackFonts: [],
+      },
+    };
+    const result = exportPageToSvg([textPath], {
+      pageId,
+      defaultPageId: pageId,
+      imageDataUris: new Map([["paint-image", "data:image/png;base64,AA=="]]),
+      textLayouts: new Map([[textPath.id, { unitsPerEm: 1_000, lines: [{ start: 0, end: 2, direction: "ltr" as const, advance: 2_000 }] }]]),
+    });
+
+    expect(result.svg).toContain("makefigma-gradient-");
+    expect(result.svg).toContain("makefigma-stroke-image-pattern-");
+    expect(result.svg).toContain('style="mix-blend-mode:multiply"');
+    expect(result.svg.match(/<text /g)).toHaveLength(2);
+    expect(result.compatibilityFallbacks).not.toEqual(expect.arrayContaining([expect.objectContaining({ nodeId: textPath.id, capability: "image-asset" })]));
+  });
+
   it("advances SVG lines with the effective line height of each authored paragraph", () => {
     const text = {
       ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000009a", pageId, width: 80, text: "abcdef\nxy",

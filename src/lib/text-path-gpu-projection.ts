@@ -67,6 +67,7 @@ export function projectTextPathLocalGlyphs(input: TextPathGpuProjectionInput): W
       width,
       height,
       rotation: pose.angle * 180 / Math.PI,
+      paintRunIndex: glyph.runIndex,
       fill: run.fill,
       // Canvas consumes local glyphs below renderNodePaint(), whose saved
       // context already carries the node opacity. Keep only run opacity here

@@ -55,6 +55,25 @@ export function canvasTextGlyphBitmap(
   return { width: glyph.maskWidth, height: glyph.maskHeight, rgba };
 }
 
+/** Builds a reusable white alpha mask for Paint Stack compositing. Unlike the
+ * solid fast path this does not require a CSS-compatible glyph color. */
+export function canvasTextGlyphAlphaBitmap(
+  glyph: Pick<WebGpuTextGlyph, "maskWidth" | "maskHeight" | "alphaMask">,
+): CanvasTextGlyphBitmap | undefined {
+  const pixelCount = glyph.maskWidth * glyph.maskHeight;
+  if (canvasTextGlyphSurfaceByteLength(glyph) === undefined
+    || glyph.alphaMask.byteLength !== pixelCount) return undefined;
+  const rgba = new Uint8ClampedArray(pixelCount * 4);
+  for (let index = 0; index < pixelCount; index += 1) {
+    const offset = index * 4;
+    rgba[offset] = 255;
+    rgba[offset + 1] = 255;
+    rgba[offset + 2] = 255;
+    rgba[offset + 3] = glyph.alphaMask[index]!;
+  }
+  return { width: glyph.maskWidth, height: glyph.maskHeight, rgba };
+}
+
 /** Maps a world-space glyph quad back into the node-local Canvas transform. */
 export function canvasTextGlyphPose(
   glyph: Pick<WebGpuTextGlyph, "x" | "y" | "width" | "height" | "rotation" | "opacity">,

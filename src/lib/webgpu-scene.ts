@@ -80,6 +80,9 @@ export interface WebGpuTextGlyph {
   width: number;
   height: number;
   rotation: number;
+  /** Canonical Text Style Run selected by the shaped glyph. Canvas TextPath
+   * paint batching uses this to resolve the run's complete Paint Stack. */
+  paintRunIndex?: number;
   /** Optional normalized-quad → world transform. When present, WebGPU maps
    * the glyph mask's unit square through this complete affine. */
   quadTransform?: Readonly<{ a: number; b: number; c: number; d: number; e: number; f: number }>;

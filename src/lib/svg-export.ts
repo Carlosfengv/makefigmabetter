@@ -657,7 +657,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const supplied = options.imageDataUris?.get(layer.image.assetId);
     const href = isSafeEmbeddedRasterDataUri(supplied) ? supplied : undefined;
     if (!href) {
-      reportFallback("image-asset", "Paint Stack image bytes were unavailable or cannot be embedded for this SVG stroke export.", node.id);
+      reportFallback("image-asset", "Paint Stack image bytes were unavailable or cannot be embedded for this SVG export.", node.id);
       return undefined;
     }
     const transform = resolvedImagePaintTransform(layer.image, node.width, node.height);
@@ -683,12 +683,17 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const paint = layer.paint ? paintValue(layer.paint) : imageStrokePaint(node, layer);
     return paint ? `<g${paintLayerPresentation(layer)}>${shape(node, { value: "none" }, paint)}</g>` : "";
   }).join("");
+  const textStylePaintLayers = (node: CanvasNode, style: RenderTextStyle): readonly DocumentPaintLayer[] => {
+    if (style.fillStack !== undefined) return style.fillStack.layers;
+    if (style.color) return [{ visible: true, opacity: 1, blendMode: "normal", paint: { css: colorToSrgbCss(style.color), color: style.color } }];
+    return node.fillStack !== undefined ? node.fillStack.layers : normalizedFillLayers(node);
+  };
   const textStylePaintAttributes = (node: CanvasNode, style: RenderTextStyle, layerIndex: number) => {
-    if (style.fillStack === undefined) {
+    if (node.kind !== "textPath" && style.fillStack === undefined) {
       if (layerIndex > 0) return ` fill="none"`;
       return style.color ? ` fill="${attribute(colorToSrgbCss(style.color))}"` : "";
     }
-    const layer = style.fillStack.layers[layerIndex];
+    const layer = textStylePaintLayers(node, style)[layerIndex];
     if (!layer?.visible || layer.opacity <= 0) return ` fill="none"`;
     const paint = layer.paint
       ? paintValue({ ...layer.paint, layerOpacity: layer.opacity })
@@ -728,7 +733,7 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const fallbackFamilies = (node.textProperties?.fallbackFonts ?? [])
       .filter((font) => isSafeEmbeddedFontDataUri(options.fontDataUris?.get(font.assetId)))
       .map((font) => svgFontFamily(font.assetId));
-    const layerCount = Math.max(1, ...node.textProperties!.runs.map((run) => run.fillStack?.layers.length ?? 1));
+    const layerCount = Math.max(1, ...node.textProperties!.runs.map((run) => textStylePaintLayers(node, run).length));
     const body = (layerIndex: number) => spans.map((span) => `<tspan ${svgTextStyleAttributes(span.style, options.fontDataUris, fallbackFamilies, false)}${svgHyperlinkDataAttributes(span.style)}${textStylePaintAttributes(node, span.style, layerIndex)}>${escapeSvgText(span.text)}</tspan>`).join("");
     return Array.from({ length: layerCount }, (_, layerIndex) => `<text fill="${attribute(fill.value)}"${fill.opacity === undefined ? "" : ` fill-opacity="${number(fill.opacity)}"`} text-anchor="${anchor}" direction="${line.direction}" dominant-baseline="alphabetic"><textPath href="#${pathId}" startOffset="${number(startOffset)}" dy="${number(vertical)}" textLength="${number(Math.max(0, textLength))}" lengthAdjust="spacingAndGlyphs">${body(layerIndex)}</textPath></text>`).join("");
   };
@@ -866,9 +871,14 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       return `<g transform="${matrix}"${presentation}>${svgTextMarkup(node, fill, options.fontDataUris, options.textLayouts?.get(node.id), (style, layerIndex) => textStylePaintAttributes(node, style, layerIndex))}</g>`;
     }
     if (node.kind === "textPath") {
-      if (normalizedFillLayers(node).some((layer) => layer.image)) reportFallback("image-asset", "Image Paint on TextPath is not yet supported by the SVG glyph exporter.", node.id);
-      const fill = fills[0] ? paintValue(fills[0]) : { value: "none" };
-      const markup = richTextPathMarkup(node, fill) ?? svgTextPathMarkup(node, fill.value, fill.opacity, number);
+      const richMarkup = richTextPathMarkup(node, { value: "none" });
+      const markup = richMarkup ?? normalizedFillLayers(node).flatMap((layer) => {
+        const paint = layer.paint ? paintValue({ ...layer.paint, layerOpacity: layer.opacity }) : imageStrokePaint(node, layer);
+        return paint ? [{ layer, paint }] : [];
+      }).map(({ layer, paint }) => {
+          const body = svgTextPathMarkup(node, paint.value, paint.opacity, number);
+          return body ? `<g${paintLayerPresentation(layer)}>${body}</g>` : "";
+        }).join("");
       if (markup) return `<g transform="${matrix}"${presentation}>${markup}</g>`;
     }
     // Versioned stacks serialize their own ordered layers below. Avoid

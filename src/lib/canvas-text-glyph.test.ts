@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canvasTextGlyphBitmap, canvasTextGlyphPose, canvasTextGlyphSurfaceByteLength, MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES } from "./canvas-text-glyph";
+import { canvasTextGlyphAlphaBitmap, canvasTextGlyphBitmap, canvasTextGlyphPose, canvasTextGlyphSurfaceByteLength, MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES } from "./canvas-text-glyph";
 
 describe("Canvas text glyph projection", () => {
   it("colorizes a straight alpha mask without baking node opacity", () => {
@@ -24,6 +24,14 @@ describe("Canvas text glyph projection", () => {
   it("rejects malformed masks and non-canonical colors", () => {
     expect(canvasTextGlyphBitmap({ fill: "rgb(1 2 3)", maskWidth: 1, maskHeight: 1, alphaMask: Uint8Array.of(255) })).toBeUndefined();
     expect(canvasTextGlyphBitmap({ fill: "#fff", maskWidth: 2, maskHeight: 1, alphaMask: Uint8Array.of(255) })).toBeUndefined();
+  });
+
+  it("creates a color-independent alpha mask for layered paint", () => {
+    expect(canvasTextGlyphAlphaBitmap({ maskWidth: 2, maskHeight: 1, alphaMask: Uint8Array.of(0, 128) })).toEqual({
+      width: 2,
+      height: 1,
+      rgba: Uint8ClampedArray.of(255, 255, 255, 0, 255, 255, 255, 128),
+    });
   });
 
   it("accounts exact RGBA bytes and rejects one glyph above the cache ceiling", () => {

@@ -12,7 +12,7 @@ import { admitCompositeFrame, type CompositeFrameSurfacePlan, type CompositePool
 import { admitSubtreeCompositeSurfacePool, MAX_SUBTREE_COMPOSITE_NESTING } from "@/lib/subtree-composite-budget";
 import { morphAlphaChannel } from "@/lib/alpha-morphology";
 import { compositeEffectSurface } from "@/lib/canvas-effect-composite";
-import { canvasTextGlyphBitmap, canvasTextGlyphPose, canvasTextGlyphSurfaceByteLength, MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES } from "@/lib/canvas-text-glyph";
+import { canvasTextGlyphAlphaBitmap, canvasTextGlyphBitmap, canvasTextGlyphPose, canvasTextGlyphSurfaceByteLength, MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES } from "@/lib/canvas-text-glyph";
 import { isLinearBlendMode, type LinearBlendMode } from "@/lib/linear-blend-composite";
 import { compositeLinearPaintLayer } from "@/lib/linear-paint-layer-composite";
 import { compositeSurfaceWindowForWorldBounds, setCompositeSurfaceTransform, transformedCompositeSurfaceWindow, type CompositeSurfaceWindow } from "@/lib/composite-surface-window";
@@ -93,6 +93,7 @@ import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
+import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { constraintGuidesForNode } from "@/lib/constraint-guides";
 import { resizeRelativeTransformFromWorldGesture } from "@/lib/relative-transform-resize";
@@ -288,6 +289,7 @@ let filteredImageSurfaceBytes = 0;
 const canvasTextGlyphSurfaces = new Map<string, { surface: OffscreenCanvas; bytes: number }>();
 let canvasTextGlyphSurfaceBytes = 0;
 let canvasTextGlyphLimitReported = false;
+let canvasTextPathPaintSurface: OffscreenCanvas | undefined;
 const nonLinearGradientSurfaces = new Map<string, OffscreenCanvas>();
 const MAX_NON_LINEAR_GRADIENT_CACHE_ENTRIES = 16;
 const imageDecodeLoads = new LatestResourceLoad();
@@ -5354,12 +5356,13 @@ function compositePreparedSubtree(
 }
 
 type PreparedCanvasTextGlyph = Readonly<{
+  glyph: WebGpuTextGlyph;
   surface: OffscreenCanvas;
   pose: NonNullable<ReturnType<typeof canvasTextGlyphPose>>;
 }>;
 
-function canvasTextGlyphSurfaceKey(glyph: WebGpuTextGlyph) {
-  return JSON.stringify([glyph.textureKey, glyph.fill]);
+function canvasTextGlyphSurfaceKey(glyph: WebGpuTextGlyph, alphaOnly: boolean) {
+  return JSON.stringify([glyph.textureKey, alphaOnly ? "alpha" : glyph.fill]);
 }
 
 /**
@@ -5368,13 +5371,13 @@ function canvasTextGlyphSurfaceKey(glyph: WebGpuTextGlyph) {
  * Map insertion order is the LRU; resources needed by this node are protected
  * while unrelated older entries are evicted.
  */
-function prepareCanvasTextGlyphs(glyphs: readonly WebGpuTextGlyph[]): PreparedCanvasTextGlyph[] | undefined {
-  const requiredKeys = new Set(glyphs.map(canvasTextGlyphSurfaceKey));
+function prepareCanvasTextGlyphs(glyphs: readonly WebGpuTextGlyph[], alphaOnly = false): PreparedCanvasTextGlyph[] | undefined {
+  const requiredKeys = new Set(glyphs.map((glyph) => canvasTextGlyphSurfaceKey(glyph, alphaOnly)));
   const poses = glyphs.map((glyph) => canvasTextGlyphPose(glyph));
   if (poses.some((pose) => !pose)) return undefined;
   const missing = new Map<string, WebGpuTextGlyph>();
   glyphs.forEach((glyph) => {
-    const key = canvasTextGlyphSurfaceKey(glyph);
+    const key = canvasTextGlyphSurfaceKey(glyph, alphaOnly);
     const cached = canvasTextGlyphSurfaces.get(key);
     if (cached?.surface.width === glyph.maskWidth && cached.surface.height === glyph.maskHeight) return;
     if (cached) {
@@ -5409,7 +5412,7 @@ function prepareCanvasTextGlyphs(glyphs: readonly WebGpuTextGlyph[]): PreparedCa
     canvasTextGlyphSurfaceBytes -= oldest[1].bytes;
   }
   for (const [key, glyph] of missing) {
-    const bitmap = canvasTextGlyphBitmap(glyph);
+    const bitmap = alphaOnly ? canvasTextGlyphAlphaBitmap(glyph) : canvasTextGlyphBitmap(glyph);
     if (!bitmap) return undefined;
     const surface = new OffscreenCanvas(bitmap.width, bitmap.height);
     const context = surface.getContext("2d");
@@ -5422,23 +5425,117 @@ function prepareCanvasTextGlyphs(glyphs: readonly WebGpuTextGlyph[]): PreparedCa
     canvasTextGlyphSurfaceBytes += bytes;
   }
   const prepared = glyphs.map((glyph, index) => {
-    const key = canvasTextGlyphSurfaceKey(glyph);
+    const key = canvasTextGlyphSurfaceKey(glyph, alphaOnly);
     const cached = canvasTextGlyphSurfaces.get(key);
     if (!cached) return undefined;
     canvasTextGlyphSurfaces.delete(key);
     canvasTextGlyphSurfaces.set(key, cached);
-    return { surface: cached.surface, pose: poses[index]! };
+    return { glyph, surface: cached.surface, pose: poses[index]! };
   });
   if (prepared.some((item) => !item)) return undefined;
   canvasTextGlyphLimitReported = false;
   return prepared as PreparedCanvasTextGlyph[];
 }
 
+function textPathUsesLayeredPaint(node: CanvasNode) {
+  return node.fillStack !== undefined
+    || Boolean(node.fills?.length)
+    || Boolean(node.fillGradient)
+    || Boolean(node.textProperties?.runs.some((run) => run.fillStack !== undefined));
+}
+
+function renderLayeredCanvasTextPath(
+  ctx: OffscreenCanvasRenderingContext2D,
+  node: CanvasNode,
+  prepared: readonly PreparedCanvasTextGlyph[],
+) {
+  const glyphs = prepared.map((item) => item.glyph);
+  const batches = textPathPaintBatches(node, glyphs, node.fillStack?.layers ?? activeFillLayers(node));
+  // An explicit empty Paint Stack is a successful transparent render. Falling
+  // through to the legacy system-font path would incorrectly resurrect fill.
+  if (batches.length === 0) return true;
+  const planned = batches.map((batch) => {
+    const selected = batch.glyphIndexes.map((index) => prepared[index]).filter((item): item is PreparedCanvasTextGlyph => Boolean(item));
+    const bounds = textPathGlyphBounds(selected.map((item) => item.glyph), viewport.zoom);
+    return selected.length === batch.glyphIndexes.length && bounds ? { ...batch, selected, bounds } : undefined;
+  });
+  if (planned.some((batch) => !batch)) return false;
+  const pixelWidths = planned.map((batch) => Math.max(1, Math.ceil(batch!.bounds.width * dpr)));
+  const pixelHeights = planned.map((batch) => Math.max(1, Math.ceil(batch!.bounds.height * dpr)));
+  const pixelWidth = Math.max(...pixelWidths);
+  const pixelHeight = Math.max(...pixelHeights);
+  const bytes = pixelWidth * pixelHeight * 4;
+  if (!Number.isSafeInteger(bytes) || bytes > MAX_CANVAS_TEXT_GLYPH_SURFACE_BYTES) return false;
+  let layerContext: OffscreenCanvasRenderingContext2D | null;
+  try {
+    if (!canvasTextPathPaintSurface
+      || canvasTextPathPaintSurface.width !== pixelWidth
+      || canvasTextPathPaintSurface.height !== pixelHeight) {
+      canvasTextPathPaintSurface = new OffscreenCanvas(pixelWidth, pixelHeight);
+    }
+    layerContext = canvasTextPathPaintSurface.getContext("2d", { alpha: true });
+  } catch {
+    return false;
+  }
+  if (!layerContext) return false;
+
+  planned.forEach((entry, batchIndex) => {
+    const batch = entry!;
+    const sourceWidth = pixelWidths[batchIndex]!;
+    const sourceHeight = pixelHeights[batchIndex]!;
+    layerContext.save();
+    layerContext.setTransform(1, 0, 0, 1, 0, 0);
+    layerContext.clearRect(0, 0, pixelWidth, pixelHeight);
+    layerContext.restore();
+    layerContext.save();
+    layerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    batch.selected.forEach(({ surface, pose }) => {
+      layerContext.save();
+      layerContext.translate(pose.centerX * viewport.zoom - batch.bounds.x, pose.centerY * viewport.zoom - batch.bounds.y);
+      layerContext.rotate(pose.rotationRadians);
+      layerContext.globalAlpha = pose.opacity;
+      layerContext.drawImage(
+        surface,
+        -pose.width * viewport.zoom / 2,
+        -pose.height * viewport.zoom / 2,
+        pose.width * viewport.zoom,
+        pose.height * viewport.zoom,
+      );
+      layerContext.restore();
+    });
+    layerContext.globalCompositeOperation = "source-in";
+    layerContext.translate(-batch.bounds.x, -batch.bounds.y);
+    if (batch.layer.paint) {
+      layerContext.fillStyle = paintStackStyle(layerContext, batch.layer.paint, node.width * viewport.zoom, node.height * viewport.zoom);
+      layerContext.fillRect(batch.bounds.x, batch.bounds.y, batch.bounds.width, batch.bounds.height);
+    } else if (batch.layer.image) {
+      drawImagePaint(layerContext, batch.layer.image, node.width * viewport.zoom, node.height * viewport.zoom);
+    }
+    layerContext.restore();
+    withNormalizedPaintLayer(ctx, node, batch.layer, () => {
+      ctx.drawImage(
+        canvasTextPathPaintSurface!,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight,
+        batch.bounds.x,
+        batch.bounds.y,
+        batch.bounds.width,
+        batch.bounds.height,
+      );
+    });
+  });
+  return true;
+}
+
 function renderShapedCanvasTextPath(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode) {
   const cached = rustTextGlyphs.get(node.id);
   if (!cached || cached.revision !== revision) return false;
-  const prepared = prepareCanvasTextGlyphs(cached.canvasGlyphs ?? cached.glyphs);
+  const layeredPaint = textPathUsesLayeredPaint(node);
+  const prepared = prepareCanvasTextGlyphs(cached.canvasGlyphs ?? cached.glyphs, layeredPaint);
   if (!prepared) return false;
+  if (layeredPaint) return renderLayeredCanvasTextPath(ctx, node, prepared);
   prepared.forEach(({ surface, pose }) => {
     ctx.save();
     ctx.translate(pose.centerX * viewport.zoom, pose.centerY * viewport.zoom);
