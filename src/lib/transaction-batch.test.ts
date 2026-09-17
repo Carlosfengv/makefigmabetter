@@ -700,9 +700,19 @@ describe("Core transaction batch resolution", () => {
       { closed: true, points: [{ id: "p1", x: 0, y: 0, pointType: "corner" as const }, { id: "p2", x: 40, y: 0, pointType: "corner" as const }, { id: "p3", x: 40, y: 20, pointType: "corner" as const }] },
       { closed: true, points: [{ id: "p4", x: 190, y: 40, pointType: "corner" as const }, { id: "p5", x: 230, y: 40, pointType: "corner" as const }, { id: "p6", x: 230, y: 60, pointType: "corner" as const }] },
     ] };
-    const resolved = resolveFlattenNodesBatch([target, first, second, targetChild], [first.id, second.id], vectorPath, () => replacementId, replacementId, { parentId: target.id, index: 0 });
+    const regionExtension = { "figma.runtime.vector-network.v1": [1, 2, 3] };
+    const fillStack = { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#3366cc" } }] };
+    const resolved = resolveFlattenNodesBatch(
+      [target, first, second, targetChild],
+      [first.id, second.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: target.id, index: 0 },
+      { fillStack, extensions: regionExtension },
+    );
 
-    expect(resolved?.replacement).toMatchObject({ id: replacementId, kind: "vector", name: "Flattened", parentId: target.id, x: 70, y: 60, width: 230, height: 60, vectorPath });
+    expect(resolved?.replacement).toMatchObject({ id: replacementId, kind: "vector", name: "Flattened", parentId: target.id, x: 70, y: 60, width: 230, height: 60, vectorPath, fillStack, extensions: regionExtension });
     expect(resolved?.batch).toEqual([
       expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, kind: "vector", vectorPath }) }),
       { type: "delete", ids: [first.id, second.id] },

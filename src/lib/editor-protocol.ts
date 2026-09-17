@@ -961,7 +961,7 @@ export type EditorCommand =
   /** Replaces one leaf vector-like node with an equivalent editable Vector. */
   | { type: "flattenNode"; id: string; replacementId?: string; vectorPath: DocumentVectorPath; parentId?: string; pageId?: string; index?: number }
   /** Replaces several bounded vector-like leaves with one aggregate editable Vector. */
-  | { type: "flattenNodes"; ids: string[]; replacementId?: string; vectorPath: DocumentVectorPath; parentId?: string; pageId?: string; index?: number }
+  | { type: "flattenNodes"; ids: string[]; replacementId?: string; vectorPath: DocumentVectorPath; parentId?: string; pageId?: string; index?: number; patch?: Partial<CanvasNode> }
   /** Replaces a Vector's paint stroke with the Rust-derived editable fill path. */
   | { type: "outlineStroke"; id: string }
   /** Replaces a Polygon or Star with its current closed editable VectorPath. */

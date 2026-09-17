@@ -3009,7 +3009,7 @@ describe("M1 RuntimeSession", () => {
     expect(await session.getNodeByIdAsync("rect-b")).toBeNull();
   });
 
-  it("rejects multi-node flatten when one node needs a distinct paint region", async () => {
+  it("preserves distinct solid paints as independent flatten regions", async () => {
     const projection: RuntimeProjection = {
       revision: 1,
       nodes: [
@@ -3019,13 +3019,35 @@ describe("M1 RuntimeSession", () => {
         { id: "second", type: "ELLIPSE", name: "Second", parentId: "page", siblingIndex: 1, x: 30, y: 0, width: 20, height: 20, fill: "#0000ff", strokeWidth: 0 },
       ],
     };
-    const session = new RuntimeSession({ sessionId: "flatten-many-reject", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-many-regions", projection, transport, scheduleMicrotask: () => {} });
     const first = (await session.getNodeByIdAsync("first"))!;
     const second = (await session.getNodeByIdAsync("second"))!;
 
-    expect(isRuntimeError(captureError(() => session.flatten([first, second])), "UNSUPPORTED_FEATURE")).toBe(true);
-    expect(first.removed).toBe(false);
-    expect(second.removed).toBe(false);
+    const flattened = session.flatten([first, second]);
+
+    expect(first.removed).toBe(true);
+    expect(second.removed).toBe(true);
+    expect(flattened.vectorNetwork.regions).toEqual([
+      expect.objectContaining({ fills: [expect.objectContaining({ type: "SOLID", color: { r: 1, g: 0, b: 0 } })] }),
+      expect.objectContaining({ fills: [expect.objectContaining({ type: "SOLID", color: { r: 0, g: 0, b: 1 } })] }),
+    ]);
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toContainEqual(expect.objectContaining({
+      type: "flattenNodes",
+      replacement: expect.objectContaining({
+        fillStack: expect.any(Object),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    }));
+    const flattenOperation = transport.submitted[0]?.operations.find((operation) => operation.type === "flattenNodes");
+    if (!flattenOperation || flattenOperation.type !== "flattenNodes" || !flattenOperation.replacement.vectorPath) {
+      throw new Error("Expected the region-preserving flatten operation.");
+    }
+    expect(vectorNetworkRegionPaintPlansFromExtension(
+      flattenOperation.replacement.extensions,
+      flattenOperation.replacement.vectorPath,
+    )?.map((region) => region.fillStack?.layers[0]?.paint?.css)).toEqual(["#ff0000ff", "#0000ffff"]);
   });
 
   it("creates a same-page Boolean from Vector children of different Frames", async () => {

@@ -9128,7 +9128,7 @@ function dispatch(command: EditorCommand) {
       parentId: command.parentId,
       pageId: command.pageId,
       index: command.index,
-    });
+    }, command.patch);
     if (!flattened) { emitError(undefined, "INVALID_COMMAND"); return; }
     const baseRevision = Number(wasmDocument.revision);
     const transactionId = createId();
@@ -9503,7 +9503,7 @@ function dispatchTransaction(transaction: Extract<MainToWorker, { type: "transac
       parentId: command.parentId,
       pageId: command.pageId,
       index: command.index,
-    });
+    }, command.patch);
     if (!flattened) {
       emitError(undefined, "INVALID_COMMAND", transaction.id);
       emit({ type: "ack", transactionId: transaction.id, errorCode: "INVALID_TRANSACTION" });

@@ -1462,7 +1462,15 @@ describe("RuntimeWorkerBridge", () => {
       operations: [{
         type: "flattenNodes",
         sourceIds: ["rect", "ellipse"],
-        replacement: { id: "flat-many-id", type: "VECTOR", parentId: "page", siblingIndex: 2, vectorPath },
+        replacement: {
+          id: "flat-many-id",
+          type: "VECTOR",
+          parentId: "page",
+          siblingIndex: 2,
+          vectorPath,
+          fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal", paint: { css: "#ff0000" } }] },
+          extensions: { "figma.runtime.vector-network.v1": [1, 2, 3] },
+        },
         siblingIndexes: [],
       }],
     }).catch(() => undefined);
@@ -1470,7 +1478,18 @@ describe("RuntimeWorkerBridge", () => {
     expect(posted[0]?.transaction.commands).toEqual([{ type: "boolean", ids: ["vector-a", "vector-b"], operation: "exclude", id: "boolean-id", pageId: "page", index: 0 }]);
     expect(posted[1]?.transaction.commands).toEqual([{ type: "flattenBoolean", id: "boolean-id", replacementId: "flat-id", pageId: "page" }]);
     expect(posted[2]?.transaction.commands).toEqual([{ type: "flattenNode", id: "rect", replacementId: "flat-rect-id", vectorPath, pageId: "page", index: 1 }]);
-    expect(posted[3]?.transaction.commands).toEqual([{ type: "flattenNodes", ids: ["rect", "ellipse"], replacementId: "flat-many-id", vectorPath, pageId: "page", index: 2 }]);
+    expect(posted[3]?.transaction.commands).toEqual([{
+      type: "flattenNodes",
+      ids: ["rect", "ellipse"],
+      replacementId: "flat-many-id",
+      vectorPath,
+      pageId: "page",
+      index: 2,
+      patch: {
+        fillStack: { layers: [{ visible: true, opacity: 1, blendMode: "normal", paint: { css: "#ff0000" } }] },
+        extensions: { "figma.runtime.vector-network.v1": [1, 2, 3] },
+      },
+    }]);
     bridge.close();
   });
 

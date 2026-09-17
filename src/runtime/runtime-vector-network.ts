@@ -188,16 +188,26 @@ export function canonicalVectorPathFromRuntimeNetwork(
   if (components.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
 
   const regions = input.regions ?? [];
-  const closedComponents = components.filter((component) => component.closed);
+  const closedComponentIndexes = components.flatMap((component, index) => component.closed ? [index] : []);
   let fillRule: DocumentVectorPath["fillRule"] = "nonZero";
-  if (closedComponents.length) {
-    if (regions.length !== 1) return { reason: "Closed VectorNetwork cycles require exactly one globally representable region." };
-    const region = regions[0]!;
-    if (!validRegion(region)) return { reason: "VectorNetwork contains an invalid fill region." };
-    if (region.loops.length !== closedComponents.length || !loopsMatchComponents(region.loops, closedComponents)) {
-      return { reason: "VectorNetwork regions must cover every closed cycle exactly once." };
+  const regionComponentIndexes: number[][] = [];
+  if (closedComponentIndexes.length) {
+    if (!regions.length) return { reason: "Closed VectorNetwork cycles require at least one fill region." };
+    const unmatched = new Set(closedComponentIndexes);
+    for (const region of regions) {
+      if (!validRegion(region)) return { reason: "VectorNetwork contains an invalid fill region." };
+      const matches: number[] = [];
+      for (const loop of region.loops) {
+        if (new Set(loop).size !== loop.length) return { reason: "VectorNetwork region loops cannot repeat segments." };
+        const match = [...unmatched].find((componentIndex) => sameIntegerSet(loop, components[componentIndex]!.segmentIndexes));
+        if (match === undefined) return { reason: "VectorNetwork regions must cover every closed cycle exactly once." };
+        unmatched.delete(match);
+        matches.push(match);
+      }
+      regionComponentIndexes.push(matches);
     }
-    fillRule = region.windingRule === "EVENODD" ? "evenOdd" : "nonZero";
+    if (unmatched.size) return { reason: "VectorNetwork regions must cover every closed cycle exactly once." };
+    fillRule = regions[0]!.windingRule === "EVENODD" ? "evenOdd" : "nonZero";
   } else if (regions.length) {
     return { reason: "Open VectorNetwork chains cannot contain fill regions." };
   }
@@ -261,8 +271,11 @@ export function canonicalVectorPathFromRuntimeNetwork(
 
   return {
     path: { fillRule, subpaths },
-    ...(closedComponents.length ? {
-      regionPaths: [{ fillRule, subpaths: subpaths.filter((subpath) => subpath.closed) }],
+    ...(regionComponentIndexes.length ? {
+      regionPaths: regionComponentIndexes.map((componentIndexes, regionIndex) => ({
+        fillRule: regions[regionIndex]!.windingRule === "EVENODD" ? "evenOdd" : "nonZero",
+        subpaths: componentIndexes.map((componentIndex) => subpaths[componentIndex]!),
+      })),
     } : {}),
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
@@ -527,20 +540,6 @@ function validRegion(region: RuntimeVectorRegion): boolean {
     && (region.fillStyleId === undefined || typeof region.fillStyleId === "string"
       && !region.fillStyleId.includes("\0")
       && new TextEncoder().encode(region.fillStyleId).byteLength <= 2_048);
-}
-
-function loopsMatchComponents(
-  loops: readonly (readonly number[])[],
-  components: readonly { segmentIndexes: number[] }[],
-): boolean {
-  const unmatched = new Set(components.map((_, index) => index));
-  for (const loop of loops) {
-    if (new Set(loop).size !== loop.length) return false;
-    const match = [...unmatched].find((componentIndex) => sameIntegerSet(loop, components[componentIndex]!.segmentIndexes));
-    if (match === undefined) return false;
-    unmatched.delete(match);
-  }
-  return unmatched.size === 0;
 }
 
 function sameIntegerSet(left: readonly number[], right: readonly number[]): boolean {

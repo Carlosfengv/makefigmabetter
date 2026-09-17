@@ -36,6 +36,7 @@ import {
   type DocumentInstanceMetadata,
   type DocumentLinkUnfurlMetadata,
   type DocumentPaintStyleResource,
+  type DocumentPaintStack,
   type DocumentTextStyleResource,
   type DocumentTextProperties,
   type DocumentTextPathMetadata,
@@ -72,6 +73,8 @@ import {
   variablePaintBindingsFromExtensions,
 } from "./runtime-variable-bindings";
 import { fontsForRuntimeTextRange, updateRuntimeText } from "./runtime-text";
+import { runtimePaintsFromDocumentStack } from "./runtime-paint";
+import { extensionsWithRuntimeVectorNetwork, type RuntimeVectorNetwork, type VectorNetworkRegionPaintRecord } from "./runtime-vector-network";
 
 const CONTAINER_TYPES = new Set<M1NodeType>([
   "DOCUMENT", "PAGE", "FRAME", "GROUP", "SECTION", "BOOLEAN_OPERATION", "COMPONENT", "INSTANCE", "SLOT",
@@ -83,6 +86,7 @@ const CREATABLE_TYPES = new Set<M1SceneNodeType>([
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_RUNTIME_FLATTEN_SUBPATHS = 64;
+const MAX_RUNTIME_FLATTEN_POINTS = 8_192;
 const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
 const INSTANCE_CLONE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
@@ -2583,15 +2587,11 @@ export class RuntimeSession implements RuntimeContainerHost {
       if (!this.projectionStore.confirmedProjection.nodes.some((candidate) => candidate.id === node.id && candidate.removed !== true) || this.queuedTransactionId) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: node.id });
       }
-      if (runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), node) || !runtimeMultiFlattenStyleKey(node)) {
+      if (runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), node) || !runtimeMultiFlattenPaintStack(node)) {
         throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: node.id });
       }
       return node;
     });
-    const styleKey = runtimeMultiFlattenStyleKey(selected[0]!);
-    if (!styleKey || selected.some((node) => runtimeMultiFlattenStyleKey(node) !== styleKey)) {
-      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
-    }
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
     if (crossesParents && runtimeOwnsAutoLayout(targetParentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
     for (const sourceParentId of new Set(selected.map((node) => node.parentId))) {
@@ -2612,6 +2612,7 @@ export class RuntimeSession implements RuntimeContainerHost {
       }
     }
     const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
+    const paintStacks = orderedSelected.map((node) => runtimeMultiFlattenPaintStack(node)!);
     const selectedIds = new Set(orderedSelected.map((node) => node.id));
     const remaining = this.siblingsOf(targetParent.id).filter((node) => !selectedIds.has(node.id));
     const destination = index ?? remaining.length;
@@ -2665,8 +2666,50 @@ export class RuntimeSession implements RuntimeContainerHost {
     });
     const fillRule = resolvedPaths[0]?.fillRule;
     const subpaths = resolvedPaths.flatMap((path) => path.subpaths);
-    if (!fillRule || resolvedPaths.some((path) => path.fillRule !== fillRule) || subpaths.length > MAX_RUNTIME_FLATTEN_SUBPATHS) {
+    const pointCount = subpaths.reduce((total, subpath) => total + subpath.points.length, 0);
+    if (!fillRule || subpaths.length > MAX_RUNTIME_FLATTEN_SUBPATHS || pointCount > MAX_RUNTIME_FLATTEN_POINTS) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
+    const networkVertices: RuntimeVectorNetwork["vertices"][number][] = [];
+    const networkSegments: RuntimeVectorNetwork["segments"][number][] = [];
+    const networkRegions: NonNullable<RuntimeVectorNetwork["regions"]>[number][] = [];
+    resolvedPaths.forEach((path) => {
+      const loops = path.subpaths.map((subpath) => {
+        const vertexOffset = networkVertices.length;
+        subpath.points.forEach((point) => networkVertices.push({
+          x: point.x,
+          y: point.y,
+          handleMirroring: point.pointType === "mirrored" ? "ANGLE_AND_LENGTH" : point.pointType === "asymmetric" ? "ANGLE" : "NONE",
+        }));
+        return subpath.points.map((point, pointIndex) => {
+          const nextIndex = (pointIndex + 1) % subpath.points.length;
+          const next = subpath.points[nextIndex]!;
+          const segmentIndex = networkSegments.length;
+          networkSegments.push({
+            start: vertexOffset + pointIndex,
+            end: vertexOffset + nextIndex,
+            ...(point.handleOut ? { tangentStart: { ...point.handleOut } } : {}),
+            ...(next.handleIn ? { tangentEnd: { ...next.handleIn } } : {}),
+          });
+          return segmentIndex;
+        });
+      });
+      networkRegions.push({ windingRule: path.fillRule === "evenOdd" ? "EVENODD" : "NONZERO", loops });
+    });
+    const vectorPath: DocumentVectorPath = { fillRule, subpaths };
+    const regionPaints: VectorNetworkRegionPaintRecord[] = paintStacks.map((fillStack) => ({
+      hasExplicitFills: true,
+      fillStack,
+    }));
+    let extensions: Record<string, number[]>;
+    try {
+      extensions = extensionsWithRuntimeVectorNetwork({}, {
+        vertices: networkVertices,
+        segments: networkSegments,
+        regions: networkRegions,
+      }, vectorPath, regionPaints);
+    } catch {
+      throw runtimeError("RESOURCE_LIMIT", { nodeId: selected[0]!.id });
     }
     const targetParentWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), targetParentNode);
     const targetParentInverse = targetParentWorld && invertRuntimeTransform(targetParentWorld);
@@ -2690,11 +2733,13 @@ export class RuntimeSession implements RuntimeContainerHost {
       relativeTransform: replacementLocal,
       siblingIndex: destination,
       positionId: replacementPositionId,
-      vectorPath: { fillRule, subpaths },
+      vectorPath,
       arcData: undefined,
       parametricShape: undefined,
       booleanOperation: undefined,
-      extensions: undefined,
+      fillStack: structuredClone(paintStacks[0]!),
+      fillStyleId: undefined,
+      extensions,
       radius: 0,
       cornerRadii: undefined,
       cornerSmoothing: 0,
@@ -4869,10 +4914,10 @@ function runtimeVectorSupportsBoolean(node: RuntimeProjectionNode): boolean {
   ));
 }
 
-/** Multi-node flatten currently has one node-level Paint Stack. Admit only the
- * legacy solid-fill subset whose appearance is invariant when several local
- * paths are baked into one aggregate coordinate space. */
-function runtimeMultiFlattenStyleKey(node: RuntimeProjectionNode): string | undefined {
+/** Solid paint coordinates are invariant when source paths are baked into an
+ * aggregate coordinate space. Gradient and image paints remain gated until
+ * their source-local transforms can be rewritten into the replacement box. */
+function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPaintStack | undefined {
   if (
     node.visible === false ||
     finiteNodeNumber(node.opacity, 1) !== 1 ||
@@ -4881,11 +4926,29 @@ function runtimeMultiFlattenStyleKey(node: RuntimeProjectionNode): string | unde
     node.dropShadow !== undefined ||
     (Array.isArray(node.effectStack) && node.effectStack.length > 0) ||
     finiteNodeNumber(node.strokeWidth, 0) !== 0 ||
-    ["fillColor", "fillGradient", "fills", "fillStack", "fillStyleId", "strokeColor", "strokeGradient", "strokes", "strokeStack", "strokeStyleId"].some((property) => node[property] !== undefined)
+    ["fillColor", "fillGradient", "fills", "fillStyleId", "strokeColor", "strokeGradient", "strokes", "strokeStack", "strokeStyleId"].some((property) => node[property] !== undefined)
   ) return undefined;
+  if (node.fillStack !== undefined) {
+    try {
+      const stack = structuredClone(node.fillStack as DocumentPaintStack);
+      return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type === "SOLID") ? stack : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   const fill = node.fill;
   if (typeof fill !== "string" || !fill.length) return undefined;
-  return fill;
+  const stack: DocumentPaintStack = { layers: [{
+    visible: true,
+    opacity: 1,
+    blendMode: "normal",
+    paint: { css: fill },
+  }] };
+  try {
+    return runtimePaintsFromDocumentStack(stack).every((paint) => paint.type === "SOLID") ? stack : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function runtimeTransformPoint(

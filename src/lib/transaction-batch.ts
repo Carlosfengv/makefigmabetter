@@ -291,8 +291,8 @@ export function resolveFlattenNodeBatch(
 }
 
 /** Replaces several leaf vector-like nodes with one pre-resolved aggregate
- * path. Runtime admission guarantees that their single node-level solid paint
- * can be retained without requiring region-local paint data. */
+ * path. A bounded presentation patch carries path-bound region paints without
+ * allowing Runtime to replace structural or geometric fields. */
 export function resolveFlattenNodesBatch(
   nodes: readonly CanvasNode[],
   sourceIds: readonly string[],
@@ -300,6 +300,7 @@ export function resolveFlattenNodesBatch(
   createId: () => string = generateId,
   replacementId?: string,
   target?: Readonly<{ parentId?: string; pageId?: string; index?: number }>,
+  patch?: Partial<CanvasNode>,
 ): ResolvedFlattenNodesBatch | undefined {
   if (sourceIds.length < 2 || new Set(sourceIds).size !== sourceIds.length) return undefined;
   const sources = sourceIds.map((sourceId) => nodes.find((node) => node.id === sourceId));
@@ -337,8 +338,15 @@ export function resolveFlattenNodesBatch(
   const desiredPositionId = positionIdForLayerInsertion(remainingTargetSiblings.map((node) => ({ positionId: node.positionId })), destination);
   if (!desiredPositionId) return undefined;
   const source = concreteSources[0]!;
+  const presentationPatch: Partial<CanvasNode> = {};
+  if (patch) {
+    for (const property of ["fill", "fillColor", "fillGradient", "fills", "fillStack", "fillStyleId", "extensions"] as const) {
+      if (Object.hasOwn(patch, property)) (presentationPatch as Record<string, unknown>)[property] = structuredClone(patch[property]);
+    }
+  }
   const replacement: CanvasNode = {
     ...source,
+    ...presentationPatch,
     id: replacementId,
     kind: "vector",
     name: "Flattened",
@@ -355,7 +363,7 @@ export function resolveFlattenNodesBatch(
     radius: 0,
     cornerRadii: undefined,
     cornerSmoothing: 0,
-    extensions: undefined,
+    extensions: patch?.extensions,
     contentsHidden: false,
     clipsContent: undefined,
   };

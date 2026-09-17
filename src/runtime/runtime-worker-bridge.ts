@@ -1,4 +1,4 @@
-import { createId, type DocumentAsset, type DocumentAutoLayout, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type EditorSnapshot, type EditorTransaction, type MainToWorker, type WorkerToMain } from "../lib/editor-protocol";
+import { createId, type CanvasNode, type DocumentAsset, type DocumentAutoLayout, type DocumentTextPathMetadata, type DocumentTransformModifier, type DocumentVectorPath, type EditorCommand, type EditorSnapshot, type EditorTransaction, type MainToWorker, type WorkerToMain } from "../lib/editor-protocol";
 import { figmaPluginNodeType } from "../lib/figma-plugin-node-projection";
 import { runtimeError } from "./runtime-errors";
 import type { PendingProjectionTransaction, RuntimeProjection, RuntimeProjectionNode } from "./runtime-projection-store";
@@ -600,11 +600,17 @@ function toEditorCommands(
       : undefined;
     const vectorPath = operation.replacement.vectorPath;
     if (!vectorPath || typeof vectorPath !== "object") throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.sourceIds[0] });
+    const patch: Partial<CanvasNode> = {};
+    const replacement = operation.replacement as Record<string, unknown>;
+    for (const property of ["fill", "fillColor", "fillGradient", "fills", "fillStack", "fillStyleId", "extensions"] as const) {
+      if (Object.hasOwn(replacement, property)) (patch as Record<string, unknown>)[property] = structuredClone(replacement[property]);
+    }
     return [{
       type: "flattenNodes",
       ids: [...operation.sourceIds],
       replacementId: operation.replacement.id,
       vectorPath: structuredClone(vectorPath) as DocumentVectorPath,
+      ...(Object.keys(patch).length ? { patch } : {}),
       ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
       ...(index === undefined ? {} : { index }),
     }];
