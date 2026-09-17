@@ -137,8 +137,9 @@ export function runtimeVectorNetworkFromCanonical(
  * branches with region-local fill rules. Region render data is persisted
  * separately from the derived fallback path. Bounded straight-chain corner
  * radii materialize into cubic fillets while the authored vertices survive in
- * the path-bound extension. Mixed joins are admitted only for independent
- * topology consumed by the shared bounded stroke mesh.
+ * the path-bound extension. Mixed joins are admitted for independent topology
+ * consumed by the shared bounded stroke mesh, including straight corner
+ * fillets whose rounded author vertices no longer form rendered joins.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -232,15 +233,19 @@ export function canonicalVectorPathFromRuntimeNetwork(
   const hasExplicitJoin = input.vertices.some((vertex) => vertex.strokeJoin !== undefined);
   const resolvedVertexJoins = input.vertices.map((vertex) => vertex.strokeJoin === undefined ? defaults.strokeJoin : canonicalStrokeJoin(vertex.strokeJoin));
   if (resolvedVertexJoins.some((join) => !join)) return { reason: "VectorNetwork contains an unsupported stroke join." };
-  const activeJoinVertexIndexes = components.flatMap((component) => component.closed
+  const activeJoinVertexIndexes = components.flatMap((component) => (component.closed
     ? component.vertexIndexes
-    : component.vertexIndexes.slice(1, -1));
-  const hasMixedActiveJoins = new Set(activeJoinVertexIndexes.map((vertexIndex) => resolvedVertexJoins[vertexIndex])).size > 1;
+    : component.vertexIndexes.slice(1, -1))
+    .filter((vertexIndex) => (input.vertices[vertexIndex]!.cornerRadius ?? 0) <= 0));
+  const activeResolvedJoins = activeJoinVertexIndexes.map((vertexIndex) => resolvedVertexJoins[vertexIndex]!);
+  const canonicalResolvedJoins = activeResolvedJoins.length ? activeResolvedJoins : resolvedVertexJoins;
+  const hasMixedActiveJoins = new Set(activeResolvedJoins).size > 1;
   const hasPerVertexCorners = input.vertices.some((vertex) => vertex.cornerRadius !== undefined);
-  if (hasMixedActiveJoins && input.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) {
-    return { reason: "Mixed per-vertex stroke joins cannot be combined with corner radii." };
-  }
-  if (hasMixedActiveJoins && !mixedNetworkStrokeSegmentsWithinBudget(input, components)) {
+  const strokeNetwork = materializedIndependentStrokeNetwork(input, components);
+  if ("reason" in strokeNetwork) return strokeNetwork;
+  const strokeComponents = independentNetworkComponents(strokeNetwork);
+  if (!strokeComponents) return { reason: "Rounded VectorNetwork could not produce independent stroke components." };
+  if (hasMixedActiveJoins && !mixedNetworkStrokeSegmentsWithinBudget(strokeNetwork, strokeComponents)) {
     return { reason: "Mixed per-vertex stroke joins exceed the bounded curve tessellation budget or contain degenerate curve geometry." };
   }
 
@@ -312,7 +317,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
     } : {}),
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
-    ...(hasExplicitJoin && new Set(resolvedVertexJoins).size === 1 && resolvedVertexJoins[0] ? { strokeJoin: resolvedVertexJoins[0] } : {}),
+    ...(hasExplicitJoin && new Set(canonicalResolvedJoins).size === 1 && canonicalResolvedJoins[0] ? { strokeJoin: canonicalResolvedJoins[0] } : {}),
     ...(hasPerVertexCorners || hasExplicitJoin ? { network: structuredClone(input) } : {}),
   };
 }
@@ -496,9 +501,9 @@ type MixedStrokeOptions = Readonly<{
   strokeDashPattern?: readonly number[];
 }>;
 
-/** True only when two or more rendered joins in an independent network have
- * different effective values. Open-path endpoints are excluded because they
- * have caps rather than joins. */
+/** True only when two or more rendered joins have different effective values.
+ * Open-path endpoints have caps, and positive corner radii replace their
+ * authored vertex with a tangent-continuous cubic fillet. Neither is a join. */
 export function runtimeVectorNetworkHasMixedActiveJoins(
   network: RuntimeVectorNetwork,
   defaultJoin: StrokeJoin,
@@ -534,11 +539,16 @@ export function vectorNetworkMixedStrokeMesh(
     || !Number.isFinite(options.strokeWidth) || options.strokeWidth <= 0
     || !Number.isFinite(options.strokeMiterLimit) || options.strokeMiterLimit < 1
     || options.strokeDashPattern?.length
-    || network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)
   ) return undefined;
-  const components = independentNetworkComponents(network);
+  const sourceComponents = independentNetworkComponents(network);
   if (!runtimeVectorNetworkHasMixedActiveJoins(network, options.strokeJoin)) return undefined;
-  if (!components && ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none")) return undefined;
+  if (!sourceComponents && network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) return undefined;
+  if (!sourceComponents && ((options.strokeCapStart ?? "none") !== "none" || (options.strokeCapEnd ?? "none") !== "none")) return undefined;
+
+  const strokeNetwork = sourceComponents ? materializedIndependentStrokeNetwork(network, sourceComponents) : network;
+  if ("reason" in strokeNetwork) return undefined;
+  const components = sourceComponents ? independentNetworkComponents(strokeNetwork) : undefined;
+  if (sourceComponents && !components) return undefined;
 
   const triangles: VectorNetworkStrokeTriangle[] = [];
   const half = options.strokeWidth / 2;
@@ -546,8 +556,8 @@ export function vectorNetworkMixedStrokeMesh(
   if (components) {
     for (const component of components) {
       if (component.vertexIndexes.length < 2) continue;
-      const points = component.vertexIndexes.map((vertexIndex) => network.vertices[vertexIndex]!);
-      const resolved = networkStrokeSegmentGroups(network, component.segmentIndexes, remainingSegments);
+      const points = component.vertexIndexes.map((vertexIndex) => strokeNetwork.vertices[vertexIndex]!);
+      const resolved = networkStrokeSegmentGroups(strokeNetwork, component.segmentIndexes, remainingSegments);
       if (!resolved || resolved.count === 0) return undefined;
       remainingSegments -= resolved.count;
       addNetworkStrokeSegmentGroups(triangles, resolved.groups, half);
@@ -573,12 +583,12 @@ export function vectorNetworkMixedStrokeMesh(
       }
     }
   } else {
-    if (!validBranchedStrokeTopology(network)) return undefined;
-    const segmentIndexes = network.segments.map((_, index) => index);
-    const resolved = networkStrokeSegmentGroups(network, segmentIndexes, remainingSegments);
+    if (!validBranchedStrokeTopology(strokeNetwork)) return undefined;
+    const segmentIndexes = strokeNetwork.segments.map((_, index) => index);
+    const resolved = networkStrokeSegmentGroups(strokeNetwork, segmentIndexes, remainingSegments);
     if (!resolved || resolved.count === 0) return undefined;
     addNetworkStrokeSegmentGroups(triangles, resolved.groups, half);
-    addBranchedNetworkStrokeJoins(triangles, network, resolved.groups, half, options.strokeJoin, options.strokeMiterLimit);
+    addBranchedNetworkStrokeJoins(triangles, strokeNetwork, resolved.groups, half, options.strokeJoin, options.strokeMiterLimit);
   }
   if (!triangles.length || triangles.length > MAX_MIXED_STROKE_TRIANGLES) return undefined;
   let minX = Number.POSITIVE_INFINITY;
@@ -657,15 +667,88 @@ function independentNetworkComponents(network: RuntimeVectorNetwork): readonly I
 
 function activeNetworkJoinVertexIndexes(network: RuntimeVectorNetwork): readonly number[] {
   const components = independentNetworkComponents(network);
-  if (components) return components.flatMap((component) => component.closed
+  if (components) return components.flatMap((component) => (component.closed
     ? [...component.vertexIndexes]
-    : component.vertexIndexes.slice(1, -1));
+    : component.vertexIndexes.slice(1, -1))
+    .filter((vertexIndex) => (network.vertices[vertexIndex]!.cornerRadius ?? 0) <= 0));
   const degrees = Array.from({ length: network.vertices.length }, () => 0);
   network.segments.forEach((segment) => {
     degrees[segment.start] = degrees[segment.start]! + 1;
     degrees[segment.end] = degrees[segment.end]! + 1;
   });
   return degrees.flatMap((degree, vertexIndex) => degree >= 2 ? [vertexIndex] : []);
+}
+
+/** Produces the presentation-only centerline for independent rounded paths.
+ * The exact authored network remains in the extension. Synthetic vertices
+ * exist only long enough to feed the shared bounded stroke tessellator. */
+function materializedIndependentStrokeNetwork(
+  network: RuntimeVectorNetwork,
+  components: readonly IndependentNetworkComponent[],
+): RuntimeVectorNetwork | { reason: string } {
+  if (!network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) return network;
+  const vertices: RuntimeVectorVertex[] = [];
+  const segments: RuntimeVectorSegment[] = [];
+  let syntheticId = 0;
+
+  for (let componentIndex = 0; componentIndex < components.length; componentIndex += 1) {
+    const component = components[componentIndex]!;
+    const componentVertices = component.vertexIndexes.map((vertexIndex) => network.vertices[vertexIndex]!);
+    const sourceIds = component.vertexIndexes.map((_, pointIndex) => `source-${componentIndex}-${pointIndex}`);
+    const sourcePoints: DocumentVectorPath["subpaths"][number]["points"] = component.vertexIndexes.map((vertexIndex, pointIndex) => {
+      const vertex = network.vertices[vertexIndex]!;
+      const incomingSegmentIndex = component.closed
+        ? component.segmentIndexes[(pointIndex + component.segmentIndexes.length - 1) % component.segmentIndexes.length]
+        : component.segmentIndexes[pointIndex - 1];
+      const outgoingSegmentIndex = component.segmentIndexes[pointIndex];
+      const handleIn = incomingSegmentIndex === undefined ? undefined : network.segments[incomingSegmentIndex]!.tangentEnd;
+      const handleOut = outgoingSegmentIndex === undefined ? undefined : network.segments[outgoingSegmentIndex]!.tangentStart;
+      return {
+        id: sourceIds[pointIndex]!,
+        x: vertex.x,
+        y: vertex.y,
+        ...(handleIn ? { handleIn: { ...handleIn } } : {}),
+        ...(handleOut ? { handleOut: { ...handleOut } } : {}),
+        pointType: vertex.handleMirroring === "ANGLE_AND_LENGTH" ? "mirrored" as const : vertex.handleMirroring === "ANGLE" ? "asymmetric" as const : "corner" as const,
+      };
+    });
+    const rounded = materializeRuntimeCornerRadii(
+      componentVertices,
+      sourcePoints,
+      component.closed,
+      () => `rounded-${syntheticId++}`,
+    );
+    if ("reason" in rounded) return rounded;
+    if (vertices.length + rounded.points.length > MAX_VECTOR_POINTS) {
+      return { reason: `Rounded VectorNetwork exceeds Core's ${MAX_VECTOR_POINTS}-point limit.` };
+    }
+
+    const vertexOffset = vertices.length;
+    const sourcePointIndexes = new Map(sourceIds.map((id, index) => [id, index] as const));
+    rounded.points.forEach((point) => {
+      const sourcePointIndex = sourcePointIndexes.get(point.id);
+      const sourceVertex = sourcePointIndex === undefined ? undefined : componentVertices[sourcePointIndex];
+      const preservesAuthoredJoin = sourceVertex && (sourceVertex.cornerRadius ?? 0) <= 0;
+      vertices.push({
+        x: point.x,
+        y: point.y,
+        ...(preservesAuthoredJoin && sourceVertex.strokeJoin ? { strokeJoin: sourceVertex.strokeJoin } : {}),
+      });
+    });
+    const segmentCount = Math.max(0, rounded.points.length - 1) + (component.closed && rounded.points.length > 1 ? 1 : 0);
+    for (let pointIndex = 0; pointIndex < segmentCount; pointIndex += 1) {
+      const nextIndex = (pointIndex + 1) % rounded.points.length;
+      const from = rounded.points[pointIndex]!;
+      const to = rounded.points[nextIndex]!;
+      segments.push({
+        start: vertexOffset + pointIndex,
+        end: vertexOffset + nextIndex,
+        ...(from.handleOut ? { tangentStart: { ...from.handleOut } } : {}),
+        ...(to.handleIn ? { tangentEnd: { ...to.handleIn } } : {}),
+      });
+    }
+  }
+  return { vertices, segments };
 }
 
 type NetworkStrokeSegment = Readonly<{

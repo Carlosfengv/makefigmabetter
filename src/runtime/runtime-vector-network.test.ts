@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentPaintStack, DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkMixedStrokeMesh, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, runtimeVectorNetworkHasMixedActiveJoins, vectorNetworkMixedStrokeMesh, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -434,6 +434,48 @@ describe("Runtime VectorNetwork adapter", () => {
       ],
     }, () => `overflow-${allocations++}`, { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
       .toMatchObject({ reason: expect.stringContaining("tessellation budget") });
+    expect(allocations).toBe(0);
+  });
+
+  it("composes straight corner fillets with the remaining visible mixed joins", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, cornerRadius: 5, strokeJoin: "MITER" as const },
+        { x: 20, y: 20, strokeJoin: "ROUND" as const },
+        { x: 40, y: 20, strokeJoin: "BEVEL" as const },
+        { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 },
+      ],
+    };
+    expect(runtimeVectorNetworkHasMixedActiveJoins(network, "miter")).toBe(true);
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `rounded-mixed-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    expect(converted.network).toEqual(network);
+    expect(converted.path.subpaths[0]?.points).toHaveLength(6);
+    const mesh = vectorNetworkMixedStrokeMeshFromExtension(
+      extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path),
+      converted.path,
+      { strokeWidth: 4, strokeJoin: "miter", strokeMiterLimit: 10 },
+    );
+
+    expect(mesh?.bounds).toEqual({ min: { x: 0, y: -2 }, max: { x: 42, y: 40 } });
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.5, y: 1.5 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21.8, y: -1.8 })).toBe(false);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.25, y: 21.75 })).toBe(false);
+
+    let allocations = 0;
+    expect(canonicalVectorPathFromRuntimeNetwork({
+      ...network,
+      vertices: network.vertices.map((vertex, index) => index === 1 ? { ...vertex, cornerRadius: 30 } : vertex),
+    }, () => `invalid-rounded-mixed-${allocations++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    })).toMatchObject({ reason: expect.stringContaining("overlap") });
     expect(allocations).toBe(0);
   });
 

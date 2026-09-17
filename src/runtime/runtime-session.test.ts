@@ -2897,6 +2897,23 @@ describe("M1 RuntimeSession", () => {
     vector.vectorNetwork = curved;
     expect(vector.vectorNetwork).toEqual(curved);
 
+    const roundedMixed = {
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 20, y: 0, cornerRadius: 5, strokeJoin: "MITER" as const },
+        { x: 20, y: 20, strokeJoin: "ROUND" as const },
+        { x: 40, y: 20, strokeJoin: "BEVEL" as const },
+        { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 },
+      ],
+    };
+    vector.vectorNetwork = roundedMixed;
+    expect(vector.vectorNetwork).toEqual(roundedMixed);
+    expect(vector.vectorPaths[0]?.data).toMatch(/^M 0 0 L 15 0 C /u);
+    expect(isRuntimeError(captureError(() => { vector.dashPattern = [4, 2]; }), "INVALID_ARGUMENT")).toBe(true);
+
     vector.strokeCap = "NONE";
     const branched = {
       vertices: [
