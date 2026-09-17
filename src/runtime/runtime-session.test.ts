@@ -2852,6 +2852,37 @@ describe("M1 RuntimeSession", () => {
     });
   });
 
+  it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {
+    const transport = new InMemoryTransport(initial);
+    const session = sessionFor(transport);
+    const vector = session.createVector();
+    await session.commitAsync();
+    const rounded = {
+      vertices: [
+        { x: 0, y: 0, cornerRadius: 10 }, { x: 40, y: 0, cornerRadius: 10 },
+        { x: 40, y: 40, cornerRadius: 10 }, { x: 0, y: 40, cornerRadius: 10 },
+      ],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 0 }],
+      regions: [{ windingRule: "NONZERO" as const, loops: [[0, 1, 2, 3]] }],
+    };
+
+    await vector.setVectorNetworkAsync(rounded);
+
+    expect(vector.vectorNetwork).toEqual(rounded);
+    expect(vector.vectorPaths).toEqual([expect.objectContaining({
+      windingRule: "NONZERO",
+      data: expect.stringMatching(/^M 0 10 C /u),
+    })]);
+    expect(transport.submitted[1]?.operations).toContainEqual(expect.objectContaining({
+      type: "update",
+      nodeId: vector.id,
+      patch: expect.objectContaining({
+        vectorPath: expect.objectContaining({ subpaths: [expect.objectContaining({ closed: true, points: expect.any(Array) })] }),
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    }));
+  });
+
   it("exposes Highlight through the complete VectorLike Runtime surface", async () => {
     const source = createNode("highlight", 0, 0);
     const projection: RuntimeProjection = {

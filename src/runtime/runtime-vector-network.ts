@@ -120,8 +120,9 @@ export function runtimeVectorNetworkFromCanonical(
  * Converts the lossless VectorNetwork subset back to Canonical. Supported
  * networks are independent directed chains/cycles or bounded shared-vertex
  * branches with region-local fill rules. Region render data is persisted
- * separately from the derived fallback path; per-vertex corners and mixed
- * joins are rejected before an optimistic Runtime write is staged.
+ * separately from the derived fallback path. Bounded straight-chain corner
+ * radii materialize into cubic fillets while the authored vertices survive in
+ * the path-bound extension; mixed joins remain rejected before staging.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -217,9 +218,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
   if (resolvedJoins.some((join) => !join) || new Set(resolvedJoins).size > 1) {
     return { reason: "Canonical VectorPath cannot represent mixed per-vertex stroke joins." };
   }
-  if (input.vertices.some((vertex) => vertex.cornerRadius !== undefined)) {
-    return { reason: "Canonical VectorPath cannot represent per-vertex corner radii." };
-  }
+  const hasPerVertexCorners = input.vertices.some((vertex) => vertex.cornerRadius !== undefined);
 
   const startCaps: StrokeCap[] = [];
   const endCaps: StrokeCap[] = [];
@@ -251,7 +250,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
     if (componentVertices.some((vertex, index) => index > 0 && samePoint(vertex, componentVertices[index - 1]!)) || (component.closed && samePoint(componentVertices[0]!, componentVertices.at(-1)!))) {
       return { reason: "VectorNetwork contains duplicate adjacent vertex positions." };
     }
-    const points = component.vertexIndexes.map((vertexIndex) => {
+    const sourcePoints = component.vertexIndexes.map((vertexIndex) => {
       const vertex = input.vertices[vertexIndex]!;
       const incomingSegment = incoming[vertexIndex]![0];
       const outgoingSegment = outgoing[vertexIndex]![0];
@@ -266,7 +265,18 @@ export function canonicalVectorPathFromRuntimeNetwork(
         pointType: vertex.handleMirroring === "ANGLE_AND_LENGTH" ? "mirrored" as const : vertex.handleMirroring === "ANGLE" ? "asymmetric" as const : "corner" as const,
       };
     });
-    subpaths.push({ closed: component.closed, points });
+    const rounded = materializeRuntimeCornerRadii(
+      component.vertexIndexes.map((vertexIndex) => input.vertices[vertexIndex]!),
+      sourcePoints,
+      component.closed,
+      allocatePointId,
+    );
+    if ("reason" in rounded) return rounded;
+    subpaths.push({ closed: component.closed, points: rounded.points });
+  }
+
+  if (subpaths.reduce((total, subpath) => total + subpath.points.length, 0) > MAX_VECTOR_POINTS) {
+    return { reason: `Rounded VectorNetwork exceeds Core's ${MAX_VECTOR_POINTS}-point limit.` };
   }
 
   return {
@@ -280,7 +290,103 @@ export function canonicalVectorPathFromRuntimeNetwork(
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
     ...(hasExplicitJoin && resolvedJoins[0] ? { strokeJoin: resolvedJoins[0] } : {}),
+    ...(hasPerVertexCorners ? { network: structuredClone(input) } : {}),
   };
+}
+
+function materializeRuntimeCornerRadii(
+  vertices: readonly RuntimeVectorVertex[],
+  sourcePoints: DocumentVectorPath["subpaths"][number]["points"],
+  closed: boolean,
+  allocatePointId: () => string,
+): Readonly<{ points: DocumentVectorPath["subpaths"][number]["points"] }> | { reason: string } {
+  const radii = vertices.map((vertex) => vertex.cornerRadius ?? 0);
+  if (radii.every((radius) => radius === 0)) return { points: sourcePoints };
+  if (vertices.length < (closed ? 3 : 2)) return { reason: "Per-vertex corner radii require a connected chain." };
+  if (!closed && (radii[0]! > 0 || radii.at(-1)! > 0)) {
+    return { reason: "Open VectorNetwork endpoints cannot carry a positive corner radius." };
+  }
+  if (sourcePoints.some((point) => point.handleIn || point.handleOut)) {
+    return { reason: "Per-vertex corner radii currently require straight adjacent segments." };
+  }
+
+  const offsets = Array.from({ length: vertices.length }, () => 0);
+  const handleLengths = Array.from({ length: vertices.length }, () => 0);
+  for (let index = 0; index < vertices.length; index += 1) {
+    const radius = radii[index]!;
+    if (radius === 0 || !closed && (index === 0 || index === vertices.length - 1)) continue;
+    const previous = vertices[(index + vertices.length - 1) % vertices.length]!;
+    const current = vertices[index]!;
+    const next = vertices[(index + 1) % vertices.length]!;
+    const previousLength = Math.hypot(previous.x - current.x, previous.y - current.y);
+    const nextLength = Math.hypot(next.x - current.x, next.y - current.y);
+    if (previousLength <= 1e-12 || nextLength <= 1e-12) return { reason: "Per-vertex corner radius touches a zero-length edge." };
+    const toPrevious = { x: (previous.x - current.x) / previousLength, y: (previous.y - current.y) / previousLength };
+    const toNext = { x: (next.x - current.x) / nextLength, y: (next.y - current.y) / nextLength };
+    const angle = Math.acos(Math.max(-1, Math.min(1, toPrevious.x * toNext.x + toPrevious.y * toNext.y)));
+    if (!Number.isFinite(angle) || angle <= 1e-9) return { reason: "Per-vertex corner radius cannot materialize a reversal." };
+    const offset = radius / Math.tan(angle / 2);
+    const arcAngle = Math.PI - angle;
+    const handleLength = 4 / 3 * Math.tan(arcAngle / 4) * radius;
+    if (![offset, handleLength].every(Number.isFinite) || offset < 0 || handleLength < 0) {
+      return { reason: "Per-vertex corner radius is geometrically invalid." };
+    }
+    offsets[index] = offset;
+    handleLengths[index] = handleLength;
+  }
+  const segmentCount = closed ? vertices.length : vertices.length - 1;
+  for (let index = 0; index < segmentCount; index += 1) {
+    const nextIndex = (index + 1) % vertices.length;
+    const segmentLength = Math.hypot(vertices[nextIndex]!.x - vertices[index]!.x, vertices[nextIndex]!.y - vertices[index]!.y);
+    const consumed = offsets[index]! + offsets[nextIndex]!;
+    if (consumed > segmentLength + 1e-9 * Math.max(1, segmentLength)) {
+      return { reason: "Adjacent per-vertex corner radii overlap on one segment." };
+    }
+  }
+
+  const points: DocumentVectorPath["subpaths"][number]["points"] = [];
+  for (let index = 0; index < vertices.length; index += 1) {
+    const current = vertices[index]!;
+    const offset = offsets[index]!;
+    if (offset <= 1e-12) {
+      points.push({ id: sourcePoints[index]!.id, x: current.x, y: current.y, pointType: "corner" });
+      continue;
+    }
+    const previous = vertices[(index + vertices.length - 1) % vertices.length]!;
+    const next = vertices[(index + 1) % vertices.length]!;
+    const previousLength = Math.hypot(previous.x - current.x, previous.y - current.y);
+    const nextLength = Math.hypot(next.x - current.x, next.y - current.y);
+    const toPrevious = { x: (previous.x - current.x) / previousLength, y: (previous.y - current.y) / previousLength };
+    const toNext = { x: (next.x - current.x) / nextLength, y: (next.y - current.y) / nextLength };
+    const handleLength = handleLengths[index]!;
+    points.push({
+      id: sourcePoints[index]!.id,
+      x: stableGeometryNumber(current.x + toPrevious.x * offset),
+      y: stableGeometryNumber(current.y + toPrevious.y * offset),
+      handleOut: {
+        x: stableGeometryNumber(-toPrevious.x * handleLength),
+        y: stableGeometryNumber(-toPrevious.y * handleLength),
+      },
+      pointType: "asymmetric",
+    });
+    points.push({
+      id: allocatePointId(),
+      x: stableGeometryNumber(current.x + toNext.x * offset),
+      y: stableGeometryNumber(current.y + toNext.y * offset),
+      handleIn: {
+        x: stableGeometryNumber(-toNext.x * handleLength),
+        y: stableGeometryNumber(-toNext.y * handleLength),
+      },
+      pointType: "asymmetric",
+    });
+  }
+  return { points };
+}
+
+function stableGeometryNumber(value: number) {
+  const nearestInteger = Math.round(value);
+  if (Math.abs(value - nearestInteger) <= 1e-12 * Math.max(1, Math.abs(value))) return Object.is(nearestInteger, -0) ? 0 : nearestInteger;
+  return Object.is(value, -0) ? 0 : value;
 }
 
 /** Reads the exact shared-topology record only while its derived VectorPath is

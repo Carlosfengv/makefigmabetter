@@ -76,6 +76,49 @@ describe("Runtime VectorNetwork adapter", () => {
     expect(converted).toMatchObject({ strokeCapStart: "square", strokeCapEnd: "triangleFilled", strokeJoin: "round" });
   });
 
+  it("materializes non-overlapping straight corner radii and preserves the authored network", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 0, y: 0, cornerRadius: 10 },
+        { x: 40, y: 0, cornerRadius: 10 },
+        { x: 40, y: 40, cornerRadius: 10 },
+        { x: 0, y: 40, cornerRadius: 10 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 0 },
+      ],
+      regions: [{ windingRule: "NONZERO" as const, loops: [[0, 1, 2, 3]] }],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `rounded-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+
+    expect(converted.network).toEqual(network);
+    expect(converted.path.subpaths[0]).toMatchObject({
+      closed: true,
+      points: [
+        { x: 0, y: 10, handleOut: { x: 0, y: expect.closeTo(-5.5228474983) } },
+        { x: 10, y: 0, handleIn: { x: expect.closeTo(-5.5228474983), y: 0 } },
+        { x: 30, y: 0 },
+        { x: 40, y: 10 },
+        { x: 40, y: 30 },
+        { x: 30, y: 40 },
+        { x: 10, y: 40 },
+        { x: 0, y: 30 },
+      ],
+    });
+    const extensions = extensionsWithRuntimeVectorNetwork({}, converted.network, converted.path);
+    expect(runtimeVectorNetworkFromExtension(extensions, converted.path)).toEqual(network);
+
+    const overlapping = canonicalVectorPathFromRuntimeNetwork({
+      vertices: [{ x: 0, y: 0 }, { x: 10, y: 0, cornerRadius: 20 }, { x: 10, y: 10 }],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
+    }, () => "overlap", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" });
+    expect(overlapping).toMatchObject({ reason: expect.stringContaining("overlap") });
+  });
+
   it("materializes a bounded open branch while preserving exact topology in an extension", () => {
     let sequence = 0;
     const network = {
