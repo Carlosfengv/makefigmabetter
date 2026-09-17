@@ -200,6 +200,7 @@ import remediationImageAlphaMaskFixture from "../../../fixtures/documents/remedi
 import remediationPaintStackFixture from "../../../fixtures/documents/remediation-paint-stack.fixture.json";
 import remediationNonLinearGradientFixture from "../../../fixtures/documents/remediation-non-linear-gradient.fixture.json";
 import remediationAdvancedBlendFixture from "../../../fixtures/documents/remediation-advanced-blend.fixture.json";
+import remediationBackdropIslandsFixture from "../../../fixtures/documents/remediation-backdrop-islands.fixture.json";
 import remediationImageRotationFixture from "../../../fixtures/documents/remediation-image-rotation.fixture.json";
 import remediationImageFiltersFixture from "../../../fixtures/documents/remediation-image-filters.fixture.json";
 import remediationTextTruncationFixture from "../../../fixtures/documents/remediation-text-truncation.fixture.json";
@@ -1417,6 +1418,8 @@ function requestedFixtureSnapshot(
                 ? remediationNonLinearGradientFixture
               : fixture === "remediation-advanced-blend"
                 ? remediationAdvancedBlendFixture
+              : fixture === "remediation-backdrop-islands"
+                ? remediationBackdropIslandsFixture
               : fixture === "remediation-pass-through"
                 ? remediationPassThroughFixture
                 : fixture === "remediation-normal-isolation"
@@ -1651,6 +1654,8 @@ function requestedFixtureStatus(initialFixture?: string) {
     return "fixed W12-P non-linear gradient fixture loaded";
   if (fixture === "remediation-advanced-blend")
     return "fixed W12-P advanced blend fixture loaded";
+  if (fixture === "remediation-backdrop-islands")
+    return "fixed W13 immutable backdrop island fixture loaded";
   if (fixture === "remediation-pass-through")
     return "fixed W12-P pass-through fixture loaded";
   if (fixture === "remediation-normal-isolation")

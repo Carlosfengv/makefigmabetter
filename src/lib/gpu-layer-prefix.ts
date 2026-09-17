@@ -36,11 +36,18 @@ export type GpuCanvasIslandReason =
   | "frame-clip"
   | "unsupported-node"
   | "native-affine"
+  | "backdrop-chain"
   | "gpu-policy";
 
 export type GpuLayerIsland =
   | { backend: "gpu"; reason: "initial-pass" | "resume-after-canvas" | "pass-restart"; backdrop: "transparent"; nodes: CanvasNode[] }
   | { backend: "canvas"; reason: GpuCanvasIslandReason; backdrop: "transparent" | "previous-islands"; nodes: CanvasNode[] };
+
+function hasVisibleBackgroundBlur(node: CanvasNode) {
+  return normalizedNodeEffects(node).some((effect) =>
+    Boolean(effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0),
+  );
+}
 
 function topLevelRootResolver(nodes: readonly CanvasNode[]) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -99,9 +106,14 @@ export function gpuLayerIslands(
   }
   const islands: GpuLayerIsland[] = [];
   let currentGpuPass: number | undefined;
+  let backdropChainMaterializable = true;
   const appendCanvas = (node: CanvasNode, reason: GpuCanvasIslandReason, backdrop: Extract<GpuLayerIsland, { backend: "canvas" }>["backdrop"]) => {
     const previous = islands.at(-1);
-    if (previous?.backend === "canvas" && previous.reason === reason && previous.backdrop === backdrop) previous.nodes.push(node);
+    const isolatesBackdropRead = backdrop === "previous-islands" && (
+      hasVisibleBackgroundBlur(node)
+      || (previous?.backend === "canvas" && hasVisibleBackgroundBlur(previous.nodes.at(-1)!))
+    );
+    if (previous?.backend === "canvas" && previous.reason === reason && previous.backdrop === backdrop && !isolatesBackdropRead) previous.nodes.push(node);
     else islands.push({ backend: "canvas", reason, backdrop, nodes: [node] });
     currentGpuPass = undefined;
   };
@@ -119,16 +131,24 @@ export function gpuLayerIslands(
     const structuralReason = structuralRootReasons.get(rootId);
     if (structuralReason) {
       appendCanvas(node, structuralReason, structuralRootsWithBackdrop.has(rootId) ? "previous-islands" : "transparent");
+      if (hasVisibleBackgroundBlur(node)) backdropChainMaterializable = false;
       continue;
     }
     const policy = canUseGpu(node);
     if (policy !== true) {
-      appendCanvas(node, policy === false ? "gpu-policy" : policy, requiresCanvasBackdrop(node) ? "previous-islands" : "transparent");
+      const backdrop = requiresCanvasBackdrop(node) ? "previous-islands" : "transparent";
+      const reason = backdrop === "previous-islands" && !backdropChainMaterializable
+        ? "backdrop-chain"
+        : policy === false ? "gpu-policy" : policy;
+      appendCanvas(node, reason, backdrop);
+      if (hasVisibleBackgroundBlur(node)) backdropChainMaterializable = false;
       continue;
     }
     const pass = gpuPass(node, decodedImageAssetIds, gpuTextNodeIds);
     if (pass === undefined) {
-      appendCanvas(node, "unsupported-node", requiresCanvasBackdrop(node) ? "previous-islands" : "transparent");
+      const backdrop = requiresCanvasBackdrop(node) ? "previous-islands" : "transparent";
+      appendCanvas(node, backdrop === "previous-islands" && !backdropChainMaterializable ? "backdrop-chain" : "unsupported-node", backdrop);
+      if (hasVisibleBackgroundBlur(node)) backdropChainMaterializable = false;
       continue;
     }
     const previous = islands.at(-1);
@@ -147,24 +167,25 @@ export function gpuLayerIslands(
  * changing blend or Background Blur semantics by painting onto transparency. */
 export function requiresCanvasBackdrop(node: CanvasNode): boolean {
   if (node.blendMode !== undefined && node.blendMode !== "normal" && node.blendMode !== "pass-through") return true;
-  return normalizedNodeEffects(node).some((effect) =>
-    Boolean(effect.backgroundBlur?.visible && effect.backgroundBlur.radius > 0),
-  );
+  return hasVisibleBackgroundBlur(node);
 }
 
-/** Visible Canvas islands without a backdrop dependency can be materialized at
- * their existing display-list boundary. The executor initializes the local
- * surface from the already presented backing pixels, so antialiased edges are
- * blended only once. Blend and Background Blur islands remain direct Canvas:
- * Chromium does not preserve their full RGBA result across a second local
- * compositing surface, even when that surface starts with identical pixels. */
+/** Visible bounded Canvas islands can be materialized at their display-list
+ * boundary. Eligible blend islands receive a full-frame immutable backdrop so
+ * Canvas keeps the same pixel origin at DPR 1 and 2. Background Blur, filtered
+ * backdrop chains and structural roots stay direct because copying their
+ * sampled result changes Chromium's RGBA output. Large-page policy suffixes
+ * also stay direct instead of duplicating most of the presentation. */
 export function canMaterializeCanvasIsland(
   island: GpuLayerIsland,
 ): island is Extract<GpuLayerIsland, { backend: "canvas" }> {
   return island.backend === "canvas"
     && island.reason !== "hidden"
     && island.reason !== "gpu-policy"
-    && island.backdrop === "transparent";
+    && (island.backdrop === "transparent"
+      || island.reason === "unsupported-node"
+      || island.reason === "native-affine")
+    && !island.nodes.some(hasVisibleBackgroundBlur);
 }
 
 /** A single WebGPU renderer retains one uploaded scene. On large documents,

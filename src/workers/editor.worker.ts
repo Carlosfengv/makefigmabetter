@@ -464,6 +464,10 @@ type CanvasFallbackSurface = {
   context: OffscreenCanvasRenderingContext2D;
 };
 let canvasFallbackSurface: CanvasFallbackSurface | undefined;
+/** Frozen for the duration of one previous-islands paint. The fallback output
+ * is seeded from this surface and may evolve, while backdrop capture never
+ * receives node paint until the next island starts. */
+let canvasBackdropSurface: CanvasFallbackSurface | undefined;
 let subtreeCompositeLimitReported = false;
 let compositeSurfaceLimitReported = false;
 const compositeContextWindows = new WeakMap<OffscreenCanvasRenderingContext2D, CompositeSurfaceWindow>();
@@ -1396,6 +1400,7 @@ function setRenderSurface(nextWidth: number, nextHeight: number, nextDeviceDpr: 
     alphaMaskSurfaces = [];
     subtreeCompositeSurfaces = [];
     canvasFallbackSurface = undefined;
+    canvasBackdropSurface = undefined;
     alphaMaskLimitReported = false;
     effectSurfaceLimitReported = false;
     subtreeCompositeLimitReported = false;
@@ -4893,7 +4898,8 @@ function allocatedCompositeSurfaceBytes() {
   return (effectSurfaces ? surfaceBytes(effectSurfaces.source) * 3 : 0)
     + alphaMaskSurfaces.reduce((total, pool) => total + (pool ? surfaceBytes(pool.target) * 2 : 0), 0)
     + subtreeCompositeSurfaces.reduce((total, pool) => total + (pool ? surfaceBytes(pool.source) * 3 : 0), 0)
-    + (canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0);
+    + (canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0)
+    + (canvasBackdropSurface ? surfaceBytes(canvasBackdropSurface.surface) : 0);
 }
 
 function admitAdditionalCompositeSurfaces(pixelWidth: number, pixelHeight: number, additionalSurfaces: number, replacingBytes = 0) {
@@ -4936,36 +4942,66 @@ function acquireEffectSurfaces(window: Pick<CompositeSurfaceWindow, "pixelWidth"
   return effectSurfaces;
 }
 
-function acquireCanvasFallbackSurface(window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">): CanvasFallbackSurface | undefined {
-  if (!canvas) return undefined;
-  const existing = canvasFallbackSurface;
-  if (existing && existing.surface.width >= window.pixelWidth && existing.surface.height >= window.pixelHeight) return existing;
-  const pixelWidth = Math.max(existing?.surface.width ?? 0, window.pixelWidth);
-  const pixelHeight = Math.max(existing?.surface.height ?? 0, window.pixelHeight);
-  const replacedBytes = existing ? surfaceBytes(existing.surface) : 0;
-  if (!admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, 1, replacedBytes).accepted) return undefined;
+function createCanvasFallbackSurface(pixelWidth: number, pixelHeight: number): CanvasFallbackSurface | undefined {
   try {
     const surface = new OffscreenCanvas(pixelWidth, pixelHeight);
     const context = surface.getContext("2d", { alpha: true });
-    if (!context) return undefined;
-    canvasFallbackSurface = { surface, context };
-    return canvasFallbackSurface;
+    return context ? { surface, context } : undefined;
   } catch {
     return undefined;
   }
 }
 
-/** Captures the destination window before painting the island. Rendering on
- * this opaque backing avoids a second alpha blend for curved edges and also
- * freezes the exact previous-islands input required by blend/background blur. */
-function prepareCanvasFallbackSurface(
-  acquired: CanvasFallbackSurface,
+function acquireCanvasIslandSurfaces(
+  window: Pick<CompositeSurfaceWindow, "pixelWidth" | "pixelHeight">,
+  immutableBackdrop: boolean,
+): { output: CanvasFallbackSurface; backdrop?: CanvasFallbackSurface } | undefined {
+  if (!canvas) return undefined;
+  const outputReady = canvasFallbackSurface
+    && canvasFallbackSurface.surface.width >= window.pixelWidth
+    && canvasFallbackSurface.surface.height >= window.pixelHeight;
+  const backdropReady = !immutableBackdrop || (canvasBackdropSurface
+    && canvasBackdropSurface.surface.width >= window.pixelWidth
+    && canvasBackdropSurface.surface.height >= window.pixelHeight);
+  if (outputReady && backdropReady)
+    return { output: canvasFallbackSurface!, ...(immutableBackdrop ? { backdrop: canvasBackdropSurface! } : {}) };
+
+  const pixelWidth = Math.max(
+    window.pixelWidth,
+    outputReady ? 0 : canvasFallbackSurface?.surface.width ?? 0,
+    immutableBackdrop && !backdropReady ? canvasBackdropSurface?.surface.width ?? 0 : 0,
+  );
+  const pixelHeight = Math.max(
+    window.pixelHeight,
+    outputReady ? 0 : canvasFallbackSurface?.surface.height ?? 0,
+    immutableBackdrop && !backdropReady ? canvasBackdropSurface?.surface.height ?? 0 : 0,
+  );
+  const surfacesToAllocate = Number(!outputReady) + Number(immutableBackdrop && !backdropReady);
+  const replacedBytes = (outputReady ? 0 : canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0)
+    + (immutableBackdrop && !backdropReady && canvasBackdropSurface ? surfaceBytes(canvasBackdropSurface.surface) : 0);
+  if (!admitAdditionalCompositeSurfaces(pixelWidth, pixelHeight, surfacesToAllocate, replacedBytes).accepted) return undefined;
+  const nextOutput = outputReady ? canvasFallbackSurface! : createCanvasFallbackSurface(pixelWidth, pixelHeight);
+  const nextBackdrop = !immutableBackdrop
+    ? undefined
+    : backdropReady ? canvasBackdropSurface! : createCanvasFallbackSurface(pixelWidth, pixelHeight);
+  if (!nextOutput || (immutableBackdrop && !nextBackdrop)) return undefined;
+  canvasFallbackSurface = nextOutput;
+  if (nextBackdrop) canvasBackdropSurface = nextBackdrop;
+  return { output: nextOutput, ...(nextBackdrop ? { backdrop: nextBackdrop } : {}) };
+}
+
+/** Captures the destination before painting. Backdrop-dependent islands keep
+ * that capture in a separate read-only-for-the-paint surface, then seed the
+ * mutable output from it. Transparent islands only need the output surface. */
+function prepareCanvasIslandSurfaces(
+  acquired: { output: CanvasFallbackSurface; backdrop?: CanvasFallbackSurface },
   destination: OffscreenCanvasRenderingContext2D,
   window: CompositeSurfaceWindow,
 ) {
-  acquired.context.setTransform(1, 0, 0, 1, 0, 0);
-  acquired.context.clearRect(0, 0, acquired.surface.width, acquired.surface.height);
-  acquired.context.drawImage(
+  const capture = acquired.backdrop ?? acquired.output;
+  capture.context.setTransform(1, 0, 0, 1, 0, 0);
+  capture.context.clearRect(0, 0, capture.surface.width, capture.surface.height);
+  capture.context.drawImage(
     destination.canvas,
     window.pixelX,
     window.pixelY,
@@ -4976,48 +5012,93 @@ function prepareCanvasFallbackSurface(
     window.pixelWidth,
     window.pixelHeight,
   );
-  setCompositeSurfaceTransform(acquired.context, window);
-  compositeContextWindows.set(acquired.context, window);
+  if (acquired.backdrop) {
+    acquired.output.context.setTransform(1, 0, 0, 1, 0, 0);
+    acquired.output.context.clearRect(0, 0, acquired.output.surface.width, acquired.output.surface.height);
+    acquired.output.context.drawImage(
+      acquired.backdrop.surface,
+      0,
+      0,
+      window.pixelWidth,
+      window.pixelHeight,
+      0,
+      0,
+      window.pixelWidth,
+      window.pixelHeight,
+    );
+    compositeContextWindows.set(acquired.backdrop.context, window);
+  }
+  setCompositeSurfaceTransform(acquired.output.context, window);
+  compositeContextWindows.set(acquired.output.context, window);
 }
 
 function materializeCanvasIsland(
   destination: OffscreenCanvasRenderingContext2D,
   islandNodes: readonly CanvasNode[],
   dragPreviewRootIds: ReadonlySet<string>,
+  immutableBackdrop: boolean,
 ) {
   const window = compositeWindowForBounds(combinedWorldCompositeBounds(islandNodes));
   if (!window) return false;
-  const acquired = acquireCanvasFallbackSurface(window);
+  const surfaceWindow: CompositeSurfaceWindow = immutableBackdrop
+    ? {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        pixelX: 0,
+        pixelY: 0,
+        pixelWidth: canvas?.width ?? window.pixelWidth,
+        pixelHeight: canvas?.height ?? window.pixelHeight,
+        dpr,
+      }
+    : window;
+  const acquired = acquireCanvasIslandSurfaces(surfaceWindow, immutableBackdrop);
   if (!acquired) return false;
-  let bitmap: ImageBitmap;
   try {
-    prepareCanvasFallbackSurface(acquired, destination, window);
-    renderFrameClippedTree(acquired.context, islandNodes, dragPreviewRootIds);
-    bitmap = acquired.surface.transferToImageBitmap();
+    prepareCanvasIslandSurfaces(acquired, destination, surfaceWindow);
+    renderFrameClippedTree(acquired.output.context, islandNodes, dragPreviewRootIds);
   } catch {
     return false;
   }
   try {
-    destination.save();
-    try {
-      destination.globalAlpha = 1;
-      destination.globalCompositeOperation = "source-over";
-      destination.drawImage(
-        bitmap,
-        0,
-        0,
-        window.pixelWidth,
-        window.pixelHeight,
-        window.x,
-        window.y,
-        window.width,
-        window.height,
-      );
-    } finally {
-      destination.restore();
+    if (immutableBackdrop) {
+      destination.save();
+      try {
+        destination.setTransform(1, 0, 0, 1, 0, 0);
+        destination.globalAlpha = 1;
+        destination.globalCompositeOperation = "copy";
+        destination.drawImage(acquired.output.surface, 0, 0);
+      } finally {
+        destination.restore();
+      }
+    } else {
+      const bitmap = acquired.output.surface.transferToImageBitmap();
+      try {
+        destination.save();
+        try {
+          destination.globalAlpha = 1;
+          destination.globalCompositeOperation = "source-over";
+          destination.drawImage(
+            bitmap,
+            0,
+            0,
+            surfaceWindow.pixelWidth,
+            surfaceWindow.pixelHeight,
+            surfaceWindow.x,
+            surfaceWindow.y,
+            surfaceWindow.width,
+            surfaceWindow.height,
+          );
+        } finally {
+          destination.restore();
+        }
+      } finally {
+        bitmap.close();
+      }
     }
-  } finally {
-    bitmap.close();
+  } catch {
+    return false;
   }
   return true;
 }
@@ -8468,7 +8549,12 @@ function render(
               backendIslandPaintStarted = true;
               const canvasIslandStartedAt = performance.now();
               const materialized = canMaterializeCanvasIsland(island)
-                && materializeCanvasIsland(context!, visibleIslandNodes, dragPreviewRootIds);
+                && materializeCanvasIsland(
+                  context!,
+                  visibleIslandNodes,
+                  dragPreviewRootIds,
+                  island.backdrop === "previous-islands",
+                );
               if (materialized) {
                 materializedCanvasIslands += 1;
                 if (island.backdrop === "previous-islands") materializedBackdropCanvasIslands += 1;
@@ -8577,7 +8663,8 @@ function render(
               directIslands: directCanvasIslands,
               backdropIslands: materializedBackdropCanvasIslands,
               pixels: materializedCanvasIslandPixels,
-              bytes: canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0,
+              bytes: (canvasFallbackSurface ? surfaceBytes(canvasFallbackSurface.surface) : 0)
+                + (canvasBackdropSurface ? surfaceBytes(canvasBackdropSurface.surface) : 0),
             },
           });
           const canvasReasonNodeCounts = new Map<string, number>();

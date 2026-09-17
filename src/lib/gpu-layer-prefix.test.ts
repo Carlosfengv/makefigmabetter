@@ -172,16 +172,21 @@ describe("GPU layer prefix", () => {
     ]);
   });
 
-  it("materializes only visible Canvas islands without a backdrop dependency", () => {
+  it("materializes visible bounded Canvas islands with an explicit backdrop contract", () => {
     const polygon = node("polygon", "polygon");
     const multiply = { ...node("multiply", "rectangle"), blendMode: "multiply" as const };
+    const backgroundBlur = { ...node("background-blur", "rectangle"), effectStack: [{ backgroundBlur: { radius: 8, visible: true } }] };
     const [transparent] = gpuLayerIslands([polygon], new Set());
     const [backdrop] = gpuLayerIslands([multiply], new Set());
+    const [blurBackdrop] = gpuLayerIslands([backgroundBlur], new Set());
     const [hidden] = gpuLayerIslands([{ ...polygon, visible: false }], new Set());
     expect(canMaterializeCanvasIsland(transparent!)).toBe(true);
-    expect(canMaterializeCanvasIsland(backdrop!)).toBe(false);
+    expect(canMaterializeCanvasIsland(backdrop!)).toBe(true);
+    expect(canMaterializeCanvasIsland(blurBackdrop!)).toBe(false);
     expect(backdrop).toMatchObject({ backdrop: "previous-islands" });
     expect(canMaterializeCanvasIsland(hidden!)).toBe(false);
+    const structuralBackdrop = { backend: "canvas", reason: "mask", backdrop: "previous-islands", nodes: [multiply] } as const;
+    expect(canMaterializeCanvasIsland(structuralBackdrop)).toBe(false);
   });
 
   it("keeps one cached GPU scene and folds a large-page remainder into a canonical Canvas suffix", () => {

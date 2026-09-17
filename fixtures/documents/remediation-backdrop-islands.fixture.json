@@ -1,0 +1,13 @@
+{
+  "format": "makefigma-remediation-backdrop-islands-v1",
+  "name": "W13-IMMUTABLE-BACKDROP-ISLANDS",
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": [
+    { "id": "00000000-0000-4000-8000-000000001301", "name": "Backdrop bands", "kind": "rectangle", "x": -280, "y": -140, "width": 560, "height": 280, "rotation": 0, "fill": "#2563eb", "stroke": "transparent", "strokeWidth": 0, "radius": 20, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000001302", "name": "Backdrop warm field", "kind": "ellipse", "x": -190, "y": -105, "width": 210, "height": 210, "rotation": 0, "fill": "#f97316", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 1, "visible": true },
+    { "id": "00000000-0000-4000-8000-000000001304", "name": "Immutable Multiply island", "kind": "ellipse", "x": -150, "y": -54, "width": 108, "height": 108, "rotation": 0, "fill": "#22c55e", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.88, "blendMode": "multiply", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000001303", "name": "Background Blur direct island", "kind": "rectangle", "x": -70, "y": -90, "width": 220, "height": 180, "rotation": 0, "fill": "#ffffff66", "stroke": "#ffffff", "strokeWidth": 2, "radius": 28, "opacity": 0.82, "visible": true, "effectStack": [{ "backgroundBlur": { "radius": 18, "visible": true } }] },
+    { "id": "00000000-0000-4000-8000-000000001306", "name": "Filtered backdrop chain", "kind": "ellipse", "x": 105, "y": -54, "width": 108, "height": 108, "rotation": 0, "fill": "#ec4899", "stroke": "transparent", "strokeWidth": 0, "radius": 0, "opacity": 0.88, "blendMode": "screen", "visible": true },
+    { "id": "00000000-0000-4000-8000-000000001305", "name": "GPU resume control", "kind": "rectangle", "x": 190, "y": -115, "width": 48, "height": 230, "rotation": 0, "fill": "#facc15", "stroke": "transparent", "strokeWidth": 0, "radius": 12, "opacity": 0.9, "visible": true }
+  ]
+}
