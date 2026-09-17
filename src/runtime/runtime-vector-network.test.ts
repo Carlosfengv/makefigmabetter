@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension } from "./runtime-vector-network";
+import type { DocumentPaintStack, DocumentVectorPath } from "../lib/editor-protocol";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkRegionPaintPlansFromExtension } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -167,6 +167,78 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
+  it("persists bounded region PaintStacks separately from exact shared topology", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 20, y: 20 }, { x: 0, y: 0 }, { x: 40, y: 0 },
+        { x: 0, y: 40 }, { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
+        { start: 0, end: 3 }, { start: 3, end: 4 }, { start: 4, end: 0 },
+      ],
+      regions: [
+        { windingRule: "NONZERO" as const, loops: [[0, 1, 2]], fills: [{ type: "SOLID" as const, color: { r: 1, g: 0, b: 0 }, opacity: .5 }] },
+        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]], fills: [] },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `region-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const red: DocumentPaintStack = { layers: [{
+      visible: true,
+      opacity: .5,
+      blendMode: "normal",
+      paint: { css: "#ff0000", color: { space: "srgb", components: [1, 0, 0], alpha: 1 } },
+    }] };
+    const extensions = extensionsWithRuntimeVectorNetwork({}, network, converted.path, [
+      { hasExplicitFills: true, fillStack: red },
+      { hasExplicitFills: true, fillStack: { layers: [] } },
+    ]);
+
+    expect(runtimeVectorNetworkFromExtension(extensions, converted.path)?.regions).toEqual([
+      expect.objectContaining({ fills: [expect.objectContaining({ type: "SOLID", opacity: .5 })] }),
+      expect.objectContaining({ fills: [] }),
+    ]);
+    const plans = vectorNetworkRegionPaintPlansFromExtension(extensions, converted.path);
+    expect(plans).toHaveLength(2);
+    expect(plans?.[0]).toMatchObject({ path: { subpaths: [{ closed: true }] }, fillStack: { layers: [{ opacity: .5 }] } });
+    expect(plans?.[1]).toMatchObject({ path: { subpaths: [{ closed: true }] }, fillStack: { layers: [] } });
+  });
+
+  it("keeps a region style link while rendering its resolved PaintStack", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 0, y: 20 }],
+      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 }],
+      regions: [{ windingRule: "NONZERO" as const, loops: [[0, 1, 2]], fillStyleId: "paint-style-blue" }],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `style-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const blue: DocumentPaintStack = { layers: [{
+      visible: true,
+      opacity: 1,
+      blendMode: "normal",
+      paint: { css: "#0000ff", color: { space: "srgb", components: [0, 0, 1], alpha: 1 } },
+    }] };
+    const extensions = extensionsWithRuntimeVectorNetwork({}, network, converted.path, [
+      { hasExplicitFills: false, fillStack: blue },
+    ]);
+
+    expect(runtimeVectorNetworkFromExtension(extensions, converted.path)?.regions?.[0]).toEqual({
+      windingRule: "NONZERO",
+      loops: [[0, 1, 2]],
+      fillStyleId: "paint-style-blue",
+    });
+    expect(vectorNetworkRegionPaintPlansFromExtension(extensions, converted.path)?.[0]?.fillStack).toMatchObject({
+      layers: [{ paint: { css: "#0000ffff" } }],
+    });
+  });
+
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {
     const defaults = { strokeCapStart: "none" as const, strokeCapEnd: "none" as const, strokeJoin: "miter" as const };
     const allocate = () => "point";
@@ -179,11 +251,6 @@ describe("Runtime VectorNetwork adapter", () => {
       vertices: [{ x: 0, y: 0, strokeCap: "ROUND" }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
     }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("NONE endpoint caps") });
-    expect(canonicalVectorPathFromRuntimeNetwork({
-      vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }],
-      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 }],
-      regions: [{ windingRule: "NONZERO", loops: [[0, 1, 2]], fills: [] }],
-    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("region-local") });
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }],
       segments: [

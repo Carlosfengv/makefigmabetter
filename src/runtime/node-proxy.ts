@@ -80,6 +80,7 @@ import {
   runtimeVectorNetworkFromExtension,
   type RuntimeHandleMirroring,
   type RuntimeVectorNetwork,
+  type VectorNetworkRegionPaintRecord,
 } from "./runtime-vector-network";
 import {
   runtimeStyledTextSegments,
@@ -2339,13 +2340,40 @@ export class RuntimeNodeProxy {
       strokeJoin: canonicalStrokeJoinValue(node.strokeJoin),
     });
     if ("reason" in converted) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+    const regions = value.regions ?? [];
+    const hasRegionPaints = regions.some((region) => region.fills !== undefined || Boolean(region.fillStyleId));
+    let regionPaints: readonly VectorNetworkRegionPaintRecord[] | undefined;
+    if (hasRegionPaints) {
+      if (!converted.regionPaths || converted.regionPaths.length !== regions.length) {
+        throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
+      }
+      regionPaints = regions.map((region) => {
+        const hasExplicitFills = region.fills !== undefined;
+        const style = region.fillStyleId ? this.host.paintStyleResource(region.fillStyleId) : undefined;
+        if (region.fillStyleId && (!style || style.id !== region.fillStyleId)) {
+          throw runtimeError("RESOURCE_UNAVAILABLE", { nodeId: this.handle.nodeId });
+        }
+        const fillStack = hasExplicitFills
+          ? documentPaintStackFromRuntime(region.fills!, (hash) => this.host.hasImageHash(hash))
+          : style ? structuredClone(style.paints) : undefined;
+        return {
+          hasExplicitFills,
+          ...(fillStack ? { fillStack } : {}),
+        };
+      });
+    }
     this.write({
       ...extraPatch,
       vectorPath: converted.path,
       strokeCapStart: converted.strokeCapStart,
       strokeCapEnd: converted.strokeCapEnd,
       ...(converted.strokeJoin ? { strokeJoin: converted.strokeJoin } : {}),
-      extensions: extensionsWithRuntimeVectorNetwork(node.extensions, converted.network, converted.path),
+      extensions: extensionsWithRuntimeVectorNetwork(
+        node.extensions,
+        converted.network ?? (hasRegionPaints ? value : undefined),
+        converted.path,
+        regionPaints,
+      ),
     });
   }
 

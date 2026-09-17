@@ -136,6 +136,7 @@ import { joinCrossVectorEndpoints } from "@/lib/vector-cross-connect";
 import { compileScene, findTopmostSceneHit, sceneNodesInPaintOrder } from "@/runtime/scene-compiler";
 import { planDirtyRegionReplay, type DirtyRegionReplayPlan } from "@/runtime/dirty-region-replay";
 import { sceneClipGeometryByNodeId, sceneMaskSourceByNodeId, type ClipGeometryRef, type OrderedRenderScene } from "@/runtime/ordered-render-ir";
+import { vectorNetworkRegionPaintPlansFromExtension } from "@/runtime/runtime-vector-network";
 import { specialNodeFallback } from "@/lib/special-node-fallback";
 import { clipsChildren } from "@/lib/node-capabilities";
 import { connectorPathForNode, traceConnectorPath } from "@/lib/connector-path";
@@ -2246,13 +2247,31 @@ function rustTextLayoutFor(node: CanvasNode): RustTextLayout | undefined {
 }
 
 function nodeImagePaintAssetIds(node: CanvasNode): string[] {
+  const regionImageAssetIds = vectorRegionPaintPlans(node)?.flatMap((region) =>
+    region.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []) ?? [];
   return [
     ...(node.assetId ? [node.assetId] : []),
     ...(node.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.strokeStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.runs.flatMap((run) => run.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []) ?? []),
     ...(node.textProperties?.baseStyle?.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
+    ...regionImageAssetIds,
   ];
+}
+
+const vectorRegionPaintPlanCache = new Map<string, { revision: number; plans: ReturnType<typeof vectorNetworkRegionPaintPlansFromExtension> }>();
+let vectorRegionPaintPlanCacheRevision = -1;
+function vectorRegionPaintPlans(node: CanvasNode) {
+  if (node.kind !== "vector" || !node.vectorPath) return undefined;
+  if (vectorRegionPaintPlanCacheRevision !== revision) {
+    vectorRegionPaintPlanCache.clear();
+    vectorRegionPaintPlanCacheRevision = revision;
+  }
+  const cached = vectorRegionPaintPlanCache.get(node.id);
+  if (cached?.revision === revision) return cached.plans;
+  const plans = vectorNetworkRegionPaintPlansFromExtension(node.extensions, node.vectorPath);
+  vectorRegionPaintPlanCache.set(node.id, { revision, plans });
+  return plans;
 }
 
 function imageDecodeBudget(assetId: string) {
@@ -3503,7 +3522,10 @@ function paintBasicTextDecorationSegment(
 }
 
 function fillPaintStack(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, width: number, height: number, fillRule: CanvasFillRule = "nonzero") {
-  activeFillLayers(node).forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
+  fillPaintLayers(ctx, node, activeFillLayers(node), width, height, fillRule);
+}
+function fillPaintLayers(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNode, layers: readonly DocumentPaintLayer[], width: number, height: number, fillRule: CanvasFillRule = "nonzero") {
+  layers.forEach((layer) => withNormalizedPaintLayer(ctx, node, layer, () => {
     if (layer.paint) {
       ctx.fillStyle = paintStackStyle(ctx, layer.paint, width, height);
       ctx.fill(fillRule);
@@ -5713,15 +5735,32 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       }
     }
   } else if (node.kind === "vector" && node.vectorPath) {
-    ctx.beginPath();
     // Canvas and SVG both understand cubic Beziers natively. Rendering the
     // Canonical handles directly avoids magnifying a document-space flattening
     // tolerance into visible facets at high zoom. Rust flattening remains the
     // bounded source for bounds, hit testing, Boolean and outline operations.
-    traceVectorPath(ctx, node.vectorPath, viewport.zoom);
-    const fillRule = node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero";
-    fillPaintStack(ctx, node, w, h, fillRule);
+    const regionPaints = vectorRegionPaintPlans(node);
+    if (regionPaints?.length) {
+      regionPaints.forEach((region) => {
+        ctx.beginPath();
+        traceVectorPath(ctx, region.path, viewport.zoom);
+        fillPaintLayers(
+          ctx,
+          node,
+          region.fillStack?.layers ?? activeFillLayers(node),
+          w,
+          h,
+          region.path.fillRule === "evenOdd" ? "evenodd" : "nonzero",
+        );
+      });
+    } else {
+      ctx.beginPath();
+      traceVectorPath(ctx, node.vectorPath, viewport.zoom);
+      fillPaintStack(ctx, node, w, h, node.vectorPath.fillRule === "evenOdd" ? "evenodd" : "nonzero");
+    }
     if (hasVisibleStroke(node)) {
+      ctx.beginPath();
+      traceVectorPath(ctx, node.vectorPath, viewport.zoom);
       const mesh = canonicalVectorStrokeMesh(node);
       if (mesh) fillScaledCanonicalStrokeMesh(ctx, node, mesh, w, h, viewport.zoom);
       else {

@@ -2821,6 +2821,26 @@ describe("M1 RuntimeSession", () => {
         extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
       }),
     });
+
+    const regionPaintNetwork = {
+      ...multiRegionBranch,
+      regions: [
+        { ...multiRegionBranch.regions[0], fills: [{ type: "SOLID" as const, color: { r: 1, g: 0, b: 0 }, opacity: .5 }] },
+        { ...multiRegionBranch.regions[1], fills: [] },
+      ],
+    };
+    await vector.setVectorNetworkAsync(regionPaintNetwork);
+    expect(vector.vectorNetwork.regions).toEqual([
+      expect.objectContaining({ fills: [expect.objectContaining({ type: "SOLID", opacity: .5 })] }),
+      expect.objectContaining({ fills: [] }),
+    ]);
+    expect(transport.submitted[4]?.operations).toContainEqual({
+      type: "update",
+      nodeId: vector.id,
+      patch: expect.objectContaining({
+        extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
+      }),
+    });
   });
 
   it("exposes Highlight through the complete VectorLike Runtime surface", async () => {

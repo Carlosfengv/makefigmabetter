@@ -1,4 +1,9 @@
-import type { DocumentVectorPath, StrokeCap, StrokeJoin } from "../lib/editor-protocol";
+import type { DocumentPaintStack, DocumentVectorPath, StrokeCap, StrokeJoin } from "../lib/editor-protocol";
+import {
+  documentPaintStackFromRuntime,
+  runtimePaintsFromDocumentStack,
+  type RuntimePaint,
+} from "./runtime-paint";
 
 export type RuntimeHandleMirroring = "NONE" | "ANGLE" | "ANGLE_AND_LENGTH";
 export type RuntimeNetworkStrokeCap = "NONE" | "ROUND" | "SQUARE" | "ARROW_LINES" | "ARROW_EQUILATERAL" | "DIAMOND_FILLED" | "TRIANGLE_FILLED" | "CIRCLE_FILLED";
@@ -21,7 +26,7 @@ export type RuntimeVectorSegment = Readonly<{
 export type RuntimeVectorRegion = Readonly<{
   windingRule: "NONZERO" | "EVENODD";
   loops: readonly (readonly number[])[];
-  fills?: readonly unknown[];
+  fills?: readonly RuntimePaint[];
   fillStyleId?: string;
 }>;
 export type RuntimeVectorNetwork = Readonly<{
@@ -32,10 +37,21 @@ export type RuntimeVectorNetwork = Readonly<{
 
 type NetworkConversion = Readonly<{
   path: DocumentVectorPath;
+  regionPaths?: readonly DocumentVectorPath[];
   strokeCapStart: StrokeCap;
   strokeCapEnd: StrokeCap;
   strokeJoin?: StrokeJoin;
   network?: RuntimeVectorNetwork;
+}>;
+
+export type VectorNetworkRegionPaintRecord = Readonly<{
+  fillStack?: DocumentPaintStack;
+  hasExplicitFills: boolean;
+}>;
+
+export type VectorNetworkRegionPaintPlan = Readonly<{
+  path: DocumentVectorPath;
+  fillStack?: DocumentPaintStack;
 }>;
 
 const MAX_VECTOR_SUBPATHS = 64;
@@ -45,8 +61,8 @@ export const VECTOR_NETWORK_EXTENSION = "figma.runtime.vector-network.v1";
 
 /**
  * Canonical VectorPath is a collection of independent cubic chains. This
- * adapter exposes that exact topology as a Figma-shaped VectorNetwork without
- * inventing shared vertices or region-local paints that Core cannot persist.
+ * adapter exposes that exact topology as a Figma-shaped VectorNetwork. Shared
+ * vertices and region-local paints use the path-bound extension below.
  */
 export function runtimeVectorNetworkFromCanonical(
   path: DocumentVectorPath,
@@ -103,8 +119,9 @@ export function runtimeVectorNetworkFromCanonical(
 /**
  * Converts the lossless VectorNetwork subset back to Canonical. Supported
  * networks are independent directed chains/cycles or bounded shared-vertex
- * branches with one global fill rule. Per-region paints, per-vertex corners
- * and mixed joins are rejected before an optimistic Runtime write is staged.
+ * branches with one global fill rule. Region paints are persisted separately
+ * from the derived fallback path; per-vertex corners and mixed joins are
+ * rejected before an optimistic Runtime write is staged.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -176,9 +193,7 @@ export function canonicalVectorPathFromRuntimeNetwork(
   if (closedComponents.length) {
     if (regions.length !== 1) return { reason: "Closed VectorNetwork cycles require exactly one globally representable region." };
     const region = regions[0]!;
-    if (!validRegion(region) || region.fills !== undefined || region.fillStyleId !== undefined) {
-      return { reason: "Canonical VectorPath cannot represent region-local fills or fill styles." };
-    }
+    if (!validRegion(region)) return { reason: "VectorNetwork contains an invalid fill region." };
     if (region.loops.length !== closedComponents.length || !loopsMatchComponents(region.loops, closedComponents)) {
       return { reason: "VectorNetwork regions must cover every closed cycle exactly once." };
     }
@@ -246,6 +261,9 @@ export function canonicalVectorPathFromRuntimeNetwork(
 
   return {
     path: { fillRule, subpaths },
+    ...(closedComponents.length ? {
+      regionPaths: [{ fillRule, subpaths: subpaths.filter((subpath) => subpath.closed) }],
+    } : {}),
     strokeCapStart: startCaps[0] ?? defaults.strokeCapStart,
     strokeCapEnd: endCaps[0] ?? defaults.strokeCapEnd,
     ...(hasExplicitJoin && resolvedJoins[0] ? { strokeJoin: resolvedJoins[0] } : {}),
@@ -256,34 +274,69 @@ export function canonicalVectorPathFromRuntimeNetwork(
  * still current. Generic path edits therefore invalidate the extension
  * without requiring every mutation surface to know about VectorNetwork. */
 export function runtimeVectorNetworkFromExtension(extensions: unknown, path: DocumentVectorPath): RuntimeVectorNetwork | undefined {
-  if (!extensions || typeof extensions !== "object") return undefined;
-  const bytes = (extensions as Record<string, unknown>)[VECTOR_NETWORK_EXTENSION];
-  if (!Array.isArray(bytes) || bytes.length > MAX_VECTOR_NETWORK_EXTENSION_BYTES || bytes.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) return undefined;
-  try {
-    const decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes))) as unknown;
-    if (!decoded || typeof decoded !== "object") return undefined;
-    const record = decoded as { version?: unknown; network?: unknown; path?: unknown };
-    if (record.version !== 1 || stableJson(record.path) !== stableJson(path) || !validNetworkShape(record.network)) return undefined;
-    return structuredClone(record.network);
-  } catch {
-    return undefined;
+  const record = vectorNetworkExtensionRecord(extensions, path);
+  if (!record) return undefined;
+  const network = structuredClone(record.network);
+  if (record.regionPaints && network.regions) {
+    return {
+      ...network,
+      regions: network.regions.map((region, index) => {
+        const paint = record.regionPaints?.[index];
+        return paint?.hasExplicitFills && paint.fillStack
+          ? { ...region, fills: runtimePaintsFromDocumentStack(paint.fillStack) }
+          : region;
+      }),
+    };
   }
+  return network;
 }
 
 export function extensionsWithRuntimeVectorNetwork(
   extensions: unknown,
   network: RuntimeVectorNetwork | undefined,
   path?: DocumentVectorPath,
+  regionPaints?: readonly VectorNetworkRegionPaintRecord[],
 ): Record<string, number[]> {
   const next = extensions && typeof extensions === "object"
     ? structuredClone(extensions as Record<string, number[]>)
     : {};
   delete next[VECTOR_NETWORK_EXTENSION];
   if (!network || !path) return next;
-  const encoded = [...new TextEncoder().encode(JSON.stringify({ version: 1, network, path }))];
+  const storedNetwork = network.regions ? {
+    ...network,
+    regions: network.regions.map((region) => ({
+      windingRule: region.windingRule,
+      loops: region.loops,
+      ...(region.fillStyleId ? { fillStyleId: region.fillStyleId } : {}),
+    })),
+  } : network;
+  const encoded = [...new TextEncoder().encode(JSON.stringify(regionPaints
+    ? { version: 2, network: storedNetwork, path, regionPaints }
+    : { version: 1, network: storedNetwork, path }))];
   if (encoded.length > MAX_VECTOR_NETWORK_EXTENSION_BYTES) throw new Error("VectorNetwork extension exceeds its byte budget.");
   next[VECTOR_NETWORK_EXTENSION] = encoded;
   return next;
+}
+
+/** Returns the exact region geometry plus its optional local PaintStack. A
+ * missing stack means that region inherits the node-level fills; an explicit
+ * empty stack paints no fill. Invalid or stale extension bytes fail closed. */
+export function vectorNetworkRegionPaintPlansFromExtension(
+  extensions: unknown,
+  path: DocumentVectorPath,
+): readonly VectorNetworkRegionPaintPlan[] | undefined {
+  const record = vectorNetworkExtensionRecord(extensions, path);
+  if (!record?.regionPaints?.length) return undefined;
+  const converted = canonicalVectorPathFromRuntimeNetwork(
+    record.network,
+    (() => { let index = 0; return () => `region-${index++}`; })(),
+    { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" },
+  );
+  if ("reason" in converted || !converted.regionPaths || converted.regionPaths.length !== record.regionPaints.length) return undefined;
+  return converted.regionPaths.map((regionPath, index) => ({
+    path: regionPath,
+    ...(record.regionPaints![index]!.fillStack ? { fillStack: structuredClone(record.regionPaints![index]!.fillStack) } : {}),
+  }));
 }
 
 function canonicalBranchedNetwork(
@@ -294,9 +347,6 @@ function canonicalBranchedNetwork(
   const regions = input.regions ?? [];
   if (regions.length > MAX_VECTOR_SUBPATHS || regions.some((region) => !validRegion(region))) {
     return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-region limit or contains an invalid region.` };
-  }
-  if (regions.some((region) => region.fills !== undefined || region.fillStyleId !== undefined)) {
-    return { reason: "Canonical VectorPath cannot represent region-local fills or fill styles." };
   }
   const windingRules = new Set(regions.map((region) => region.windingRule));
   if (windingRules.size > 1) {
@@ -328,22 +378,32 @@ function canonicalBranchedNetwork(
   };
   const loopSegmentIndexes = new Set<number>();
   const subpaths: DocumentVectorPath["subpaths"] = [];
-  for (const loop of regions.flatMap((region) => region.loops)) {
-    if (loop.length < 3 || loop.some((segmentIndex) => segmentIndex >= input.segments.length || loopSegmentIndexes.has(segmentIndex))) {
-      return { reason: "Branched VectorNetwork region loops must contain at least three unique in-range segments." };
+  const regionPaths: DocumentVectorPath[] = [];
+  for (const region of regions) {
+    const regionSubpaths: DocumentVectorPath["subpaths"] = [];
+    for (const loop of region.loops) {
+      if (loop.length < 3 || loop.some((segmentIndex) => segmentIndex >= input.segments.length || loopSegmentIndexes.has(segmentIndex))) {
+        return { reason: "Branched VectorNetwork region loops must contain at least three unique in-range segments." };
+      }
+      const segments = loop.map((segmentIndex) => input.segments[segmentIndex]!);
+      if (segments.some((segment, index) => segment.end !== segments[(index + 1) % segments.length]!.start)) {
+        return { reason: "Branched VectorNetwork region loops must form directed closed chains." };
+      }
+      loop.forEach((segmentIndex) => loopSegmentIndexes.add(segmentIndex));
+      const subpath = {
+        closed: true,
+        points: segments.map((segment, index) => point(
+          segment.start,
+          segments[(index + segments.length - 1) % segments.length]!.tangentEnd,
+          segment.tangentStart,
+        )),
+      };
+      subpaths.push(subpath);
+      regionSubpaths.push(subpath);
     }
-    const segments = loop.map((segmentIndex) => input.segments[segmentIndex]!);
-    if (segments.some((segment, index) => segment.end !== segments[(index + 1) % segments.length]!.start)) {
-      return { reason: "Branched VectorNetwork region loops must form directed closed chains." };
-    }
-    loop.forEach((segmentIndex) => loopSegmentIndexes.add(segmentIndex));
-    subpaths.push({
-      closed: true,
-      points: segments.map((segment, index) => point(
-        segment.start,
-        segments[(index + segments.length - 1) % segments.length]!.tangentEnd,
-        segment.tangentStart,
-      )),
+    regionPaths.push({
+      fillRule: region.windingRule === "EVENODD" ? "evenOdd" : "nonZero",
+      subpaths: regionSubpaths,
     });
   }
   input.segments.forEach((segment, segmentIndex) => {
@@ -360,6 +420,7 @@ function canonicalBranchedNetwork(
   if (subpaths.length > MAX_VECTOR_SUBPATHS) return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-subpath limit.` };
   return {
     path: { fillRule: regions[0]?.windingRule === "EVENODD" ? "evenOdd" : "nonZero", subpaths },
+    ...(regionPaths.length ? { regionPaths } : {}),
     strokeCapStart: "none",
     strokeCapEnd: "none",
     strokeJoin: defaults.strokeJoin,
@@ -377,6 +438,52 @@ function validNetworkShape(value: unknown): value is RuntimeVectorNetwork {
     && network.vertices.every(validVertex)
     && network.segments.every((segment) => validSegment(segment, network.vertices.length))
     && (network.regions === undefined || Array.isArray(network.regions) && network.regions.every(validRegion));
+}
+
+type VectorNetworkExtensionRecord = Readonly<{
+  network: RuntimeVectorNetwork;
+  regionPaints?: readonly VectorNetworkRegionPaintRecord[];
+}>;
+
+function vectorNetworkExtensionRecord(extensions: unknown, path: DocumentVectorPath): VectorNetworkExtensionRecord | undefined {
+  if (!extensions || typeof extensions !== "object") return undefined;
+  const bytes = (extensions as Record<string, unknown>)[VECTOR_NETWORK_EXTENSION];
+  if (!Array.isArray(bytes) || bytes.length > MAX_VECTOR_NETWORK_EXTENSION_BYTES || bytes.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) return undefined;
+  try {
+    const decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes))) as unknown;
+    if (!decoded || typeof decoded !== "object") return undefined;
+    const record = decoded as { version?: unknown; network?: unknown; path?: unknown; regionPaints?: unknown };
+    const network = record.network;
+    if ((record.version !== 1 && record.version !== 2)
+      || stableJson(record.path) !== stableJson(path)
+      || !validNetworkShape(network)
+      || network.regions?.some((region) => region.fills !== undefined)) return undefined;
+    if (record.version === 1) return { network: structuredClone(network) };
+    if (!Array.isArray(record.regionPaints)
+      || record.regionPaints.length !== (network.regions?.length ?? 0)) return undefined;
+    const regionPaints = record.regionPaints.map(normalizeRegionPaintRecord);
+    if (regionPaints.some((entry) => !entry)) return undefined;
+    return {
+      network: structuredClone(network),
+      regionPaints: regionPaints as VectorNetworkRegionPaintRecord[],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeRegionPaintRecord(value: unknown): VectorNetworkRegionPaintRecord | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as { fillStack?: unknown; hasExplicitFills?: unknown };
+  if (typeof record.hasExplicitFills !== "boolean") return undefined;
+  if (record.fillStack === undefined) return record.hasExplicitFills ? undefined : { hasExplicitFills: false };
+  try {
+    const runtimePaints = runtimePaintsFromDocumentStack(record.fillStack as DocumentPaintStack);
+    const fillStack = documentPaintStackFromRuntime(runtimePaints, () => true);
+    return { fillStack, hasExplicitFills: record.hasExplicitFills };
+  } catch {
+    return undefined;
+  }
 }
 
 function stableJson(value: unknown): string {
@@ -419,7 +526,11 @@ function validRegion(region: RuntimeVectorRegion): boolean {
     && (region.windingRule === "NONZERO" || region.windingRule === "EVENODD")
     && Array.isArray(region.loops)
     && region.loops.length > 0
-    && region.loops.every((loop) => Array.isArray(loop) && loop.every((segmentIndex) => Number.isSafeInteger(segmentIndex) && segmentIndex >= 0));
+    && region.loops.every((loop) => Array.isArray(loop) && loop.every((segmentIndex) => Number.isSafeInteger(segmentIndex) && segmentIndex >= 0))
+    && (region.fills === undefined || Array.isArray(region.fills))
+    && (region.fillStyleId === undefined || typeof region.fillStyleId === "string"
+      && !region.fillStyleId.includes("\0")
+      && new TextEncoder().encode(region.fillStyleId).byteLength <= 2_048);
 }
 
 function loopsMatchComponents(

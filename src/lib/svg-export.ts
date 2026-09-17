@@ -20,6 +20,7 @@ import { fontVariationCss } from "./font-variation-axes";
 import { layoutTextRanges, textAlignedLineLeft, textHangingPunctuationOffsets, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "./text-layout";
 import { sceneNodesInPaintOrder } from "../runtime/scene-compiler";
 import type { OrderedRenderScene } from "../runtime/ordered-render-ir";
+import { vectorNetworkRegionPaintPlansFromExtension } from "../runtime/runtime-vector-network";
 import { specialNodeFallback } from "./special-node-fallback";
 import { connectorPathForNode, connectorPathSvgD } from "./connector-path";
 import { connectorDecorationTriangles, connectorEndpointDecorations, connectorLabelLayout } from "./connector-presentation";
@@ -893,6 +894,24 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
       if (image) return `<g transform="${matrix}"${presentation}>${image}</g>`;
     }
     if (node.assetId && !assetUri) reportFallback("image-asset", "Image asset bytes were unavailable or cannot be embedded for this SVG export.", node.id);
+    const vectorRegionPaints = node.kind === "vector" && node.vectorPath
+      ? vectorNetworkRegionPaintPlansFromExtension(node.extensions, node.vectorPath)
+      : undefined;
+    if (vectorRegionPaints?.length) {
+      const regionFills = vectorRegionPaints.map((region) => {
+        const regionNode: CanvasNode = {
+          ...node,
+          vectorPath: region.path,
+          ...(region.fillStack ? { fillStack: region.fillStack } : {}),
+        };
+        if (region.fillStack || node.fillStack) return versionedFillMarkup(regionNode);
+        return fills.map(paintValue).map((paint) => shape(regionNode, paint, { value: "none" })).join("");
+      }).join("");
+      const regionStrokes = node.strokeStack
+        ? versionedStrokeMarkup(node)
+        : strokes.map(paintValue).filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)).join("");
+      return `<g transform="${matrix}"${presentation}>${regionFills}${regionStrokes}</g>`;
+    }
     const layers = node.fillStack || node.strokeStack
       ? `${node.fillStack ? versionedFillMarkup(node) : fillPaints.map((paint) => shape(node, paint, { value: "none" })).join("")}${node.strokeStack ? versionedStrokeMarkup(node) : strokePaints.filter(() => node.strokeWidth > 0).map((paint) => shape(node, { value: "none" }, paint)).join("")}`
       : perSideStrokeLayers(node, fillPaints, strokePaints)

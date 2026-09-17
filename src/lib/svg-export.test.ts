@@ -5,6 +5,7 @@ import { extensionsForNodeBlendMode } from "./node-blend-semantics";
 import { replaceRuntimeTextRangeWithStyles } from "../runtime/runtime-text";
 import { exportPageToSvg } from "./svg-export";
 import { compileScene } from "../runtime/scene-compiler";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork } from "../runtime/runtime-vector-network";
 
 const pageId = "00000000-0000-0000-0000-000000000001";
 
@@ -485,6 +486,48 @@ describe("SVG export", () => {
 
     expect(result.svg).toContain('d="M 0 0 L 50 0 L 100 0 L 50 80 L 0 0 Z"');
     expect(result.svg).not.toContain(' C ');
+  });
+
+  it("renders versioned VectorNetwork region PaintStacks on their own closed paths", () => {
+    let sequence = 0;
+    const network = {
+      vertices: [
+        { x: 20, y: 20 }, { x: 0, y: 0 }, { x: 40, y: 0 },
+        { x: 0, y: 40 }, { x: 40, y: 40 },
+      ],
+      segments: [
+        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
+        { start: 0, end: 3 }, { start: 3, end: 4 }, { start: 4, end: 0 },
+      ],
+      regions: [
+        { windingRule: "NONZERO" as const, loops: [[0, 1, 2]], fills: [{ type: "SOLID" as const, color: { r: 1, g: 0, b: 0 } }] },
+        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]], fills: [{ type: "SOLID" as const, color: { r: 0, g: 0, b: 1 } }] },
+      ],
+    };
+    const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `svg-region-${sequence++}`, {
+      strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
+    });
+    if ("reason" in converted) throw new Error(converted.reason);
+    const red = { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } } }] };
+    const blue = { layers: [{ visible: true, opacity: 1, blendMode: "normal" as const, paint: { css: "#0000ff", color: { space: "srgb" as const, components: [0, 0, 1] as [number, number, number], alpha: 1 } } }] };
+    const vector = {
+      ...createNode("vector", 0, 0),
+      id: "00000000-0000-4000-8000-000000000079",
+      pageId,
+      width: 40,
+      height: 40,
+      strokeWidth: 0,
+      vectorPath: converted.path,
+      extensions: extensionsWithRuntimeVectorNetwork({}, network, converted.path, [
+        { hasExplicitFills: true, fillStack: red },
+        { hasExplicitFills: true, fillStack: blue },
+      ]),
+    };
+
+    const result = exportPageToSvg([vector], { pageId, defaultPageId: pageId, padding: 0 });
+
+    expect(result.svg).toContain('d="M 20 20 L 0 0 L 40 0 L 20 20 Z" fill="#ff0000"');
+    expect(result.svg).toContain('d="M 20 20 L 0 40 L 40 40 L 20 20 Z" fill="#0000ff"');
   });
 
   it("preserves a Rust-derived Boolean through an alpha-mask Slice source and records the PDF fallback", () => {
