@@ -126,6 +126,7 @@ export function assertFigmaPluginTypingsContract(
   if (false) void rectangle.setStrokeStyleIdAsync("S:brand-stroke");
   component.backgroundStyleId = "S:brand-fill";
   text.textAutoResize = "HEIGHT";
+  text.textAutoResize = "TRUNCATE";
   text.textTruncation = "ENDING";
   text.maxLines = 2;
   text.insertCharacters(0, "A", "AFTER");

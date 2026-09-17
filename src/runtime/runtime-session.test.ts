@@ -5117,7 +5117,7 @@ describe("M1 RuntimeSession", () => {
     ]);
   });
 
-  it("maps the supported Figma textAutoResize values to Canonical text properties", async () => {
+  it("maps every Figma textAutoResize value to Canonical text properties", async () => {
     const projection: RuntimeProjection = {
       revision: 0,
       nodes: [
@@ -5165,7 +5165,23 @@ describe("M1 RuntimeSession", () => {
     expect(isRuntimeError(captureError(() => { text.maxLines = 0; }), "INVALID_ARGUMENT")).toBe(true);
     text.textTruncation = "DISABLED";
     expect(text.maxLines).toBeNull();
-    expect(isRuntimeError(captureError(() => { (text as unknown as { textAutoResize: string }).textAutoResize = "TRUNCATE"; }), "INVALID_ARGUMENT")).toBe(true);
+    text.textAutoResize = "TRUNCATE";
+    expect(text.textAutoResize).toBe("TRUNCATE");
+    expect(text.textTruncation).toBe("ENDING");
+    expect(text.maxLines).toBeNull();
+    expect(session.projectionStore.transaction(transactionId)?.operations.at(-1)).toMatchObject({
+      type: "update",
+      nodeId: "text",
+      patch: { textProperties: { autoSize: "fixed", textTruncation: "ending" } },
+    });
+    text.textAutoResize = "HEIGHT";
+    expect(text.textAutoResize).toBe("HEIGHT");
+    expect(text.textTruncation).toBe("ENDING");
+    text.textAutoResize = "NONE";
+    expect(text.textAutoResize).toBe("TRUNCATE");
+    text.textTruncation = "DISABLED";
+    expect(text.textAutoResize).toBe("NONE");
+    expect(isRuntimeError(captureError(() => { (text as unknown as { textAutoResize: string }).textAutoResize = "WRAP"; }), "INVALID_ARGUMENT")).toBe(true);
     expect(isRuntimeError(captureError(() => rectangle.textAutoResize), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => rectangle.textTruncation), "UNSUPPORTED_PROPERTY")).toBe(true);
   });

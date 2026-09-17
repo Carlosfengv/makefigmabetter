@@ -136,7 +136,7 @@ export type RuntimePrimaryAxisAlignment = "MIN" | "CENTER" | "MAX" | "SPACE_BETW
 export type RuntimeCounterAxisAlignment = "MIN" | "CENTER" | "MAX" | "BASELINE";
 export type RuntimeCounterAxisAlignContent = "AUTO" | "SPACE_BETWEEN";
 export type RuntimeLayoutAlign = "MIN" | "CENTER" | "MAX" | "STRETCH" | "INHERIT";
-export type RuntimeTextAutoResize = "NONE" | "HEIGHT" | "WIDTH_AND_HEIGHT";
+export type RuntimeTextAutoResize = "NONE" | "HEIGHT" | "WIDTH_AND_HEIGHT" | "TRUNCATE";
 export type RuntimeTextTruncation = "DISABLED" | "ENDING";
 export type RuntimeConstraintType = "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE";
 export type RuntimeConstraints = Readonly<{ horizontal: RuntimeConstraintType; vertical: RuntimeConstraintType }>;
@@ -2890,12 +2890,15 @@ export class RuntimeNodeProxy {
 
   get textAutoResize(): RuntimeTextAutoResize {
     this.assertText();
-    const value = (this.read().textProperties as DocumentTextProperties | undefined)?.autoSize ?? "fixed";
-    return value === "height" ? "HEIGHT" : value === "widthAndHeight" ? "WIDTH_AND_HEIGHT" : "NONE";
+    const properties = this.read().textProperties as DocumentTextProperties | undefined;
+    const value = properties?.autoSize ?? "fixed";
+    if (value === "height") return "HEIGHT";
+    if (value === "widthAndHeight") return "WIDTH_AND_HEIGHT";
+    return properties?.textTruncation === "ending" ? "TRUNCATE" : "NONE";
   }
   set textAutoResize(value: RuntimeTextAutoResize) {
     this.assertText();
-    if (!["NONE", "HEIGHT", "WIDTH_AND_HEIGHT"].includes(value)) {
+    if (!["NONE", "HEIGHT", "WIDTH_AND_HEIGHT", "TRUNCATE"].includes(value)) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     }
     const node = this.read();
@@ -2903,7 +2906,11 @@ export class RuntimeNodeProxy {
     const current = node.textProperties as DocumentTextProperties | undefined;
     this.host.assertFontsLoaded(fontsForRuntimeTextRange(text, current));
     const properties = updateRuntimeText(text, text, current).textProperties;
-    this.write({ textProperties: { ...properties, autoSize: value === "HEIGHT" ? "height" : value === "WIDTH_AND_HEIGHT" ? "widthAndHeight" : "fixed" } });
+    this.write({ textProperties: {
+      ...properties,
+      autoSize: value === "HEIGHT" ? "height" : value === "WIDTH_AND_HEIGHT" ? "widthAndHeight" : "fixed",
+      ...(value === "TRUNCATE" ? { textTruncation: "ending" as const } : {}),
+    } });
   }
 
   get textTruncation(): RuntimeTextTruncation {
