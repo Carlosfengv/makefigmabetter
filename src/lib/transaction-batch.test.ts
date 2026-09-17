@@ -612,7 +612,7 @@ describe("Core transaction batch resolution", () => {
     }])).toBeUndefined();
   });
 
-  it("wraps only absolute siblings inside an active Auto Layout parent", () => {
+  it("wraps absolute siblings and the complete bounded flow inside active Auto Layout", () => {
     const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
     const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
     const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000151", pageId: "page", width: 300, height: 160, autoLayout: ownerLayout };
@@ -637,6 +637,38 @@ describe("Core transaction batch resolution", () => {
     const flowSecond = { ...second, autoLayout: { ...absoluteLayout, absolute: false } };
     expect(resolveCoreBatch([frame, first, flowSecond], [{
       type: "boolean", ids: [first.id, flowSecond.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+
+    const flowLayout = { ...absoluteLayout, absolute: false };
+    const flowFirst = { ...first, x: 8, y: 8, autoLayout: flowLayout, relativeTransform: undefined };
+    const flowLast = { ...second, x: 60, y: 8, autoLayout: flowLayout, relativeTransform: undefined };
+    const flowResolved = resolveCoreBatch([frame, flowFirst, flowLast], [{
+      type: "boolean", ids: [flowFirst.id, flowLast.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }]);
+    expect(flowResolved?.nextNodes.find((node) => node.id === booleanId)).toMatchObject({
+      parentId: frame.id,
+      width: 82,
+      height: 20,
+      autoLayout: { mode: "none", absolute: false, primarySizing: "fixed", counterSizing: "fixed" },
+      relativeTransform: undefined,
+    });
+    expect(flowResolved?.batch).toContainEqual(expect.objectContaining({
+      type: "setAutoLayout",
+      id: booleanId,
+      autoLayout: expect.objectContaining({ absolute: false }),
+    }));
+    expect(resolveCoreBatch([frame, flowFirst, flowLast], [{
+      type: "boolean", ids: [flowFirst.id, flowLast.id], operation: "union", id: booleanId, parentId: frame.id, index: 1,
+    }])).toBeUndefined();
+    const retainedFlow = { ...flowLast, id: "00000000-0000-4000-8000-000000000155", x: 102, positionId: "30000000000000000000000000000000:00000000000040008000000000000155" };
+    expect(resolveCoreBatch([frame, flowFirst, flowLast, retainedFlow], [{
+      type: "boolean", ids: [flowFirst.id, flowLast.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+    expect(resolveCoreBatch([frame, { ...flowFirst, autoLayout: { ...flowLayout, primarySizing: "fill" as const } }, flowLast], [{
+      type: "boolean", ids: [flowFirst.id, flowLast.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
+    }])).toBeUndefined();
+    expect(resolveCoreBatch([{ ...frame, autoLayout: { ...ownerLayout, wrap: true } }, flowFirst, flowLast], [{
+      type: "boolean", ids: [flowFirst.id, flowLast.id], operation: "union", id: booleanId, parentId: frame.id, index: 0,
     }])).toBeUndefined();
   });
 
@@ -808,7 +840,7 @@ describe("Core transaction batch resolution", () => {
     ]);
   });
 
-  it("flattens only absolute siblings inside an active Auto Layout parent", () => {
+  it("flattens absolute siblings and the complete bounded flow inside active Auto Layout", () => {
     const ownerLayout = { mode: "vertical" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
     const absoluteLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0, absolute: true };
     const frame = { ...createNode("frame", 100, 50), id: "00000000-0000-4000-8000-000000000161", pageId: "page", width: 300, height: 160, autoLayout: ownerLayout };
@@ -848,6 +880,36 @@ describe("Core transaction batch resolution", () => {
       () => replacementId,
       replacementId,
       { parentId: frame.id, index: 0 },
+    )).toBeUndefined();
+
+    const flowLayout = { ...absoluteLayout, absolute: false };
+    const flowFirst = { ...first, x: 8, y: 8, autoLayout: flowLayout, relativeTransform: undefined };
+    const flowLast = { ...second, x: 8, y: 40, autoLayout: flowLayout, relativeTransform: undefined };
+    const flowResolved = resolveFlattenNodesBatch(
+      [frame, flowFirst, flowLast],
+      [flowFirst.id, flowLast.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: frame.id, index: 0 },
+    );
+    expect(flowResolved?.replacement).toMatchObject({
+      parentId: frame.id,
+      autoLayout: { mode: "none", absolute: false, primarySizing: "fixed", counterSizing: "fixed" },
+      relativeTransform: undefined,
+    });
+    expect(flowResolved?.batch).toContainEqual(expect.objectContaining({
+      type: "setAutoLayout",
+      id: replacementId,
+      autoLayout: expect.objectContaining({ absolute: false }),
+    }));
+    expect(resolveFlattenNodesBatch(
+      [frame, flowFirst, flowLast],
+      [flowFirst.id, flowLast.id],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: frame.id, index: 1 },
     )).toBeUndefined();
     expect(resolveFlattenNodesBatch(
       [frame, first, second],

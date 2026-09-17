@@ -4,6 +4,7 @@ import { DEFAULT_PAGE_ID } from "./document-bootstrap";
 import { createNode, type CanvasNode, type DocumentVectorPath } from "./editor-protocol";
 import { resolveCoreBatch, resolveFlattenNodesBatch } from "./transaction-batch";
 import { canvasNodeFromWasmProjection } from "./wasm-projection-node";
+import { worldTransformForNode } from "./scene-transform";
 
 type WasmRuntime = typeof import("../wasm/generated/editor_wasm");
 
@@ -61,6 +62,15 @@ function autoLayoutNodes(): CanvasNode[] {
   const frame = { ...createNode("frame", 100, 50), id: outerId, pageId: DEFAULT_PAGE_ID, width: 300, height: 160, autoLayout: ownerLayout, positionId: "10000000000000000000000000000000:00000000000040008000000000000701" };
   const first = { ...createNode("vector", 20, 30), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 40, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 }, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
   const second = { ...createNode("vector", 90, 50), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 30, height: 20, autoLayout: absoluteLayout, relativeTransform: { a: 1, b: 0, c: 0, d: 1, e: 90, f: 50 }, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
+  return [frame, first, second];
+}
+
+function flowLayoutNodes(): CanvasNode[] {
+  const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+  const flowLayout = { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0 };
+  const frame = { ...createNode("frame", 100, 50), id: outerId, pageId: DEFAULT_PAGE_ID, width: 300, height: 160, autoLayout: ownerLayout, positionId: "10000000000000000000000000000000:00000000000040008000000000000701" };
+  const first = { ...createNode("vector", 0, 0), id: firstId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 40, height: 20, autoLayout: flowLayout, positionId: "10000000000000000000000000000000:00000000000040008000000000000703" };
+  const second = { ...createNode("vector", 0, 0), id: secondId, pageId: DEFAULT_PAGE_ID, parentId: frame.id, width: 30, height: 20, autoLayout: flowLayout, positionId: "20000000000000000000000000000000:00000000000040008000000000000704" };
   return [frame, first, second];
 }
 
@@ -233,5 +243,64 @@ describe("nested neutral Group Core dissolution", () => {
     });
     expect(flattenSeed.engine.undo()).toBe(3n);
     expect(flattenSeed.projection().find((node) => node.id === outerId)).toMatchObject({ isMask: true, opacity: .55 });
+  });
+
+  it("commits full fixed flow aggregation without moving its geometry", async () => {
+    const booleanId = "00000000-0000-4000-8000-000000000771";
+    const booleanSeed = await seededEngineWith(flowLayoutNodes(), "00000000-0000-4000-8000-000000000770");
+    const beforeBoolean = [firstId, secondId].map((id) => worldTransformForNode(booleanSeed.projection(), id)!);
+    const boolean = resolveCoreBatch(booleanSeed.projection(), [{
+      type: "boolean",
+      ids: [firstId, secondId],
+      operation: "union",
+      id: booleanId,
+      parentId: outerId,
+      index: 0,
+    }])!;
+    expect(booleanSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000772", 1n, JSON.stringify(boolean.batch))).toBe(2n);
+    const booleanProjection = booleanSeed.projection();
+    expect(booleanProjection.find((node) => node.id === booleanId)).toMatchObject({
+      parentId: outerId,
+      width: 82,
+      height: 20,
+    });
+    expect(booleanProjection.find((node) => node.id === booleanId)?.autoLayout?.absolute ?? false).toBe(false);
+    [firstId, secondId].forEach((id, index) => expect(worldTransformForNode(booleanProjection, id)).toEqual(beforeBoolean[index]));
+    expect(booleanSeed.engine.undo()).toBe(3n);
+    expect(booleanSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
+    expect(booleanSeed.engine.redo()).toBe(4n);
+    expect(booleanSeed.projection().find((node) => node.id === booleanId)?.autoLayout?.absolute ?? false).toBe(false);
+
+    const replacementId = "00000000-0000-4000-8000-000000000773";
+    const flattenSeed = await seededEngineWith(flowLayoutNodes(), "00000000-0000-4000-8000-000000000774");
+    const beforeFlatten = worldTransformForNode(flattenSeed.projection(), firstId)!;
+    const vectorPath: DocumentVectorPath = {
+      fillRule: "nonZero",
+      subpaths: [{ closed: true, points: [
+        { id: "00000000-0000-4000-8000-000000000781", x: 0, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000782", x: 82, y: 0, pointType: "corner" },
+        { id: "00000000-0000-4000-8000-000000000783", x: 0, y: 20, pointType: "corner" },
+      ] }],
+    };
+    const flattened = resolveFlattenNodesBatch(
+      flattenSeed.projection(),
+      [firstId, secondId],
+      vectorPath,
+      () => replacementId,
+      replacementId,
+      { parentId: outerId, index: 0 },
+    )!;
+
+    expect(flattenSeed.engine.apply_transaction_json("00000000-0000-4000-8000-000000000775", 1n, JSON.stringify(flattened.batch))).toBe(2n);
+    const flattenProjection = flattenSeed.projection();
+    expect(flattenProjection.find((node) => node.id === replacementId)).toMatchObject({
+      parentId: outerId,
+      width: 82,
+      height: 20,
+    });
+    expect(flattenProjection.find((node) => node.id === replacementId)?.autoLayout?.absolute ?? false).toBe(false);
+    expect(worldTransformForNode(flattenProjection, replacementId)).toEqual(beforeFlatten);
+    expect(flattenSeed.engine.undo()).toBe(3n);
+    expect(flattenSeed.projection().filter((node) => node.parentId === outerId).map((node) => node.id)).toEqual([firstId, secondId]);
   });
 });

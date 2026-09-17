@@ -923,10 +923,18 @@ describe("protocol operation codec", () => {
     const node = { ...createNode("frame", 10, 20), id, autoLayout };
     const created = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
     const updated = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([node], [{ type: "update", id, patch: { autoLayout: { ...autoLayout, wrap: false, mode: "vertical", counterAlignment: "start" } } }])!.batch));
+    const forced = ResolvedOperationBatch.decode(encodeCoreBatchPayload([{
+      type: "setAutoLayout",
+      id,
+      autoLayout: { ...autoLayout, mode: "none", padding: [0, 0, 0, 0], itemSpacing: 0, trackSpacing: undefined, trackAlignment: undefined, wrap: false, primaryAlignment: "start", counterAlignment: "start", absolute: false, alignSelf: undefined },
+    }]));
 
     expect(created.operations[0].createNode?.node?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_HORIZONTAL, paddingTop: 4, paddingLeft: 16, itemSpacing: 10, trackSpacing: 14, wrapTrackAlignment: WrapTrackAlignment.WRAP_TRACK_ALIGNMENT_SPACE_BETWEEN, wrap: true });
     expect(created.operations[1].setAutoLayout?.autoLayout).toMatchObject({ primaryAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_SPACE_BETWEEN, counterAlignment: LayoutAlignment.LAYOUT_ALIGNMENT_BASELINE, primarySizing: LayoutSizing.LAYOUT_SIZING_FIXED, minWidth: 120, maxHeight: 320, alignSelf: LayoutAlignment.LAYOUT_ALIGNMENT_END });
     expect(updated.operations.find((operation) => operation.setAutoLayout)?.setAutoLayout?.autoLayout).toMatchObject({ mode: LayoutMode.LAYOUT_MODE_VERTICAL, wrap: false });
+    expect(forced.operations).toEqual([expect.objectContaining({
+      setAutoLayout: expect.objectContaining({ nodeId: idBytes(id), autoLayout: expect.objectContaining({ mode: LayoutMode.LAYOUT_MODE_NONE, absolute: false }) }),
+    })]);
   });
 
   it("serializes versioned Grid tracks and independent gaps", () => {

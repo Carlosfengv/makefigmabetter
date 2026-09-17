@@ -3,6 +3,7 @@ import { validRuntimeStyleDocumentationLinks } from "./runtime-style-metadata";
 import type { DocumentTransformModifier } from "../lib/editor-protocol";
 import type { DocumentPaintStyleResource, DocumentTextProperties, DocumentTextStyleResource, DocumentVariableCollectionResource, DocumentVariableResource } from "../lib/editor-protocol";
 import { isBoundedTransformModifierStack } from "../lib/transform-group-repeat";
+import { matchesStructuralAggregateChildLayout, structuralAggregateLayoutAdmission } from "../lib/auto-layout-normalization";
 
 export type RuntimeProjectionNode = Readonly<{
   id: string;
@@ -1025,7 +1026,7 @@ function validateBooleanOperation(
   }
   const operandIds = new Set(operation.operandIds);
   const operands = operation.operandIds.map((nodeId) => read(nodeId)!);
-  if (!projectionAdmitsAggregateInAutoLayout(read, operands, operation.node)) {
+  if (!projectionAdmitsAggregateInAutoLayout(read, nodeIds, operands, operation.node)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.operandIds[0] });
   }
   const sourceParentIds = new Set(operation.operandIds.map((nodeId) => read(nodeId)?.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
@@ -1242,7 +1243,7 @@ function validateFlattenNodesOperation(
     new Set(operation.siblingIndexes.map(({ nodeId }) => nodeId)).size !== operation.siblingIndexes.length
   ) throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   const sourceIds = new Set(operation.sourceIds);
-  if (!projectionAdmitsAggregateInAutoLayout(read, sources, operation.replacement)) {
+  if (!projectionAdmitsAggregateInAutoLayout(read, nodeIds, sources, operation.replacement)) {
     throw runtimeError("INVALID_ARGUMENT", { transactionId, nodeId: operation.sourceIds[0] });
   }
   const sourceParentIds = new Set(sources.map((source) => source.parentId).filter((parentId): parentId is string => typeof parentId === "string"));
@@ -1393,14 +1394,23 @@ function projectionOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
 
 function projectionAdmitsAggregateInAutoLayout(
   read: (nodeId: string) => RuntimeProjectionNode | undefined,
+  nodeIds: () => Iterable<string>,
   sources: readonly RuntimeProjectionNode[],
   replacement: RuntimeProjectionNode,
 ): boolean {
   const targetParent = typeof replacement.parentId === "string" ? read(replacement.parentId) : undefined;
   if (targetParent && projectionOwnsAutoLayout(targetParent)) {
-    const replacementLayout = replacement.autoLayout as { mode?: unknown; absolute?: unknown } | undefined;
-    if (replacementLayout?.mode !== "none" || replacementLayout.absolute !== true
-      || sources.some((source) => source.parentId !== targetParent.id || (source.autoLayout as { absolute?: unknown } | undefined)?.absolute !== true)) {
+    const siblings = [...nodeIds()]
+      .map((nodeId) => read(nodeId))
+      .filter((node): node is RuntimeProjectionNode => Boolean(node && node.removed !== true && node.parentId === targetParent.id));
+    const admission = structuralAggregateLayoutAdmission(
+      targetParent.autoLayout as Parameters<typeof structuralAggregateLayoutAdmission>[0],
+      sources as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+      siblings as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+    );
+    if (!admission || sources.some((source) => source.parentId !== targetParent.id)
+      || !matchesStructuralAggregateChildLayout(replacement.autoLayout as Parameters<typeof matchesStructuralAggregateChildLayout>[0], admission.kind)
+      || (admission.kind === "flow" && replacement.relativeTransform != null)) {
       return false;
     }
   }

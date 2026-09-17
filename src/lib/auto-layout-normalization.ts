@@ -103,6 +103,90 @@ export function absoluteStructuralChildAutoLayout(): DocumentAutoLayout {
   };
 }
 
+/** A bounded structural aggregate can remain in a linear flow only when it
+ * replaces every flow child. The wrapper then owns the former children'
+ * internal spacing while the parent continues to position one fixed item. */
+export function flowStructuralChildAutoLayout(): DocumentAutoLayout {
+  return {
+    ...absoluteStructuralChildAutoLayout(),
+    absolute: false,
+  };
+}
+
+export type StructuralAggregateLayoutAdmission = Readonly<{
+  kind: "absolute" | "flow";
+  autoLayout: DocumentAutoLayout;
+}>;
+
+type StructuralAggregateLayoutNode = Readonly<{
+  id: string;
+  autoLayout?: DocumentAutoLayout | null;
+  relativeTransform?: unknown;
+  rotation?: unknown;
+  width?: unknown;
+  height?: unknown;
+  visible?: unknown;
+}>;
+
+/** Returns the only child-layout record that keeps a structural replacement
+ * valid inside an active Auto Layout owner. Absolute sources preserve the
+ * existing out-of-flow contract. The flow subset is deliberately limited to
+ * all visible, axis-aligned, fixed-size children of one non-wrapping linear
+ * owner; partial flow aggregation would change gap and alignment semantics. */
+export function structuralAggregateLayoutAdmission(
+  parentValue: DocumentAutoLayout | null | undefined,
+  sources: readonly StructuralAggregateLayoutNode[],
+  siblings: readonly StructuralAggregateLayoutNode[],
+): StructuralAggregateLayoutAdmission | undefined {
+  const parent = normalizeAutoLayout(parentValue ?? undefined);
+  if (!parent || !["horizontal", "vertical"].includes(parent.mode) || !sources.length) return undefined;
+  const sourceIds = new Set(sources.map((source) => source.id));
+  if (sourceIds.size !== sources.length) return undefined;
+  if (sources.every((source) => normalizeAutoLayout(source.autoLayout ?? undefined)?.absolute === true)) {
+    return { kind: "absolute", autoLayout: absoluteStructuralChildAutoLayout() };
+  }
+  if (
+    parent.wrap
+    || parent.primaryAlignment === "spaceBetween"
+    || parent.counterAlignment === "spaceBetween"
+    || parent.counterAlignment === "baseline"
+  ) return undefined;
+  const flowSiblings = siblings.filter((sibling) => normalizeAutoLayout(sibling.autoLayout ?? undefined)?.absolute !== true);
+  if (flowSiblings.length !== sources.length || flowSiblings.some((sibling) => !sourceIds.has(sibling.id))) return undefined;
+  for (const source of sources) {
+    const layout = normalizeAutoLayout(source.autoLayout ?? undefined);
+    if (
+      (layout && (layout.mode !== "none" || layout.absolute || layout.primarySizing !== "fixed" || layout.counterSizing !== "fixed" || layout.alignSelf !== undefined))
+      || source.relativeTransform != null
+      || (source.rotation !== undefined && source.rotation !== 0)
+      || source.visible === false
+      || typeof source.width !== "number"
+      || !Number.isFinite(source.width)
+      || source.width < 0
+      || typeof source.height !== "number"
+      || !Number.isFinite(source.height)
+      || source.height < 0
+    ) return undefined;
+  }
+  return { kind: "flow", autoLayout: flowStructuralChildAutoLayout() };
+}
+
+export function matchesStructuralAggregateChildLayout(
+  value: DocumentAutoLayout | null | undefined,
+  kind: StructuralAggregateLayoutAdmission["kind"],
+): boolean {
+  const layout = normalizeAutoLayout(value ?? undefined);
+  // Core elides its stable default record. Absence therefore represents a
+  // fixed, non-absolute flow child rather than an unknown layout contract.
+  if (!layout) return kind === "flow";
+  return Boolean(layout
+    && layout.mode === "none"
+    && layout.absolute === (kind === "absolute")
+    && layout.primarySizing === "fixed"
+    && layout.counterSizing === "fixed"
+    && layout.alignSelf === undefined);
+}
+
 function normalizeGridTracks(value: unknown): DocumentAutoLayout["gridRows"] {
   if (!Array.isArray(value)) return [{ type: "flex", value: 1 }];
   const tracks: NonNullable<DocumentAutoLayout["gridRows"]> = [];

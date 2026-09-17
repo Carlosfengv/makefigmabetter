@@ -1,5 +1,5 @@
 import { COMPONENT_PROPERTY_REFERENCES_EXTENSION, createId as generateId, createNode, documentColorFromCssHex, type CanvasNode, type CoreBatchCommand, type CoreProjectionNode, type DocumentVectorPath, type EditorClipboard, type EditorCommand } from "./editor-protocol";
-import { absoluteStructuralChildAutoLayout } from "./auto-layout-normalization";
+import { absoluteStructuralChildAutoLayout, structuralAggregateLayoutAdmission } from "./auto-layout-normalization";
 import { validateClipboardCapture } from "./editor-clipboard";
 import { orderNewLayerAtFront, positionIdForLayerInsertion, resolveLayerDrop, sortNodesByLayerOrder } from "./layer-order";
 import { nodePropsForWorldTransform, normalizeGroupBounds, worldBoundsForNode, worldSpaceProjectionNode, worldTransformForNode } from "./scene-transform";
@@ -333,7 +333,14 @@ export function resolveFlattenNodesBatch(
   const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
   const removedIds = new Set([...sourceIdSet, ...dissolvedGroupIds]);
   const targetOwnsAutoLayout = ownsAutoLayout(targetParent);
-  if (targetOwnsAutoLayout && concreteSources.some((source) => source.parentId !== targetParentId || !isAbsoluteAutoLayoutChild(source))) return undefined;
+  const aggregateLayout = targetOwnsAutoLayout
+    ? structuralAggregateLayoutAdmission(
+        targetParent?.autoLayout,
+        concreteSources,
+        nodes.filter((node) => node.parentId === targetParentId),
+      )
+    : undefined;
+  if (targetOwnsAutoLayout && (concreteSources.some((source) => source.parentId !== targetParentId) || !aggregateLayout)) return undefined;
   for (const sourceParentId of new Set(concreteSources.map((source) => source.parentId))) {
     if (sourceParentId === targetParentId) continue;
     if (sourceParentId === undefined) continue;
@@ -345,9 +352,16 @@ export function resolveFlattenNodesBatch(
   }
   const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
     node.pageId === targetPageId && node.parentId === targetParentId && !removedIds.has(node.id)));
-  const destination = target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : Math.min(...concreteSources
+  const orderedTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) => node.pageId === targetPageId && node.parentId === targetParentId));
+  const sourceIndexesAtTarget = concreteSources
     .filter((source) => source.parentId === targetParentId)
-    .map((source) => sortNodesByLayerOrder(nodes.filter((node) => node.pageId === source.pageId && node.parentId === source.parentId)).findIndex((node) => node.id === source.id))));
+    .map((source) => orderedTargetSiblings.findIndex((node) => node.id === source.id));
+  const firstSourceIndex = sourceIndexesAtTarget.length ? Math.min(...sourceIndexesAtTarget) : remainingTargetSiblings.length;
+  const flowDestination = aggregateLayout?.kind === "flow"
+    ? orderedTargetSiblings.slice(0, firstSourceIndex).filter((node) => !removedIds.has(node.id)).length
+    : undefined;
+  if (flowDestination !== undefined && target?.index !== undefined && target.index !== flowDestination) return undefined;
+  const destination = flowDestination ?? target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : firstSourceIndex);
   if (!Number.isSafeInteger(destination) || destination < 0 || destination > remainingTargetSiblings.length) return undefined;
   const bounds = concreteSources.map((source) => worldBoundsForNode(nodes, source));
   if (bounds.some((bound) => !bound)) return undefined;
@@ -390,17 +404,25 @@ export function resolveFlattenNodesBatch(
     radius: 0,
     cornerRadii: undefined,
     cornerSmoothing: 0,
-    autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : source.autoLayout,
+    autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : source.autoLayout,
+    ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
     extensions: patch?.extensions,
     contentsHidden: false,
     clipsContent: undefined,
     ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
   };
+  const replacementAtCreation = aggregateLayout?.kind === "flow"
+    ? { ...replacement, ...replacementTransform, autoLayout: absoluteStructuralChildAutoLayout() }
+    : replacement;
   const batch: CoreBatchCommand[] = [
-    { type: "create", node: coreProjectionNode(replacement) },
+    { type: "create", node: coreProjectionNode(replacementAtCreation) },
     { type: "delete", ids: [...sourceIds] },
     { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
   ];
+  if (aggregateLayout?.kind === "flow") {
+    batch.push({ type: "update", node: coreProjectionNode(replacement) });
+    batch.push({ type: "setAutoLayout", id: replacement.id, autoLayout: aggregateLayout.autoLayout });
+  }
   const nextNodes = [...nodes.filter((node) => !removedIds.has(node.id)), { ...replacement, positionId: desiredPositionId }];
   if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
   return { replacement, batch };
@@ -1113,7 +1135,14 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       if (parentId && (!parent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(parent.kind))) return undefined;
       if ((command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet") && roots.some((node) => node.parentId !== parentId) && parent && isAutoLayoutFrame(parent)) return undefined;
       const targetOwnsAutoLayout = command.type === "boolean" && ownsAutoLayout(parent);
-      if (targetOwnsAutoLayout && roots.some((node) => node.parentId !== parentId || !isAbsoluteAutoLayoutChild(node))) return undefined;
+      const aggregateLayout = targetOwnsAutoLayout
+        ? structuralAggregateLayoutAdmission(
+            parent?.autoLayout,
+            roots,
+            nextNodes.filter((node) => node.parentId === parentId),
+          )
+        : undefined;
+      if (targetOwnsAutoLayout && (roots.some((node) => node.parentId !== parentId) || !aggregateLayout)) return undefined;
       const id = (command.type === "transformGroup" || command.type === "boolean" || command.type === "componentSet") && command.id ? command.id : createId();
       if (nextNodes.some((node) => node.id === id)) return undefined;
       const bounds = roots.map((node) => worldBoundsForNode(nextNodes, node));
@@ -1135,7 +1164,16 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // nothing batch fail before the root has vacated that sibling slot.
       const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
       const remainingSiblings = nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId && !selectedIds.has(node.id) && !dissolvedGroupIds.has(node.id));
-      const requestedIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet" ? command.index : undefined;
+      const orderedParentSiblings = sortNodesByLayerOrder(nextNodes.filter((node) => node.pageId === pageId && node.parentId === parentId));
+      const firstRootIndex = Math.min(...roots.map((node) => orderedParentSiblings.findIndex((sibling) => sibling.id === node.id)));
+      const flowDestination = aggregateLayout?.kind === "flow"
+        ? orderedParentSiblings.slice(0, firstRootIndex).filter((node) => !selectedIds.has(node.id) && !dissolvedGroupIds.has(node.id)).length
+        : undefined;
+      const commandIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet" ? command.index : undefined;
+      if (flowDestination !== undefined && commandIndex !== undefined && commandIndex !== flowDestination) return undefined;
+      const requestedIndex = command.type === "boolean" || command.type === "transformGroup" || command.type === "componentSet"
+        ? flowDestination ?? commandIndex
+        : undefined;
       if (requestedIndex !== undefined && requestedIndex > remainingSiblings.length) return undefined;
       const groupPositionId = requestedIndex === undefined
         ? `${id.replaceAll("-", "").toLowerCase()}:00000000000000000000000000000000`
@@ -1170,7 +1208,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         height,
         positionId: groupPositionId,
         ...(command.type === "boolean" ? { booleanOperation: command.operation } : {}),
-        ...(targetOwnsAutoLayout ? { autoLayout: absoluteStructuralChildAutoLayout() } : {}),
+        ...(targetOwnsAutoLayout ? { autoLayout: aggregateLayout!.autoLayout } : {}),
         ...booleanPatch,
         ...(consumedPresentationGroup ? presentationGroupPatch(consumedPresentationGroup) : {}),
         ...transformGroupPatch,
@@ -1183,6 +1221,7 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
         // `groupTransform` already resolved equivalent x/y/rotation values in
         // the common parent's coordinate space, so clear only the matrix.
         ...(command.type === "group" && command.autoLayout ? { relativeTransform: undefined } : {}),
+        ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
       };
       nextNodes.push(group);
       const groupWorld = worldTransformForNode(nextNodes, group.id);
@@ -1211,7 +1250,9 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       // children atomically, then enable Auto Layout as the last command.
       const wrapperAtCreation = command.type === "group" && command.autoLayout
         ? { ...group, autoLayout: undefined, positionId: groupCreationPositionId }
-        : { ...group, positionId: groupCreationPositionId };
+        : aggregateLayout?.kind === "flow"
+          ? { ...group, ...groupTransform, autoLayout: absoluteStructuralChildAutoLayout(), positionId: groupCreationPositionId }
+          : { ...group, positionId: groupCreationPositionId };
       batch.push({ type: "create", node: coreProjectionNode(wrapperAtCreation) });
       batch.push({ type: "reparent", parentIds: reparented.map((node) => ({ id: node.id, parentId: id, positionId: node.positionId! })) });
       // The child matrices above are local to the newly created Group. Their
@@ -1225,6 +1266,10 @@ export function resolveCoreBatch(nodes: CanvasNode[], commands: EditorCommand[],
       }
       if (groupCreationPositionId !== groupPositionId) {
         batch.push({ type: "reposition", positionIds: [{ id, positionId: groupPositionId }] });
+      }
+      if (aggregateLayout?.kind === "flow") {
+        batch.push({ type: "update", node: coreProjectionNode(group) });
+        batch.push({ type: "setAutoLayout", id: group.id, autoLayout: aggregateLayout.autoLayout });
       }
       createdIds.push(id);
       selectionIds = [id];
@@ -1743,10 +1788,6 @@ function isAutoLayoutFrame(node: CanvasNode | undefined) {
 
 function ownsAutoLayout(node: CanvasNode | undefined) {
   return Boolean(node && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none");
-}
-
-function isAbsoluteAutoLayoutChild(node: CanvasNode): boolean {
-  return node.autoLayout?.absolute === true;
 }
 
 /** Component edits propagate to the matching cloned instance layers in the

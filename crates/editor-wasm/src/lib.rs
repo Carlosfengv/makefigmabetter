@@ -353,6 +353,12 @@ impl DocumentEngine {
                 BatchCommand::DeleteVariableCollection { id } => {
                     commands.push(Command::DeleteVariableCollection { id });
                 }
+                BatchCommand::SetAutoLayout { id, auto_layout } => {
+                    commands.push(Command::SetAutoLayout {
+                        id: parse_id(&id)?,
+                        layout: auto_layout_from_projection(Some(&auto_layout))?,
+                    });
+                }
                 BatchCommand::Create { node } => {
                     let text_properties =
                         text_properties_from_projection(node.text_properties.as_ref())?;
@@ -2275,6 +2281,10 @@ enum BatchCommand {
         #[serde(default)]
         rename_text_path: bool,
     },
+    SetAutoLayout {
+        id: String,
+        auto_layout: ProjectionAutoLayout,
+    },
     MoveVectorPoint {
         id: String,
         point_id: String,
@@ -3363,6 +3373,7 @@ impl DocumentEngine {
                 | BatchCommand::DeleteVariable { .. }
                 | BatchCommand::SetVariableCollection { .. }
                 | BatchCommand::DeleteVariableCollection { .. }
+                | BatchCommand::SetAutoLayout { .. }
                 | BatchCommand::Update { .. }
                 | BatchCommand::Restore { .. }
                 | BatchCommand::ConvertToTextPath { .. }

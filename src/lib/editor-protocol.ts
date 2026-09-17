@@ -633,6 +633,9 @@ export type CoreBatchCommand =
   | { type: "insertVectorPoint"; id: string; subpathIndex: number; afterPointId?: string; point: DocumentVectorPath["subpaths"][number]["points"][number] }
   | { type: "splitVectorSegment"; id: string; subpathIndex: number; afterPointId: string; t: number; pointId: string }
   | { type: "connectVectorEndpoints"; id: string; firstSubpathIndex: number; firstPointId: string; secondSubpathIndex: number; secondPointId: string }
+  /** Forces a child-layout transition inside the same batch as node creation.
+   * A complete Update cannot infer this against a node that does not yet exist. */
+  | { type: "setAutoLayout"; id: string; autoLayout: DocumentAutoLayout }
   | { type: "setMask"; id: string; enabled: boolean }
   | { type: "setExtensions"; id: string; extensions: Record<string, number[]> }
   | { type: "deleteVectorPoint"; id: string; pointId: string }

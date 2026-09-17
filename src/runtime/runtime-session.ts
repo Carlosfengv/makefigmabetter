@@ -50,7 +50,7 @@ import {
   type DocumentVariableValue,
   type ShapeWithTextType,
 } from "../lib/editor-protocol";
-import { absoluteStructuralChildAutoLayout, normalizeAutoLayout } from "../lib/auto-layout-normalization";
+import { normalizeAutoLayout, structuralAggregateLayoutAdmission } from "../lib/auto-layout-normalization";
 import type { RuntimeDocumentAccessMode } from "./runtime-capabilities";
 import { probeAssetInWorker } from "../lib/asset-probe-client";
 import { sha256Hex } from "../lib/sha256";
@@ -2617,8 +2617,14 @@ export class RuntimeSession implements RuntimeContainerHost {
     const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
     const targetOwnsAutoLayout = runtimeOwnsAutoLayout(targetParentNode);
-    if ((crossesParents && targetOwnsAutoLayout)
-      || (targetOwnsAutoLayout && selected.some((node) => !runtimeIsAbsoluteAutoLayoutChild(node)))) {
+    const aggregateLayout = targetOwnsAutoLayout
+      ? structuralAggregateLayoutAdmission(
+          targetParentNode.autoLayout as DocumentAutoLayout | null | undefined,
+          selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+          liveNodes.filter((node) => node.parentId === targetParent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+        )
+      : undefined;
+    if ((crossesParents && targetOwnsAutoLayout) || (targetOwnsAutoLayout && !aggregateLayout)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
     }
     for (const sourceParentId of sourceParentIds) {
@@ -2648,7 +2654,16 @@ export class RuntimeSession implements RuntimeContainerHost {
       .filter((group) => group.parentId === targetParent.id)
       .map((group) => targetSiblings.findIndex((sibling) => sibling.id === group.id))
       .filter((candidateIndex) => candidateIndex >= 0);
-    const destination = index ?? (dissolvedTargetIndexes.length
+    const selectedTargetIndexes = selected
+      .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
+      .filter((candidateIndex) => candidateIndex >= 0);
+    const flowDestination = aggregateLayout?.kind === "flow"
+      ? targetSiblings.slice(0, Math.min(...selectedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
+      : undefined;
+    if (flowDestination !== undefined && index !== undefined && index !== flowDestination) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    }
+    const destination = flowDestination ?? index ?? (dissolvedTargetIndexes.length
       ? targetSiblings.slice(0, Math.min(...dissolvedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
       : remaining.length);
     if (!Number.isSafeInteger(destination) || destination < 0 || destination > remaining.length) {
@@ -2809,7 +2824,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       booleanOperation: undefined,
       fillStack: structuredClone(paintStacks[0]!),
       fillStyleId: undefined,
-      autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : source.autoLayout,
+      autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : source.autoLayout,
+      ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
       effectStack: sharedEffects.length ? structuredClone(sharedEffects) : undefined,
       dropShadow: structuredClone(sharedEffects.find((effect) => effect.dropShadow)?.dropShadow),
       extensions,
@@ -2925,8 +2941,14 @@ export class RuntimeSession implements RuntimeContainerHost {
     const dissolvedGroupIds = new Set(dissolvedGroups.map((group) => group.id));
     const crossesParents = selected.some((node) => node.parentId !== parent.id);
     const targetOwnsAutoLayout = runtimeOwnsAutoLayout(parentNode);
-    if ((crossesParents && targetOwnsAutoLayout)
-      || (targetOwnsAutoLayout && selected.some((node) => !runtimeIsAbsoluteAutoLayoutChild(node)))) {
+    const aggregateLayout = targetOwnsAutoLayout
+      ? structuralAggregateLayoutAdmission(
+          parentNode.autoLayout as DocumentAutoLayout | null | undefined,
+          selected as Parameters<typeof structuralAggregateLayoutAdmission>[1],
+          liveNodes.filter((node) => node.parentId === parent.id) as Parameters<typeof structuralAggregateLayoutAdmission>[2],
+        )
+      : undefined;
+    if ((crossesParents && targetOwnsAutoLayout) || (targetOwnsAutoLayout && !aggregateLayout)) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
     }
     for (const sourceParentId of sourceParentIds) {
@@ -2956,7 +2978,16 @@ export class RuntimeSession implements RuntimeContainerHost {
       .filter((group) => group.parentId === parent.id)
       .map((group) => targetSiblings.findIndex((sibling) => sibling.id === group.id))
       .filter((candidateIndex) => candidateIndex >= 0);
-    const destination = index ?? (dissolvedTargetIndexes.length
+    const selectedTargetIndexes = selected
+      .map((source) => targetSiblings.findIndex((sibling) => sibling.id === source.id))
+      .filter((candidateIndex) => candidateIndex >= 0);
+    const flowDestination = aggregateLayout?.kind === "flow"
+      ? targetSiblings.slice(0, Math.min(...selectedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
+      : undefined;
+    if (flowDestination !== undefined && index !== undefined && index !== flowDestination) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: parent.id });
+    }
+    const destination = flowDestination ?? index ?? (dissolvedTargetIndexes.length
       ? targetSiblings.slice(0, Math.min(...dissolvedTargetIndexes)).filter((node) => !removedIds.has(node.id)).length
       : remaining.length);
     if (!Number.isSafeInteger(destination) || destination < 0 || destination > remaining.length) throw runtimeError("INVALID_ARGUMENT", { nodeId: parent.id });
@@ -2988,7 +3019,8 @@ export class RuntimeSession implements RuntimeContainerHost {
       visible: true,
       siblingIndex: destination,
       booleanOperation: operation,
-      autoLayout: targetOwnsAutoLayout ? absoluteStructuralChildAutoLayout() : undefined,
+      autoLayout: targetOwnsAutoLayout ? aggregateLayout!.autoLayout : undefined,
+      ...(aggregateLayout?.kind === "flow" ? { relativeTransform: undefined } : {}),
       ...(consumedPresentationGroup ? runtimePresentationGroupPatch(consumedPresentationGroup) : {}),
     };
     const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
@@ -4801,10 +4833,6 @@ function runtimeOwnsAutoLayout(node: RuntimeProjectionNode): boolean {
   if (!autoLayout || typeof autoLayout !== "object") return false;
   const mode = (autoLayout as { mode?: unknown }).mode;
   return mode === "horizontal" || mode === "vertical" || mode === "grid";
-}
-
-function runtimeIsAbsoluteAutoLayoutChild(node: RuntimeProjectionNode): boolean {
-  return normalizeAutoLayout(node.autoLayout as DocumentAutoLayout | undefined)?.absolute === true;
 }
 
 function runtimeCanDissolveNeutralGroup(node: RuntimeProjectionNode): boolean {

@@ -185,6 +185,18 @@ describe("normalizeGroupBounds", () => {
     expect(normalized.find((node) => node.id === outer.id)).toMatchObject({ width: 20, height: 30 });
   });
 
+  it("keeps a structural flow child on legacy geometry while fitting its contents", () => {
+    const ownerLayout = { mode: "horizontal" as const, padding: [8, 8, 8, 8] as [number, number, number, number], itemSpacing: 12, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
+    const frame = { ...createNode("frame", 100, 50), id: "frame", width: 300, height: 160, autoLayout: ownerLayout };
+    const group = { ...createNode("booleanOperation", 108, 58), id: "boolean", parentId: frame.id, width: 100, height: 40, autoLayout: { ...ownerLayout, mode: "none" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 0 } };
+    const first = { ...createNode("vector", 0, 0), id: "first", parentId: group.id, width: 20, height: 20, relativeTransform: { ...IDENTITY_AFFINE, e: 0, f: 0 } };
+    const second = { ...createNode("vector", 0, 0), id: "second", parentId: group.id, width: 20, height: 20, relativeTransform: { ...IDENTITY_AFFINE, e: 32, f: 0 } };
+
+    const normalized = normalizeGroupBounds([frame, group, first, second])!;
+
+    expect(normalized.find((node) => node.id === group.id)).toMatchObject({ x: 108, y: 58, width: 52, height: 20, relativeTransform: undefined });
+  });
+
   it("uses the pointer-down scene for each child-drag frame instead of compounding prior rebases", () => {
     const group = { ...createNode("group", 0, 0), id: "group", width: 160, height: 80, relativeTransform: { ...IDENTITY_AFFINE } };
     const child = { ...createNode("rectangle", 0, 0), id: "child", parentId: group.id, width: 40, height: 20, relativeTransform: { ...IDENTITY_AFFINE, e: 20, f: 20 } };

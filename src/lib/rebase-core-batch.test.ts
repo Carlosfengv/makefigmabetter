@@ -38,4 +38,31 @@ describe("core batch reconciliation", () => {
     expect(rebased).toEqual([command]);
     expect((rebased[0] as typeof command).style).not.toBe(command.style);
   });
+
+  it("replays an explicit child-layout transition after a newly created node", () => {
+    const created = node("00000000-0000-0000-0000-000000000012");
+    const autoLayout = {
+      mode: "none" as const,
+      padding: [0, 0, 0, 0] as [number, number, number, number],
+      itemSpacing: 0,
+      wrap: false,
+      primaryAlignment: "start" as const,
+      counterAlignment: "start" as const,
+      primarySizing: "fixed" as const,
+      counterSizing: "fixed" as const,
+      absolute: false,
+    };
+    const batch: CoreBatchCommand[] = [
+      { type: "create", node: { ...created, cornerRadius: created.radius, text: "", autoLayout: { ...autoLayout, absolute: true } } },
+      { type: "setAutoLayout", id: created.id, autoLayout },
+    ];
+
+    const rebased = rebaseCoreBatchForSnapshot([], batch);
+
+    expect(rebased).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: created.id, autoLayout: expect.objectContaining({ absolute: true }) }) }),
+      { type: "setAutoLayout", id: created.id, autoLayout },
+    ]);
+    expect((rebased[1] as Extract<CoreBatchCommand, { type: "setAutoLayout" }>).autoLayout).not.toBe(autoLayout);
+  });
 });

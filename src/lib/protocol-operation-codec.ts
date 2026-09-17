@@ -212,6 +212,7 @@ function operationForBatchCommand(command: CoreBatchCommand): ResolvedOperation[
   if (command.type === "insertVectorPoint") return [{ insertVectorPoint: { nodeId: idBytes(command.id), subpathIndex: command.subpathIndex, afterPointId: command.afterPointId ? idBytes(command.afterPointId) : undefined, point: vectorPointProto(command.point) } }];
   if (command.type === "splitVectorSegment") return [{ splitVectorSegment: { nodeId: idBytes(command.id), subpathIndex: command.subpathIndex, afterPointId: idBytes(command.afterPointId), t: command.t, pointId: idBytes(command.pointId) } }];
   if (command.type === "connectVectorEndpoints") return [{ connectVectorEndpoints: { nodeId: idBytes(command.id), firstSubpathIndex: command.firstSubpathIndex, firstPointId: idBytes(command.firstPointId), secondSubpathIndex: command.secondSubpathIndex, secondPointId: idBytes(command.secondPointId) } }];
+  if (command.type === "setAutoLayout") return [{ setAutoLayout: { nodeId: idBytes(command.id), autoLayout: autoLayoutProto(command.autoLayout) } }];
   if (command.type === "setMask") return [{ setMask: { nodeId: idBytes(command.id), enabled: command.enabled } }];
   if (command.type === "setExtensions") return [{ setNodeExtensions: { nodeId: idBytes(command.id), extensions: extensionsProto(command.extensions) } }];
   if (command.type === "deleteVectorPoint") return [{ deleteVectorPoint: { nodeId: idBytes(command.id), pointId: idBytes(command.pointId) } }];

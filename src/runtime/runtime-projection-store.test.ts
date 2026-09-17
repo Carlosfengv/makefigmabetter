@@ -326,7 +326,7 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("flat")).toMatchObject({ parentId: "page", siblingIndex: 0, removed: false });
   });
 
-  it("validates absolute aggregate replacements inside active Auto Layout", () => {
+  it("validates absolute and complete bounded-flow aggregate replacements inside active Auto Layout", () => {
     const ownerLayout = { mode: "horizontal" as const, padding: [0, 0, 0, 0] as [number, number, number, number], itemSpacing: 8, wrap: false, primaryAlignment: "start" as const, counterAlignment: "start" as const, primarySizing: "fixed" as const, counterSizing: "fixed" as const, absolute: false };
     const absoluteLayout = { ...ownerLayout, mode: "none" as const, itemSpacing: 0, absolute: true };
     const projection = {
@@ -334,8 +334,8 @@ describe("RuntimeProjectionStore", () => {
       nodes: [
         { id: "page", type: "PAGE" as const },
         { id: "frame", type: "FRAME" as const, parentId: "page", autoLayout: ownerLayout },
-        { id: "a", type: "VECTOR" as const, parentId: "frame", siblingIndex: 0, autoLayout: absoluteLayout },
-        { id: "b", type: "VECTOR" as const, parentId: "frame", siblingIndex: 1, autoLayout: absoluteLayout },
+        { id: "a", type: "VECTOR" as const, parentId: "frame", siblingIndex: 0, width: 20, height: 20, rotation: 0, autoLayout: absoluteLayout },
+        { id: "b", type: "VECTOR" as const, parentId: "frame", siblingIndex: 1, width: 20, height: 20, rotation: 0, autoLayout: absoluteLayout },
       ],
     };
     const store = new RuntimeProjectionStore(projection);
@@ -365,6 +365,42 @@ describe("RuntimeProjectionStore", () => {
         node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "frame", siblingIndex: 0, booleanOperation: "union", autoLayout: absoluteLayout },
         operandIds: ["a", "b"],
         operandPatches: [{ x: 0 }, { x: 10 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    })), "INVALID_ARGUMENT")).toBe(true);
+
+    const boundedFlowProjection = structuredClone(projection);
+    boundedFlowProjection.nodes[2]!.autoLayout = { ...absoluteLayout, absolute: false };
+    boundedFlowProjection.nodes[3]!.autoLayout = { ...absoluteLayout, absolute: false };
+    const boundedFlowStore = new RuntimeProjectionStore(boundedFlowProjection);
+    boundedFlowStore.stage({
+      transactionId: "tx-bounded-flow-layout-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "frame", siblingIndex: 0, width: 48, height: 20, rotation: 0, booleanOperation: "union", autoLayout: { ...absoluteLayout, absolute: false } },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 28 }],
+        siblingIndexes: [],
+        wrapperPatch: {},
+        operation: "union",
+      }],
+    });
+    expect(boundedFlowStore.getNode("boolean")).toMatchObject({ parentId: "frame", autoLayout: { mode: "none", absolute: false } });
+
+    const partialFlowProjection = structuredClone(boundedFlowProjection);
+    partialFlowProjection.nodes.push({ id: "c", type: "VECTOR", parentId: "frame", siblingIndex: 2, width: 20, height: 20, rotation: 0, autoLayout: { ...absoluteLayout, absolute: false } });
+    const partialFlowStore = new RuntimeProjectionStore(partialFlowProjection);
+    expect(isRuntimeError(captureError(() => partialFlowStore.stage({
+      transactionId: "tx-partial-flow-layout-boolean",
+      baseRevision: 7,
+      operations: [{
+        type: "boolean",
+        node: { id: "boolean", type: "BOOLEAN_OPERATION", parentId: "frame", siblingIndex: 0, width: 48, height: 20, rotation: 0, booleanOperation: "union", autoLayout: { ...absoluteLayout, absolute: false } },
+        operandIds: ["a", "b"],
+        operandPatches: [{ x: 0 }, { x: 28 }],
         siblingIndexes: [],
         wrapperPatch: {},
         operation: "union",

@@ -379,7 +379,22 @@ export function normalizeGroupBounds(
     const movedGroupWorld = multiplyAffine(groupWorld, shift);
     const groupPatch = nodePropsForWorldTransform(movedGroupWorld, parentWorld, width, height);
     if (!groupPatch) return undefined;
-    next[groupIndex] = { ...group, ...groupPatch, width, height };
+    const flowChild = isAutoLayoutFlowChild(next, group);
+    const publishedGroupPatch = flowChild
+      ? nodePropsForWorldTransform(movedGroupWorld, undefined, width, height)
+      : groupPatch;
+    if (!publishedGroupPatch) return undefined;
+    next[groupIndex] = {
+      ...group,
+      ...publishedGroupPatch,
+      width,
+      height,
+      // An active Auto Layout parent owns a flow child's placement. Structural
+      // containers still fit their contents, but must publish that geometry
+      // through legacy x/y instead of a Relative-v1 matrix or Core will reject
+      // the parent's deterministic reflow.
+      ...(flowChild ? { relativeTransform: undefined } : {}),
+    };
 
     const inverseShift = { ...IDENTITY_AFFINE, e: -left, f: -top };
     for (const child of localChildren) {
@@ -407,6 +422,12 @@ export function normalizeGroupBounds(
 
 function isAutoLayoutFrame(node: CanvasNode | undefined) {
   return (node?.kind === "frame" || node?.kind === "component" || node?.kind === "instance" || node?.kind === "slot" || node?.kind === "componentSet") && node.autoLayout?.mode !== undefined && node.autoLayout.mode !== "none";
+}
+
+function isAutoLayoutFlowChild(nodes: readonly CanvasNode[], node: CanvasNode) {
+  if (!node.parentId || node.autoLayout?.absolute === true) return false;
+  const parent = nodes.find((candidate) => candidate.id === node.parentId);
+  return Boolean(parent && isAutoLayoutFrame(parent));
 }
 
 function isInvertibleAffine(matrix: AffineMatrix) {
