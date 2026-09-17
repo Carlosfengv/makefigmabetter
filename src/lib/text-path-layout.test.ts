@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createNode } from "./editor-protocol";
 import { specialNodeFallback } from "./special-node-fallback";
 import { exportPageToSvg } from "./svg-export";
-import { layoutTextPath } from "./text-path-layout";
+import { layoutTextPath, textPathCharacterAtLocalPoint } from "./text-path-layout";
 
 const pageId = "00000000-0000-4000-8000-00000000e001";
 
@@ -25,6 +25,41 @@ describe("M6 TextPath layout", () => {
     expect(exported.svg).toContain('dominant-baseline="central"');
     expect(exported.svg).toContain(">A</text>");
     expect(exported.compatibilityFallbacks).toEqual([]);
+  });
+
+  it("maps rotated fallback glyph boxes back to UTF-16 source characters", () => {
+    const node = { ...textPath(), text: "A😀" };
+    expect(textPathCharacterAtLocalPoint(node, { x: 5, y: 24 }, {
+      advance: 10,
+      glyphHeight: 12,
+      measure: () => 8,
+    })).toBe(0);
+    expect(textPathCharacterAtLocalPoint(node, { x: 15, y: 24 }, {
+      advance: 10,
+      glyphHeight: 12,
+      measure: () => 8,
+    })).toBe(1);
+    expect(textPathCharacterAtLocalPoint(node, { x: 30, y: 24 }, {
+      advance: 10,
+      glyphHeight: 12,
+      measure: () => 8,
+    })).toBeUndefined();
+
+    const vertical = {
+      ...node,
+      text: "A",
+      textPathMetadata: { ...node.textPathMetadata!, startSegment: 1, startPosition: 0, textAlignVertical: "CENTER" as const },
+    };
+    expect(textPathCharacterAtLocalPoint(vertical, { x: 100, y: 25 }, {
+      advance: 10,
+      glyphHeight: 12,
+      measure: () => 8,
+    })).toBe(0);
+    expect(textPathCharacterAtLocalPoint(vertical, { x: 93, y: 25 }, {
+      advance: 10,
+      glyphHeight: 12,
+      measure: () => 8,
+    })).toBeUndefined();
   });
 
   it("samples open Canonical cubic segments while retaining malformed offsets as an explicit fallback", () => {

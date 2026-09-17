@@ -7,6 +7,11 @@ export type TextPathGeometry = Readonly<{
   length: number;
 }>;
 export type TextPathPlacement = Readonly<{ start: number; gap: number; vertical: number }>;
+export type TextPathCharacterHitOptions = Readonly<{
+  advance: number;
+  glyphHeight: number;
+  measure: (text: string) => number;
+}>;
 
 export function textPathPlacement(
   metadata: DocumentTextPathMetadata,
@@ -54,6 +59,41 @@ export function layoutTextPath(node: Pick<CanvasNode, "kind" | "text" | "vectorP
     const normal = { x: -Math.sin(pose.angle), y: Math.cos(pose.angle) };
     return [{ text, x: pose.x + normal.x * placement.vertical, y: pose.y + normal.y * placement.vertical, angle: pose.angle }];
   });
+}
+
+/** Returns the UTF-16 start of the painted fallback glyph under a node-local
+ * point. This mirrors the Canvas fallback's center/middle text placement and
+ * intentionally does not approximate the explicit-font Rust glyph path. */
+export function textPathCharacterAtLocalPoint(
+  node: Pick<CanvasNode, "kind" | "text" | "vectorPath" | "textPathMetadata">,
+  point: Readonly<{ x: number; y: number }>,
+  options: TextPathCharacterHitOptions,
+): number | undefined {
+  if (![point.x, point.y, options.advance, options.glyphHeight].every(Number.isFinite)
+    || options.advance <= 0 || options.glyphHeight <= 0) return undefined;
+  const glyphs = layoutTextPath(node, options.advance);
+  if (!glyphs?.length) return undefined;
+  const characters = [...(node.text ?? "")];
+  const starts: number[] = [];
+  let utf16Start = 0;
+  for (const character of characters) {
+    starts.push(utf16Start);
+    utf16Start += character.length;
+  }
+  for (let index = glyphs.length - 1; index >= 0; index -= 1) {
+    const glyph = glyphs[index]!;
+    const width = options.measure(glyph.text);
+    if (!Number.isFinite(width) || width <= 0) continue;
+    const cosine = Math.cos(glyph.angle);
+    const sine = Math.sin(glyph.angle);
+    const dx = point.x - glyph.x;
+    const dy = point.y - glyph.y;
+    const localX = cosine * dx + sine * dy;
+    const localY = -sine * dx + cosine * dy;
+    if (Math.abs(localX) <= width / 2 && Math.abs(localY) <= options.glyphHeight / 2)
+      return starts[index];
+  }
+  return undefined;
 }
 
 /** Resolves the bounded path traversal shared by Canvas, WebGPU and SVG. */

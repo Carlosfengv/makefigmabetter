@@ -93,6 +93,7 @@ import {
   resolveTextHyperlinkNavigation,
   textHyperlinkAtUtf16Character,
 } from "@/lib/text-hyperlink-navigation";
+import { textPathCharacterAtLocalPoint } from "@/lib/text-path-layout";
 import {
   canvasTextEditBox,
   canvasTextEditContainsPoint,
@@ -4554,15 +4555,29 @@ export function EditorShell({
     const pageNodes = current.nodes.filter((node) =>
       (node.pageId ?? defaultPageId) === current.activePageId);
     const candidate = findTopmostHit(pageNodes, point, defaultPageId);
-    if (!candidate || !isCanvasTextEditableNode(candidate)) return false;
+    if (!candidate || (candidate.kind !== "textPath" && !isCanvasTextEditableNode(candidate))) return false;
     const worldTransform = worldTransformForNode(current.nodes, candidate.id);
     const inverse = worldTransform && invertAffine(worldTransform);
     if (!inverse) return false;
-    const character = textPointHit(
-      candidate,
-      point,
-      transformPoint(inverse, point),
-    ).character;
+    const localPoint = transformPoint(inverse, point);
+    const primary = candidate.textProperties?.runs[0];
+    let character: number | undefined;
+    if (candidate.kind === "textPath") {
+      if (!candidate.textProperties?.runs.some((run) => run.font)) {
+        const fontSize = primary?.fontSize ?? 14;
+        const canvasContext = document.createElement("canvas").getContext("2d");
+        if (canvasContext) {
+          canvasContext.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+          character = textPathCharacterAtLocalPoint(candidate, localPoint, {
+            advance: Math.max(1, fontSize * .6),
+            glyphHeight: fontSize,
+            measure: (value) => canvasContext.measureText(value).width,
+          });
+        }
+      }
+    } else if (isCanvasTextEditableNode(candidate)) {
+      character = textPointHit(candidate, point, localPoint).character;
+    }
     if (character === undefined) return false;
     const hyperlink = textHyperlinkAtUtf16Character(
       candidate.text ?? "",
