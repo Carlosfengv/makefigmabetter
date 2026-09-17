@@ -97,6 +97,9 @@ export type SvgExportOptions = {
   /** Short-lived, already-authorized data URIs for raster fills. They are
    * presentation-only: no asset bytes are ever written into the Document. */
   imageDataUris?: ReadonlyMap<string, string>;
+  /** Decoded raster dimensions paired with imageDataUris. TILE uses intrinsic
+   * pixel size as its repeat cell, matching Canvas and alpha hit testing. */
+  imageDimensions?: ReadonlyMap<string, Readonly<{ width: number; height: number }>>;
   /** Short-lived, already-authorized font data URIs from the same frozen
    * source. Export embeds these as isolated @font-face rules. */
   fontDataUris?: ReadonlyMap<string, string>;
@@ -638,10 +641,13 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     }
     const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
     if (layer.image.scaleMode === "tile") {
+      const dimensions = validImageDimensions(options.imageDimensions?.get(layer.image.assetId));
+      if (!dimensions) {
+        reportFallback("image-transform", "Tiled Image Paint requires decoded asset dimensions to preserve its repeat period.", node.id);
+        return "";
+      }
       const patternId = `makefigma-image-pattern-${nextDefinitionId++}`;
-      const tileWidth = Math.max(1, node.width / 4);
-      const tileHeight = Math.max(1, node.height / 4);
-      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(tileWidth)}" height="${number(tileHeight)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(tileWidth)}" height="${number(tileHeight)}" preserveAspectRatio="xMidYMid slice"/></pattern>`);
+      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(dimensions.width)}" height="${number(dimensions.height)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(dimensions.width)}" height="${number(dimensions.height)}" preserveAspectRatio="none"/></pattern>`);
       return `<g${presentation}>${shape(node, { value: `url(#${patternId})` }, { value: "none" })}</g>`;
     }
     const clip = imageClipMarkup(node) ?? shape(node, { value: "#ffffff" }, { value: "none" });
@@ -670,9 +676,12 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     const matrix = `matrix(${number(transform.a)} ${number(transform.b)} ${number(transform.c)} ${number(transform.d)} ${number(transform.e)} ${number(transform.f)})`;
     const patternId = `makefigma-stroke-image-pattern-${nextDefinitionId++}`;
     if (layer.image.scaleMode === "tile") {
-      const tileWidth = Math.max(1, node.width / 4);
-      const tileHeight = Math.max(1, Math.max(node.height, node.strokeWidth) / 4);
-      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(tileWidth)}" height="${number(tileHeight)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(tileWidth)}" height="${number(tileHeight)}" preserveAspectRatio="xMidYMid slice"/></pattern>`);
+      const dimensions = validImageDimensions(options.imageDimensions?.get(layer.image.assetId));
+      if (!dimensions) {
+        reportFallback("image-transform", "Tiled Image Paint requires decoded asset dimensions to preserve its repeat period.", node.id);
+        return undefined;
+      }
+      definitions.push(`<pattern id="${patternId}" patternUnits="userSpaceOnUse" width="${number(dimensions.width)}" height="${number(dimensions.height)}" patternTransform="${matrix}"><image href="${attribute(href)}" x="0" y="0" width="${number(dimensions.width)}" height="${number(dimensions.height)}" preserveAspectRatio="none"/></pattern>`);
     } else {
       const height = Math.max(layout.height, node.strokeWidth, 1);
       const preserveAspectRatio = layer.image.scaleMode === "fit" ? "xMidYMid meet" : "xMidYMid slice";
@@ -1021,6 +1030,12 @@ export function exportPageToSvg(nodes: readonly CanvasNode[], options: SvgExport
     warnings: [...warnings],
     compatibilityFallbacks,
   };
+}
+
+function validImageDimensions(value: Readonly<{ width: number; height: number }> | undefined) {
+  return value && Number.isFinite(value.width) && value.width > 0 && Number.isFinite(value.height) && value.height > 0
+    ? value
+    : undefined;
 }
 
 function svgTextPathMarkup(node: CanvasNode, fill: string, opacity: number | undefined, number: (value: number) => string): string | undefined {

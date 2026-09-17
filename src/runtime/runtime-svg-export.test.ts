@@ -114,6 +114,7 @@ describe("Runtime SVG export lease lifecycle", () => {
 
     expect(result.svg).toContain('<pattern id="makefigma-image-pattern-');
     expect(result.svg).toContain('href="data:image/png;base64,AAAA"');
+    expect(result.svg).toContain('patternUnits="userSpaceOnUse" width="1" height="1"');
     expect(result.svg).toContain('opacity="0.5"');
     expect(result.svg).toContain("mix-blend-mode:screen");
     expect(result.compatibilityFallbacks).not.toEqual(expect.arrayContaining([

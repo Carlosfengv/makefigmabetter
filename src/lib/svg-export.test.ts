@@ -681,6 +681,7 @@ describe("SVG export", () => {
       pageId,
       defaultPageId: pageId,
       imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+      imageDimensions: new Map([[assetId, { width: 12, height: 6 }]]),
     });
     expect(result.compatibilityFallbacks).toContainEqual(expect.objectContaining({ nodeId: node.id, capability: "image-filters", outcome: "fallback" }));
 
@@ -691,6 +692,8 @@ describe("SVG export", () => {
     expect(result.svg).toContain('style="mix-blend-mode:screen"');
     expect(result.svg).toContain('opacity="0.5"');
     expect(result.svg).toContain('<pattern id="makefigma-image-pattern-');
+    expect(result.svg).toContain('patternUnits="userSpaceOnUse" width="12" height="6"');
+    expect(result.svg).toContain('width="12" height="6" preserveAspectRatio="none"');
     expect(result.svg.match(/data:image\/png;base64,AAAA/g)).toHaveLength(2);
   });
 
@@ -712,14 +715,41 @@ describe("SVG export", () => {
       pageId,
       defaultPageId: pageId,
       imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+      imageDimensions: new Map([[assetId, { width: 12, height: 6 }]]),
     });
 
     expect(result.compatibilityFallbacks).toEqual([]);
     expect(result.svg).toContain('<pattern id="makefigma-stroke-image-pattern-');
     expect(result.svg).toContain('patternTransform="matrix(1 0 0 1 2 3)"');
+    expect(result.svg).toContain('patternUnits="userSpaceOnUse" width="12" height="6"');
     expect(result.svg).toContain('style="mix-blend-mode:multiply"');
     expect(result.svg).toContain('opacity="0.5"');
     expect(result.svg.match(/fill="url\(#makefigma-stroke-image-pattern-/g)).toHaveLength(2);
+  });
+
+  it("reports a tiled image fallback when decoded dimensions are unavailable", () => {
+    const assetId = "tile-without-dimensions";
+    const node = {
+      ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000107", pageId,
+      fillStack: { layers: [{
+        image: { assetId, scaleMode: "tile" as const, transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+        visible: true,
+        opacity: 1,
+        blendMode: "normal" as const,
+      }] },
+    };
+    const result = exportPageToSvg([node], {
+      pageId,
+      defaultPageId: pageId,
+      imageDataUris: new Map([[assetId, "data:image/png;base64,AAAA"]]),
+    });
+
+    expect(result.svg).not.toContain("makefigma-image-pattern-");
+    expect(result.compatibilityFallbacks).toContainEqual(expect.objectContaining({
+      nodeId: node.id,
+      capability: "image-transform",
+      outcome: "fallback",
+    }));
   });
 
   it("refuses a supplied SVG data URI and reports the image fallback", () => {

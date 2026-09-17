@@ -42,6 +42,12 @@ export function exportRuntimeNodeSvgResult(
     if (!nodes.some((node) => node.id === nodeId)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId, revision: lease.revision });
     const defaultPageId = lease.projection.nodes.find((node) => node.type === "PAGE" && node.removed !== true)?.id;
     if (!defaultPageId) throw runtimeError("EXPORT_FAILED", { nodeId, revision: lease.revision });
+    const document = lease.projection.nodes.find((node) => node.type === "DOCUMENT" && node.removed !== true);
+    const imageDimensions = new Map((Array.isArray(document?.assets) ? document.assets : []).flatMap((asset) =>
+      isLeaseAsset(asset) && Number.isFinite(asset.pixelWidth) && (asset.pixelWidth ?? 0) > 0
+        && Number.isFinite(asset.pixelHeight) && (asset.pixelHeight ?? 0) > 0
+        ? [[asset.assetId, { width: asset.pixelWidth!, height: asset.pixelHeight! }] as const]
+        : []));
     const scene = compileScene({ revision: lease.revision, nodes, pageId, defaultPageId }).scene;
     return exportPageToSvg(nodes, {
       pageId,
@@ -51,6 +57,7 @@ export function exportRuntimeNodeSvgResult(
       nodeIds: [nodeId],
       booleanPaths,
       imageDataUris,
+      imageDimensions,
     });
   } catch (error) {
     if (isRuntimeError(error)) throw error;
