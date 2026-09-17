@@ -1117,7 +1117,7 @@ function svgSpecialNodeComposition(
   if (node.kind === "embed" || node.kind === "linkUnfurl") {
     const metadata = node.kind === "embed" ? node.embedMetadata : node.linkUnfurlMetadata;
     const title = metadata?.title || metadata?.provider || (node.kind === "embed" ? "Embed preview" : "Link preview");
-    const description = node.kind === "linkUnfurl" ? node.linkUnfurlMetadata?.description : node.embedMetadata?.canonicalUrl;
+    const description = node.kind === "linkUnfurl" ? node.linkUnfurlMetadata?.description : node.embedMetadata?.description || node.embedMetadata?.canonicalUrl;
     const provider = metadata?.provider;
     const lines = [title, description, provider].filter((value): value is string => Boolean(value)).slice(0, 3);
     return `${textMarkup}<rect x="8" y="8" width="${number(Math.max(0, node.width - 16))}" height="${number(Math.max(0, node.height - 16))}" rx="4" fill="#f8fafc" fill-opacity=".86"/>${lines.map((line, index) => `<text x="16" y="${number(24 + index * 18)}" fill="#1f2937" font-family="sans-serif" font-size="${index ? "12" : "14"}" font-weight="${index ? "400" : "600"}" dominant-baseline="central">${escapeSvgText(line)}</text>`).join("")}`;

@@ -31,6 +31,9 @@ export function specialNodeFallback(node: CanvasNode, target: SpecialNodeRenderT
     case "tableCell":
       return undefined;
     case "media":
+      if (!node.assetId || !node.mediaMetadata?.hash) {
+        return fallback("MEDIA_RESOURCE_UNAVAILABLE", `${target === "canvas" ? "Canvas" : "SVG"} preserves the Media node, but its immutable GIF resource binding or public media hash is unavailable.`);
+      }
       return fallback("MEDIA_PLAYBACK", `${target === "canvas" ? "Canvas" : "SVG"} renders a deterministic media poster; remote media decoding and playback are not activated.`);
     case "embed":
       return fallback("EMBED_PREVIEW", `${target === "canvas" ? "Canvas" : "SVG"} renders a safe embed preview; remote content is never activated during rendering or export.`);

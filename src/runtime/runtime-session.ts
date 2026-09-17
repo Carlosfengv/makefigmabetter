@@ -5124,6 +5124,7 @@ function validRuntimeEmbedMetadata(value: unknown): value is DocumentEmbedMetada
   return validRuntimeHttpUrl(candidate.srcUrl)
     && (candidate.canonicalUrl === null || validRuntimeHttpUrl(candidate.canonicalUrl))
     && validRuntimeNullablePreviewText(candidate.title)
+    && validRuntimeNullablePreviewText(candidate.description)
     && validRuntimeNullablePreviewText(candidate.provider);
 }
 

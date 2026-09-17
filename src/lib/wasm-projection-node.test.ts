@@ -100,6 +100,29 @@ describe("canvasNodeFromWasmProjection", () => {
     });
   });
 
+  it("defaults legacy Embed metadata description to null", () => {
+    const current = coreProjectionNode(createNode("embed", 0, 0));
+    const legacy = {
+      ...current,
+      extensions: {
+        ...current.extensions,
+        "figma.embed.metadata.v1": [...new TextEncoder().encode(JSON.stringify({
+          srcUrl: "https://player.example/embed/1",
+          canonicalUrl: "https://example.com/watch/1",
+          title: "Demo",
+          provider: "Example",
+        }))],
+      },
+    };
+    expect(canvasNodeFromWasmProjection(legacy).embedMetadata).toEqual({
+      srcUrl: "https://player.example/embed/1",
+      canonicalUrl: "https://example.com/watch/1",
+      title: "Demo",
+      description: null,
+      provider: "Example",
+    });
+  });
+
   it("round-trips component property references through the extension-backed Core projection", () => {
     const source = { ...createNode("text", 0, 0), componentPropertyReferences: { visible: "Enabled", characters: "Label" } };
     const core = coreProjectionNode(source);

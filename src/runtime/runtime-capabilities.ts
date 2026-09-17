@@ -230,7 +230,7 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     property: "createImageAsync|getImageByHash|createImageNode|setImageAsset|createGif|mediaData",
     surface: "write",
     status: "partial",
-    limitation: "M2 admits bounded raster bytes, registers metadata in Core and seeds Worker decode bytes. W12-P can reference the resulting AssetId through the admitted Figma-shaped Image Paint subset. The FigJam createGif subset requires an already-admitted image/gif AssetId and synchronously creates a MEDIA node with immutable hash and source dimensions; playback remains a deterministic poster fallback. Filters, video and the full Figma image-adjustment surface remain staged.",
+    limitation: "M2 admits bounded raster bytes, registers metadata in Core and seeds Worker decode bytes. W12-P can reference the resulting AssetId through the admitted Figma-shaped Image Paint subset. The FigJam createGif subset requires an already-admitted image/gif AssetId and creates a MEDIA node whose immutable hash and GIF-only resource binding persist through Core history, snapshots, clone and clipboard manifests. Canvas uses the decoded static poster when available; SVG rejects animated GIF bytes and records resource plus playback fallbacks. Filters, video and the full Figma image-adjustment surface remain staged.",
     errorCode: "RESOURCE_UNAVAILABLE",
   },
   {
@@ -241,7 +241,7 @@ export const RUNTIME_CAPABILITIES: readonly RuntimeCapability[] = [
     property: "embedData|linkUnfurlData|createLinkPreviewAsync",
     surface: "write",
     status: "partial",
-    limitation: "Existing Embed and LinkUnfurl nodes expose immutable provider-resolved metadata through live Runtime proxies. createLinkPreviewAsync delegates provider discovery to an explicit host resolver, validates bounded HTTP(S) metadata, then stages one normal Canonical create transaction. Thumbnail retrieval, iframe activation and clone remain staged.",
+    limitation: "Existing Embed and LinkUnfurl nodes expose immutable provider-resolved metadata through live Runtime proxies, including nullable Embed description. createLinkPreviewAsync delegates provider discovery to an explicit host resolver, validates bounded HTTP(S) metadata, then stages one normal Canonical create transaction. Metadata persists through Core history, snapshots and clone; render and export use stored safe cards without contacting the provider. Thumbnail retrieval and iframe activation remain staged.",
   },
   {
     id: "runtime.view-state",

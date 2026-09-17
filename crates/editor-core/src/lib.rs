@@ -4781,12 +4781,11 @@ impl Document {
                     .nodes
                     .get(id)
                     .ok_or(CommandError::MissingNode { id: *id })?;
-                if !image_fill_supported(&node.kind)
+                if !image_fill_supported(&node.kind) && node.kind != NodeKind::Media
                     || asset_id.is_some_and(|asset_id| {
-                        !self
-                            .assets
-                            .get(&asset_id)
-                            .is_some_and(|asset| asset.media_type.starts_with("image/"))
+                        !self.assets.get(&asset_id).is_some_and(|asset| {
+                            node_asset_supported(&node.kind, &asset.media_type)
+                        })
                     })
                 {
                     return Err(CommandError::InvalidAsset);
@@ -8295,11 +8294,10 @@ impl Document {
         node: Node,
         asset_id: AssetId,
     ) -> Result<AppliedChange, CommandError> {
-        if !image_fill_supported(&node.kind)
-            || !self
-                .assets
-                .get(&asset_id)
-                .is_some_and(|asset| asset.media_type.starts_with("image/"))
+        if !self
+            .assets
+            .get(&asset_id)
+            .is_some_and(|asset| node_asset_supported(&node.kind, &asset.media_type))
         {
             return Err(CommandError::InvalidAsset);
         }
@@ -8437,11 +8435,10 @@ impl Document {
             return Err(CommandError::InvalidAsset);
         }
         if let Some(asset_id) = asset_id {
-            if !image_fill_supported(&node.kind)
-                || !self
-                    .assets
-                    .get(&asset_id)
-                    .is_some_and(|asset| asset.media_type.starts_with("image/"))
+            if !self
+                .assets
+                .get(&asset_id)
+                .is_some_and(|asset| node_asset_supported(&node.kind, &asset.media_type))
             {
                 return Err(CommandError::InvalidAsset);
             }
@@ -11478,6 +11475,16 @@ fn image_fill_supported(kind: &NodeKind) -> bool {
             | NodeKind::Ellipse
             | NodeKind::Image
     )
+}
+
+fn node_asset_supported(kind: &NodeKind, media_type: &str) -> bool {
+    match kind {
+        // MediaData enters this boundary through createGif. Keep its durable
+        // binding narrower than ordinary image fills so PNG and future video
+        // resources cannot silently acquire GIF playback semantics.
+        NodeKind::Media => media_type == "image/gif",
+        _ => image_fill_supported(kind) && media_type.starts_with("image/"),
+    }
 }
 
 /// Canonical text style records are owned by Text, by the embedded TextSublayer
@@ -16470,6 +16477,68 @@ mod tests {
 
         document.redo().unwrap();
         assert_eq!(document.asset_for_node(NodeId(11)), Some(asset.asset_id));
+    }
+
+    #[test]
+    fn media_nodes_bind_only_gif_assets_and_restore_through_history() {
+        let gif = AssetReference {
+            asset_id: AssetId(12),
+            content_hash: [6; 32],
+            media_type: "image/gif".into(),
+            byte_length: 512,
+            dimensions: Some([320, 180]),
+            font_faces: Vec::new(),
+        };
+        let png = AssetReference {
+            asset_id: AssetId(13),
+            content_hash: [7; 32],
+            media_type: "image/png".into(),
+            byte_length: 256,
+            dimensions: Some([64, 32]),
+            font_faces: Vec::new(),
+        };
+        let mut document = Document::empty();
+        document.seed_asset(gif.clone()).unwrap();
+        document.seed_asset(png.clone()).unwrap();
+        let mut media = node(14);
+        media.kind = NodeKind::Media;
+        document
+            .submit(
+                transaction(
+                    0,
+                    vec![Command::CreateImageInPage {
+                        page_id: DEFAULT_PAGE_ID,
+                        node: media,
+                        asset_id: gif.asset_id,
+                    }],
+                ),
+                Origin::LocalUser,
+            )
+            .unwrap();
+        assert_eq!(document.asset_for_node(NodeId(14)), Some(gif.asset_id));
+
+        document.undo().unwrap();
+        assert_eq!(document.node(NodeId(14)), None);
+        assert_eq!(document.asset_for_node(NodeId(14)), None);
+        document.redo().unwrap();
+        assert_eq!(document.asset_for_node(NodeId(14)), Some(gif.asset_id));
+
+        let mut invalid_media = node(15);
+        invalid_media.kind = NodeKind::Media;
+        assert_eq!(
+            document.submit(
+                transaction(
+                    document.revision,
+                    vec![Command::CreateImageInPage {
+                        page_id: DEFAULT_PAGE_ID,
+                        node: invalid_media,
+                        asset_id: png.asset_id,
+                    }],
+                ),
+                Origin::LocalUser,
+            ),
+            Err(CommandError::InvalidAsset)
+        );
     }
 
     #[test]

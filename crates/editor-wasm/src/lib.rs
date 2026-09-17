@@ -388,7 +388,9 @@ impl DocumentEngine {
                         .map(|id| AssetId(id.0));
                     let node = node_from_projection(node)?;
                     let node_id = node.id;
-                    if node.kind == NodeKind::Image {
+                    if node.kind == NodeKind::Image
+                        || (node.kind == NodeKind::Media && asset_id.is_some())
+                    {
                         commands.push(Command::CreateImageInPage {
                             page_id,
                             node,
@@ -10712,6 +10714,50 @@ mod tests {
                 .document
                 .node(parse_id(image_id).unwrap())
                 .is_none()
+        );
+
+        let gif_asset_id = "00000000-0000-4000-8000-000000000029";
+        let media_id = "00000000-0000-4000-8000-000000000030";
+        let mut media = node(media_id, "GIF media");
+        media.kind = "media".into();
+        media.asset_id = Some(gif_asset_id.into());
+        media.extensions.insert(
+            "figma.media.metadata.v1".into(),
+            br#"{"hash":"00000000-0000-4000-8000-000000000029"}"#.to_vec(),
+        );
+        let mut media_engine = DocumentEngine::new();
+        media_engine
+            .submit_batch(
+                NodeId(29),
+                0,
+                vec![
+                    BatchCommand::RegisterAsset {
+                        asset: ProjectionAsset {
+                            asset_id: gif_asset_id.into(),
+                            content_hash: "ef".repeat(32),
+                            media_type: "image/gif".into(),
+                            byte_length: 256,
+                            pixel_width: Some(320),
+                            pixel_height: Some(180),
+                            font_faces: Vec::new(),
+                        },
+                    },
+                    BatchCommand::Create { node: media },
+                ],
+            )
+            .unwrap();
+        let media_core_id = parse_id(media_id).unwrap();
+        let gif_core_id = AssetId(parse_id(gif_asset_id).unwrap().0);
+        assert_eq!(
+            media_engine.document.asset_for_node(media_core_id),
+            Some(gif_core_id)
+        );
+        media_engine.undo().unwrap();
+        assert_eq!(media_engine.document.node(media_core_id), None);
+        media_engine.redo().unwrap();
+        assert_eq!(
+            media_engine.document.asset_for_node(media_core_id),
+            Some(gif_core_id)
         );
     }
 

@@ -6,7 +6,8 @@ describe("M6 special-node fallbacks", () => {
   it("keeps static Canvas cards while exposing only lossy or remote behavior", () => {
     expect(specialNodeFallback(createNode("sticky", 0, 0), "canvas")).toBeUndefined();
     expect(specialNodeFallback({ ...createNode("connector", 0, 0), connectorMetadata: { ...createNode("connector", 0, 0).connectorMetadata!, lineType: "ELBOWED" } }, "canvas")).toBeUndefined();
-    expect(specialNodeFallback(createNode("media", 0, 0), "canvas")).toMatchObject({ code: "M6_MEDIA_PLAYBACK_FALLBACK" });
+    expect(specialNodeFallback(createNode("media", 0, 0), "canvas")).toMatchObject({ code: "M6_MEDIA_RESOURCE_UNAVAILABLE_FALLBACK" });
+    expect(specialNodeFallback({ ...createNode("media", 0, 0), assetId: "gif-asset", mediaMetadata: { hash: "gif-content-hash" } }, "canvas")).toMatchObject({ code: "M6_MEDIA_PLAYBACK_FALLBACK" });
     expect(specialNodeFallback({ ...createNode("shapeWithText", 0, 0), shapeWithTextType: "STAR" }, "canvas")).toBeUndefined();
     expect(specialNodeFallback({ ...createNode("transformGroup", 0, 0), transformModifiers: [{ type: "REPEAT", count: 2, unitType: "RELATIVE", offset: 1, repeatType: "LINEAR", axis: "HORIZONTAL" }] }, "canvas")).toMatchObject({ code: "M6_TRANSFORM_GROUP_REPEAT_FALLBACK" });
   });

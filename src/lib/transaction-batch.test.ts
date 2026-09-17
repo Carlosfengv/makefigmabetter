@@ -1443,6 +1443,11 @@ describe("clipboard capture and paste resolution", () => {
     expect(clipboard?.nodes[0]).not.toBe(subtreeDocument()[0]);
   });
 
+  it("keeps a Media GIF resource in the clipboard manifest", () => {
+    const media = { ...createNode("media", 0, 0), id: imageId, assetId: "asset-gif", mediaMetadata: { hash: "asset-gif" } };
+    expect(captureClipboard([media], [media.id], 19)?.assetIds).toEqual(["asset-gif"]);
+  });
+
   it("collapses an ancestor+descendant selection to the single owning root", () => {
     const clipboard = captureClipboard(subtreeDocument(), [frameId, imageId], 19);
     expect(clipboard?.rootIds).toEqual([frameId]);

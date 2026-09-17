@@ -1720,7 +1720,7 @@ export function captureClipboard(nodes: readonly CanvasNode[], ids: readonly str
 
 function referencedAssetIds(nodes: readonly CanvasNode[]) {
   return [...new Set(nodes.flatMap((node) => [
-    ...(node.kind === "image" && node.assetId ? [node.assetId] : []),
+    ...((node.kind === "image" || node.kind === "media") && node.assetId ? [node.assetId] : []),
     ...(node.fillStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.strokeStack?.layers.flatMap((layer) => layer.image ? [layer.image.assetId] : []) ?? []),
     ...(node.textProperties?.runs.flatMap((run) => run.font ? [run.font.assetId] : []) ?? []),

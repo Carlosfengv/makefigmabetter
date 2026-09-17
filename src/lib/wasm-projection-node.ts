@@ -131,7 +131,8 @@ function embedMetadataFromExtensions(extensions: CanvasNode["extensions"]): Canv
   const bytes = extensions?.["figma.embed.metadata.v1"];
   try {
     const value = bytes && JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes))) as Partial<NonNullable<CanvasNode["embedMetadata"]>>;
-    if (value && typeof value.srcUrl === "string" && [value.canonicalUrl, value.title, value.provider].every((entry) => entry === null || typeof entry === "string")) return value as NonNullable<CanvasNode["embedMetadata"]>;
+    const description = value?.description ?? null;
+    if (value && typeof value.srcUrl === "string" && [value.canonicalUrl, value.title, description, value.provider].every((entry) => entry === null || typeof entry === "string")) return { ...value, description } as NonNullable<CanvasNode["embedMetadata"]>;
   } catch { /* malformed forward data is not a valid embed */ }
   return undefined;
 }

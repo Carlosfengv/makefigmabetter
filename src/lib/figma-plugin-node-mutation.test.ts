@@ -138,9 +138,9 @@ describe("Figma Plugin API node mutation adapter", () => {
   });
 
   it("creates an Embed only through validated resolved link-preview data", () => {
-    const created = createFigmaPluginLinkPreview({ srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" }, 12, 24, () => "embed");
+    const created = createFigmaPluginLinkPreview({ srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", description: "Demo preview", provider: "Example" }, 12, 24, () => "embed");
     expect(created).toMatchObject({ ok: true, embedId: "embed", commands: [{ type: "create", node: { kind: "embed", name: "Demo", embedMetadata: { provider: "Example" } } }] });
-    expect(createFigmaPluginLinkPreview({ srcUrl: "not a URL", canonicalUrl: null, title: null, provider: null }, 0, 0, () => "invalid")).toEqual({ ok: false, reason: "createLinkPreviewAsync requires a valid HTTP(S) EmbedData payload and finite coordinates." });
+    expect(createFigmaPluginLinkPreview({ srcUrl: "not a URL", canonicalUrl: null, title: null, description: null, provider: null }, 0, 0, () => "invalid")).toEqual({ ok: false, reason: "createLinkPreviewAsync requires a valid HTTP(S) EmbedData payload and finite coordinates." });
   });
 
   it("writes Highlight handle mirroring and its canonical vector path", () => {

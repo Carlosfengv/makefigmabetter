@@ -10,6 +10,21 @@ import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwo
 const pageId = "00000000-0000-0000-0000-000000000001";
 
 describe("SVG export", () => {
+  it("rejects animated GIF bytes from structural SVG and reports both resource and playback fallbacks", () => {
+    const media = { ...createNode("media", 0, 0), id: "00000000-0000-4000-8000-000000000970", pageId, assetId: "gif-asset", mediaMetadata: { hash: "gif-asset" } };
+    const result = exportPageToSvg([media], {
+      pageId,
+      defaultPageId: pageId,
+      padding: 0,
+      imageDataUris: new Map([["gif-asset", "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="]]),
+    });
+
+    expect(result.svg).not.toContain("data:image/gif");
+    expect(result.svg).toContain("Media preview");
+    expect(result.compatibilityFallbacks).toContainEqual(expect.objectContaining({ nodeId: media.id, capability: "special-node", reason: expect.stringContaining("MEDIA_PLAYBACK") }));
+    expect(result.compatibilityFallbacks).toContainEqual(expect.objectContaining({ nodeId: media.id, capability: "image-asset" }));
+  });
+
   it("uses a matching shared Scene IR order instead of re-sorting the export input", () => {
     const back = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000971", pageId, width: 20, height: 20, fills: [{ css: "#ff0000" }], strokeWidth: 0, positionId: "00000000000000000000000000000001:00000000000000000000000000000000" };
     const front = { ...createNode("rectangle", 0, 0), id: "00000000-0000-4000-8000-000000000972", pageId, width: 20, height: 20, fills: [{ css: "#0000ff" }], strokeWidth: 0, positionId: "00000000000000000000000000000002:00000000000000000000000000000000" };

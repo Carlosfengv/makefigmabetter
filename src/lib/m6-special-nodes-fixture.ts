@@ -35,7 +35,7 @@ export function createM6SpecialNodesFixture(): M6SpecialNodesFixture {
   ];
   const media = node("media", "00000000-0000-4000-8000-00000000a610", "Demo media", 440, 220, { width: 220, height: 124, mediaMetadata: { hash: "m6-demo-media" } });
   const embed = node("embed", "00000000-0000-4000-8000-00000000a611", "Prototype embed", 700, 220, {
-    width: 220, height: 124, embedMetadata: { srcUrl: "https://example.com/embed", canonicalUrl: "https://example.com/embed", title: "Prototype", provider: "Example" },
+    width: 220, height: 124, embedMetadata: { srcUrl: "https://example.com/embed", canonicalUrl: "https://example.com/embed", title: "Prototype", description: "Interactive prototype", provider: "Example" },
   });
   const unfurl = node("linkUnfurl", "00000000-0000-4000-8000-00000000a612", "Launch link", 960, 220, {
     width: 220, height: 124, linkUnfurlMetadata: { url: "https://example.com/launch", title: "Launch notes", description: "M6 safe preview", provider: "Example" },

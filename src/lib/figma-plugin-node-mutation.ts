@@ -794,7 +794,7 @@ function validEmbedMetadata(value: unknown): value is NonNullable<CanvasNode["em
   if (!value || typeof value !== "object") return false;
   const embed = value as Record<string, unknown>;
   return typeof embed.srcUrl === "string" && /^https?:\/\//u.test(embed.srcUrl)
-    && [embed.canonicalUrl, embed.title, embed.provider].every((entry) => entry === null || typeof entry === "string");
+    && [embed.canonicalUrl, embed.title, embed.description, embed.provider].every((entry) => entry === null || typeof entry === "string");
 }
 function validLinkUnfurlMetadata(value: unknown): value is NonNullable<CanvasNode["linkUnfurlMetadata"]> {
   if (!value || typeof value !== "object") return false;

@@ -613,7 +613,7 @@ describe("protocol operation codec", () => {
   });
 
   it("serializes Embed with its dedicated node kind and readonly preview metadata", () => {
-    const node = { ...createNode("embed", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: null, title: "Demo", provider: "Example" } };
+    const node = { ...createNode("embed", 10, 20), id, pageId: "00000000-0000-0000-0000-000000000001", positionId: "00000000000000000000000000000001:00000000000000000000000000000000", embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: null, title: "Demo", description: "Demo preview", provider: "Example" } };
     const batch = ResolvedOperationBatch.decode(encodeCoreBatchPayload(resolveCoreBatch([], [{ type: "create", node }])!.batch));
     expect(batch.operations[0].createNode?.node).toMatchObject({ kind: NodeKind.NODE_KIND_EMBED, width: 360, height: 240 });
     expect(new TextDecoder().decode(batch.operations[0].createNode?.node?.extensions["figma.embed.metadata.v1"])).toContain("player.example");

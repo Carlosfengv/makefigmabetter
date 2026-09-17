@@ -105,7 +105,7 @@ describe("Figma Plugin API node projection", () => {
   });
 
   it("projects Embed's readonly resolved preview metadata", () => {
-    const embed = { ...createNode("embed", 0, 0), id: "embed", embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" } };
+    const embed = { ...createNode("embed", 0, 0), id: "embed", embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", description: "Demo preview", provider: "Example" } };
     expect(projectFigmaPluginNode([embed], embed)).toMatchObject({ type: "EMBED", embedData: embed.embedMetadata });
   });
 

@@ -5191,7 +5191,7 @@ describe("M1 RuntimeSession", () => {
           name: "Video",
           parentId: "page",
           siblingIndex: 0,
-          embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" },
+          embedMetadata: { srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", description: "Demo preview", provider: "Example" },
         },
         {
           id: "link",
@@ -5207,7 +5207,7 @@ describe("M1 RuntimeSession", () => {
     const embed = (await session.getNodeByIdAsync("embed"))!;
     const link = (await session.getNodeByIdAsync("link"))!;
 
-    expect(embed.embedData).toEqual({ srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", provider: "Example" });
+    expect(embed.embedData).toEqual({ srcUrl: "https://player.example/embed/1", canonicalUrl: "https://example.com/watch/1", title: "Demo", description: "Demo preview", provider: "Example" });
     expect(link.linkUnfurlData).toEqual({ url: "https://example.com/story", title: "Story", description: "Summary", provider: "Example" });
     expect(isRuntimeError(captureError(() => embed.linkUnfurlData), "UNSUPPORTED_PROPERTY")).toBe(true);
     expect(isRuntimeError(captureError(() => link.mediaData), "UNSUPPORTED_PROPERTY")).toBe(true);
@@ -5216,12 +5216,12 @@ describe("M1 RuntimeSession", () => {
   it("creates provider-resolved Embed and LinkUnfurl nodes through the host boundary", async () => {
     const transport = new InMemoryTransport(initial) as InMemoryTransport & {
       resolveLinkPreviewAsync: (url: string) => Promise<
-        | { type: "EMBED"; data: { srcUrl: string; canonicalUrl: string | null; title: string | null; provider: string | null } }
+        | { type: "EMBED"; data: { srcUrl: string; canonicalUrl: string | null; title: string | null; description: string | null; provider: string | null } }
         | { type: "LINK_UNFURL"; data: { url: string; title: string | null; description: string | null; provider: string | null } }
       >;
     };
     transport.resolveLinkPreviewAsync = vi.fn(async (url: string) => url.includes("video")
-      ? { type: "EMBED" as const, data: { srcUrl: "https://player.example/embed/1", canonicalUrl: url, title: "Video", provider: "Example" } }
+      ? { type: "EMBED" as const, data: { srcUrl: "https://player.example/embed/1", canonicalUrl: url, title: "Video", description: "Video preview", provider: "Example" } }
       : { type: "LINK_UNFURL" as const, data: { url, title: "Story", description: "Summary", provider: "Example" } });
     let nextId = 0;
     const session = new RuntimeSession({
@@ -5252,7 +5252,7 @@ describe("M1 RuntimeSession", () => {
     expect(withoutResolver.projectionStore.pendingTransactionIds()).toEqual([]);
 
     const transport = new InMemoryTransport(initial) as InMemoryTransport & { resolveLinkPreviewAsync: () => Promise<unknown> };
-    transport.resolveLinkPreviewAsync = async () => ({ type: "EMBED", data: { srcUrl: "file:///private", canonicalUrl: null, title: null, provider: null } });
+    transport.resolveLinkPreviewAsync = async () => ({ type: "EMBED", data: { srcUrl: "file:///private", canonicalUrl: null, title: null, description: null, provider: null } });
     const invalidResolver = new RuntimeSession({ sessionId: "invalid-preview-resolver", projection: initial, transport: transport as never, scheduleMicrotask: () => {} });
     await expect(invalidResolver.createLinkPreviewAsync("https://example.com")).rejects.toSatisfy((error: unknown) => isRuntimeError(error, "RESOURCE_UNAVAILABLE"));
     expect(invalidResolver.projectionStore.pendingTransactionIds()).toEqual([]);
