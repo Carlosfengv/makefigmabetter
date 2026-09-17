@@ -26,6 +26,17 @@ describe("Canvas primitive hit testing", () => {
     const shape = { ...text, kind: "shapeWithText" as const, shapeWithTextType: "DIAMOND" as const };
     expect(nodeContainsWorldPoint(shape, { x: -20, y: 15 })).toBe(true);
     expect(nodeContainsWorldPoint(shape, { x: 5, y: 5 })).toBe(false);
+
+    const rtl = {
+      ...text,
+      text: "א",
+      textProperties: {
+        ...text.textProperties,
+        runs: [{ ...text.textProperties.runs[0]!, end: 2 }],
+      },
+    };
+    expect(nodeContainsWorldPoint(rtl, { x: 120, y: 15 })).toBe(true);
+    expect(nodeContainsWorldPoint(rtl, { x: -20, y: 15 })).toBe(false);
   });
 
   it("does not select transparent corners of ellipses and rounded rectangles", () => {

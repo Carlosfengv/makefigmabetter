@@ -70,6 +70,28 @@ describe("worldVisualBoundsForNode", () => {
       },
     };
     expect(worldVisualBoundsForNode([runOnlyList], runOnlyList)).toEqual({ left: -65, top: 20, right: 110, bottom: 80 });
+
+    const rtl = {
+      ...text,
+      id: "hanging-rtl-list",
+      text: "א",
+      textProperties: {
+        ...text.textProperties,
+        runs: [{ ...text.textProperties.runs[0]!, end: 2 }],
+      },
+    };
+    expect(worldVisualBoundsForNode([rtl], rtl)).toEqual({ left: 10, top: 20, right: 185, bottom: 80 });
+
+    const mixedDirections = {
+      ...text,
+      id: "hanging-mixed-direction-list",
+      text: "One\nא",
+      textProperties: {
+        ...text.textProperties,
+        runs: [{ ...text.textProperties.runs[0]!, end: 6 }],
+      },
+    };
+    expect(worldVisualBoundsForNode([mixedDirections], mixedDirections)).toEqual({ left: -65, top: 20, right: 185, bottom: 80 });
   });
 
   it("includes hanging punctuation on both inline edges", () => {

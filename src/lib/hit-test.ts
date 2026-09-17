@@ -61,8 +61,9 @@ export function nodeContainsWorldPoint(node: CanvasNode, point: WorldPoint, node
   if (node.height <= 0) return false;
   const hangingListBounds = hangingListLocalBounds(node);
   if (hangingListBounds
-    && local.x < 0
+    && (local.x < 0 || local.x > node.width)
     && local.x >= hangingListBounds.x
+    && local.x <= hangingListBounds.x + hangingListBounds.width
     && local.y >= hangingListBounds.y
     && local.y <= hangingListBounds.y + hangingListBounds.height) return true;
   const strokeAlign = node.strokeAlign ?? "inside";

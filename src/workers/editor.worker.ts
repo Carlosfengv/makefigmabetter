@@ -6072,7 +6072,7 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
     const hangingMarkerClip = node.textProperties?.paragraph.hangingList ? listMarkerGutter : 0;
     const hangingPunctuationClip = node.textProperties?.paragraph.hangingPunctuation ? fontSize : 0;
     ctx.beginPath();
-    ctx.rect(-hangingMarkerClip - hangingPunctuationClip, 0, textMetrics.width + hangingMarkerClip + hangingPunctuationClip * 2, textMetrics.height);
+    ctx.rect(-hangingMarkerClip - hangingPunctuationClip, 0, textMetrics.width + hangingMarkerClip * 2 + hangingPunctuationClip * 2, textMetrics.height);
     ctx.clip();
     const shapedLayout = rustTextLayoutFor(node);
     const lines = shapedLayout
@@ -6402,7 +6402,7 @@ function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, nod
     ? listMarkerGutter
     : 0;
   const hangingPunctuationClip = node.textProperties?.paragraph.hangingPunctuation ? primaryStyle.fontSize * viewport.zoom : 0;
-  ctx.rect(inset - hangingMarkerClip - hangingPunctuationClip, inset, availableWidth + hangingMarkerClip + hangingPunctuationClip * 2, availableHeight);
+  ctx.rect(inset - hangingMarkerClip - hangingPunctuationClip, inset, availableWidth + hangingMarkerClip * 2 + hangingPunctuationClip * 2, availableHeight);
   ctx.clip();
   ctx.textBaseline = "alphabetic";
   const lines = layoutTextRanges({

@@ -2,7 +2,7 @@ import type { CanvasNode } from "./editor-protocol";
 import { closedShapeStrokeLocalBounds } from "./closed-shape-stroke-bounds";
 import { worldLineVisualBounds } from "./line-world-bounds";
 import { normalizedNodeEffects } from "./normalized-node-view";
-import { textListMarkerGutterForProperties } from "./text-layout";
+import { textListMarkerGutterForProperties, textParagraphListTypeAt, textParagraphRanges } from "./text-layout";
 import { transformPoint, worldBoundsForNode, worldTransformForNode, type AffineMatrix, type TransformBounds } from "./scene-transform";
 
 type PrecomputedWorldGeometry = Readonly<{ transform: AffineMatrix; bounds: TransformBounds; defaultPageId?: string; nodeById?: ReadonlyMap<string, CanvasNode>; worldTransformByNodeId?: ReadonlyMap<string, AffineMatrix> }>;
@@ -11,7 +11,7 @@ type PrecomputedWorldGeometry = Readonly<{ transform: AffineMatrix; bounds: Tran
  * The selection/culling/export envelope for common shapes. Line already owns
  * a precise cap/marker envelope; full Ellipse, Frame and Rectangle expand when
  * their visible Stroke is Center or Outside; hanging list markers extend the
- * Text or ShapeWithText envelope to the left. The affine rectangle is
+ * Text or ShapeWithText envelope at each listed paragraph's visual start. The affine rectangle is
  * conservative for rotated shapes, which is desirable here: it must never
  * clip rendered paint.
  */
@@ -52,9 +52,18 @@ export function hangingListLocalBounds(node: CanvasNode): LocalBounds | undefine
     Array.from(value).length * conservativeScalarAdvance);
   const inset = node.kind === "shapeWithText" ? 10 : 0;
   const extension = Math.max(0, gutter - inset);
-  return extension > 0
-    ? { x: -extension, y: 0, width: node.width + extension, height: node.height }
-    : undefined;
+  if (extension <= 0) return undefined;
+  const listedParagraphs = textParagraphRanges(source).filter(({ start }) =>
+    textParagraphListTypeAt(node.textProperties, start));
+  const extendsLeft = listedParagraphs.some(({ direction }) => direction === "ltr");
+  const extendsRight = listedParagraphs.some(({ direction }) => direction === "rtl");
+  if (!extendsLeft && !extendsRight) return undefined;
+  return {
+    x: extendsLeft ? -extension : 0,
+    y: 0,
+    width: node.width + (extendsLeft ? extension : 0) + (extendsRight ? extension : 0),
+    height: node.height,
+  };
 }
 
 export function hangingTextLocalBounds(node: CanvasNode): LocalBounds | undefined {
