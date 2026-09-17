@@ -3050,6 +3050,56 @@ describe("M1 RuntimeSession", () => {
     )?.map((region) => region.fillStack?.layers[0]?.paint?.css)).toEqual(["#ff0000ff", "#0000ffff"]);
   });
 
+  it("preserves one shared solid stroke across rigidly transformed flatten sources", async () => {
+    const strokeStack = { layers: [{
+      visible: true,
+      opacity: 1,
+      blendMode: "normal" as const,
+      paint: { css: "#ff0000", color: { space: "srgb" as const, components: [1, 0, 0] as [number, number, number], alpha: 1 } },
+    }] };
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "first", type: "RECTANGLE", name: "First", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fill: "#ffffff", stroke: "#ff0000", strokeWidth: 2, strokeStack, strokeJoin: "round", strokeDashPattern: [4, 2] },
+        { id: "second", type: "ELLIPSE", name: "Second", parentId: "page", siblingIndex: 1, x: 30, y: 0, width: 20, height: 20, fill: "#ffffff", stroke: "#ff0000", strokeWidth: 2, strokeStack: structuredClone(strokeStack), strokeJoin: "round", strokeDashPattern: [4, 2] },
+      ],
+    };
+    const session = new RuntimeSession({
+      sessionId: "flatten-shared-stroke",
+      projection,
+      transport: new InMemoryTransport(projection),
+      scheduleMicrotask: () => {},
+    });
+    const first = (await session.getNodeByIdAsync("first"))!;
+    const second = (await session.getNodeByIdAsync("second"))!;
+
+    const flattened = session.flatten([first, second]);
+
+    expect(flattened.strokeWeight).toBe(2);
+    expect(flattened.strokeJoin).toBe("ROUND");
+    expect(flattened.dashPattern).toEqual([4, 2]);
+    expect(flattened.strokes).toEqual([expect.objectContaining({
+      type: "SOLID",
+      color: { r: 1, g: 0, b: 0 },
+      opacity: 1,
+    })]);
+
+    const shearedProjection = structuredClone(projection);
+    const shearedSource = shearedProjection.nodes.find((node) => node.id === "first")!;
+    shearedSource.relativeTransform = { a: 1, b: 0, c: .25, d: 1, e: 0, f: 0 };
+    const shearedSession = new RuntimeSession({
+      sessionId: "flatten-sheared-stroke",
+      projection: shearedProjection,
+      transport: new InMemoryTransport(shearedProjection),
+      scheduleMicrotask: () => {},
+    });
+    const shearedFirst = (await shearedSession.getNodeByIdAsync("first"))!;
+    const shearedSecond = (await shearedSession.getNodeByIdAsync("second"))!;
+    expect(isRuntimeError(captureError(() => shearedSession.flatten([shearedFirst, shearedSecond])), "UNSUPPORTED_FEATURE")).toBe(true);
+  });
+
   it("remaps linear and non-linear flatten gradients into the replacement box", async () => {
     const linear = {
       layers: [{

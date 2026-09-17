@@ -2675,6 +2675,13 @@ export class RuntimeSession implements RuntimeContainerHost {
     if (!fillRule || subpaths.length > MAX_RUNTIME_FLATTEN_SUBPATHS || pointCount > MAX_RUNTIME_FLATTEN_POINTS) {
       throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
     }
+    const strokeSignatures = orderedSelected.map((node, sourceIndex) => runtimeMultiFlattenStrokeSignature(
+      node,
+      resolvedPaths[sourceIndex]!.relative,
+    ));
+    if (strokeSignatures.some((signature) => signature === undefined) || new Set(strokeSignatures).size !== 1) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
     const paintStacks = orderedSelected.map((node, sourceIndex) => runtimeFlattenRegionPaintStack(
       runtimeMultiFlattenPaintStack(node)!,
       resolvedPaths[sourceIndex]!.sourceWidth,
@@ -4937,8 +4944,7 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
     node.isMask === true ||
     node.dropShadow !== undefined ||
     (Array.isArray(node.effectStack) && node.effectStack.length > 0) ||
-    finiteNodeNumber(node.strokeWidth, 0) !== 0 ||
-    ["fillColor", "fillGradient", "fills", "fillStyleId", "strokeColor", "strokeGradient", "strokes", "strokeStack", "strokeStyleId"].some((property) => node[property] !== undefined)
+    ["fillColor", "fillGradient", "fills", "fillStyleId"].some((property) => node[property] !== undefined)
   ) return undefined;
   if (node.fillStack !== undefined) {
     try {
@@ -4963,6 +4969,57 @@ function runtimeMultiFlattenPaintStack(node: RuntimeProjectionNode): DocumentPai
   } catch {
     return undefined;
   }
+}
+
+/** A shared solid stroke can stay node-global when every source transform is
+ * rigid. Non-uniform scale/shear would require stroke-to-fill conversion. */
+function runtimeMultiFlattenStrokeSignature(node: RuntimeProjectionNode, sourceToReplacement: RuntimeTransform): string | undefined {
+  const strokeWidth = finiteNodeNumber(node.strokeWidth, 0);
+  const structuredFields = ["strokeColor", "strokeGradient", "strokes", "strokeStack", "strokeStyleId"] as const;
+  if (strokeWidth === 0) return structuredFields.some((property) => node[property] !== undefined) ? undefined : "none";
+  if (strokeWidth < 0 || !runtimeIsRigidTransform(sourceToReplacement) || node.strokeWeights !== undefined || node.strokeStyleId !== undefined) return undefined;
+  if (["strokeColor", "strokeGradient", "strokes"].some((property) => node[property] !== undefined)) return undefined;
+  let paints: unknown;
+  if (node.strokeStack !== undefined) {
+    try {
+      const stack = structuredClone(node.strokeStack as DocumentPaintStack);
+      const runtimePaints = runtimePaintsFromDocumentStack(stack);
+      const paint = runtimePaints[0];
+      if (runtimePaints.length !== 1 || paint?.type !== "SOLID" || paint.visible === false
+        || (paint.opacity ?? 1) !== 1 || (paint.blendMode !== undefined && paint.blendMode !== "NORMAL")) return undefined;
+      paints = runtimePaints;
+    } catch {
+      return undefined;
+    }
+  } else if (typeof node.stroke === "string" && /^#[\da-f]{6}(?:ff)?$/iu.test(node.stroke)) {
+    paints = node.stroke;
+  } else {
+    return undefined;
+  }
+  const dashPattern = node.strokeDashPattern;
+  if (dashPattern !== undefined && (!Array.isArray(dashPattern) || dashPattern.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0))) return undefined;
+  return JSON.stringify({
+    strokeWidth,
+    paints,
+    strokeCapStart: node.strokeCapStart ?? "none",
+    strokeCapEnd: node.strokeCapEnd ?? "none",
+    strokeJoin: node.strokeJoin ?? "miter",
+    strokeMiterLimit: finiteNodeNumber(node.strokeMiterLimit, 10),
+    strokeDashPattern: dashPattern ?? [],
+    strokeAlign: node.strokeAlign ?? "inside",
+  });
+}
+
+function runtimeIsRigidTransform(transform: RuntimeTransform) {
+  const firstLength = Math.hypot(transform.a, transform.b);
+  const secondLength = Math.hypot(transform.c, transform.d);
+  const dot = transform.a * transform.c + transform.b * transform.d;
+  const determinant = transform.a * transform.d - transform.b * transform.c;
+  const tolerance = 1e-9 * Math.max(1, firstLength, secondLength, Math.abs(determinant));
+  return Math.abs(firstLength - 1) <= tolerance
+    && Math.abs(secondLength - 1) <= tolerance
+    && Math.abs(dot) <= tolerance
+    && Math.abs(determinant - 1) <= tolerance;
 }
 
 function runtimeFlattenRegionPaintStack(
