@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentPaintStack, DocumentVectorPath } from "../lib/editor-protocol";
-import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
+import { canonicalVectorPathFromRuntimeNetwork, extensionsWithRuntimeVectorNetwork, runtimeVectorNetworkFromCanonical, runtimeVectorNetworkFromExtension, vectorNetworkMixedStrokeMesh, vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, vectorNetworkStrokeMeshContains } from "./runtime-vector-network";
 
 describe("Runtime VectorNetwork adapter", () => {
   it("round-trips independent open cubic chains and closed regions", () => {
@@ -290,7 +290,7 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
-  it("materializes mixed active joins and standard endpoint caps as one shared straight-network stroke mesh", () => {
+  it("materializes curved mixed joins and standard endpoint caps as one shared bounded stroke mesh", () => {
     let sequence = 0;
     const network = {
       vertices: [
@@ -300,7 +300,12 @@ describe("Runtime VectorNetwork adapter", () => {
         { x: 40, y: 20 },
         { x: 40, y: 40, strokeCap: "SQUARE" as const },
       ],
-      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 4 }],
+      segments: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 2, end: 3 },
+        { start: 3, end: 4 },
+      ],
     };
     const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `mixed-${sequence++}`, {
       strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
@@ -318,12 +323,29 @@ describe("Runtime VectorNetwork adapter", () => {
     });
 
     expect(mesh?.bounds).toEqual({ min: { x: -2, y: -2 }, max: { x: 42, y: 42 } });
-    expect(mesh?.triangles.length).toBeGreaterThan(20);
+    expect(mesh?.triangles.length).toBeGreaterThan(30);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 21, y: -1 })).toBe(true);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 18.25, y: 21.75 })).toBe(false);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 41.5, y: 18.5 })).toBe(true);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: -1.5, y: 0 })).toBe(true);
     expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 40, y: 41.5 })).toBe(true);
+    expect(mesh && vectorNetworkStrokeMeshContains(mesh, { x: 23.75, y: 6.25 })).toBe(true);
+
+    const backtrackingMesh = vectorNetworkMixedStrokeMesh({
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 10, y: 0, strokeJoin: "ROUND" },
+        { x: 20, y: 0, strokeJoin: "BEVEL" },
+        { x: 30, y: 0 },
+      ],
+      segments: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2, tangentStart: { x: 90, y: 0 }, tangentEnd: { x: -90, y: 0 } },
+        { start: 2, end: 3 },
+      ],
+    }, { strokeWidth: 4, strokeJoin: "miter", strokeMiterLimit: 10 });
+    expect(backtrackingMesh?.bounds?.min.x).toBeLessThan(-5);
+    expect(backtrackingMesh?.bounds?.max.x).toBeGreaterThan(35);
 
     expect(canonicalVectorPathFromRuntimeNetwork({
       ...network,
@@ -333,11 +355,22 @@ describe("Runtime VectorNetwork adapter", () => {
     }, () => "decorative", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
       .toMatchObject({ reason: expect.stringContaining("NONE, ROUND or SQUARE") });
 
+    let allocations = 0;
     expect(canonicalVectorPathFromRuntimeNetwork({
-      ...network,
-      segments: [{ start: 0, end: 1 }, { start: 1, end: 2, tangentStart: { x: 1, y: 0 } }, { start: 2, end: 3 }, { start: 3, end: 4 }],
-    }, () => "curve", { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
-      .toMatchObject({ reason: expect.stringContaining("straight") });
+      vertices: [
+        { x: 0, y: 0 },
+        { x: Number.MAX_VALUE, y: 0, strokeJoin: "ROUND" },
+        { x: 0, y: 20, strokeJoin: "BEVEL" },
+        { x: 20, y: 20 },
+      ],
+      segments: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2, tangentStart: { x: Number.MAX_VALUE, y: 0 } },
+        { start: 2, end: 3 },
+      ],
+    }, () => `overflow-${allocations++}`, { strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter" }))
+      .toMatchObject({ reason: expect.stringContaining("tessellation budget") });
+    expect(allocations).toBe(0);
   });
 
   it("rejects network details that neither VectorPath nor the bounded branch extension can render", () => {

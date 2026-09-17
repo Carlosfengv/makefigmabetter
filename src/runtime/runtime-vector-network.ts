@@ -64,6 +64,13 @@ export type VectorNetworkMixedStrokeMesh = Readonly<{
 const MAX_VECTOR_SUBPATHS = 64;
 const MAX_VECTOR_POINTS = 8_192;
 const MAX_VECTOR_NETWORK_EXTENSION_BYTES = 256 * 1024;
+const MIXED_STROKE_CURVE_TOLERANCE = .25;
+const MAX_MIXED_STROKE_CURVE_DEPTH = 20;
+const MIXED_STROKE_CURVE_MITER_LIMIT = 4;
+// 16,384 centerline segments leave enough room under the 200K triangle cap
+// even when every one of the 8,192 authored vertices uses a round join.
+const MAX_MIXED_STROKE_SEGMENTS = 16_384;
+const MAX_MIXED_STROKE_TRIANGLES = 200_000;
 export const VECTOR_NETWORK_EXTENSION = "figma.runtime.vector-network.v1";
 
 /**
@@ -129,8 +136,8 @@ export function runtimeVectorNetworkFromCanonical(
  * branches with region-local fill rules. Region render data is persisted
  * separately from the derived fallback path. Bounded straight-chain corner
  * radii materialize into cubic fillets while the authored vertices survive in
- * the path-bound extension. Mixed joins are admitted only for the exact
- * straight, independent topology consumed by the shared derived stroke mesh.
+ * the path-bound extension. Mixed joins are admitted only for independent
+ * topology consumed by the shared bounded stroke mesh.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -229,11 +236,11 @@ export function canonicalVectorPathFromRuntimeNetwork(
     : component.vertexIndexes.slice(1, -1));
   const hasMixedActiveJoins = new Set(activeJoinVertexIndexes.map((vertexIndex) => resolvedVertexJoins[vertexIndex])).size > 1;
   const hasPerVertexCorners = input.vertices.some((vertex) => vertex.cornerRadius !== undefined);
-  if (hasMixedActiveJoins && input.segments.some((segment) => segment.tangentStart !== undefined || segment.tangentEnd !== undefined)) {
-    return { reason: "Mixed per-vertex stroke joins currently require straight VectorNetwork segments." };
-  }
   if (hasMixedActiveJoins && input.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)) {
     return { reason: "Mixed per-vertex stroke joins cannot be combined with corner radii." };
+  }
+  if (hasMixedActiveJoins && !mixedNetworkStrokeSegmentsWithinBudget(input, components)) {
+    return { reason: "Mixed per-vertex stroke joins exceed the bounded curve tessellation budget or contain degenerate curve geometry." };
   }
 
   const startCaps: StrokeCap[] = [];
@@ -509,9 +516,10 @@ export function runtimeVectorNetworkHasMixedActiveJoins(
   return new Set(joins).size > 1;
 }
 
-/** Builds the exact solid-stroke union used for the bounded mixed-join
- * VectorNetwork slice. The path-bound extension remains authoritative; this
- * triangle mesh is derived for Canvas paint, hit testing and SVG export. */
+/** Builds the bounded solid-stroke mesh used for mixed VectorNetwork joins.
+ * Curves use deterministic adaptive subdivision; the path-bound extension
+ * remains authoritative while Canvas paint, hit testing and SVG share this
+ * derived presentation mesh. */
 export function vectorNetworkMixedStrokeMeshFromExtension(
   extensions: unknown,
   path: DocumentVectorPath,
@@ -529,7 +537,6 @@ export function vectorNetworkMixedStrokeMesh(
     || !Number.isFinite(options.strokeWidth) || options.strokeWidth <= 0
     || !Number.isFinite(options.strokeMiterLimit) || options.strokeMiterLimit < 1
     || options.strokeDashPattern?.length
-    || network.segments.some((segment) => segment.tangentStart !== undefined || segment.tangentEnd !== undefined)
     || network.vertices.some((vertex) => (vertex.cornerRadius ?? 0) > 0)
   ) return undefined;
   const components = independentNetworkComponents(network);
@@ -540,28 +547,31 @@ export function vectorNetworkMixedStrokeMesh(
 
   const triangles: VectorNetworkStrokeTriangle[] = [];
   const half = options.strokeWidth / 2;
+  let remainingSegments = MAX_MIXED_STROKE_SEGMENTS;
   for (const component of components) {
     if (component.vertexIndexes.length < 2) continue;
     const points = component.vertexIndexes.map((vertexIndex) => network.vertices[vertexIndex]!);
-    const segments = component.segmentIndexes.map((segmentIndex) => {
-      const segment = network.segments[segmentIndex]!;
-      return networkStrokeSegment(network.vertices[segment.start]!, network.vertices[segment.end]!);
-    });
-    if (segments.some((segment) => !segment)) return undefined;
-    const resolvedSegments = segments as NetworkStrokeSegment[];
-    for (const segment of resolvedSegments) {
+    const resolved = networkStrokeSegmentGroups(network, component, remainingSegments);
+    if (!resolved || resolved.count === 0) return undefined;
+    remainingSegments -= resolved.count;
+    for (const segment of resolved.groups.flat()) {
       addNetworkStrokeQuad(triangles,
         offsetNetworkStrokePoint(segment.from, segment.normal, half),
         offsetNetworkStrokePoint(segment.to, segment.normal, half),
         offsetNetworkStrokePoint(segment.to, segment.normal, -half),
         offsetNetworkStrokePoint(segment.from, segment.normal, -half));
     }
+    for (const group of resolved.groups) {
+      for (let index = 1; index < group.length; index += 1) {
+        addNetworkStrokeJoin(triangles, group[index]!.from, group[index - 1]!, group[index]!, half, "miter", MIXED_STROKE_CURVE_MITER_LIMIT);
+      }
+    }
     const joinStart = component.closed ? 0 : 1;
     const joinEnd = component.closed ? points.length : points.length - 1;
     for (let index = joinStart; index < joinEnd; index += 1) {
       const vertexIndex = index % points.length;
-      const previous = resolvedSegments[(index + resolvedSegments.length - 1) % resolvedSegments.length]!;
-      const next = resolvedSegments[index % resolvedSegments.length]!;
+      const previous = resolved.groups[(index + resolved.groups.length - 1) % resolved.groups.length]!.at(-1)!;
+      const next = resolved.groups[index % resolved.groups.length]![0]!;
       addNetworkStrokeJoin(
         triangles,
         points[vertexIndex]!,
@@ -573,11 +583,11 @@ export function vectorNetworkMixedStrokeMesh(
       );
     }
     if (!component.closed) {
-      addNetworkStrokeCap(triangles, resolvedSegments[0]!, true, half, options.strokeCapStart ?? "none");
-      addNetworkStrokeCap(triangles, resolvedSegments.at(-1)!, false, half, options.strokeCapEnd ?? "none");
+      addNetworkStrokeCap(triangles, resolved.groups[0]![0]!, true, half, options.strokeCapStart ?? "none");
+      addNetworkStrokeCap(triangles, resolved.groups.at(-1)!.at(-1)!, false, half, options.strokeCapEnd ?? "none");
     }
   }
-  if (!triangles.length || triangles.length > 200_000) return undefined;
+  if (!triangles.length || triangles.length > MAX_MIXED_STROKE_TRIANGLES) return undefined;
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
@@ -658,6 +668,129 @@ type NetworkStrokeSegment = Readonly<{
   tangent: VectorNetworkStrokePoint;
   normal: VectorNetworkStrokePoint;
 }>;
+
+type NetworkStrokeSegmentGroups = Readonly<{
+  groups: readonly (readonly NetworkStrokeSegment[])[];
+  count: number;
+}>;
+
+function mixedNetworkStrokeSegmentsWithinBudget(
+  network: RuntimeVectorNetwork,
+  components: readonly IndependentNetworkComponent[],
+): boolean {
+  let remaining = MAX_MIXED_STROKE_SEGMENTS;
+  for (const component of components) {
+    if (!component.segmentIndexes.length) continue;
+    const resolved = networkStrokeSegmentGroups(network, component, remaining);
+    if (!resolved) return false;
+    remaining -= resolved.count;
+  }
+  return true;
+}
+
+function networkStrokeSegmentGroups(
+  network: RuntimeVectorNetwork,
+  component: IndependentNetworkComponent,
+  maximumSegments: number,
+): NetworkStrokeSegmentGroups | undefined {
+  const groups: Array<readonly NetworkStrokeSegment[]> = [];
+  let count = 0;
+  for (const segmentIndex of component.segmentIndexes) {
+    const segment = network.segments[segmentIndex]!;
+    const remaining = maximumSegments - count;
+    if (remaining <= 0) return undefined;
+    const group = networkStrokeSegments(
+      network.vertices[segment.start]!,
+      network.vertices[segment.end]!,
+      segment,
+      remaining,
+    );
+    if (!group?.length) return undefined;
+    groups.push(group);
+    count += group.length;
+  }
+  return { groups, count };
+}
+
+function networkStrokeSegments(
+  from: VectorNetworkStrokePoint,
+  to: VectorNetworkStrokePoint,
+  segment: RuntimeVectorSegment,
+  maximumSegments: number,
+): readonly NetworkStrokeSegment[] | undefined {
+  if (!segment.tangentStart && !segment.tangentEnd) {
+    const straight = networkStrokeSegment(from, to);
+    return straight ? [straight] : undefined;
+  }
+  const control1 = segment.tangentStart ? offsetNetworkStrokePoint(from, segment.tangentStart, 1) : from;
+  const control2 = segment.tangentEnd ? offsetNetworkStrokePoint(to, segment.tangentEnd, 1) : to;
+  if (![control1.x, control1.y, control2.x, control2.y].every(Number.isFinite)) return undefined;
+  const points: VectorNetworkStrokePoint[] = [from];
+  if (!flattenNetworkStrokeCubic(points, from, control1, control2, to, maximumSegments + 1)) return undefined;
+  const result: NetworkStrokeSegment[] = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const resolved = networkStrokeSegment(points[index - 1]!, points[index]!);
+    if (resolved) result.push(resolved);
+  }
+  return result.length && result.length <= maximumSegments ? result : undefined;
+}
+
+function flattenNetworkStrokeCubic(
+  result: VectorNetworkStrokePoint[],
+  from: VectorNetworkStrokePoint,
+  control1: VectorNetworkStrokePoint,
+  control2: VectorNetworkStrokePoint,
+  to: VectorNetworkStrokePoint,
+  maximumPoints: number,
+  depth = 0,
+): boolean {
+  const flatEnough = networkStrokeCubicFlatEnough(from, control1, control2, to);
+  if (!flatEnough && depth >= MAX_MIXED_STROKE_CURVE_DEPTH) return false;
+  if (flatEnough) {
+    if (result.length >= maximumPoints) return false;
+    result.push(to);
+    return true;
+  }
+  const fromControl1 = networkStrokeMidpoint(from, control1);
+  const control1Control2 = networkStrokeMidpoint(control1, control2);
+  const control2To = networkStrokeMidpoint(control2, to);
+  const leftRight = networkStrokeMidpoint(fromControl1, control1Control2);
+  const rightLeft = networkStrokeMidpoint(control1Control2, control2To);
+  const middle = networkStrokeMidpoint(leftRight, rightLeft);
+  return flattenNetworkStrokeCubic(result, from, fromControl1, leftRight, middle, maximumPoints, depth + 1)
+    && flattenNetworkStrokeCubic(result, middle, rightLeft, control2To, to, maximumPoints, depth + 1);
+}
+
+function networkStrokeCubicFlatEnough(
+  from: VectorNetworkStrokePoint,
+  control1: VectorNetworkStrokePoint,
+  control2: VectorNetworkStrokePoint,
+  to: VectorNetworkStrokePoint,
+): boolean {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const chordLength = Math.hypot(dx, dy);
+  if (!Number.isFinite(chordLength)) return false;
+  if (chordLength <= 1e-9) {
+    return Math.max(
+      Math.hypot(control1.x - from.x, control1.y - from.y),
+      Math.hypot(control2.x - from.x, control2.y - from.y),
+    ) <= MIXED_STROKE_CURVE_TOLERANCE;
+  }
+  const lengthSquared = chordLength * chordLength;
+  const projection1 = ((control1.x - from.x) * dx + (control1.y - from.y) * dy) / lengthSquared;
+  const projection2 = ((control2.x - from.x) * dx + (control2.y - from.y) * dy) / lengthSquared;
+  if (![projection1, projection2].every(Number.isFinite)
+    || projection1 < 0 || projection2 > 1 || projection1 > projection2) return false;
+  const distance = (point: VectorNetworkStrokePoint) => Math.abs(
+    -dy / chordLength * (point.x - from.x) + dx / chordLength * (point.y - from.y),
+  );
+  return Math.max(distance(control1), distance(control2)) <= MIXED_STROKE_CURVE_TOLERANCE;
+}
+
+function networkStrokeMidpoint(left: VectorNetworkStrokePoint, right: VectorNetworkStrokePoint): VectorNetworkStrokePoint {
+  return { x: left.x / 2 + right.x / 2, y: left.y / 2 + right.y / 2 };
+}
 
 function networkStrokeSegment(from: VectorNetworkStrokePoint, to: VectorNetworkStrokePoint): NetworkStrokeSegment | undefined {
   const dx = to.x - from.x;

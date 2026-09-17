@@ -540,7 +540,11 @@ describe("SVG export", () => {
         { x: 20, y: 20, strokeJoin: "BEVEL" as const },
         { x: 40, y: 20, strokeCap: "SQUARE" as const },
       ],
-      segments: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }],
+      segments: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 2, end: 3 },
+      ],
     };
     const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `svg-mixed-${sequence++}`, {
       strokeCapStart: "none", strokeCapEnd: "none", strokeJoin: "miter",
@@ -571,6 +575,7 @@ describe("SVG export", () => {
 
     expect(result.svg).toContain('viewBox="-2 -2 44 24"');
     expect(result.svg).toContain('M 0 2 L 20 -2 L 20 2 Z');
+    expect(result.svg.match(/ Z/g)?.length).toBeGreaterThan(30);
     expect(result.svg).toMatch(/fill="#ff0000(?:ff)?"/u);
     expect(result.svg).not.toContain("stroke-linejoin=");
   });

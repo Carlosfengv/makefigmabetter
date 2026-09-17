@@ -2854,7 +2854,7 @@ describe("M1 RuntimeSession", () => {
     });
   });
 
-  it("preserves mixed joins for bounded straight VectorNetworks and gates incompatible stroke state", async () => {
+  it("preserves mixed joins for bounded curved VectorNetworks and gates incompatible stroke state", async () => {
     const transport = new InMemoryTransport(initial);
     const session = sessionFor(transport);
     const vector = session.createVector();
@@ -2885,10 +2885,16 @@ describe("M1 RuntimeSession", () => {
     vector.strokeCap = "ROUND";
     expect(vector.strokeCap).toBe("ROUND");
     expect(isRuntimeError(captureError(() => { vector.strokeCap = "ARROW_EQUILATERAL"; }), "INVALID_ARGUMENT")).toBe(true);
-    expect(isRuntimeError(captureError(() => { vector.vectorNetwork = {
+    const curved = {
       ...mixed,
-      segments: [{ start: 0, end: 1 }, { start: 1, end: 2, tangentStart: { x: 2, y: 0 } }, { start: 2, end: 3 }],
-    }; }), "INVALID_ARGUMENT")).toBe(true);
+      segments: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2, tangentStart: { x: 10, y: 0 }, tangentEnd: { x: 0, y: -10 } },
+        { start: 2, end: 3 },
+      ],
+    };
+    vector.vectorNetwork = curved;
+    expect(vector.vectorNetwork).toEqual(curved);
   });
 
   it("round-trips straight per-vertex corner radii through one rendered cubic path", async () => {
