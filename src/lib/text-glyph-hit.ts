@@ -1,4 +1,4 @@
-import { invertAffine, transformPoint } from "./scene-transform";
+import { invertAffine, transformPoint, type AffineMatrix } from "./scene-transform";
 import type { WebGpuTextGlyph } from "./webgpu-scene";
 
 export type TextGlyphHitPoint = Readonly<{ x: number; y: number }>;
@@ -17,6 +17,19 @@ export function textGlyphPaintRunAtPoint(
       return glyph.paintRunIndex;
   }
   return undefined;
+}
+
+/** Maps a world-space pointer through the exact paint occurrence transform
+ * before resolving its shaped glyph. This lets authored text and transient
+ * Repeat copies share one glyph hit implementation without minting derived
+ * node identities. */
+export function textGlyphPaintRunAtWorldPoint(
+  glyphs: readonly WebGpuTextGlyph[],
+  point: TextGlyphHitPoint,
+  worldTransform: AffineMatrix,
+): number | undefined {
+  const inverse = invertAffine(worldTransform);
+  return inverse ? textGlyphPaintRunAtPoint(glyphs, transformPoint(inverse, point)) : undefined;
 }
 
 export function textGlyphContainsPoint(

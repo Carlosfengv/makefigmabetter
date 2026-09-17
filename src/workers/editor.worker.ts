@@ -97,7 +97,7 @@ import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-proje
 import { projectTextHitGlyphs } from "@/lib/text-hit-glyph-projection";
 import { shapedTextFirstLineIndents, shapedTextParagraphWrapStyles } from "@/lib/shaped-text-line-boxes";
 import { shapedTextLineMetrics } from "@/lib/shaped-text-line-metrics";
-import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
+import { textGlyphPaintRunAtWorldPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
 import { constraintGuidesForNode } from "@/lib/constraint-guides";
@@ -3130,7 +3130,9 @@ function paintedHit(worldX: number, worldY: number) {
       && Boolean(nodesById.get(groupId) && isInsideClippingFrames(nodesById.get(groupId)!, derivedPoint)),
   });
   const ordinaryPaintIndex = ordinaryHit ? active.findIndex((candidate) => candidate.id === ordinaryHit!.id) : -1;
-  return { active, node: repeatHit && repeatHit.paintAfterIndex >= ordinaryPaintIndex ? repeatHit.node : ordinaryHit };
+  if (repeatHit && repeatHit.paintAfterIndex >= ordinaryPaintIndex)
+    return { active, node: repeatHit.node, repeatMatrix: repeatHit.matrix };
+  return { active, node: ordinaryHit, repeatMatrix: undefined };
 }
 function hit(worldX: number, worldY: number, drillDown = false, deepSelect = false) {
   const { active, node: paintedNode } = paintedHit(worldX, worldY);
@@ -3144,13 +3146,17 @@ function hit(worldX: number, worldY: number, drillDown = false, deepSelect = fal
 function hoverHit(worldX: number, worldY: number) {
   // Figma previews the actual layer under the pointer, not the parent that a
   // normal click would select. Container fallback retains Frame-name hover.
-  const paintedNode = paintedHit(worldX, worldY).node;
-  if (paintedNode) return paintedNode;
+  const painted = paintedHit(worldX, worldY);
+  if (painted.node) return painted;
   const screen = toScreen(worldX, worldY);
-  return hitFrameName(screen.x, screen.y);
+  return { ...painted, node: hitFrameName(screen.x, screen.y) };
 }
 
-function shapedTextHyperlinkAtWorldPoint(node: CanvasNode | undefined, point: Readonly<{ x: number; y: number }>) {
+function shapedTextHyperlinkAtWorldPoint(
+  node: CanvasNode | undefined,
+  point: Readonly<{ x: number; y: number }>,
+  repeatMatrix?: AffineMatrix,
+) {
   if (!node || (node.kind !== "text" && node.kind !== "textPath" && node.kind !== "shapeWithText")) return undefined;
   const canonical = canonicalNodeById.get(node.id);
   if (!canonical || (canonical.kind !== "text" && canonical.kind !== "textPath" && canonical.kind !== "shapeWithText")) return undefined;
@@ -3163,10 +3169,13 @@ function shapedTextHyperlinkAtWorldPoint(node: CanvasNode | undefined, point: Re
   const cached = rustTextGlyphs.get(canonical.id);
   if (!request || cached?.revision !== revision || cached.key !== request.key) return undefined;
 
-  const transform = worldTransformById.get(canonical.id);
-  const inverse = transform && invertAffine(transform);
-  if (!inverse) return undefined;
-  const runIndex = textGlyphPaintRunAtPoint(cached.hitGlyphs, transformPoint(inverse, point));
+  const sourceTransform = worldTransformById.get(canonical.id);
+  if (!sourceTransform) return undefined;
+  // Repeat matrices map the already-positioned source world into one derived
+  // occurrence. Compose both transforms so rotated/nested copies resolve the
+  // same canonical Style Run as their authored source.
+  const transform = repeatMatrix ? multiplyAffine(repeatMatrix, sourceTransform) : sourceTransform;
+  const runIndex = textGlyphPaintRunAtWorldPoint(cached.hitGlyphs, point, transform);
   const target = runIndex === undefined ? undefined : properties.runs[runIndex]?.hyperlink;
   return target ? { nodeId: canonical.id, target } : undefined;
 }
@@ -10093,10 +10102,11 @@ function pointer(event: Extract<MainToWorker, { type: "pointer" }>) {
         }
         return;
       }
-      const hoveredNode = hoverHit(world.x, world.y);
+      const hoveredHit = hoverHit(world.x, world.y);
+      const hoveredNode = hoveredHit.node;
       const nextHoveredId = hoveredNode?.id;
       const hyperlink = tool === "select"
-        ? shapedTextHyperlinkAtWorldPoint(hoveredNode, world)
+        ? shapedTextHyperlinkAtWorldPoint(hoveredNode, world, hoveredHit.repeatMatrix)
         : undefined;
       emit({
         type: "text-hyperlink-hover",

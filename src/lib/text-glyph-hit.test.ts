@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WebGpuTextGlyph } from "./webgpu-scene";
-import { textGlyphContainsPoint, textGlyphPaintRunAtPoint } from "./text-glyph-hit";
+import { textGlyphContainsPoint, textGlyphPaintRunAtPoint, textGlyphPaintRunAtWorldPoint } from "./text-glyph-hit";
 
 const glyph = (overrides: Partial<WebGpuTextGlyph> = {}): WebGpuTextGlyph => ({
   textureKey: "font:0:[]:400:normal:7:16",
@@ -39,5 +39,13 @@ describe("shaped text glyph hit testing", () => {
       glyph({ paintRunIndex: 7 }),
     ], { x: 12, y: 21 })).toBe(7);
     expect(textGlyphPaintRunAtPoint([glyph()], { x: 40, y: 40 })).toBeUndefined();
+  });
+
+  it("maps a world pointer through the complete paint occurrence transform", () => {
+    const glyphs = [glyph({ paintRunIndex: 7 })];
+    const quarterTurn = { a: 0, b: 1, c: -1, d: 0, e: 120, f: 30 };
+    expect(textGlyphPaintRunAtWorldPoint(glyphs, { x: 99, y: 42 }, quarterTurn)).toBe(7);
+    expect(textGlyphPaintRunAtWorldPoint(glyphs, { x: 12, y: 21 }, quarterTurn)).toBeUndefined();
+    expect(textGlyphPaintRunAtWorldPoint(glyphs, { x: 99, y: 42 }, { ...quarterTurn, a: 0, b: 0, c: 0, d: 0 })).toBeUndefined();
   });
 });
