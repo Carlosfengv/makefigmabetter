@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createNode, type CanvasNode, type DocumentTextProperties } from "./editor-protocol";
 import { createPhase2ProfessionalCompositeFixture } from "./phase2-professional-composite-fixture";
 import { hasMissingRustTextGlyph, parseRustTextLayout, remapRustTextLayoutToSource } from "./rust-text-layout";
-import { parseTextPathSvgLayoutProjection, parseTextSvgLayoutProjection, textFrozenLayoutFace, textSvgLayoutInput } from "./text-svg-layout-input";
+import { parseTextPathSvgLayoutProjection, parseTextSvgLayoutProjection, textFrozenLayoutFace, textFrozenLayoutPlan, textSvgLayoutInput } from "./text-svg-layout-input";
 
 const assetId = "00000000-0000-4000-8000-0000000000f1";
 const font = { assetId, faceIndex: 0, variationAxes: [{ tag: "wght", value: 400 }] };
@@ -22,6 +22,17 @@ const paragraph = { alignment: "left" as const, lineHeight: 20, paragraphSpacing
 const fontBytes = new Map([[assetId, new ArrayBuffer(4)]]);
 
 describe("textSvgLayoutInput", () => {
+  it("admits ShapeWithText into the contiguous explicit-font shaping contract", () => {
+    const shape = {
+      ...createNode("shapeWithText", 0, 0),
+      width: 160,
+      text: "Design",
+      textProperties: { runs: [run(0, 6)], paragraph: { ...paragraph, alignment: "center" as const }, autoSize: "fixed" as const, fallbackFonts: [] },
+    };
+    expect(textFrozenLayoutPlan(shape)).toMatchObject({ source: "Design", shapingSource: "Design" });
+    expect(textSvgLayoutInput(shape, fontBytes)).toBeUndefined();
+  });
+
   it("admits TextPath into the same contiguous multi-run shaping contract", () => {
     const textPath = {
       ...createNode("textPath", 0, 0),

@@ -95,7 +95,8 @@ function canonicalVariationAxes(font: DocumentFontReference) {
  * small caps enter Rust as derived smcp/c2sc feature overrides. PIXELS
  * tracking is metric bearing and therefore travels with each admitted run. */
 export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | undefined {
-  if ((node.kind !== "text" && node.kind !== "textPath") || !Number.isFinite(node.width) || node.width <= 0) return undefined;
+  if ((node.kind !== "text" && node.kind !== "textPath" && node.kind !== "shapeWithText")
+    || !Number.isFinite(node.width) || node.width <= 0) return undefined;
   const source = node.text ?? "Text";
   const sourceLength = new TextEncoder().encode(source).byteLength;
   const runs = node.textProperties?.runs ?? [];
@@ -152,6 +153,7 @@ export function textFrozenLayoutPlan(node: CanvasNode): TextFrozenLayoutPlan | u
  * immutable font resource. Canvas, SVG, caret layout and the per-glyph WebGPU
  * path use `textFrozenLayoutPlan` directly. */
 export function textFrozenLayoutFace(node: CanvasNode): TextFrozenLayoutFace | undefined {
+  if (node.kind !== "text" && node.kind !== "textPath") return undefined;
   const plan = textFrozenLayoutPlan(node);
   const primary = plan?.runs[0];
   if (!plan || !primary || plan.runs.some((run) =>
@@ -177,6 +179,7 @@ export function textFrozenLayoutFace(node: CanvasNode): TextFrozenLayoutFace | u
 }
 
 export function textSvgLayoutInput(node: CanvasNode, fontBytes: ReadonlyMap<string, ArrayBuffer>): TextSvgLayoutInput | undefined {
+  if (node.kind !== "text" && node.kind !== "textPath") return undefined;
   const plan = textFrozenLayoutPlan(node);
   return plan && textLayoutInputFromPlan(plan, fontBytes);
 }

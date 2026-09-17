@@ -24,6 +24,7 @@ export type GpuTextProjectionInput = {
   /** Canonical text box width used to right-anchor RTL line advances. */
   width: number;
   rotation: number;
+  alignment?: "left" | "center" | "right" | "justify";
   fill: string;
   opacity: number;
   lineHeight: number;
@@ -47,9 +48,12 @@ export function projectGpuTextGlyphs(input: GpuTextProjectionInput): WebGpuTextG
   const glyphs: WebGpuTextGlyph[] = [];
   let lineY = 0;
   for (const line of input.layout.lines) {
-    let penX = line.direction === "rtl"
-      ? input.width - line.advance * metricScale
-      : 0;
+    const advance = line.advance * metricScale;
+    let penX = input.alignment === "center"
+      ? (input.width - advance) / 2
+      : input.alignment === "right" || line.direction === "rtl"
+        ? input.width - advance
+        : 0;
     for (const glyph of line.glyphs) {
       if (glyph.glyphId === 0 || !Number.isInteger(glyph.runIndex)) return undefined;
       const run = input.runs[glyph.runIndex];

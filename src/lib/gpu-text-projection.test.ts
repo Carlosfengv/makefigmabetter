@@ -74,6 +74,17 @@ describe("GPU text projection", () => {
     expect(glyphs?.map((glyph) => glyph.x)).toEqual([91, 101]);
   });
 
+  it("centers shaped line advances when requested", () => {
+    const glyphs = projectGpuTextGlyphs({
+      nodeId: "centered", runs: [run()],
+      x: 10, y: 20, width: 100, rotation: 0, alignment: "center", fill: "#000000", opacity: 1, lineHeight: 25,
+      layout: { unitsPerEm: 1000, lines: [{ start: 0, end: 1, direction: "ltr", advance: 500, visualRuns: [], glyphs: [
+        { glyphId: 7, runIndex: 0, cluster: 0, xAdvance: 500, yAdvance: 0, xOffset: 0, yOffset: 0 },
+      ] }] },
+    });
+    expect(glyphs?.[0]?.x).toBe(56);
+  });
+
   it("preserves Canvas overflow semantics when an RTL line is wider than its text box", () => {
     const glyphs = projectGpuTextGlyphs({
       nodeId: "rtl-overflow", runs: [run()],

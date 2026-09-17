@@ -93,6 +93,7 @@ import { parseRustGlyphRaster } from "@/lib/rust-glyph-raster";
 import { parseRustRenderGraphPlan, type RustRenderGraphPlan } from "@/lib/rust-render-graph";
 import { projectGpuTextGlyphs } from "@/lib/gpu-text-projection";
 import { projectTextPathGpuGlyphs, projectTextPathLocalGlyphs } from "@/lib/text-path-gpu-projection";
+import { projectShapeWithTextHitGlyphs } from "@/lib/shape-with-text-glyph-projection";
 import { textGlyphPaintRunAtPoint } from "@/lib/text-glyph-hit";
 import { textPathGlyphBounds, textPathPaintBatches } from "@/lib/text-path-paint-plan";
 import { hasCommittedResize, isCornerResizeHandle, resizeGeometryFromCenter, resizeGeometryFromCorner, resizeGeometryFromCornerWithFlip, resizeRotatedLegacyGeometry, type CanvasResizeHandle, type ResizeGeometry } from "@/lib/canvas-resize";
@@ -1920,13 +1921,15 @@ function rustTextLayoutRequest(node: CanvasNode) {
     key,
     plan,
     fontSize: plan.fontSize,
-    widthPx: node.kind === "textPath" ? TEXT_PATH_SINGLE_LINE_WIDTH : node.width,
+    widthPx: node.kind === "textPath"
+      ? TEXT_PATH_SINGLE_LINE_WIDTH
+      : node.kind === "shapeWithText" ? Math.max(1, node.width - 20) : node.width,
   };
 }
 
 function refreshRustTextLayouts() {
   const active = new Set<string>();
-  nodes.filter((node) => node.kind === "text" || node.kind === "textPath").forEach((node) => {
+  nodes.filter((node) => node.kind === "text" || node.kind === "textPath" || node.kind === "shapeWithText").forEach((node) => {
     const request = rustTextLayoutRequest(node);
     if (!request) return;
     active.add(node.id);
@@ -2020,10 +2023,10 @@ async function emitRustTextCaretLayout(request: Extract<MainToWorker, { type: "t
     const node = nodes.find((candidate) =>
       candidate.id === request.nodeId
       && (candidate.kind === "text" || candidate.kind === "shapeWithText"));
-    let shaped = node?.kind === "text" && (node.text ?? "") === request.text
+    let shaped = node && (node.kind === "text" || node.kind === "shapeWithText") && (node.text ?? "") === request.text
       ? rustTextLayoutFor(node)
       : undefined;
-    if (!shaped && node?.kind === "text" && (node.text ?? "") === request.text) {
+    if (!shaped && node && (node.kind === "text" || node.kind === "shapeWithText") && (node.text ?? "") === request.text) {
       const shapedRequest = rustTextLayoutRequest(node);
       if (shapedRequest) {
         const candidate = await deriveRustTextLayout(shapedRequest);
@@ -2075,16 +2078,23 @@ function rustTextGlyphRequest(node: CanvasNode) {
   const properties = node.textProperties;
   // Ordinary Text still needs a full box-transform projection. TextPath owns
   // a complete local-glyph → world affine in its WebGPU instance.
-  if ((node.kind !== "textPath" && node.rotation !== 0)
-    || node.fillStack !== undefined
-    || Boolean(node.fillGradient)
-    || Boolean(node.fills?.length)
-    || properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)) return undefined;
+  const interactionOnlyShape = node.kind === "shapeWithText";
+  if ((node.kind !== "textPath" && !interactionOnlyShape && node.rotation !== 0)
+    || (!interactionOnlyShape && (
+      node.fillStack !== undefined
+      || Boolean(node.fillGradient)
+      || Boolean(node.fills?.length)
+      || properties?.runs.some((candidate) => candidate.fillStack !== undefined || candidate.textDecoration !== undefined || candidate.leadingTrim !== undefined)
+    ))) return undefined;
   if (node.kind === "text" && (
     properties?.paragraph.alignment !== "left"
     || (properties?.paragraph.paragraphSpacing ?? 0) !== 0
     || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
     || properties?.runs.some((candidate) => candidate.color)
+  )) return undefined;
+  if (interactionOnlyShape && (
+    (properties?.paragraph.paragraphSpacing ?? 0) !== 0
+    || properties?.paragraphStyleRuns?.some((run) => (run.paragraphSpacing ?? 0) !== 0)
   )) return undefined;
   if (node.kind === "textPath" && layout.lines.length !== 1) return undefined;
   if (layout.lines.reduce((total, line) => total + line.glyphs.length, 0) > MAX_RUST_TEXT_GLYPHS_PER_NODE) return undefined;
@@ -2105,7 +2115,9 @@ function rustTextGlyphRequest(node: CanvasNode) {
   const key = JSON.stringify([
     layoutRequest.key,
     gpuRuns.map((run) => [run.font.assetId, run.font.faceIndex, run.axesKey, run.syntheticStyleKey, run.fontSize, run.pixelSize]),
-    node.kind === "textPath" ? textPathWorldTransform : [node.x, node.y, node.rotation],
+    node.kind === "textPath" ? textPathWorldTransform
+      : interactionOnlyShape ? [node.width, node.height, properties?.paragraph.alignment]
+        : [node.x, node.y, node.rotation],
     node.fill,
     node.opacity,
     node.textProperties?.paragraph.lineHeight,
@@ -2141,9 +2153,11 @@ function refreshRustTextGlyphs() {
   // could never match the current Canonical node. Ordinary Text retains its
   // existing world-space compatibility projection.
   visibleNodesOnPage(nodes, activePageId, defaultPageId)
-    .filter((node) => (node.kind === "text" || node.kind === "textPath") && node.visible !== false)
+    .filter((node) => (node.kind === "text" || node.kind === "textPath" || node.kind === "shapeWithText") && node.visible !== false)
     .forEach((node) => {
-    const projectionNode = node.kind === "textPath" ? node : (nodeById.get(node.id) ?? node);
+    const projectionNode = node.kind === "textPath" || node.kind === "shapeWithText"
+      ? node
+      : (nodeById.get(node.id) ?? node);
     const request = rustTextGlyphRequest(projectionNode);
     if (!request) return;
     active.add(node.id);
@@ -2214,9 +2228,12 @@ async function loadRustTextGlyphs(
     }));
     const canvasGlyphs = request.node.kind === "textPath"
       ? projectTextPathLocalGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout })
-      : undefined;
+      : request.node.kind === "shapeWithText"
+        ? projectShapeWithTextHitGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, lineHeight: request.nodeLineHeight ?? 14 })
+        : undefined;
     const glyphs = request.node.kind === "textPath"
       ? projectTextPathGpuGlyphs({ node: request.node, runs: projectionRuns, layout: request.layout, worldTransform: request.textPathWorldTransform })
+      : request.node.kind === "shapeWithText" ? canvasGlyphs
       : projectGpuTextGlyphs({
           nodeId,
           runs: projectionRuns,
@@ -2229,9 +2246,9 @@ async function loadRustTextGlyphs(
           lineHeight: request.nodeLineHeight ?? DEFAULT_TEXT_LINE_HEIGHT,
           layout: request.layout,
         });
-    if (!glyphs || (request.node.kind === "textPath" && !canvasGlyphs)) throw new Error("INVALID_GPU_TEXT_PROJECTION");
+    if (!glyphs || ((request.node.kind === "textPath" || request.node.kind === "shapeWithText") && !canvasGlyphs)) throw new Error("INVALID_GPU_TEXT_PROJECTION");
     const currentNode = nodes.find((node) => node.id === nodeId);
-    const currentProjectionNode = currentNode?.kind === "textPath"
+    const currentProjectionNode = currentNode?.kind === "textPath" || currentNode?.kind === "shapeWithText"
       ? currentNode
       : currentNode ? (nodeById.get(nodeId) ?? currentNode) : undefined;
     const currentRequest = currentProjectionNode ? rustTextGlyphRequest(currentProjectionNode) : undefined;
@@ -3075,20 +3092,22 @@ function hoverHit(worldX: number, worldY: number) {
 }
 
 function shapedTextHyperlinkAtWorldPoint(node: CanvasNode | undefined, point: Readonly<{ x: number; y: number }>) {
-  if (!node || (node.kind !== "text" && node.kind !== "textPath")) return undefined;
+  if (!node || (node.kind !== "text" && node.kind !== "textPath" && node.kind !== "shapeWithText")) return undefined;
   const canonical = canonicalNodeById.get(node.id);
-  if (!canonical || (canonical.kind !== "text" && canonical.kind !== "textPath")) return undefined;
+  if (!canonical || (canonical.kind !== "text" && canonical.kind !== "textPath" && canonical.kind !== "shapeWithText")) return undefined;
   const properties = canonical.textProperties;
   if (!properties?.runs.some((run) => run.hyperlink)) return undefined;
-  const projectionNode = canonical.kind === "textPath" ? canonical : (nodeById.get(canonical.id) ?? canonical);
+  const projectionNode = canonical.kind === "textPath" || canonical.kind === "shapeWithText"
+    ? canonical
+    : (nodeById.get(canonical.id) ?? canonical);
   const request = rustTextGlyphRequest(projectionNode);
   const cached = rustTextGlyphs.get(canonical.id);
   if (!request || cached?.revision !== revision || cached.key !== request.key) return undefined;
 
   let glyphs = cached.glyphs;
   let hitPoint = point;
-  if (canonical.kind === "textPath") {
-    const transform = worldTransformForNode(nodes, canonical.id);
+  if (canonical.kind === "textPath" || canonical.kind === "shapeWithText") {
+    const transform = worldTransformById.get(canonical.id);
     const inverse = transform && invertAffine(transform);
     if (!inverse || !cached.canvasGlyphs) return undefined;
     glyphs = cached.canvasGlyphs;
@@ -8509,7 +8528,10 @@ function render(
           .map((node) => node.assetId!));
         refreshRustTextGlyphs();
         const gpuTextNodeIds = new Set([...rustTextGlyphs]
-          .filter(([, cached]) => cached.revision === revision && cached.glyphs.length > 0)
+          .filter(([nodeId, cached]) => {
+            const kind = canonicalNodeById.get(nodeId)?.kind;
+            return (kind === "text" || kind === "textPath") && cached.revision === revision && cached.glyphs.length > 0;
+          })
           .map(([nodeId]) => nodeId));
         const plannedBackendIslands = gpuLayerIslands(pageNodes, decodedImageAssetIds, gpuTextNodeIds, (node) => {
           const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
