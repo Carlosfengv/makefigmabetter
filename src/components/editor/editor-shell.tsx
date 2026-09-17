@@ -93,6 +93,7 @@ import {
   resolveTextHyperlinkNavigation,
   textHyperlinkAtUtf16Character,
 } from "@/lib/text-hyperlink-navigation";
+import { freshTextHyperlinkHoverTarget } from "@/lib/text-hyperlink-hover";
 import { textPathCharacterAtLocalPoint } from "@/lib/text-path-layout";
 import {
   canvasTextEditBox,
@@ -4586,12 +4587,12 @@ export function EditorShell({
       return true;
     };
     const shapedHover = canvasTextHyperlinkHoverRef.current;
-    if (shapedHover?.target
-      && shapedHover.revision === current.revision
-      && shapedHover.pageId === current.activePageId
-      && Math.hypot(shapedHover.x - screenPoint.x, shapedHover.y - screenPoint.y) <= 2) {
-      return activateHyperlink(shapedHover.target);
-    }
+    const shapedTarget = freshTextHyperlinkHoverTarget(shapedHover, {
+      revision: current.revision,
+      pageId: current.activePageId,
+      ...screenPoint,
+    });
+    if (shapedTarget) return activateHyperlink(shapedTarget);
     const point = {
       x: (screenPoint.x - rect.width / 2) / current.viewport.zoom - current.viewport.x,
       y: (screenPoint.y - rect.height / 2) / current.viewport.zoom - current.viewport.y,
