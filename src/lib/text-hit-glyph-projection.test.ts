@@ -62,6 +62,19 @@ describe("Text interaction glyph projection", () => {
     expect(projectTextHitGlyphs({ node: text, runs, layout, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(20);
   });
 
+  it("reserves an RTL list marker column on the physical right", () => {
+    const text = {
+      ...createNode("text", 0, 0), id: "rtl-listed", text: "א", width: 100,
+      textProperties: {
+        runs: [],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, listType: "ordered" as const },
+        autoSize: "fixed" as const,
+      },
+    };
+    const rtl = { ...layout, lines: [{ ...layout.lines[0]!, end: 2, direction: "rtl" as const }] };
+    expect(projectTextHitGlyphs({ node: text, runs, layout: rtl, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(70);
+  });
+
   it("excludes hidden and ellipsis-bearing lines from hyperlink hits", () => {
     const text = {
       ...createNode("text", 0, 0), id: "truncated", text: "A\nB\nC", width: 100, height: 100,

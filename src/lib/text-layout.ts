@@ -185,6 +185,46 @@ export function textParagraphStartAtOffset(text: string, byteOffset: number): nu
 
 export type TextDirection = "ltr" | "rtl";
 
+/** Places a logical-start indent on the physical side selected by the
+ * paragraph direction. Width fitting only needs the indent amount; every
+ * renderer and interaction projection uses this helper to recover the same
+ * physical line box afterwards. */
+export function textIndentedLineBox(
+  boxStart: number,
+  boxWidth: number,
+  indent: number,
+  direction: TextDirection,
+): { start: number; width: number } {
+  const safeIndent = Number.isFinite(indent) ? Math.max(0, indent) : 0;
+  const width = Math.max(0, boxWidth - safeIndent);
+  return {
+    start: direction === "rtl" ? boxStart : boxStart + safeIndent,
+    width,
+  };
+}
+
+/** Positions a presentation-only list marker at the visual start edge of the
+ * measured content. Marker glyphs stay LTR so ordered-list punctuation does
+ * not reorder, while RTL paragraphs reserve and paint their column on the
+ * right. */
+export function textListMarkerPlacement(
+  contentStart: number,
+  contentWidth: number,
+  gap: number,
+  direction: TextDirection,
+): { x: number; align: "left" | "right"; anchor: "start" | "end" } {
+  if (direction === "rtl") return {
+    x: contentStart + contentWidth + Math.max(0, gap),
+    align: "left",
+    anchor: "start",
+  };
+  return {
+    x: contentStart - Math.max(0, gap),
+    align: "right",
+    anchor: "end",
+  };
+}
+
 export interface TextLayoutLine {
   text: string;
   /** Paragraph base direction; the Canvas text engine applies glyph-level bidi. */

@@ -1125,6 +1125,21 @@ describe("SVG export", () => {
     expect(svg).toContain('x="0" y="16" text-anchor="start"');
   });
 
+  it("exports an RTL list marker in the reserved right-side column", () => {
+    const node = {
+      ...createNode("text", 0, 0), id: "00000000-0000-4000-8000-00000000018d", pageId, width: 100, height: 30, text: "א",
+      textProperties: {
+        runs: [{ start: 0, end: 2, fontSize: 10, fontWeight: 400, italic: false, letterSpacing: 0 }],
+        paragraph: { alignment: "left" as const, lineHeight: 14, paragraphSpacing: 0, listType: "ordered" as const },
+        autoSize: "fixed" as const, fallbackFonts: [],
+      },
+    };
+    const svg = exportPageToSvg([node], { pageId, defaultPageId: pageId }).svg;
+
+    expect(svg).toContain('x="88" y="10" text-anchor="start" direction="ltr" data-makefigma-list-marker="ORDERED">1.</tspan>');
+    expect(svg).toContain('x="82" y="10" text-anchor="end" direction="rtl" unicode-bidi="plaintext">');
+  });
+
   it("hangs boundary punctuation while preserving one authored SVG line", () => {
     const source = "“abcd。”";
     const node = {

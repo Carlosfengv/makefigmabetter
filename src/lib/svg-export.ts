@@ -17,7 +17,7 @@ import { ellipseStrokeRing } from "./ellipse-stroke-ring";
 import { nodeParametricShape, parametricShapePath, parametricShapePoints } from "./parametric-shape";
 import { vectorPathSvgD } from "./vector-path";
 import { fontVariationCss } from "./font-variation-axes";
-import { layoutTextRanges, textAlignedLineLeft, textHangingPunctuationOffsets, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "./text-layout";
+import { layoutTextRanges, textAlignedLineLeft, textHangingPunctuationOffsets, textIndentedLineBox, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textListMarkerPlacement, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "./text-layout";
 import { sceneNodesInPaintOrder } from "../runtime/scene-compiler";
 import type { OrderedRenderScene } from "../runtime/ordered-render-ir";
 import { vectorNetworkMixedStrokeMeshFromExtension, vectorNetworkRegionPaintPlansFromExtension, type VectorNetworkMixedStrokeMesh } from "../runtime/runtime-vector-network";
@@ -1213,16 +1213,18 @@ function svgShapeWithTextSublayerMarkup(
     const indent = nestingIndent + (firstLineFlags[index]
       ? textParagraphIndentAt(node.textProperties, paragraphStart) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
       : 0);
-    const lineBoxWidth = Math.max(0, availableWidth - indent);
+    const lineBox = textIndentedLineBox(inset, availableWidth, indent, line.direction);
+    const lineBoxWidth = lineBox.width;
     const lineWidth = spans.reduce((total, span) => total + approximateStyleMeasure(span.text, span.style), 0);
     const hanging = node.textProperties?.paragraph.hangingPunctuation
       ? textHangingPunctuationOffsets(line.text, line.direction, (value) => approximateStyleMeasure(value, primary ?? { fontSize: 14, fontWeight: 400, italic: false, letterSpacing: 0 }))
       : { left: 0, right: 0 };
-    const contentStart = textAlignedLineLeft(inset + indent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
-    const anchor = alignment === "center" ? "middle" : alignment === "right" ? "end" : "start";
+    const contentStart = textAlignedLineLeft(lineBox.start, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+    const anchor = alignment === "center" ? "middle" : alignment === "right" || line.direction === "rtl" ? "end" : "start";
     const x = contentStart + (anchor === "middle" ? lineWidth / 2 : anchor === "end" ? lineWidth : 0);
+    const markerPlacement = textListMarkerPlacement(contentStart, lineWidth, listMarkerGap, line.direction);
     const marker = listType && firstLineFlags[index]
-      ? `<tspan x="${number(contentStart - listMarkerGap)}" y="${number(lineTop)}" text-anchor="end" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
+      ? `<tspan x="${number(markerPlacement.x)}" y="${number(lineTop)}" text-anchor="${markerPlacement.anchor}" direction="ltr" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
       : "";
     const markup = `${marker}<tspan x="${number(x)}" y="${number(lineTop)}" text-anchor="${anchor}" direction="${line.direction}" unicode-bidi="plaintext">${content}</tspan>`;
     lineTop += lineHeights[index] ?? lineHeight;
@@ -1380,11 +1382,13 @@ function svgTextMarkup(
     previousEnd = line.end;
     const paragraphStart = textParagraphStartAtOffset(source, line.start);
     const listType = textParagraphListTypeAt(node.textProperties, paragraphStart);
+    const direction = line.direction;
     const nestingIndent = textListIndentationOffset(source, node.textProperties, line.start, listMarkerGutter);
     const indent = nestingIndent + (first
       ? textParagraphIndentAt(node.textProperties, paragraphStart) + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
       : 0);
-    const lineBoxWidth = Math.max(0, node.width - indent);
+    const lineBox = textIndentedLineBox(0, node.width, indent, direction);
+    const lineBoxWidth = lineBox.width;
     const shouldEllipsize = line.truncateEnding
       || (node.textProperties?.textTruncation === "ending" && approximateStyledRange(line.start, line.end) > lineBoxWidth);
     const truncated = shouldEllipsize ? endingEllipsis(
@@ -1443,17 +1447,17 @@ function svgTextMarkup(
     // direction. Re-deriving it from the sliced source here can disagree at
     // BiDi-neutral boundaries, which would make SVG/PNG/PDF pick a different
     // visual start edge from the Canvas snapshot.
-    const direction = line.direction;
     const baselineOffset = primary?.leadingTrim === "capHeight" ? size * .7 : size;
     const lineWidth = approximateStyledRange(line.start, displayEnd) + (truncated?.text ? approximateMeasure("…") : 0);
     const hanging = paragraph?.hangingPunctuation
       ? textHangingPunctuationOffsets(truncated?.text ?? line.text, direction, approximateMeasure)
       : { left: 0, right: 0 };
-    const contentStart = textAlignedLineLeft(indent, lineBoxWidth, lineWidth, alignment, direction, hanging);
+    const contentStart = textAlignedLineLeft(lineBox.start, lineBoxWidth, lineWidth, alignment, direction, hanging);
     const lineAnchor = alignment === "center" ? "middle" : alignment === "right" || direction === "rtl" ? "end" : "start";
     const lineX = contentStart + (lineAnchor === "middle" ? lineWidth / 2 : lineAnchor === "end" ? lineWidth : 0);
+    const markerPlacement = textListMarkerPlacement(contentStart, lineWidth, listMarkerGap, direction);
     const marker = listType && first
-      ? `<tspan x="${number(contentStart - listMarkerGap)}" y="${number(baselineOffset + line.lineTop)}" text-anchor="end" direction="ltr" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
+      ? `<tspan x="${number(markerPlacement.x)}" y="${number(baselineOffset + line.lineTop)}" text-anchor="${markerPlacement.anchor}" direction="ltr" data-makefigma-list-marker="${listType.toUpperCase()}">${text(textListMarker(listType, paragraphIndex))}</tspan>`
       : "";
     const markup = `${marker}<tspan x="${number(lineX)}" y="${number(baselineOffset + line.lineTop)}" text-anchor="${lineAnchor}" direction="${direction}" unicode-bidi="plaintext">${content}</tspan>`;
     return markup;

@@ -56,6 +56,11 @@ describe("shaped text line boxes", () => {
       xOffsets: [25, 0, 45],
       widths: [75, 100, 55],
     });
+    const rtlLayout = { ...layout, lines: layout.lines.map((line) => ({ ...line, direction: "rtl" as const })) };
+    expect(shapedTextLineBoxes(node, rtlLayout, 100, 20)).toEqual({
+      xOffsets: [0, 0, 0],
+      widths: [75, 100, 55],
+    });
     expect(shapedTextFirstLineIndents({
       ...node,
       textProperties: { ...node.textProperties, paragraph: { ...node.textProperties.paragraph, hangingList: true } },

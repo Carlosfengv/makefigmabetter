@@ -22,7 +22,7 @@ import { assessWasmHeap, MAX_WASM_HEAP_BYTES } from "@/lib/wasm-heap-budget";
 import { createId, createNode, DEFAULT_TEXT_LINE_HEIGHT, documentColorFromCssHex } from "@/lib/editor-protocol";
 import { resolvedTextLineHeight, resolvedTextLineHeightAt } from "@/lib/text-line-height";
 import { colorToLinearSrgbComponents, colorToSrgbCss, sampleLinearGradientForCanvas } from "@/lib/color-rendering";
-import { layoutTextRanges, resolveTextRenderMetrics, textAlignedLineLeft, textHangingPunctuationOffsets, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "@/lib/text-layout";
+import { layoutTextRanges, resolveTextRenderMetrics, textAlignedLineLeft, textHangingPunctuationOffsets, textIndentedLineBox, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutterForProperties, textListMarkerPlacement, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphStartAtOffset, textParagraphWrapStyleAt } from "@/lib/text-layout";
 import { styledTextSpans, styledTextVisualSpans, type RenderTextStyle } from "@/lib/text-style-runs";
 import { basicTextDecorationPattern, basicTextDecorationRect, textDecorationPaintLayers, textDecorationVisibleSegments, type BasicTextDecorationPattern, type BasicTextDecorationRect } from "@/lib/text-decoration";
 import { effectiveTextOpenTypeFeatures, textCaseFontVariantCaps } from "@/lib/text-case";
@@ -6107,7 +6107,8 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
       const lineIndent = nestingIndent + (isParagraphFirstLine
         ? textParagraphIndentAt(node.textProperties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
         : 0);
-      const lineBoxWidth = Math.max(0, textMetrics.width - lineIndent);
+      const lineBox = textIndentedLineBox(0, textMetrics.width, lineIndent, line.direction);
+      const lineBoxWidth = lineBox.width;
       applyCanvasTextStyle(ctx, primaryRenderStyle, fallbackFonts);
       const truncated = line.truncateEnding
         ? endingEllipsis(
@@ -6153,11 +6154,12 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
           const hanging = node.textProperties?.paragraph.hangingPunctuation
             ? textHangingPunctuationOffsets(spanText, line.direction, (value) => ctx.measureText(value).width)
             : { left: 0, right: 0 };
-          const contentStart = textAlignedLineLeft(lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+          const contentStart = textAlignedLineLeft(lineBox.start, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
           if (listType && isParagraphFirstLine) {
+            const marker = textListMarkerPlacement(contentStart, lineWidth, listMarkerGap, line.direction);
             ctx.direction = "ltr";
-            ctx.textAlign = "right";
-            paintTextSpan(ctx, node, style, textListMarker(listType, paragraphIndex), contentStart - listMarkerGap, lineBaseline, w, h, activeFillLayers(node));
+            ctx.textAlign = marker.align;
+            paintTextSpan(ctx, node, style, textListMarker(listType, paragraphIndex), marker.x, lineBaseline, w, h, activeFillLayers(node));
             ctx.direction = line.direction;
             ctx.textAlign = "left";
             paintTextSpan(ctx, node, style, spanText, contentStart, lineBaseline, w, h, activeFillLayers(node));
@@ -6187,12 +6189,13 @@ function renderNodePaint(ctx: OffscreenCanvasRenderingContext2D, node: CanvasNod
           const hanging = node.textProperties?.paragraph.hangingPunctuation
             ? textHangingPunctuationOffsets(displayText, line.direction, (value) => ctx.measureText(value).width)
             : { left: 0, right: 0 };
-          let x = textAlignedLineLeft(lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+          let x = textAlignedLineLeft(lineBox.start, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
           if (listType && isParagraphFirstLine) {
             applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryRenderStyle, fallbackFonts);
+            const marker = textListMarkerPlacement(x, lineWidth, listMarkerGap, line.direction);
             ctx.direction = "ltr";
-            ctx.textAlign = "right";
-            paintTextSpan(ctx, node, spans[0]?.style ?? primaryRenderStyle, textListMarker(listType, paragraphIndex), x - listMarkerGap, lineBaseline, w, h, activeFillLayers(node));
+            ctx.textAlign = marker.align;
+            paintTextSpan(ctx, node, spans[0]?.style ?? primaryRenderStyle, textListMarker(listType, paragraphIndex), marker.x, lineBaseline, w, h, activeFillLayers(node));
             ctx.textAlign = "left";
           }
           drawableSpans.forEach((span, index) => {
@@ -6457,19 +6460,21 @@ function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, nod
     const lineIndent = nestingIndent + (isParagraphFirstLine
       ? textParagraphIndentAt(node.textProperties, paragraphStart) * viewport.zoom + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
       : 0);
-    const lineBoxWidth = Math.max(0, availableWidth - lineIndent);
+    const lineBox = textIndentedLineBox(inset, availableWidth, lineIndent, line.direction);
+    const lineBoxWidth = lineBox.width;
     applyCanvasTextStyle(ctx, primaryStyle, fallbackFonts);
     const hanging = node.textProperties?.paragraph.hangingPunctuation
       ? textHangingPunctuationOffsets(line.text, line.direction, (value) => ctx.measureText(value).width)
       : { left: 0, right: 0 };
-    let x = textAlignedLineLeft(inset + lineIndent, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
+    let x = textAlignedLineLeft(lineBox.start, lineBoxWidth, lineWidth, alignment, line.direction, hanging);
     const effectiveLineHeight = lineHeights[lineIndex] ?? lineHeight;
     const baseline = textLineBox(ctx, lineTop, effectiveLineHeight, primaryStyle.leadingTrim).baseline;
     if (listType && isParagraphFirstLine) {
       applyCanvasTextStyle(ctx, spans[0]?.style ?? primaryStyle, fallbackFonts);
+      const marker = textListMarkerPlacement(x, lineWidth, listMarkerGap, line.direction);
       ctx.direction = "ltr";
-      ctx.textAlign = "right";
-      paintTextSpan(ctx, node, spans[0]?.style ?? primaryStyle, textListMarker(listType, paragraphIndex), x - listMarkerGap, baseline, width, height, [{
+      ctx.textAlign = marker.align;
+      paintTextSpan(ctx, node, spans[0]?.style ?? primaryStyle, textListMarker(listType, paragraphIndex), marker.x, baseline, width, height, [{
         visible: true,
         opacity: 1,
         blendMode: "normal",
@@ -6478,6 +6483,7 @@ function renderShapeWithTextSublayer(ctx: OffscreenCanvasRenderingContext2D, nod
     }
     for (const [index, span] of spans.entries()) {
       applyCanvasTextStyle(ctx, span.style, fallbackFonts);
+      ctx.direction = line.direction;
       ctx.textAlign = "left";
       paintTextSpan(ctx, node, span.style, span.text, x, baseline, width, height, [{
         visible: true,

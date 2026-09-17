@@ -2,6 +2,7 @@ import type { CanvasNode } from "./editor-protocol";
 import type { RustTextLayout } from "./rust-text-layout";
 import {
   textLineStartsParagraph,
+  textIndentedLineBox,
   textListIndentationOffset,
   textListMarkerBaseIndent,
   textParagraphIndentAt,
@@ -80,8 +81,9 @@ export function shapedTextLineBoxes(
         + textListMarkerBaseIndent(node.textProperties, listMarkerGutter, paragraphStart)
       : 0);
     if (!Number.isFinite(indent) || indent < 0) return undefined;
-    xOffsets.push(indent);
-    widths.push(Math.max(0, width - indent));
+    const lineBox = textIndentedLineBox(0, width, indent, line.direction);
+    xOffsets.push(lineBox.start);
+    widths.push(lineBox.width);
     previousEnd = line.end;
   }
   return { xOffsets, widths };

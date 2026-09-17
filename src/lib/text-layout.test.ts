@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutText, layoutTextLines, layoutTextRanges, resolveTextDirection, resolveTextRenderMetrics, segmentGraphemes, textAlignedLineLeft, textHangingPunctuationOffsets, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutter, textListMarkerGutterForProperties, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphRanges, textParagraphWrapStyleAt } from "./text-layout";
+import { layoutText, layoutTextLines, layoutTextRanges, resolveTextDirection, resolveTextRenderMetrics, segmentGraphemes, textAlignedLineLeft, textHangingPunctuationOffsets, textIndentedLineBox, textLineStartsParagraph, textListIndentationOffset, textListMarker, textListMarkerBaseIndent, textListMarkerGutter, textListMarkerGutterForProperties, textListMarkerPlacement, textParagraphGap, textParagraphIndentAt, textParagraphListTypeAt, textParagraphRanges, textParagraphWrapStyleAt } from "./text-layout";
 
 const monoMeasure = (value: string) => segmentGraphemes(value).length * 10;
 
@@ -169,6 +169,13 @@ describe("basic text layout", () => {
       { text: "One", direction: "ltr", start: 0, end: 3 },
       { text: "Two", direction: "ltr", start: 4, end: 7 },
     ]);
+  });
+
+  it("places indents and list markers on the paragraph's visual start side", () => {
+    expect(textIndentedLineBox(10, 100, 20, "ltr")).toEqual({ start: 30, width: 80 });
+    expect(textIndentedLineBox(10, 100, 20, "rtl")).toEqual({ start: 10, width: 80 });
+    expect(textListMarkerPlacement(30, 40, 5, "ltr")).toEqual({ x: 25, align: "right", anchor: "end" });
+    expect(textListMarkerPlacement(30, 40, 5, "rtl")).toEqual({ x: 75, align: "left", anchor: "start" });
   });
 
   it("removes only the first marker column from layout for a hanging list", () => {

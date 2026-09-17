@@ -75,6 +75,19 @@ describe("ShapeWithText shaped-glyph hit projection", () => {
     expect(projectShapeWithTextHitGlyphs({ node, runs, layout, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(55);
   });
 
+  it("reserves an RTL list marker column inside the right inset", () => {
+    const node = {
+      ...createNode("shapeWithText", 0, 0), id: "rtl-listed-shape", text: "א", width: 100, height: 60,
+      textProperties: {
+        runs: [],
+        paragraph: { alignment: "left" as const, lineHeight: 12, paragraphSpacing: 0, listType: "ordered" as const },
+        autoSize: "fixed" as const,
+      },
+    };
+    const rtl = { ...layout, lines: [{ ...layout.lines[0]!, end: 2, direction: "rtl" as const }] };
+    expect(projectShapeWithTextHitGlyphs({ node, runs, layout: rtl, lineHeight: 12, listMarkerGutter: 20 })?.[0]?.x).toBe(60);
+  });
+
   it("rejects unrelated node kinds and invalid line metrics", () => {
     expect(projectShapeWithTextHitGlyphs({ node: createNode("text", 0, 0), runs, layout, lineHeight: 12 })).toBeUndefined();
     expect(projectShapeWithTextHitGlyphs({ node: createNode("shapeWithText", 0, 0), runs, layout, lineHeight: 0 })).toBeUndefined();

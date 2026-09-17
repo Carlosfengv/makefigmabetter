@@ -77,6 +77,7 @@ import {
   segmentGraphemes,
   textAlignedLineLeft,
   textHangingPunctuationOffsets,
+  textIndentedLineBox,
   textLineStartsParagraph,
   textListIndentationOffset,
   textListMarkerBaseIndent,
@@ -1299,7 +1300,8 @@ function textPointHit(
     if (local.y <= lineBottom) {
       const indent = textListIndentationOffset(text, properties, line.start, listMarkerGutter)
         + (first ? textParagraphIndentAt(properties, paragraphStart) + textListMarkerBaseIndent(properties, listMarkerGutter, paragraphStart) : 0);
-      const lineBoxWidth = Math.max(0, editBox.width - indent);
+      const lineBox = textIndentedLineBox(editBox.x, editBox.width, indent, line.direction);
+      const lineBoxWidth = lineBox.width;
       const truncated = line.truncateEnding
         ? endingEllipsis(line.text, lineBoxWidth, measure)
         : undefined;
@@ -1315,7 +1317,7 @@ function textPointHit(
         ? textHangingPunctuationOffsets(displayText, line.direction, measure)
         : { left: 0, right: 0 };
       let x = textAlignedLineLeft(
-        editBox.x + indent,
+        lineBox.start,
         lineBoxWidth,
         lineWidth,
         alignment,
