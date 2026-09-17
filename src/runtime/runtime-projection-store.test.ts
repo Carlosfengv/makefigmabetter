@@ -190,6 +190,33 @@ describe("RuntimeProjectionStore", () => {
     expect(store.getNode("sibling")).toMatchObject({ siblingIndex: 0 });
   });
 
+  it("projects a multi-leaf flatten replacement synchronously", () => {
+    const store = new RuntimeProjectionStore({
+      revision: 7,
+      nodes: [
+        { id: "page", type: "PAGE" },
+        { id: "rect", type: "RECTANGLE", parentId: "page", siblingIndex: 0, width: 40, height: 30 },
+        { id: "ellipse", type: "ELLIPSE", parentId: "page", siblingIndex: 1, width: 40, height: 30 },
+        { id: "sibling", type: "VECTOR", parentId: "page", siblingIndex: 2 },
+      ],
+    });
+    store.stage({
+      transactionId: "tx-flatten-nodes",
+      baseRevision: 7,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["rect", "ellipse"],
+        replacement: { id: "flat", type: "VECTOR", parentId: "page", siblingIndex: 1, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+        siblingIndexes: [{ nodeId: "sibling", siblingIndex: 0 }],
+      }],
+    });
+
+    expect(store.getNode("rect")).toMatchObject({ removed: true });
+    expect(store.getNode("ellipse")).toMatchObject({ removed: true });
+    expect(store.getNode("flat")).toMatchObject({ type: "VECTOR", parentId: "page", siblingIndex: 1, removed: false });
+    expect(store.getNode("sibling")).toMatchObject({ siblingIndex: 0 });
+  });
+
   it("projects Frame-to-Component replacement and child adoption atomically", () => {
     const store = new RuntimeProjectionStore({
       revision: 7,

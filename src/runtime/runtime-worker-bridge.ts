@@ -593,6 +593,22 @@ function toEditorCommands(
       ...(index === undefined ? {} : { index }),
     }];
   }
+  if (operation.type === "flattenNodes") {
+    const runtimeParentId = typeof operation.replacement.parentId === "string" ? operation.replacement.parentId : undefined;
+    const index = typeof operation.replacement.siblingIndex === "number" && Number.isSafeInteger(operation.replacement.siblingIndex)
+      ? operation.replacement.siblingIndex
+      : undefined;
+    const vectorPath = operation.replacement.vectorPath;
+    if (!vectorPath || typeof vectorPath !== "object") throw runtimeError("INVALID_ARGUMENT", { nodeId: operation.sourceIds[0] });
+    return [{
+      type: "flattenNodes",
+      ids: [...operation.sourceIds],
+      replacementId: operation.replacement.id,
+      vectorPath: structuredClone(vectorPath) as DocumentVectorPath,
+      ...(runtimeParentId && pageIds.has(runtimeParentId) ? { pageId: runtimeParentId } : runtimeParentId ? { parentId: runtimeParentId } : {}),
+      ...(index === undefined ? {} : { index }),
+    }];
+  }
   if (operation.type === "remove") return [{ type: "delete", ids: [operation.nodeId] }];
   if (operation.type === "update") {
     const patch = structuredClone(operation.patch) as Record<string, unknown>;

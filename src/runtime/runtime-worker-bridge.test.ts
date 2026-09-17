@@ -1456,10 +1456,21 @@ describe("RuntimeWorkerBridge", () => {
         siblingIndexes: [],
       }],
     }).catch(() => undefined);
+    void bridge.submit({
+      transactionId: "tx-flatten-nodes",
+      baseRevision: 4,
+      operations: [{
+        type: "flattenNodes",
+        sourceIds: ["rect", "ellipse"],
+        replacement: { id: "flat-many-id", type: "VECTOR", parentId: "page", siblingIndex: 2, vectorPath },
+        siblingIndexes: [],
+      }],
+    }).catch(() => undefined);
 
     expect(posted[0]?.transaction.commands).toEqual([{ type: "boolean", ids: ["vector-a", "vector-b"], operation: "exclude", id: "boolean-id", pageId: "page", index: 0 }]);
     expect(posted[1]?.transaction.commands).toEqual([{ type: "flattenBoolean", id: "boolean-id", replacementId: "flat-id", pageId: "page" }]);
     expect(posted[2]?.transaction.commands).toEqual([{ type: "flattenNode", id: "rect", replacementId: "flat-rect-id", vectorPath, pageId: "page", index: 1 }]);
+    expect(posted[3]?.transaction.commands).toEqual([{ type: "flattenNodes", ids: ["rect", "ellipse"], replacementId: "flat-many-id", vectorPath, pageId: "page", index: 2 }]);
     bridge.close();
   });
 

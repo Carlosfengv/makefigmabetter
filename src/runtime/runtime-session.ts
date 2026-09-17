@@ -82,6 +82,7 @@ const CREATABLE_TYPES = new Set<M1SceneNodeType>([
   "CONNECTOR", "EMBED", "LINK_UNFURL", "MEDIA", "SHAPE_WITH_TEXT",
 ]);
 const MAX_RUNTIME_SVG_IMAGE_SOURCE_BYTES = 16 * 1024 * 1024;
+const MAX_RUNTIME_FLATTEN_SUBPATHS = 64;
 const INSTANCE_SOURCE_NODE_EXTENSION = "figma.instance.source-node.v1";
 const INSTANCE_CLONE_TYPES = new Set<M1SceneNodeType>([
   "FRAME", "GROUP", "SECTION", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION", "SLICE", "LINE", "TEXT", "IMAGE",
@@ -2388,7 +2389,8 @@ export class RuntimeSession implements RuntimeContainerHost {
 
   flatten(nodes: readonly RuntimeNodeProxy[], parent?: RuntimeContainerNodeProxy, index?: number): RuntimeNodeProxy {
     this.assertOpen();
-    if (nodes.length !== 1) throw runtimeError("UNSUPPORTED_FEATURE");
+    if (nodes.length > 1) return this.flattenVectorLikeNodes(nodes, parent, index);
+    if (nodes.length !== 1) throw runtimeError("INVALID_ARGUMENT");
     const sourceProxy = nodes[0]!;
     if (sourceProxy.handle.sessionId !== this.sessionId || sourceProxy.removed) {
       throw runtimeError("INVALID_ARGUMENT", { nodeId: sourceProxy.handle.nodeId });
@@ -2558,6 +2560,157 @@ export class RuntimeSession implements RuntimeContainerHost {
         });
     }
     this.enqueueOperations([{ type: "flattenNode", sourceId: source.id, replacement, siblingIndexes }]);
+    return this.proxyFor(replacementId);
+  }
+
+  private flattenVectorLikeNodes(nodes: readonly RuntimeNodeProxy[], parent?: RuntimeContainerNodeProxy, index?: number): RuntimeNodeProxy {
+    if (new Set(nodes.map((node) => node.id)).size !== nodes.length) throw runtimeError("INVALID_ARGUMENT");
+    const targetParent = parent ?? this.currentPage;
+    if (targetParent.handle.sessionId !== this.sessionId || targetParent.removed || !["PAGE", "FRAME", "GROUP", "SECTION", "COMPONENT", "BOOLEAN_OPERATION", "TRANSFORM_GROUP"].includes(targetParent.type)) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: targetParent.handle.nodeId });
+    }
+    const targetParentNode = this.projectionStore.getNode(targetParent.id)!;
+    const targetPageId = this.pageIdFor(targetParentNode);
+    if (!targetPageId || runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), targetParentNode)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    }
+    const selected = nodes.map((proxy) => {
+      if (proxy.handle.sessionId !== this.sessionId || proxy.removed) throw runtimeError("INVALID_ARGUMENT", { nodeId: proxy.handle.nodeId });
+      const node = this.projectionStore.getNode(proxy.id);
+      if (!node || this.pageIdFor(node) !== targetPageId || !["VECTOR", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR"].includes(node.type)) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: proxy.id });
+      }
+      if (!this.projectionStore.confirmedProjection.nodes.some((candidate) => candidate.id === node.id && candidate.removed !== true) || this.queuedTransactionId) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: node.id });
+      }
+      if (runtimeBooleanHasImmutableAncestor((nodeId) => this.projectionStore.getNode(nodeId), node) || !runtimeMultiFlattenStyleKey(node)) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: node.id });
+      }
+      return node;
+    });
+    const styleKey = runtimeMultiFlattenStyleKey(selected[0]!);
+    if (!styleKey || selected.some((node) => runtimeMultiFlattenStyleKey(node) !== styleKey)) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
+    const crossesParents = selected.some((node) => node.parentId !== targetParent.id);
+    if (crossesParents && runtimeOwnsAutoLayout(targetParentNode)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    for (const sourceParentId of new Set(selected.map((node) => node.parentId))) {
+      if (sourceParentId === targetParent.id) continue;
+      const sourceParent = typeof sourceParentId === "string" ? this.projectionStore.getNode(sourceParentId) : undefined;
+      if (!sourceParent || sourceParent.type === "GROUP" || sourceParent.type === "BOOLEAN_OPERATION" || runtimeOwnsAutoLayout(sourceParent)) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: sourceParentId });
+      }
+    }
+    for (const structuralParentId of new Set([...selected.map((node) => node.parentId), targetParent.id])) {
+      if (typeof structuralParentId !== "string") continue;
+      const structuralParent = this.projectionStore.getNode(structuralParentId);
+      if (!structuralParent || (structuralParent.type !== "GROUP" && structuralParent.type !== "BOOLEAN_OPERATION")) continue;
+      const selectedChildCount = selected.filter((node) => node.parentId === structuralParentId).length;
+      const childCountAfter = this.siblingsOf(structuralParentId).length - selectedChildCount + (structuralParentId === targetParent.id ? 1 : 0);
+      if ((structuralParent.type === "GROUP" && childCountAfter < 1) || (structuralParent.type === "BOOLEAN_OPERATION" && childCountAfter < 2)) {
+        throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: structuralParentId });
+      }
+    }
+    const orderedSelected = sortRuntimeNodesByDocumentOrder(this.projectionStore.listLiveNodes(), selected, targetPageId);
+    const selectedIds = new Set(orderedSelected.map((node) => node.id));
+    const remaining = this.siblingsOf(targetParent.id).filter((node) => !selectedIds.has(node.id));
+    const destination = index ?? remaining.length;
+    if (!Number.isSafeInteger(destination) || destination < 0 || destination > remaining.length) {
+      throw runtimeError("INVALID_ARGUMENT", { nodeId: targetParent.id });
+    }
+    const sourceWorldTransforms = orderedSelected.map((source) => runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), source));
+    if (sourceWorldTransforms.some((transform) => !transform)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    const bounds = orderedSelected.map((source, sourceIndex) => runtimeBoundsForTransform(source, sourceWorldTransforms[sourceIndex]!));
+    const left = Math.min(...bounds.map((bound) => bound.left));
+    const top = Math.min(...bounds.map((bound) => bound.top));
+    const right = Math.max(...bounds.map((bound) => bound.right));
+    const bottom = Math.max(...bounds.map((bound) => bound.bottom));
+    const wrapperWorld: RuntimeTransform = { a: 1, b: 0, c: 0, d: 1, e: left, f: top };
+    const wrapperInverse = invertRuntimeTransform(wrapperWorld)!;
+    const resolvedPaths = orderedSelected.map((source, sourceIndex) => {
+      const kind = source.type === "VECTOR" ? "vector" : source.type === "RECTANGLE" ? "rectangle" : source.type === "ELLIPSE" ? "ellipse" : source.type === "POLYGON" ? "polygon" : "star";
+      const path = resolveTextPathVectorPath({
+        kind,
+        width: finiteNodeNumber(source.width, 0),
+        height: finiteNodeNumber(source.height, 0),
+        radius: finiteNodeNumber(source.radius, 0),
+        cornerRadii: source.cornerRadii as [number, number, number, number] | undefined,
+        arcData: source.arcData as NonNullable<Parameters<typeof resolveTextPathVectorPath>[0]["arcData"]> | undefined,
+        parametricShape: source.parametricShape as NonNullable<Parameters<typeof resolveTextPathVectorPath>[0]["parametricShape"]> | undefined,
+        vectorPath: source.vectorPath as DocumentVectorPath | undefined,
+      }, this.createId);
+      if (!path || path.subpaths.some((subpath) => !subpath.closed)) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: source.id });
+      const relative = multiplyRuntimeTransforms(wrapperInverse, sourceWorldTransforms[sourceIndex]!);
+      return {
+        fillRule: path.fillRule,
+        subpaths: path.subpaths.map((subpath) => ({
+          closed: true,
+          points: subpath.points.map((point) => {
+            const transformed = runtimeTransformPoint(relative, point.x, point.y);
+            const transformHandle = (handle: Readonly<{ x: number; y: number }> | undefined) => handle && ({
+              x: relative.a * handle.x + relative.c * handle.y,
+              y: relative.b * handle.x + relative.d * handle.y,
+            });
+            return {
+              ...structuredClone(point),
+              id: this.createId(),
+              x: transformed.x,
+              y: transformed.y,
+              handleIn: transformHandle(point.handleIn),
+              handleOut: transformHandle(point.handleOut),
+            };
+          }),
+        })),
+      };
+    });
+    const fillRule = resolvedPaths[0]?.fillRule;
+    const subpaths = resolvedPaths.flatMap((path) => path.subpaths);
+    if (!fillRule || resolvedPaths.some((path) => path.fillRule !== fillRule) || subpaths.length > MAX_RUNTIME_FLATTEN_SUBPATHS) {
+      throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: selected[0]!.id });
+    }
+    const targetParentWorld = runtimeWorldTransformForNode((nodeId) => this.projectionStore.getNode(nodeId), targetParentNode);
+    const targetParentInverse = targetParentWorld && invertRuntimeTransform(targetParentWorld);
+    if (!targetParentInverse) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    const replacementLocal = multiplyRuntimeTransforms(targetParentInverse, wrapperWorld);
+    const replacementId = this.createId();
+    const replacementPositionId = positionIdForLayerInsertion(remaining, destination);
+    if (!replacementPositionId) throw runtimeError("UNSUPPORTED_FEATURE", { nodeId: targetParent.id });
+    const source = orderedSelected[0]!;
+    const replacement: RuntimeProjectionNode = {
+      ...structuredClone(source),
+      id: replacementId,
+      type: "VECTOR",
+      name: "Flattened",
+      parentId: targetParent.id,
+      x: replacementLocal.e,
+      y: replacementLocal.f,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top),
+      rotation: Math.atan2(replacementLocal.b, replacementLocal.a) * 180 / Math.PI,
+      relativeTransform: replacementLocal,
+      siblingIndex: destination,
+      positionId: replacementPositionId,
+      vectorPath: { fillRule, subpaths },
+      arcData: undefined,
+      parametricShape: undefined,
+      booleanOperation: undefined,
+      extensions: undefined,
+      radius: 0,
+      cornerRadii: undefined,
+      cornerSmoothing: 0,
+      removed: false,
+    };
+    const siblingIndexes = [...remaining.slice(0, destination), replacement, ...remaining.slice(destination)].flatMap((sibling, siblingIndex) =>
+      sibling.id === replacementId || sibling.siblingIndex === siblingIndex ? [] : [{ nodeId: sibling.id, siblingIndex }]);
+    for (const sourceParentId of new Set(orderedSelected.map((sourceNode) => sourceNode.parentId))) {
+      if (sourceParentId === targetParent.id) continue;
+      this.siblingsOf(sourceParentId)
+        .filter((sibling) => !selectedIds.has(sibling.id))
+        .forEach((sibling, siblingIndex) => {
+          if (sibling.siblingIndex !== siblingIndex) siblingIndexes.push({ nodeId: sibling.id, siblingIndex });
+        });
+    }
+    this.enqueueOperations([{ type: "flattenNodes", sourceIds: orderedSelected.map((sourceNode) => sourceNode.id), replacement, siblingIndexes }]);
     return this.proxyFor(replacementId);
   }
 
@@ -4714,6 +4867,25 @@ function runtimeVectorSupportsBoolean(node: RuntimeProjectionNode): boolean {
     Array.isArray(subpath.points) &&
     subpath.points.length >= 3,
   ));
+}
+
+/** Multi-node flatten currently has one node-level Paint Stack. Admit only the
+ * legacy solid-fill subset whose appearance is invariant when several local
+ * paths are baked into one aggregate coordinate space. */
+function runtimeMultiFlattenStyleKey(node: RuntimeProjectionNode): string | undefined {
+  if (
+    node.visible === false ||
+    finiteNodeNumber(node.opacity, 1) !== 1 ||
+    (node.blendMode !== undefined && node.blendMode !== "normal") ||
+    node.isMask === true ||
+    node.dropShadow !== undefined ||
+    (Array.isArray(node.effectStack) && node.effectStack.length > 0) ||
+    finiteNodeNumber(node.strokeWidth, 0) !== 0 ||
+    ["fillColor", "fillGradient", "fills", "fillStack", "fillStyleId", "strokeColor", "strokeGradient", "strokes", "strokeStack", "strokeStyleId"].some((property) => node[property] !== undefined)
+  ) return undefined;
+  const fill = node.fill;
+  if (typeof fill !== "string" || !fill.length) return undefined;
+  return fill;
 }
 
 function runtimeTransformPoint(

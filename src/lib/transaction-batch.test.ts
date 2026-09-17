@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createNode, type CanvasNode } from "./editor-protocol";
 import { transformPoint, translateNodeWorldPatch, worldTransformForNode } from "./scene-transform";
-import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveFlattenNodeBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
+import { autoLayoutProjectionNormalizationPatches, captureClipboard, normalizeAutoLayoutProjection, resolveCoreBatch, resolveFlattenBooleanBatch, resolveFlattenNodeBatch, resolveFlattenNodesBatch, resolveLineOutlineStrokeBatch, resolveOutlineStrokeBatch, resolveParametricShapeToVectorBatch, resolvePasteBatch } from "./transaction-batch";
 import { createPhase2ProfessionalCompositeFixture } from "./phase2-professional-composite-fixture";
 import fixture from "../../fixtures/documents/phase2-common-nodes.fixture.json";
 
@@ -687,6 +687,26 @@ describe("Core transaction batch resolution", () => {
       expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, kind: "vector", vectorPath }) }),
       { type: "delete", ids: [rectangle.id] },
       { type: "reposition", positionIds: [{ id: replacementId, positionId: rectangle.positionId }] },
+    ]);
+  });
+
+  it("flattens several leaves into one atomic aggregate Vector replacement", () => {
+    const target = { ...createNode("frame", 50, 20), id: "00000000-0000-4000-8000-000000000141", width: 400, height: 200 };
+    const first = { ...createNode("rectangle", 120, 80), id: "00000000-0000-4000-8000-000000000142", width: 40, height: 20, fill: "#3366cc", strokeWidth: 0 };
+    const second = { ...createNode("ellipse", 310, 120), id: "00000000-0000-4000-8000-000000000143", width: 40, height: 20, fill: "#3366cc", strokeWidth: 0 };
+    const targetChild = { ...createNode("vector", 0, 0), id: "00000000-0000-4000-8000-000000000144", parentId: target.id };
+    const replacementId = "00000000-0000-4000-8000-000000000145";
+    const vectorPath = { fillRule: "nonZero" as const, subpaths: [
+      { closed: true, points: [{ id: "p1", x: 0, y: 0, pointType: "corner" as const }, { id: "p2", x: 40, y: 0, pointType: "corner" as const }, { id: "p3", x: 40, y: 20, pointType: "corner" as const }] },
+      { closed: true, points: [{ id: "p4", x: 190, y: 40, pointType: "corner" as const }, { id: "p5", x: 230, y: 40, pointType: "corner" as const }, { id: "p6", x: 230, y: 60, pointType: "corner" as const }] },
+    ] };
+    const resolved = resolveFlattenNodesBatch([target, first, second, targetChild], [first.id, second.id], vectorPath, () => replacementId, replacementId, { parentId: target.id, index: 0 });
+
+    expect(resolved?.replacement).toMatchObject({ id: replacementId, kind: "vector", name: "Flattened", parentId: target.id, x: 70, y: 60, width: 230, height: 60, vectorPath });
+    expect(resolved?.batch).toEqual([
+      expect.objectContaining({ type: "create", node: expect.objectContaining({ id: replacementId, kind: "vector", vectorPath }) }),
+      { type: "delete", ids: [first.id, second.id] },
+      { type: "reposition", positionIds: [{ id: replacementId, positionId: expect.any(String) }] },
     ]);
   });
 

@@ -146,6 +146,11 @@ export type ResolvedFlattenNodeBatch = Readonly<{
   replacement: CanvasNode;
 }>;
 
+export type ResolvedFlattenNodesBatch = Readonly<{
+  batch: CoreBatchCommand[];
+  replacement: CanvasNode;
+}>;
+
 /** Turns one valid live Boolean subtree into the Vector result produced by the
  * Rust geometry bridge. The replacement is created before deleting the wrapper
  * and takes the wrapper's old layer position, so Core records the entire
@@ -281,6 +286,85 @@ export function resolveFlattenNodeBatch(
     { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
   ];
   const nextNodes = [...nodes.filter((node) => node.id !== source.id), { ...replacement, positionId: desiredPositionId }];
+  if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
+  return { replacement, batch };
+}
+
+/** Replaces several leaf vector-like nodes with one pre-resolved aggregate
+ * path. Runtime admission guarantees that their single node-level solid paint
+ * can be retained without requiring region-local paint data. */
+export function resolveFlattenNodesBatch(
+  nodes: readonly CanvasNode[],
+  sourceIds: readonly string[],
+  vectorPath: DocumentVectorPath,
+  createId: () => string = generateId,
+  replacementId?: string,
+  target?: Readonly<{ parentId?: string; pageId?: string; index?: number }>,
+): ResolvedFlattenNodesBatch | undefined {
+  if (sourceIds.length < 2 || new Set(sourceIds).size !== sourceIds.length) return undefined;
+  const sources = sourceIds.map((sourceId) => nodes.find((node) => node.id === sourceId));
+  if (sources.some((source) => !source || !["vector", "rectangle", "ellipse", "polygon", "star"].includes(source.kind))) return undefined;
+  const concreteSources = sources as CanvasNode[];
+  if (target?.parentId !== undefined && target.pageId !== undefined) return undefined;
+  const sourcePageId = concreteSources[0]!.pageId;
+  if (concreteSources.some((source) => source.pageId !== sourcePageId)) return undefined;
+  const hasExplicitTarget = target?.parentId !== undefined || target?.pageId !== undefined || target?.index !== undefined;
+  const targetParentId = target?.parentId !== undefined ? target.parentId : target?.pageId !== undefined ? undefined : concreteSources[0]!.parentId;
+  const targetParent = targetParentId ? nodes.find((node) => node.id === targetParentId) : undefined;
+  const targetPageId = target?.pageId ?? targetParent?.pageId ?? sourcePageId;
+  if (targetPageId !== sourcePageId || (targetParentId && (!targetParent || !["frame", "component", "group", "transformGroup", "booleanOperation", "section", "slot"].includes(targetParent.kind)))) return undefined;
+  const sourceIdSet = new Set(sourceIds);
+  if (targetParentId && (sourceIdSet.has(targetParentId) || sourceIds.some((sourceId) => hasAncestor(nodes, targetParentId, sourceId)))) return undefined;
+  const remainingTargetSiblings = sortNodesByLayerOrder(nodes.filter((node) =>
+    node.pageId === targetPageId && node.parentId === targetParentId && !sourceIdSet.has(node.id)));
+  const destination = target?.index ?? (hasExplicitTarget ? remainingTargetSiblings.length : Math.min(...concreteSources
+    .filter((source) => source.parentId === targetParentId)
+    .map((source) => sortNodesByLayerOrder(nodes.filter((node) => node.pageId === source.pageId && node.parentId === source.parentId)).findIndex((node) => node.id === source.id))));
+  if (!Number.isSafeInteger(destination) || destination < 0 || destination > remainingTargetSiblings.length) return undefined;
+  const bounds = concreteSources.map((source) => worldBoundsForNode(nodes, source));
+  if (bounds.some((bound) => !bound)) return undefined;
+  const left = Math.min(...bounds.map((bound) => bound!.left));
+  const top = Math.min(...bounds.map((bound) => bound!.top));
+  const right = Math.max(...bounds.map((bound) => bound!.right));
+  const bottom = Math.max(...bounds.map((bound) => bound!.bottom));
+  const width = Math.max(1, right - left);
+  const height = Math.max(1, bottom - top);
+  const targetParentWorld = targetParentId ? worldTransformForNode(nodes, targetParentId) : undefined;
+  const replacementTransform = nodePropsForWorldTransform({ a: 1, b: 0, c: 0, d: 1, e: left, f: top }, targetParentWorld, width, height);
+  if (!replacementTransform) return undefined;
+  replacementId ??= createId();
+  if (!replacementId || nodes.some((node) => node.id === replacementId)) return undefined;
+  const desiredPositionId = positionIdForLayerInsertion(remainingTargetSiblings.map((node) => ({ positionId: node.positionId })), destination);
+  if (!desiredPositionId) return undefined;
+  const source = concreteSources[0]!;
+  const replacement: CanvasNode = {
+    ...source,
+    id: replacementId,
+    kind: "vector",
+    name: "Flattened",
+    pageId: targetPageId,
+    parentId: targetParentId,
+    ...replacementTransform,
+    width,
+    height,
+    positionId: `${replacementId.replaceAll("-", "")}:00000000000000000000000000000000`,
+    vectorPath: structuredClone(vectorPath),
+    arcData: undefined,
+    parametricShape: undefined,
+    booleanOperation: undefined,
+    radius: 0,
+    cornerRadii: undefined,
+    cornerSmoothing: 0,
+    extensions: undefined,
+    contentsHidden: false,
+    clipsContent: undefined,
+  };
+  const batch: CoreBatchCommand[] = [
+    { type: "create", node: coreProjectionNode(replacement) },
+    { type: "delete", ids: [...sourceIds] },
+    { type: "reposition", positionIds: [{ id: replacementId, positionId: desiredPositionId }] },
+  ];
+  const nextNodes = [...nodes.filter((node) => !sourceIdSet.has(node.id)), { ...replacement, positionId: desiredPositionId }];
   if (!appendCreatedMaskCommands(batch, nextNodes)) return undefined;
   return { replacement, batch };
 }

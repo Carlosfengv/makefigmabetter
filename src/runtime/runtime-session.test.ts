@@ -2935,6 +2935,66 @@ describe("M1 RuntimeSession", () => {
     expect(await session.getNodeByIdAsync(flattened.id)).toBe(flattened);
   });
 
+  it("flattens multiple confirmed solid-fill leaves into one world-stable Vector", async () => {
+    const projection: RuntimeProjection = {
+      revision: 6,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "source-a", type: "FRAME", name: "Source A", parentId: "page", siblingIndex: 0, x: 100, y: 50, width: 100, height: 100 },
+        { id: "rect-a", type: "RECTANGLE", name: "A", parentId: "source-a", siblingIndex: 0, x: 20, y: 30, width: 40, height: 20, fill: "#3366cc", strokeWidth: 0 },
+        { id: "source-b", type: "FRAME", name: "Source B", parentId: "page", siblingIndex: 1, x: 300, y: 100, width: 100, height: 100 },
+        { id: "rect-b", type: "RECTANGLE", name: "B", parentId: "source-b", siblingIndex: 0, x: 10, y: 20, width: 40, height: 20, fill: "#3366cc", strokeWidth: 0 },
+        { id: "target", type: "FRAME", name: "Target", parentId: "page", siblingIndex: 2, x: 50, y: 20, width: 400, height: 200 },
+        { id: "target-child", type: "VECTOR", name: "Target child", parentId: "target", siblingIndex: 0, x: 0, y: 0, width: 10, height: 10, vectorPath: { fillRule: "nonZero", subpaths: [] } },
+      ],
+    };
+    let sequence = 0;
+    const transport = new InMemoryTransport(projection);
+    const session = new RuntimeSession({ sessionId: "flatten-many", projection, transport, createId: () => `flatten-many-${++sequence}`, scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("rect-a"))!;
+    const second = (await session.getNodeByIdAsync("rect-b"))!;
+    const target = (await session.getNodeByIdAsync("target")) as RuntimeContainerNodeProxy;
+
+    const flattened = session.flatten([second, first], target, 0);
+    expect(flattened).toMatchObject({ type: "VECTOR", name: "Flattened", parent: target, x: 70, y: 60, width: 230, height: 60, fills: [expect.objectContaining({ type: "SOLID" })] });
+    expect(flattened.vectorPaths).toHaveLength(1);
+    expect(flattened.vectorPaths[0]!.data.match(/\bM\b/gu)).toHaveLength(2);
+    expect(first.removed).toBe(true);
+    expect(second.removed).toBe(true);
+    expect(target.children.map((node) => node.id)).toEqual([flattened.id, "target-child"]);
+
+    await session.commitAsync();
+    expect(transport.submitted[0]?.operations).toEqual([
+      expect.objectContaining({
+        type: "flattenNodes",
+        sourceIds: ["rect-a", "rect-b"],
+        replacement: expect.objectContaining({ id: flattened.id, parentId: "target", siblingIndex: 0, vectorPath: expect.objectContaining({ subpaths: expect.arrayContaining([expect.objectContaining({ closed: true })]) }) }),
+      }),
+    ]);
+    expect(await session.getNodeByIdAsync("rect-a")).toBeNull();
+    expect(await session.getNodeByIdAsync("rect-b")).toBeNull();
+  });
+
+  it("rejects multi-node flatten when one node needs a distinct paint region", async () => {
+    const projection: RuntimeProjection = {
+      revision: 1,
+      nodes: [
+        { id: "document", type: "DOCUMENT", name: "Document" },
+        { id: "page", type: "PAGE", name: "Page", parentId: "document", siblingIndex: 0 },
+        { id: "first", type: "RECTANGLE", name: "First", parentId: "page", siblingIndex: 0, x: 0, y: 0, width: 20, height: 20, fill: "#ff0000", strokeWidth: 0 },
+        { id: "second", type: "ELLIPSE", name: "Second", parentId: "page", siblingIndex: 1, x: 30, y: 0, width: 20, height: 20, fill: "#0000ff", strokeWidth: 0 },
+      ],
+    };
+    const session = new RuntimeSession({ sessionId: "flatten-many-reject", projection, transport: new InMemoryTransport(projection), scheduleMicrotask: () => {} });
+    const first = (await session.getNodeByIdAsync("first"))!;
+    const second = (await session.getNodeByIdAsync("second"))!;
+
+    expect(isRuntimeError(captureError(() => session.flatten([first, second])), "UNSUPPORTED_FEATURE")).toBe(true);
+    expect(first.removed).toBe(false);
+    expect(second.removed).toBe(false);
+  });
+
   it("creates a same-page Boolean from Vector children of different Frames", async () => {
     const closedPath = {
       fillRule: "nonZero" as const,
@@ -4621,6 +4681,14 @@ class InMemoryTransport implements RuntimeTransactionTransport {
       else if (operation.type === "flattenNode") {
         nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
         nodes.delete(operation.sourceId);
+        operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
+          const node = nodes.get(nodeId);
+          if (node) nodes.set(nodeId, { ...node, siblingIndex });
+        });
+      }
+      else if (operation.type === "flattenNodes") {
+        nodes.set(operation.replacement.id, { ...structuredClone(operation.replacement), removed: false });
+        operation.sourceIds.forEach((nodeId) => nodes.delete(nodeId));
         operation.siblingIndexes.forEach(({ nodeId, siblingIndex }) => {
           const node = nodes.get(nodeId);
           if (node) nodes.set(nodeId, { ...node, siblingIndex });
