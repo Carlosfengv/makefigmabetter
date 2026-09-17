@@ -130,7 +130,7 @@ describe("Runtime VectorNetwork adapter", () => {
     });
   });
 
-  it("materializes multiple globally styled regions that share branch vertices", () => {
+  it("materializes multiple regions with independent winding rules", () => {
     let sequence = 0;
     const network = {
       vertices: [
@@ -146,7 +146,7 @@ describe("Runtime VectorNetwork adapter", () => {
       ],
       regions: [
         { windingRule: "NONZERO" as const, loops: [[0, 1, 2]] },
-        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]] },
+        { windingRule: "EVENODD" as const, loops: [[3, 4, 5]] },
       ],
     };
     const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `multi-${sequence++}`, {
@@ -164,6 +164,10 @@ describe("Runtime VectorNetwork adapter", () => {
           { closed: true, points: [{ x: 20, y: 20 }, { x: 0, y: 40 }, { x: 40, y: 40 }] },
         ],
       },
+      regionPaths: [
+        { fillRule: "nonZero", subpaths: [{ closed: true }] },
+        { fillRule: "evenOdd", subpaths: [{ closed: true }] },
+      ],
     });
   });
 
@@ -251,17 +255,6 @@ describe("Runtime VectorNetwork adapter", () => {
       vertices: [{ x: 0, y: 0, strokeCap: "ROUND" }, { x: 10, y: 0 }, { x: 10, y: 10 }],
       segments: [{ start: 0, end: 1 }, { start: 0, end: 2 }],
     }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("NONE endpoint caps") });
-    expect(canonicalVectorPathFromRuntimeNetwork({
-      vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }],
-      segments: [
-        { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 0 },
-        { start: 0, end: 2 }, { start: 2, end: 3 }, { start: 3, end: 0 },
-      ],
-      regions: [
-        { windingRule: "NONZERO", loops: [[0, 1, 2]] },
-        { windingRule: "EVENODD", loops: [[3, 4, 5]] },
-      ],
-    }, allocate, defaults)).toMatchObject({ reason: expect.stringContaining("shared winding rule") });
     expect(canonicalVectorPathFromRuntimeNetwork({
       vertices: [{ x: 0, y: 0, cornerRadius: 2 }],
       segments: [],

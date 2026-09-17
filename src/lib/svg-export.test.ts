@@ -501,7 +501,7 @@ describe("SVG export", () => {
       ],
       regions: [
         { windingRule: "NONZERO" as const, loops: [[0, 1, 2]], fills: [{ type: "SOLID" as const, color: { r: 1, g: 0, b: 0 } }] },
-        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]], fills: [{ type: "SOLID" as const, color: { r: 0, g: 0, b: 1 } }] },
+        { windingRule: "EVENODD" as const, loops: [[3, 4, 5]], fills: [{ type: "SOLID" as const, color: { r: 0, g: 0, b: 1 } }] },
       ],
     };
     const converted = canonicalVectorPathFromRuntimeNetwork(network, () => `svg-region-${sequence++}`, {
@@ -528,6 +528,7 @@ describe("SVG export", () => {
 
     expect(result.svg).toContain('d="M 20 20 L 0 0 L 40 0 L 20 20 Z" fill="#ff0000"');
     expect(result.svg).toContain('d="M 20 20 L 0 40 L 40 40 L 20 20 Z" fill="#0000ff"');
+    expect(result.svg).toContain('fill-rule="evenodd"');
   });
 
   it("preserves a Rust-derived Boolean through an alpha-mask Slice source and records the PDF fallback", () => {

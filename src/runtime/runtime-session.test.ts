@@ -9,6 +9,7 @@ import { vi } from "vitest";
 import { createNode } from "../lib/editor-protocol";
 import { NORMAL_BLEND_ISOLATION_EXTENSION } from "../lib/node-blend-semantics";
 import { fontFamilyForAsset } from "../lib/font-face-registry";
+import { vectorNetworkRegionPaintPlansFromExtension } from "./runtime-vector-network";
 
 const initial: RuntimeProjection = {
   revision: 0,
@@ -2803,7 +2804,7 @@ describe("M1 RuntimeSession", () => {
       ],
       regions: [
         { windingRule: "NONZERO" as const, loops: [[0, 1, 2]] },
-        { windingRule: "NONZERO" as const, loops: [[3, 4, 5]] },
+        { windingRule: "EVENODD" as const, loops: [[3, 4, 5]] },
       ],
     };
     await vector.setVectorNetworkAsync(multiRegionBranch);
@@ -2821,6 +2822,14 @@ describe("M1 RuntimeSession", () => {
         extensions: expect.objectContaining({ "figma.runtime.vector-network.v1": expect.any(Array) }),
       }),
     });
+    const mixedWindingUpdate = transport.submitted[3]?.operations.find((operation) => operation.type === "update" && operation.nodeId === vector.id);
+    if (!mixedWindingUpdate || mixedWindingUpdate.type !== "update" || !mixedWindingUpdate.patch.vectorPath) {
+      throw new Error("Expected the mixed-winding VectorNetwork update.");
+    }
+    expect(vectorNetworkRegionPaintPlansFromExtension(
+      mixedWindingUpdate.patch.extensions,
+      mixedWindingUpdate.patch.vectorPath,
+    )?.map((region) => region.path.fillRule)).toEqual(["nonZero", "evenOdd"]);
 
     const regionPaintNetwork = {
       ...multiRegionBranch,

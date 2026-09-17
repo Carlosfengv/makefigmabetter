@@ -2342,8 +2342,9 @@ export class RuntimeNodeProxy {
     if ("reason" in converted) throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
     const regions = value.regions ?? [];
     const hasRegionPaints = regions.some((region) => region.fills !== undefined || Boolean(region.fillStyleId));
+    const hasMixedRegionWinding = new Set(regions.map((region) => region.windingRule)).size > 1;
     let regionPaints: readonly VectorNetworkRegionPaintRecord[] | undefined;
-    if (hasRegionPaints) {
+    if (hasRegionPaints || hasMixedRegionWinding) {
       if (!converted.regionPaths || converted.regionPaths.length !== regions.length) {
         throw runtimeError("INVALID_ARGUMENT", { nodeId: this.handle.nodeId });
       }
@@ -2370,7 +2371,7 @@ export class RuntimeNodeProxy {
       ...(converted.strokeJoin ? { strokeJoin: converted.strokeJoin } : {}),
       extensions: extensionsWithRuntimeVectorNetwork(
         node.extensions,
-        converted.network ?? (hasRegionPaints ? value : undefined),
+        converted.network ?? (hasRegionPaints || hasMixedRegionWinding ? value : undefined),
         converted.path,
         regionPaints,
       ),

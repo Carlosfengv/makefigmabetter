@@ -119,9 +119,9 @@ export function runtimeVectorNetworkFromCanonical(
 /**
  * Converts the lossless VectorNetwork subset back to Canonical. Supported
  * networks are independent directed chains/cycles or bounded shared-vertex
- * branches with one global fill rule. Region paints are persisted separately
- * from the derived fallback path; per-vertex corners and mixed joins are
- * rejected before an optimistic Runtime write is staged.
+ * branches with region-local fill rules. Region render data is persisted
+ * separately from the derived fallback path; per-vertex corners and mixed
+ * joins are rejected before an optimistic Runtime write is staged.
  */
 export function canonicalVectorPathFromRuntimeNetwork(
   input: RuntimeVectorNetwork,
@@ -347,10 +347,6 @@ function canonicalBranchedNetwork(
   const regions = input.regions ?? [];
   if (regions.length > MAX_VECTOR_SUBPATHS || regions.some((region) => !validRegion(region))) {
     return { reason: `VectorNetwork exceeds Core's ${MAX_VECTOR_SUBPATHS}-region limit or contains an invalid region.` };
-  }
-  const windingRules = new Set(regions.map((region) => region.windingRule));
-  if (windingRules.size > 1) {
-    return { reason: "Canonical VectorPath requires one shared winding rule across branch regions." };
   }
   if (input.vertices.some((vertex) => vertex.cornerRadius !== undefined)) return { reason: "Canonical VectorPath cannot represent per-vertex corner radii." };
   if (input.vertices.some((vertex) => vertex.strokeJoin !== undefined)) return { reason: "Branched VectorNetwork vertices cannot preserve explicit per-vertex stroke joins." };
